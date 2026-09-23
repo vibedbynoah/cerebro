@@ -1,0 +1,12 @@
+[
+  {
+    "build_commit": "3466812d1",
+    "build_number": 10751,
+    "model_filename": "m.gguf",
+    "n_prompt": "sixty-four",
+    "n_gen": 0,
+    "n_depth": 0,
+    "samples_ns": [1, 2, 3, 4],
+    "samples_ts": [1.0, 2.0, 3.0, 4.0]
+  }
+]

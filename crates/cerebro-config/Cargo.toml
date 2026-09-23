@@ -1,0 +1,81 @@
+[package]
+name = "cerebro-config"
+description = "The one schema-validated settings.json every Cerebro surface (CLI, API, Tauri shell) reads"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+# The closed flag allowlist: runtime.* fields are typed newtypes/enums that map only onto flags
+# already defined there, so a value that cannot be expressed as one of its variants cannot be
+# constructed here either.
+cerebro-flags = { path = "../cerebro-flags" }
+# `DaclAudit` is reused as-is for the spawn-decision surface (`profile::Preflighter`) rather than
+# redefined here, so "is this directory safe to spawn from" has exactly one implementation in the
+# workspace.
+cerebro-probe = { path = "../cerebro-probe" }
+# File-watching crate, pinned exactly rather than with a caret range. `watch()` must debounce and
+# must survive the watched file being deleted and recreated (an editor "safe save" does exactly
+# that), which rules out watching a file handle directly and requires watching the parent
+# directory instead -- a strategy notify's `RecommendedWatcher` supports uniformly across Win32's
+# `ReadDirectoryChangesW` (used here), inotify and FSEvents. Pinned to the newest release that is
+# not a pre-release (9.0.0 exists only as release candidates at the time of writing) so a `cargo
+# update` cannot silently hand this crate an API it has not been built and tested against.
+notify = "=8.2.0"
+# `Secret`'s `Drop` zeroes its buffer through `zeroize`'s volatile write, which the optimizer
+# cannot remove -- a hand-written loop or `slice::fill(0)` gives no such guarantee, and shipping
+# one silently while implying it behaves like `zeroize` is exactly the security theater
+# `docs/CLAIMS.md` forbids. Pinned exactly so a `cargo update` cannot hand `secrets::Secret`'s Drop
+# a different zeroing strategy without a reviewed version bump.
+zeroize = "=1.9.0"
+# CSPRNG *trait* only, not an RNG implementation: `secrets::SecretStore::rotate_api_bearer` is
+# generic over `rand_core::CryptoRng` so the caller supplies the actual generator (e.g.
+# `rand::rngs::StdRng` seeded from OS entropy) rather than this crate reaching for one on its own
+# -- see `secrets`'s module documentation for why "no global state" here is deliberate. Depending
+# on the trait crate alone, not `rand` itself, keeps a production build of this crate from linking
+# an RNG implementation it never calls. Pinned exactly to the version this crate's own `rand`
+# dev-dependency below already resolves to, so the trait `rotate_api_bearer` is generic over can
+# never silently drift from what a caller elsewhere in this workspace actually implements.
+rand_core = "=0.10.1"
+
+# DPAPI (`CryptProtectData`/`CryptUnprotectData`), converting the owner-only SDDL to a
+# `SECURITY_ATTRIBUTES`, and the owner-only DACL audit in `secrets` have no portable API and no
+# safe-Rust equivalent -- see `cerebro-probe`'s identical rationale for depending on this crate
+# directly rather than shelling out to PowerShell.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+] }
+
+[dev-dependencies]
+# Isolated per-test directories for file.rs's disk-touching tests (comment stripping, size cap,
+# reload/fuzz, watch) and profile.rs's path-resolution tests.
+tempfile = "3"
+# Test-only: `a_sampler_from_settings_is_always_recordable` (schema.rs) pins `SamplerSection`'s
+# validated bounds to `SamplerProfile::new`'s so the two numeric contracts can never drift apart
+# without a red test. Not a runtime dependency -- this crate does not otherwise know results
+# storage exists.
+cerebro-store = { path = "../cerebro-store" }
+# Seeded fuzzing input for the 50-file corpus in file.rs. `std_rng` (the default feature set)
+# gives a reproducible, non-cryptographic generator, which is exactly what a deterministic test
+# fixture needs -- reproducibility, not unpredictability.
+rand = "0.10"
+
+[lints.rust]
+# `deny`, not `forbid`: every module except `secrets` still bans unsafe code outright (see
+# `src/lib.rs`'s crate doc comment), but DPAPI and the SDDL/DACL machinery `secrets` needs have no
+# safe-Rust API, so that one module opts back in with its own `#![allow(unsafe_code)]` -- a `deny`
+# can be locally overridden by an inner `allow`; a `forbid` cannot be overridden at all, by design,
+# which is why this could not stay `forbid` once `secrets` needed real Win32 FFI.
+unsafe_code = "deny"
+missing_docs = "warn"

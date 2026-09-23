@@ -1,0 +1,11 @@
+2026-09-22 22:11:51 start; C: free 35 GB
+2026-09-22 22:11:51 have b10751-vendored__gemma-4-E4B-Q4_K_M__defaults
+2026-09-22 22:11:51 have b10751-vendored__gemma-4-E4B-Q4_K_M__tuned
+2026-09-22 22:11:51 have b11026-official__gemma-4-E4B-Q4_K_M__tuned
+2026-09-22 22:12:53 run b10751-vendored__qwen3-coder-30B-A3B-Q4_K_M__defaults: free VRAM 8017 MiB
+2026-09-22 22:19:58 done b10751-vendored__qwen3-coder-30B-A3B-Q4_K_M__defaults status=ok in 425.0s
+2026-09-22 22:21:03 run b10751-vendored__qwen3-coder-30B-A3B-Q4_K_M__tuned-moe: free VRAM 8017 MiB
+2026-09-22 22:26:10 done b10751-vendored__qwen3-coder-30B-A3B-Q4_K_M__tuned-moe status=ok in 307.6s
+2026-09-22 22:27:14 run b11026-official__qwen3-coder-30B-A3B-Q4_K_M__tuned-moe: free VRAM 8017 MiB
+2026-09-22 22:31:12 done b11026-official__qwen3-coder-30B-A3B-Q4_K_M__tuned-moe status=ok in 238.0s
+2026-09-22 22:32:16 run b10751-vendored__qwen3.8-27B-Q4_K_M__defaults: free VRAM 8017 MiB

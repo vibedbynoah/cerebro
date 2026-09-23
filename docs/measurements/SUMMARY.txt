@@ -1,0 +1,7 @@
+run                                                     status    pp tok/s  tg tok/s  tg@4096
+b10751-vendored__gemma-4-E4B-Q4_K_M__defaults           ok         2926.2      80.6     75.5
+b10751-vendored__gemma-4-E4B-Q4_K_M__tuned              ok         2671.6      74.8     70.1
+b10751-vendored__qwen3-coder-30B-A3B-Q4_K_M__defaults   ok          189.7       3.1      2.4
+b10751-vendored__qwen3-coder-30B-A3B-Q4_K_M__tuned-moe  ok          407.2      17.9      3.4
+b11026-official__gemma-4-E4B-Q4_K_M__tuned              ok         2803.7      75.2     67.5
+b11026-official__qwen3-coder-30B-A3B-Q4_K_M__tuned-moe  ok          345.2       5.1     10.4

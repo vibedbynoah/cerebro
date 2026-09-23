@@ -1,0 +1,45 @@
+[package]
+name = "cerebro-probe"
+description = "Runtime ground truth for Cerebro: CPU topology, accelerator inventory, and llama.cpp backend identity and integrity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde = { workspace = true, optional = true }
+# SHA-256 for the backend manifest. Backend identity is part of every measurement key, so this is
+# load-bearing for correctness, not only for security.
+sha2 = "0.10"
+
+# Win32 is unavoidable here: efficiency class, NUMA topology and DACLs have no portable API, and
+# shelling out to PowerShell for them would violate the no-shell rule and be far easier to spoof.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
+
+[features]
+default = []
+serde = ["dep:serde"]
+# Exposes test-only constructors (e.g. `WritableGrant::test_new`) so other crates in this workspace
+# can build fixture `DaclAudit` values without going through the real Win32 audit. Never enabled in
+# a normal build: gated by `#[cfg(feature = "test-support")]`, not `#[cfg(test)]`, because it must be
+# reachable from cerebro-supervisor's own test binary, which compiles this crate as an ordinary
+# dependency rather than as `cfg(test)` code.
+test-support = []
+
+[lints.rust]
+missing_docs = "warn"

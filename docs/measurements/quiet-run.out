@@ -1,0 +1,9 @@
+2026-09-22 17:10:32 start; C: free 65 GB
+2026-09-22 17:10:32 waiting for a quiet machine; busy: ['opencode.exe']
+2026-09-22 22:06:12 run b10751-vendored__gemma-4-E4B-Q4_K_M__defaults: free VRAM 8017 MiB
+2026-09-22 22:06:43 done b10751-vendored__gemma-4-E4B-Q4_K_M__defaults status=ok in 31.3s
+2026-09-22 22:07:47 run b10751-vendored__gemma-4-E4B-Q4_K_M__tuned: free VRAM 8017 MiB
+2026-09-22 22:08:08 done b10751-vendored__gemma-4-E4B-Q4_K_M__tuned status=ok in 21.3s
+2026-09-22 22:09:12 run b11026-official__gemma-4-E4B-Q4_K_M__tuned: free VRAM 8017 MiB
+2026-09-22 22:09:38 done b11026-official__gemma-4-E4B-Q4_K_M__tuned status=ok in 25.8s
+2026-09-22 22:10:40 run b10751-vendored__qwen3-coder-30B-A3B-Q4_K_M__defaults: free VRAM 8017 MiB

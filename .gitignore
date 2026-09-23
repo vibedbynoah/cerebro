@@ -1,0 +1,33 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+
+# Tauri
+src-tauri/target/
+src-tauri/gen/
+
+# Marrow runtime artifacts
+/bench-results/
+/profiles/*.local.json
+*.log
+
+# Vendored engine binaries (large, fetched not committed)
+/vendor/llama.cpp/**/*.exe
+/vendor/llama.cpp/**/*.dll
+/vendor/llama.cpp/**/*.so
+
+# Models never enter the repo
+*.gguf
+*.safetensors
+*.bin
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store

@@ -1,0 +1,29 @@
+[package]
+name = "cerebro-store"
+description = "Durable, tamper-evident append-only storage for measurement results and chosen configurations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde = { workspace = true, features = ["derive"] }
+# `raw_value` lets the line codec (`src/line.rs`) borrow a record's exact on-disk bytes via
+# `serde_json::value::RawValue` instead of re-serializing it, which is load-bearing for the hash
+# chain: hashing a re-serialization instead of the original bytes would let float reformatting or
+# key reordering silently break `record_hash`. `float_roundtrip` is a separate, smaller guarantee:
+# it keeps a `Record` round-tripped through disk `==`-equal in memory (exact `f64` values survive
+# re-parsing), which several of this crate's own tests rely on -- it plays no role in the chain
+# itself, since the chain never re-parses a float to check anything.
+serde_json = { workspace = true, features = ["float_roundtrip", "raw_value"] }
+# SHA-256 for the hash chain and for the model/backend digests carried in ProvenanceKey. This is
+# the same crate cerebro-probe already uses for backend manifest hashes, so results and the
+# provenance they were measured under can be compared by the same digest algorithm end to end.
+sha2 = "0.10"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"

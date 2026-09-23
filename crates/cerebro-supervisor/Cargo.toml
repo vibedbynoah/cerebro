@@ -1,0 +1,91 @@
+[package]
+name = "cerebro-supervisor"
+description = "Preflight gate and supervised spawn for a llama.cpp launch: prove it safe, then run it contained"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+cerebro-flags = { path = "../cerebro-flags" }
+cerebro-probe = { path = "../cerebro-probe" }
+
+# `lifecycle`'s readiness polling needs an async HTTP client; see `lifecycle::readiness`'s module
+# docs for why hyper+hyper-util was chosen over reqwest (no TLS stack pulled in for a loopback-only
+# health check). `tokio` is this crate's async runtime for the whole `lifecycle` module: the state
+# machine, the restart backoff delay, and the readiness/child-exit race are all driven by it.
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time", "macros", "net"] }
+hyper = { version = "1", default-features = false, features = ["client", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+
+# Off by default. Enabled only via the self dev-dependency below, so `cerebro-print-env` (see the
+# `[[bin]]` and its `required-features` further down) is built for this crate's own `cargo test` and
+# never reaches a plain `cargo build`/`cargo install` of the published library or a consumer's build.
+[features]
+test-fixtures = []
+
+# `test-support` exposes `WritableGrant::test_new`, which the preflight test suite uses to build
+# fixture `DaclAudit` values without depending on the real Win32 audit or on this machine's ambient
+# ACLs. With `resolver = "2"` (set at the workspace root), a dev-dependency's features are activated
+# only when a dev target (tests, examples, benches) of *this* crate is built, never for a plain
+# `cargo build` of this library or for a crate that merely depends on it — so `test-support` never
+# reaches a consumer of the published `cerebro-supervisor` library build.
+#
+# The self dependency on `cerebro-supervisor` (this crate, by path) exists purely to turn
+# `test-fixtures` on for `cargo test`'s own build of this package: resolver v2 unifies a
+# dev-dependency's features into the package's own feature set only while building that package's
+# dev targets (tests/benches/examples, and — the property this crate actually needs —
+# `required-features`-gated `[[bin]]`s), never for an ordinary build. See `Cargo.toml`'s `[[bin]]`
+# entry below and `src/bin/print_env.rs`'s module docs.
+[dev-dependencies]
+cerebro-probe = { path = "../cerebro-probe", features = ["test-support"] }
+cerebro-supervisor = { path = ".", features = ["test-fixtures"] }
+# Augments the `tokio` dependency above (Cargo unifies one crate's feature set across a normal and a
+# dev dependency): `test-util` for `lifecycle`'s state-machine tests to pause and advance the clock
+# deterministically, `io-util` for the hand-rolled fake HTTP server `lifecycle::readiness`'s own
+# tests drive over a real loopback socket (see that module's docs on why it is hand-rolled rather
+# than `hyper`'s own server half), `rt-multi-thread` for `#[tokio::test]`.
+tokio = { version = "1", features = ["test-util", "io-util", "rt-multi-thread"] }
+
+# Only for the process-token elevation check (Win32_Security, Win32_System_Threading), the
+# reparse-point attribute bit on a model file or a caller-supplied temp/log directory
+# (Win32_Storage_FileSystem), the Job Object that contains a spawned child tree
+# (Win32_System_JobObjects), resolving the real system directory for the child's environment rather
+# than trusting an inherited variable (Win32_System_SystemInformation), and `GetConsoleWindow` in the
+# `cerebro-print-env` fixture, which proves a spawned child got no console window at all
+# (Win32_System_Console) — see that fixture's own module docs. No FFI outside those.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    # `CreateToolhelp32Snapshot`/`Process32FirstW`/`Process32NextW`, used only by
+    # `lifecycle`'s own `#[ignore]`d live test to enumerate every `llama-server.exe` process on the
+    # whole machine by name (not merely poll one known PID) when it asserts none remain after `stop`.
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
+
+# Fixture binary for `spawn`'s environment-allowlist tests: a `[[bin]]`, not an `examples/` target,
+# specifically so `env!("CARGO_BIN_EXE_cerebro-print-env")` resolves it at compile time for the
+# integration test in `tests/live_env_allowlist.rs` — that macro is populated only for `[[bin]]`
+# targets, and only inside integration tests, never for `examples/` or unit tests.
+#
+# `required-features` keeps this bin out of a plain `cargo build`/`cargo install` of the published
+# library: without the self dev-dependency above turning `test-fixtures` on, cargo will not build
+# this target at all, for anyone but this crate's own dev builds.
+[[bin]]
+name = "cerebro-print-env"
+path = "src/bin/print_env.rs"
+required-features = ["test-fixtures"]
+
+[lints.rust]
+missing_docs = "warn"
