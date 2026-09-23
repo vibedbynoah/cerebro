@@ -1,6 +1,6 @@
 export const meta = {
   name: 'cerebro-frontend',
-  description: 'Cerebro front ends: shared design system, then the marketing website and the desktop app in parallel. Sonnet 5 builders, Opus 5.5 mentor-critics to 10/10 (visual + functional + security), free local Gemma first passes.',
+  description: 'Cerebro front ends: shared design system, then the marketing website and the desktop app in parallel. Opus 5.5 builders and mentor-critics to 10/10 (visual + functional + security), free local Gemma first passes.',
   phases: [
     { title: 'Design system', detail: 'shared tokens, type, motion, brand' },
     { title: 'Website', detail: 'Astro marketing site, page by page' },
@@ -10,7 +10,9 @@ export const meta = {
 
 // args: { skip: [task ids already committed] }
 const SKIP = (args && args.skip) || []
-const BUILDER = 'claude-sonnet-5'
+const BUILDER = 'claude-opus-5-5'
+// Owner rule 2026-09-23: Opus 5.5 builds and reviews; only the mechanical commit/merge steps use Sonnet 5.
+const CLERK = 'claude-sonnet-5'
 const CRITIC = 'claude-opus-5-5'
 const MAX_ROUNDS = 8
 const MAIN = 'C:/Users/noahm/Projects/cerebro'
@@ -167,7 +169,7 @@ DEFINITION OF DONE FOR THIS ROUND: the build passes; every test passes (always r
 }
 
 function criticPrompt(task, repo) {
-  return `You are a harsh senior design engineer, security reviewer AND mentor for Cerebro. A less experienced builder (Sonnet) made this and will revise it from your review alone, so give exact, actionable guidance. Your bar: would this ship on anthropic.com or linear.app today, flawless in function, visuals, accessibility, performance and security? Anything short of that is a finding.
+  return `You are a harsh senior design engineer, security reviewer AND mentor for Cerebro. Another builder made this and will revise it from your review alone, so give exact, actionable guidance. Your bar: would this ship on anthropic.com or linear.app today, flawless in function, visuals, accessibility, performance and security? Anything short of that is a finding.
 ${PRODUCT}
 REPOSITORY: ${repo}
 ${RULES}
@@ -207,7 +209,7 @@ Run git status. Stage only files under ${task.dir}/ plus any root files this tas
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Q4T16r2eHnoWzCJrCw94mq
 Never use --no-verify. Return the commit hash and first line.`,
-    { label: `commit:${task.id}`, phase: phaseName, model: BUILDER, effort: 'low' })
+    { label: `commit:${task.id}`, phase: phaseName, model: CLERK, effort: 'low' })
   if (!commit) return { id: task.id, status: 'halted', where: 'commit' }
   return { id: task.id, status: passed ? 'passed' : 'open-findings', open: open.length, commit }
 }
@@ -235,7 +237,7 @@ const synced = await agent(`In two git worktrees of the same repository, merge t
 1. cd ${SITE} && git merge --no-edit main
 2. cd ${APP} && git merge --no-edit main
 If a merge conflicts, abort it (git merge --abort) and report the conflict. Return what happened for each.`,
-  { label: 'sync-design-into-tracks', phase: 'Design system', model: BUILDER, effort: 'low' })
+  { label: 'sync-design-into-tracks', phase: 'Design system', model: CLERK, effort: 'low' })
 if (!synced) return { design, halted: 'sync failed' }
 
 const [site, app] = await parallel([

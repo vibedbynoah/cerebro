@@ -1,12 +1,14 @@
 export const meta = {
   name: 'cerebro-core',
-  description: 'Cerebro engine wave A: harden kept crates, config, bench runner, model scanner, autotuner, loopback server, Hugging Face downloader, CLI. Sonnet 5 builder + Opus 5.5 mentor-critic to 10/10, one pair at a time.',
+  description: 'Cerebro engine wave A: harden kept crates, config, bench runner, model scanner, autotuner, loopback server, Hugging Face downloader, CLI. Opus 5.5 builder + Opus 5.5 mentor-critic to 10/10, one pair at a time.',
   phases: [{ title: 'Core', detail: 'one component at a time in the cerebro-core worktree' }],
 }
 
 // args: { skip: [ids already committed] }
 const SKIP = (args && args.skip) || []
-const BUILDER = 'claude-sonnet-5'
+const BUILDER = 'claude-opus-5-5'
+// Owner rule 2026-09-23: Opus 5.5 builds and reviews; only the mechanical commit/merge steps use Sonnet 5.
+const CLERK = 'claude-sonnet-5'
 const CRITIC = 'claude-opus-5-5'
 const MAX_ROUNDS = 8
 const REPO = 'C:/Users/noahm/Projects/cerebro-core'
@@ -88,7 +90,7 @@ DONE FOR THIS ROUND: cargo test --workspace and cargo clippy -- -D warnings pass
 }
 
 function criticPrompt(task) {
-  return `You are a harsh senior Rust and security reviewer AND mentor for Cerebro. A less experienced builder (Sonnet) wrote this and will revise it from your review alone. Your bar: production infrastructure that a senior reviewer at a security-focused company approves with no comments, fast, correct and sealed.
+  return `You are a harsh senior Rust and security reviewer AND mentor for Cerebro. Another builder wrote this and will revise it from your review alone. Your bar: production infrastructure that a senior reviewer at a security-focused company approves with no comments, fast, correct and sealed.
 ${CONTEXT}
 
 COMPONENT: ${task.id} (${task.crate})
@@ -120,7 +122,7 @@ ${open.length ? `First append these open findings to docs/build/open-findings.md
 Run git status; stage only this component's crate directories, the root Cargo.toml and Cargo.lock, and docs/build/open-findings.md if changed. Never stage target/ or secrets. Commit with an imperative first line, a short body, and these final lines exactly:
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01Q4T16r2eHnoWzCJrCw94mq
-Never use --no-verify. Return the commit hash and first line.`, { label: `commit:${task.id}`, phase: 'Core', model: BUILDER, effort: 'low' })
+Never use --no-verify. Return the commit hash and first line.`, { label: `commit:${task.id}`, phase: 'Core', model: CLERK, effort: 'low' })
   if (!commit) { results.push({ id: task.id, status: 'halted', where: 'commit' }); break }
   results.push({ id: task.id, status: passed ? 'passed' : 'open-findings', open: open.length, commit })
 }
