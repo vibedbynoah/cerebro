@@ -90,6 +90,10 @@ pulled into whichever slice first needs them.
   DACL override unrepresentable: it must become a user setting.
 - Beginner-friendly, with daily feature discovery (spotlight, What's New, checklist).
 - Speed and performance are core values alongside compatibility.
+- Brief answers first by default (low upfront verbosity), with a user verbosity setting.
+- Every model load parameter is a user option (tuned values are the default, with presets and reset).
+- Model loading: DSH-style one-click simplicity plus an LM Studio-style load panel for text models;
+  a better dedicated path for vision (auto-paired mmproj) and audio (separate STT/TTS engines).
 - Effort dial (Low to Max) that sets thinking budget and verification rigor together, user-chosen
   and editable: see docs/specs/effort-levels.md.
 - Support every model type natively, not via plugins: text, coding, vision, image generation
