@@ -77,6 +77,27 @@ coding and reasoning suites; every lost metric becomes build work.
 Hardening items (config de-duplication, DACL ancestor fix, lifecycle review, flaky test) are
 pulled into whichever slice first needs them.
 
+## Product requirements added 2026-09-22 (owner)
+
+- Fully self-contained and offline (no Wi-Fi needed); plugins optional.
+- One-click model downloads from Hugging Face (Qwen, Google, Meta, Mistral, DeepSeek, ...) like
+  LM Studio: users press Download, never browse the hub.
+- Plugin and MCP marketplace with clean icons and one-click install (image generation, web search,
+  files, git, ...), installable from a local file for offline use.
+- Tools with Claude Code / Codex style permission prompts (ask, session, always, deny), editable.
+- Everything user-editable, including switching off the sandbox and integrity checks. Safe by
+  default; the user decides. This overrides the parked cerebro-config design that made an unsafe
+  DACL override unrepresentable: it must become a user setting.
+- Beginner-friendly, with daily feature discovery (spotlight, What's New, checklist).
+- Speed and performance are core values alongside compatibility.
+- Effort dial (Low to Max) that sets thinking budget and verification rigor together, user-chosen
+  and editable: see docs/specs/effort-levels.md.
+- Support every model type natively, not via plugins: text, coding, vision, image generation
+  (text-to-image, img2img, inpainting, upscaling; FLUX, SDXL, SD 3.5, Qwen-Image incl. GGUF),
+  speech-to-text, text-to-speech, embeddings. The owner specifically dislikes that LM Studio and
+  DSH lack image generation. Candidate backends: stable-diffusion.cpp, ComfyUI (installed locally),
+  whisper.cpp, Kokoro/Piper.
+
 ## Process
 
 - Builders: Sonnet 5. Critics and QA: Opus 5.5, to 10/10 with zero findings, judged functionally
