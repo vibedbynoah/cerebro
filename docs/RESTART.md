@@ -107,6 +107,11 @@ source data it describes was not included, and no sources are cited, so its rati
   default; the user decides. This overrides the parked cerebro-config design that made an unsafe
   DACL override unrepresentable: it must become a user setting.
 - Beginner-friendly, with daily feature discovery (spotlight, What's New, checklist).
+- Every feature for every hardware setup (the product is for users worldwide): features that do not
+  run on the development laptop (FlashAttention 3 on Hopper, FP8/NVFP4 on Ada/Blackwell, multi-GPU,
+  AMD ROCm, Intel Arc/SYCL, NPUs, Apple Silicon/MLX, datacenter runtimes like vLLM/SGLang) are
+  hardware-gated options, detected automatically and shown with the reason when unavailable. Items
+  earlier "rejected" only because this laptop lacks the hardware are reclassified accordingly.
 - Speed and performance are core values alongside compatibility.
 - Brief answers first by default (low upfront verbosity), with a user verbosity setting.
 - Every model load parameter is a user option (tuned values are the default, with presets and reset).
