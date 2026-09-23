@@ -28,3 +28,4 @@ Worktrees: `C:\Users\noahm\Projects\cerebro` (main, design system), `cerebro-sit
    name the model); findings become fix tasks.
 2. Slice 1 CLI (models, tune, serve, chat) on the kept crates; then wire the app's mock layer to it.
 3. Triage the owner's incoming research and boilerplate against docs/RESTART.md.
+4. Daily auto-research: schedule tools/research/run_research.py-style free-model runs (from the marrow archive) that scan arXiv, Reddit and vendor blogs for new local-inference features and write a dated report for review (owner's research report, 2026-09-22).

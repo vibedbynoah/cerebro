@@ -44,6 +44,9 @@ model and machine after the first few messages at each level.
 - XHigh and Max add a second pass: the model's draft is sent back with a review instruction, and
   the revised answer replaces it. Max adds a third, independent check pass (fresh context, "find any
   error in this answer").
+- Max may additionally run multi-path self-consistency (user setting, default 3 independent paths
+  for questions with a checkable answer, majority or verifier-picked), since independent paths catch
+  errors a single self-review repeats. The time cost is shown like every other level.
 - The reasoning-budget trap measured on this machine (thinking can consume the whole token budget
   and return nothing) is guarded: the answer budget is reserved separately from the thinking budget.
 - The level, the thinking tokens used and the extra time are shown under each reply, so users learn

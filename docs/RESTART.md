@@ -77,6 +77,24 @@ coding and reasoning suites; every lost metric becomes build work.
 Hardening items (config de-duplication, DACL ancestor fix, lifecycle review, flaky test) are
 pulled into whichever slice first needs them.
 
+## Owner research report triage (Downloads/harness_research_report.html, 2026-09-22)
+
+A 12 KB summary (17 rated features, a sample prompt, two reviewer notes); the 275 MB of crawled
+source data it describes was not included, and no sources are cited, so its ratings are not used.
+
+- Kept: auto-research loop (becomes a daily scheduled free-model research run, not every 30 min,
+  because the free tier rate-limits); multi-path self-consistency, reflexion and plan-and-execute
+  (folded into the Effort dial's High to Max levels); persistent cross-session memory (core app
+  feature); reviewer notes (explain jargon for non-technical readers, real CLI commands in code
+  blocks, heading tiers, spacing rhythm, mobile menu, narrow-screen tables) as critic rules.
+- Chucked: training-time methods (Constitutional AI, DPO, ORPO, RLVR, federated learning) because
+  Cerebro runs models and does not train them; model architectures (MoE, SSM, RetNet) because the
+  harness runs whatever llama.cpp supports; FlashAttention 3 (Hopper-only); FP8/AWQ/GPTQ (not
+  accelerated on Ampere / not GGUF); neuromorphic, quantum-inspired, neuro-symbolic and causal
+  engines (not implementable); the sample prompt ("4x+ throughput", "Revolutionary") and the
+  self-assigned 96/100 because they violate docs/CLAIMS.md; testimonials until real users exist,
+  because placeholder quotes read as fabricated reviews.
+
 ## Product requirements added 2026-09-22 (owner)
 
 - Fully self-contained and offline (no Wi-Fi needed); plugins optional.
