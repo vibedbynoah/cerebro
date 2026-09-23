@@ -107,6 +107,12 @@ source data it describes was not included, and no sources are cited, so its rati
   default; the user decides. This overrides the parked cerebro-config design that made an unsafe
   DACL override unrepresentable: it must become a user setting.
 - Beginner-friendly, with daily feature discovery (spotlight, What's New, checklist).
+- Every machine type: Windows (x64 and ARM64), macOS (Apple Silicon and Intel), and Linux
+  (x64/ARM64, major distros), with platform-correct file locations, file-system handling (NTFS/ReFS,
+  APFS, ext4/btrfs; long paths, case sensitivity, symlinks/junctions, network drives), process
+  containment (Job Objects, macOS sandbox profiles, Linux namespaces/seccomp/cgroups), secret storage
+  (DPAPI, Keychain, Secret Service), and installers (MSI/winget, dmg/Homebrew, AppImage/deb/rpm/Flatpak).
+  Windows ships first; every platform-specific piece sits behind a trait so the others slot in.
 - Every feature for every hardware setup (the product is for users worldwide): features that do not
   run on the development laptop (FlashAttention 3 on Hopper, FP8/NVFP4 on Ada/Blackwell, multi-GPU,
   AMD ROCm, Intel Arc/SYCL, NPUs, Apple Silicon/MLX, datacenter runtimes like vLLM/SGLang) are
