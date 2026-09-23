@@ -72,13 +72,22 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo")
     ap.add_argument("--images", nargs="*", default=[])
+    ap.add_argument("--refs", nargs="*", default=[], help="reference screenshots of best-in-class sites to compare against")
     ap.add_argument("--focus", default="")
     args = ap.parse_args()
     focus = f"\nFOCUS: {args.focus}\n" if args.focus else ""
     if args.images:
         imgs = [Path(p) for p in args.images]
+        refs = [Path(p) for p in args.refs]
         names = ", ".join(p.name for p in imgs)
-        out = local_llm.ask("gemma", f"{VISUAL_RUBRIC}{focus}\nScreenshots, in order: {names}", imgs, 1536, True)
+        compare = ""
+        if refs:
+            compare = (f"\nThe LAST {len(refs)} image(s) ({', '.join(p.name for p in refs)}) are reference pages from "
+                       "best-in-class companies. Judge Cerebro's screenshots against them: say concretely where Cerebro "
+                       "falls short of the references (hierarchy, spacing, typography, polish, visual interest) and score "
+                       "Cerebro relative to that bar, not in absolute terms.")
+        out = local_llm.ask("gemma", f"{VISUAL_RUBRIC}{focus}{compare}\nCerebro screenshots, in order: {names}",
+                            imgs + refs, 1536, True)
     elif args.repo:
         diff = collect_diff(Path(args.repo))
         if not diff.strip():

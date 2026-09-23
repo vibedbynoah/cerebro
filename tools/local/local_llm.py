@@ -152,8 +152,11 @@ def ask(role: str, prompt: str, images: list[Path] | None = None, max_tokens: in
             content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
     else:
         content = prompt
+    # Thinking is switched off: these are short rating and drafting jobs, and a reasoning model can
+    # otherwise spend the whole token budget in its reasoning channel and return an empty answer.
     body = {"messages": [{"role": "user", "content": content}], "max_tokens": max_tokens,
-            "temperature": temperature, "min_p": 0.05}
+            "temperature": temperature, "min_p": 0.05,
+            "chat_template_kwargs": {"enable_thinking": False}, "reasoning_format": "none"}
     if json_mode:
         body["response_format"] = {"type": "json_object"}
     req = urllib.request.Request(f"{base}/v1/chat/completions", data=json.dumps(body).encode("utf-8"),
@@ -161,7 +164,8 @@ def ask(role: str, prompt: str, images: list[Path] | None = None, max_tokens: in
     with urllib.request.urlopen(req, timeout=900) as r:
         data = json.load(r)
     _heartbeat(role).touch()
-    return data["choices"][0]["message"]["content"]
+    msg = data["choices"][0]["message"]
+    return msg.get("content") or msg.get("reasoning_content") or ""
 
 
 def main() -> int:
