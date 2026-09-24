@@ -1,0 +1,1668 @@
+/*
+ * Styles for the design specimen page only (preview.html). Nothing here is part of the design
+ * system itself — it's the harness that displays tokens.css/fonts.css/motion.css/components.css.
+ * Real, reusable components (buttons, inputs, code blocks, stat tiles, ...) live in
+ * design/components.css instead, so Astro and Tauri can import them without this file.
+ */
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  /* The topbar is sticky (73px: 16px padding, a 40px control, a 1px hairline) and paints above the
+     content. Every programmatic or anchor scroll (a same-page link like "Get started", a keyboard
+     user's focus moving to an off-screen control, scrollIntoView, an audit tool) stops this far
+     below the top edge, so the target is never hidden behind the bar (WCAG 2.4.11). */
+  scroll-padding-top: calc(var(--space-16) + var(--space-4));
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+  font-family: var(--font-family-ui);
+  font-size: var(--text-body);
+  line-height: var(--leading-normal);
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: var(--space-8) var(--space-6) var(--space-32);
+}
+
+/* ---- Top bar ---- */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-6);
+  /* Opaque with a hairline, not frosted glass: no glassmorphism (DESIGN.md) and no blur to
+     recomposite on every scroll frame of a long page. */
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.topbar__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.topbar__controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.topbar__reduced-motion {
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+/* Below ~480px there isn't room for brand + diagnostic badge + toggle on one line. The badge is
+   a specimen-only diagnostic, not essential chrome, so it's the first to go — never shrink text
+   below the type scale (no arbitrary sub-scale font sizes; see DESIGN.md). */
+@media (max-width: 30rem) {
+  .topbar__brand-suffix {
+    display: none;
+  }
+  .topbar__reduced-motion {
+    display: none;
+  }
+}
+
+.topbar__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--color-accent);
+}
+
+/* ---- Sections ---- */
+section {
+  margin-top: var(--space-32);
+  padding-top: var(--space-8);
+  border-top: 1px solid var(--color-border);
+  /* No scroll-margin here: the root's scroll-padding-top already keeps every scroll target,
+     sections included, clear of the sticky topbar (they would add up). */
+}
+
+section:first-of-type {
+  border-top: none;
+  margin-top: var(--space-12);
+}
+
+/* Phone: ~80px between sections, so each scroll brings in the next reveal rather than empty space. */
+@media (max-width: 40rem) {
+  section {
+    margin-top: var(--space-16);
+    padding-top: var(--space-4);
+  }
+}
+
+.section__eyebrow {
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-eyebrow);
+  margin: 0 0 var(--space-2);
+}
+
+.section__title {
+  font-family: var(--font-family-display);
+  font-size: var(--text-headline);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-headline);
+  margin: 0 0 var(--space-2);
+  font-weight: var(--weight-semibold);
+  text-wrap: balance;
+}
+
+.section__desc {
+  color: var(--color-text-secondary);
+  max-width: 62ch;
+  margin: 0 0 var(--space-8);
+  text-wrap: pretty;
+}
+
+/* One vertical rhythm for blocks stacked directly inside a section (two grids, a list and a grid,
+   ...), so no pair can ever sit at 0px just because nothing declared a margin between them. Text
+   (eyebrow, title, desc, subhead) keeps its own margins. */
+section > :where(div, ul, ol, figure, dl, table) + :where(div, ul, ol, figure, dl, table) {
+  margin-top: var(--space-6);
+}
+
+/* ---- Plate: one composed specimen. Heading and one sentence on the left, the instrument on the
+   right, on one 2-column rhythm at desktop; stacked on narrower screens. ---- */
+.plate {
+  display: grid;
+  grid-template-columns: minmax(0, 20rem) minmax(0, 1fr);
+  column-gap: var(--space-12);
+  align-items: start;
+}
+
+/* Side by side, not stacked: the section flow rule's top margin must not push the body down. */
+.plate > .plate__body {
+  margin-top: 0;
+}
+
+.plate__intro > :last-child {
+  margin-bottom: 0;
+}
+
+.plate--sub {
+  margin-top: var(--space-12);
+}
+
+/* A sub-plate's heading lines up with the top of its instrument. */
+.plate--sub .subhead {
+  margin-top: 0;
+}
+
+@media (max-width: 64rem) {
+  .plate {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .plate > .plate__body {
+    margin-top: var(--space-6);
+  }
+}
+
+/* h3-tier heading used inside a section, between --text-title's weight and the section title. */
+.subhead {
+  font-family: var(--font-family-ui);
+  font-size: var(--text-title);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-snug);
+  margin: var(--space-12) 0 var(--space-4);
+}
+
+/* ---- Hero ---- */
+.hero {
+  padding: var(--space-16) 0 var(--space-8);
+}
+
+@media (max-width: 40rem) {
+  .hero {
+    padding-top: var(--space-4);
+  }
+}
+
+.hero__grid {
+  display: grid;
+  /* The trace column is a capped, fixed-ish width (not a proportional `fr`) so it never eats into
+     the copy column enough to force extra line-wraps in the headline/lede — those already wrap
+     against their own `ch`-based `max-width`, and shrinking their available width further than
+     that only adds height (more wrapped lines) without making the copy any more readable. */
+  grid-template-columns: minmax(0, 1fr) minmax(16rem, 22rem);
+  gap: var(--space-12);
+  align-items: center;
+}
+
+@media (max-width: 64rem) {
+  .hero__grid {
+    grid-template-columns: 1fr;
+  }
+  /* Copy first on narrow screens: the headline is the page's h1 and the first thing a visitor
+     should read; the instrument panel supports it rather than preceding it. */
+  .hero__trace {
+    max-width: 28rem;
+  }
+}
+
+/* One instrument-panel moment in the one place every visitor sees first: a best-so-far step trace
+   (the system's own SVG draw-on primitive) climbing from the llama.cpp-defaults baseline, settling
+   into a count-up number, clearly flagged as illustrative. The plot, the number and the flag each
+   own a separate row, so the trace never crosses the text it explains. */
+.hero__trace {
+  margin: 0;
+  padding: var(--space-5) var(--space-6) var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-2xl);
+  box-shadow: var(--shadow-2);
+}
+
+.hero__trace-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-1) var(--space-4);
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+}
+
+.hero__trace-label {
+  color: var(--color-text-secondary);
+}
+
+.hero__trace-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-muted);
+}
+
+.hero__trace-key {
+  display: inline-block;
+  width: 14px;
+  height: 0;
+  border-top: 2px solid var(--color-accent-text);
+}
+
+.hero__trace-key--base {
+  border-top: 2px dashed var(--color-text-muted);
+}
+
+.hero__trace-key--tuned {
+  margin-inline-start: var(--space-2);
+}
+
+.hero__trace-plot {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+/* Y ticks in HTML (real text at --text-small, never a scaled SVG <text>) in a gutter left of the
+   plot. Tick positions are the plot's own grid lines as a share of its 140-unit height:
+   y=10 (40 tok/s) 7.143%, y=70 (20) 50%, y=130 (0) 92.857%. Classes, not style="" (CSP). */
+.hero__trace-chart {
+  display: grid;
+  grid-template-columns: 2ch minmax(0, 1fr);
+  gap: var(--space-2);
+}
+
+.hero__trace-axis-y,
+.hero__trace-plot-wrap {
+  position: relative;
+}
+
+.hero__trace-tick,
+.hero__trace-base-label {
+  position: absolute;
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  line-height: 1;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.hero__trace-tick {
+  inset-inline-end: 0;
+  transform: translateY(-50%);
+}
+
+.hero__trace-tick--40 { top: 7.143%; }
+.hero__trace-tick--20 { top: 50%; }
+.hero__trace-tick--0 { top: 92.857%; }
+
+/* Names the dashed line where the trace has already climbed away from it (right end, y=112 = 80%).
+   An opaque chip in the panel's own surface, so the grid lines never run through the text and its
+   contrast is against one known color (contrast checkers can't resolve text drawn over an SVG). */
+.hero__trace-base-label {
+  inset-inline-end: 0;
+  bottom: calc(20% + var(--space-1));
+  padding: var(--space-1); /* line-height 1 would let the glyph box poke out of a thinner chip */
+  background: var(--color-surface-1);
+  border-radius: var(--radius-sm);
+}
+
+.hero__trace-grid line {
+  stroke: var(--color-border);
+  stroke-width: 1;
+}
+
+.hero__trace-base {
+  stroke: var(--color-text-muted);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 4;
+}
+
+/* --color-accent-text, not the fill token: the trace is information-carrying graphics on a
+   surface, so it needs 3:1 (WCAG 1.4.11) in light theme too, where the amber fill is too pale. */
+.hero__trace-line {
+  fill: none;
+  stroke: var(--color-accent-text);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.hero__trace-axis {
+  margin: calc(-1 * var(--space-2)) 0 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-1);
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+}
+
+.hero__trace-arrow {
+  flex: none;
+}
+
+/* The reveal wrapper is the grid item; the figure inside keeps its own box and shadow. */
+.hero__trace-wrap {
+  min-width: 0;
+}
+
+.hero__trace-value {
+  --value-unit-gap: var(--gap-value-unit);
+  margin: var(--space-1) 0 0;
+  font-family: var(--font-family-code);
+  font-size: clamp(1.75rem, 1.35rem + 1.6vw, 2.5rem);
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-accent-text);
+}
+
+.hero__trace-unit {
+  margin-inline-start: var(--value-unit-gap);
+  font-size: 0.5em;
+  color: var(--color-text-muted);
+}
+
+.hero__title {
+  font-family: var(--font-family-display);
+  font-size: var(--text-display);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-display);
+  font-weight: var(--weight-semibold);
+  margin: 0 0 var(--space-6);
+  max-width: 16ch;
+  text-wrap: balance;
+}
+
+.hero__lede {
+  font-size: var(--text-title);
+  line-height: var(--leading-snug);
+  color: var(--color-text-secondary);
+  max-width: 40ch;
+  margin: 0 0 var(--space-6);
+  font-weight: var(--weight-regular);
+  text-wrap: balance;
+}
+
+/* Three proof points under the lede, each with its own term button, so the headline and lede stay
+   short and every safety word still gets its plain-language definition. */
+.proof-row {
+  list-style: none;
+  margin: 0 0 var(--space-8);
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-6);
+}
+
+.proof {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-primary);
+  font-size: var(--text-body);
+}
+
+.proof__icon {
+  flex: none;
+  color: var(--color-accent-text);
+}
+
+@media (max-width: 40rem) {
+  .proof-row {
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+}
+
+.hero__actions {
+  display: flex;
+  align-items: center; /* each button keeps its own height; the CTA is never stretched to or from */
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+/* The tertiary link has no border/fill, so its text sits visually indented relative to the hero
+   button beside it once the two wrap onto separate lines (its padding is identical, but there's
+   no filled box to anchor the eye to) — pull it back flush with the hero button's own edge below
+   the width where they wrap; above it, sitting a little right of the button it follows reads
+   fine, so the offset is removed again. */
+.hero__actions .btn--tertiary {
+  margin-inline-start: calc(-1 * var(--space-5));
+}
+
+@media (min-width: 30rem) {
+  .hero__actions .btn--tertiary {
+    margin-inline-start: 0;
+  }
+}
+
+/* A ghost button has no box, so its padding would read as an indent above its caption. */
+.btn-row .btn--tertiary {
+  margin-inline-start: calc(-1 * var(--space-5));
+}
+
+/* ---- Grid helpers ---- */
+.grid {
+  display: grid;
+  gap: var(--space-4);
+}
+
+/* Fixed column counts (not auto-fit/auto-fill) so a section with a count of 3 or 6 never leaves
+   a single card stranded alone on its own row at an in-between width. */
+.grid--swatches {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+@media (max-width: 30rem) {
+  .grid--swatches {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.grid--cards {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+@media (max-width: 40rem) {
+  .grid--cards {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Four form states: one row on desktop, 2x2 at tablet width, one column on a phone — never a
+   3+1 split with one field stranded on its own row. */
+.grid--quad {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+@media (max-width: 64rem) {
+  .grid--quad {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 40rem) {
+  .grid--quad {
+    grid-template-columns: 1fr;
+  }
+}
+
+.grid--tints {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+@media (max-width: 48rem) {
+  .grid--tints {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+
+.grid--type {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+/* ---- Swatch ---- */
+.swatch {
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-1);
+}
+
+.swatch__fill {
+  height: 96px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: var(--weight-semibold);
+}
+
+.swatch__fill--bg { background: var(--color-bg); }
+.swatch__fill--surface-1 { background: var(--color-surface-1); }
+.swatch__fill--surface-2 { background: var(--color-surface-2); }
+.swatch__fill--surface-3 { background: var(--color-surface-3); }
+.swatch__fill--border { background: var(--color-border); }
+.swatch__fill--border-strong { background: var(--color-border-strong); }
+
+.swatch__fill--text-primary { background: var(--color-bg); color: var(--color-text-primary); }
+.swatch__fill--text-secondary { background: var(--color-bg); color: var(--color-text-secondary); }
+.swatch__fill--text-muted { background: var(--color-bg); color: var(--color-text-muted); }
+.swatch__fill--danger-on-bg { background: var(--color-bg); color: var(--color-danger); font-weight: var(--weight-bold); }
+
+.swatch__fill--accent { background: var(--color-accent); color: var(--color-accent-contrast); }
+.swatch__fill--accent-text { background: var(--color-bg); color: var(--color-accent-text); font-weight: var(--weight-semibold); }
+.swatch__fill--success { background: var(--color-success); color: var(--color-success-contrast); }
+.swatch__fill--warning { background: var(--color-warning); color: var(--color-warning-contrast); }
+.swatch__fill--danger { background: var(--color-danger); color: var(--color-danger-contrast); }
+
+/* Overlay swatches: the real fill at rest (left) and with the overlay composited on it (right),
+   as solid layers with no text, so nothing depends on reading an alpha colour over near-black. */
+.swatch__fill--split { display: grid; grid-template-columns: 1fr 1fr; align-items: stretch; }
+.swatch__half { background: var(--split-fill); }
+.swatch__half--state { background: linear-gradient(var(--split-overlay), var(--split-overlay)), var(--split-fill); border-inline-start: 1px solid var(--color-border); }
+.swatch__fill--state-hover { --split-fill: var(--color-surface-2); --split-overlay: var(--state-hover); }
+.swatch__fill--state-press { --split-fill: var(--color-surface-2); --split-overlay: var(--state-press); }
+.swatch__fill--state-press-accent { --split-fill: var(--color-accent); --split-overlay: var(--state-press); }
+.swatch__fill--state-press-ghost { --split-fill: var(--color-bg); --split-overlay: var(--state-press-ghost); }
+.swatch__fill--danger-hover { --split-fill: var(--color-bg); --split-overlay: var(--color-danger-muted); }
+.swatch__fill--state-press-danger { --split-fill: var(--color-bg); --split-overlay: var(--state-press-danger); }
+
+/* Decorative layers, each drawn exactly as components.css/motion.css draw it. */
+.swatch__fill--grid-line {
+  background-color: var(--color-bg);
+  background-image:
+    linear-gradient(to right, var(--color-grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--color-grid-line) 1px, transparent 1px);
+  background-size: var(--space-6) var(--space-6);
+  background-position: 50% 50%;
+}
+
+.swatch__fill--glow {
+  background: radial-gradient(closest-side, var(--color-glow), transparent), var(--color-bg);
+}
+
+/* The sweep band parked mid-travel over the fill it plays on. */
+.swatch__fill--sweep {
+  background:
+    linear-gradient(115deg, transparent 30%, var(--sweep-highlight) 48%, var(--sweep-highlight) 52%, transparent 70%),
+    var(--color-accent);
+}
+
+.swatch__fill--text-primary-s2 { background: var(--color-surface-2); color: var(--color-text-primary); }
+.swatch__fill--text-secondary-s2 { background: var(--color-surface-2); color: var(--color-text-secondary); }
+.swatch__fill--text-muted-s2 { background: var(--color-surface-2); color: var(--color-text-muted); }
+
+.swatch__meta {
+  padding: var(--space-3);
+}
+
+.swatch__name {
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  font-weight: var(--weight-medium);
+  margin: 0 0 var(--space-1);
+  /* Never break a token identifier at its hyphen — an overflow (rare, at this card width) reads
+     better than "--color-text-" / "secondary" split across two lines. */
+  overflow-wrap: normal;
+  word-break: keep-all;
+  hyphens: none;
+}
+
+.swatch__value {
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+  margin: 0 0 var(--space-1);
+}
+
+/* The rendered colour in the current theme, on one line. */
+.swatch__value-resolved {
+  display: block;
+  color: var(--color-text-secondary);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+
+.swatch__value-resolved--wrap {
+  white-space: normal;
+  font-weight: var(--weight-regular);
+}
+
+/* The raw light-dark() source, collapsed. */
+.swatch__source {
+  margin-top: var(--space-1);
+}
+
+.swatch__source summary {
+  width: fit-content;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+}
+
+.swatch__source code {
+  display: block;
+  margin-top: var(--space-1);
+  white-space: normal;
+  word-break: break-word;
+  font-size: 0.85em;
+}
+
+.swatch__ratio {
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+  margin: 0;
+}
+
+.swatch__ratio[data-pass="true"]::before {
+  content: "AA \2713  ";
+  color: var(--color-success);
+}
+
+.is-focus-demo {
+  box-shadow: var(--focus-ring);
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+}
+
+/* The ring draws 4px outside the button and the swatch clips (overflow: hidden), so the button
+   must leave room on every side. */
+.swatch__fill .is-focus-demo {
+  max-width: calc(100% - 2 * var(--space-3));
+}
+
+/* ---- Status tint chips ---- */
+.tint-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-small);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-primary);
+}
+
+.tint-chip--accent { background: var(--color-accent-muted); }
+.tint-chip--success { background: var(--color-success-muted); }
+.tint-chip--warning { background: var(--color-warning-muted); }
+.tint-chip--danger { background: var(--color-danger-muted); }
+
+/* ---- Type samples ---- */
+.type-sample {
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.type-sample__label {
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+  margin: 0 0 var(--space-2);
+}
+
+/* A token never breaks across lines; the label wraps between its parts instead. */
+.type-sample__label .tok {
+  white-space: nowrap;
+}
+
+.type-sample--display .type-sample__text {
+  font-family: var(--font-family-display);
+  font-size: var(--text-display);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-display);
+  font-weight: var(--weight-semibold);
+  margin: 0;
+  text-wrap: balance;
+}
+
+.type-sample--headline .type-sample__text {
+  font-family: var(--font-family-display);
+  font-size: var(--text-headline);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-headline);
+  font-weight: var(--weight-semibold);
+  margin: 0;
+  text-wrap: balance;
+}
+
+.type-sample--title .type-sample__text {
+  font-family: var(--font-family-ui);
+  font-size: var(--text-title);
+  line-height: var(--leading-snug);
+  font-weight: var(--weight-semibold);
+  margin: 0;
+}
+
+.type-sample--body .type-sample__text {
+  font-family: var(--font-family-ui);
+  font-size: var(--text-body);
+  line-height: var(--leading-relaxed);
+  margin: 0;
+  max-width: 60ch;
+}
+
+.type-sample--small .type-sample__text {
+  font-family: var(--font-family-ui);
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+
+/* ---- Families, weights, leading: composed across the full column ---- */
+.family-grid,
+.weight-grid,
+.leading-grid {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.family-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.weight-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  list-style: none;
+  /* Not the `margin` shorthand: its margin-top would beat the section flow rule above and put
+     this list flush against the family grid. */
+  margin-inline: 0;
+  margin-block-end: 0;
+  padding: 0;
+}
+
+/* Side by side at one measure, so the difference in leading reads at a glance. */
+.leading-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-6);
+}
+
+@media (max-width: 64rem) {
+  .weight-grid,
+  .leading-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 40rem) {
+  .family-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 30rem) {
+  .leading-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.family,
+.weight-cell {
+  padding: var(--space-5);
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+}
+
+.family > p {
+  margin: 0;
+}
+
+.family__glyph {
+  font-size: var(--text-headline);
+  line-height: var(--leading-tight);
+  color: var(--color-text-primary);
+  margin-bottom: var(--space-4) !important;
+}
+
+.family__glyph--display { font-family: var(--font-family-display); font-weight: var(--weight-semibold); }
+.family__glyph--ui { font-family: var(--font-family-ui); font-weight: var(--weight-medium); }
+.family__glyph--code { font-family: var(--font-family-code); }
+
+.family__token {
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-primary);
+}
+
+.family__role {
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.family__stack {
+  margin: var(--space-3) 0 0;
+}
+
+.weight-cell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.weight-sample {
+  font-family: var(--font-family-ui);
+  font-size: var(--text-title);
+  line-height: var(--leading-snug);
+  color: var(--color-text-primary);
+}
+
+.weight-cell__token {
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+}
+
+.weight-cell__token .tok {
+  color: var(--color-text-secondary);
+}
+
+.weight-sample[data-weight="regular"] { font-weight: var(--weight-regular); }
+.weight-sample[data-weight="medium"] { font-weight: var(--weight-medium); }
+.weight-sample[data-weight="semibold"] { font-weight: var(--weight-semibold); }
+.weight-sample[data-weight="bold"] { font-weight: var(--weight-bold); }
+
+.leading-cell {
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+}
+
+.leading-cell__label {
+  margin: 0 0 var(--space-3);
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+}
+
+.leading-cell__label .tok {
+  color: var(--color-text-secondary);
+}
+
+.leading-sample {
+  margin: 0;
+  color: var(--color-text-secondary);
+}
+
+.leading-sample--tight { line-height: var(--leading-tight); }
+.leading-sample--snug { line-height: var(--leading-snug); }
+.leading-sample--normal { line-height: var(--leading-normal); }
+.leading-sample--relaxed { line-height: var(--leading-relaxed); }
+
+/* ---- Tracking (letter-spacing) specimen ---- */
+.tracking-sample {
+  margin: 0 0 var(--space-2);
+  color: var(--color-text-secondary);
+}
+
+.tracking-sample--display {
+  font-family: var(--font-family-display);
+  letter-spacing: var(--tracking-display);
+  font-size: var(--text-title);
+}
+
+.tracking-sample--headline {
+  font-family: var(--font-family-display);
+  letter-spacing: var(--tracking-headline);
+  font-size: var(--text-title);
+}
+
+.tracking-sample--eyebrow {
+  font-family: var(--font-family-code);
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  font-size: var(--text-small);
+}
+
+/* ---- Z-index stack: a visual, not a plain key/value list — each card is offset further into
+   the page as its z-index token grows, so "higher stacking order" reads as "closer/forward"
+   instead of just as a bigger number in a column. ---- */
+.z-stack {
+  --z-step: var(--space-2);
+  list-style: none;
+  margin: 0;
+  padding: var(--space-2) 0 var(--space-2) calc(var(--z-step) * 8);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.z-stack__card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  box-shadow: var(--shadow-1);
+  /* One constant step: card i starts i steps in from the first, so the list reads as a deck fanned
+     toward the viewer. */
+  margin-inline-start: calc(var(--z-step) * (var(--i, 8) - 8));
+}
+
+.z-stack__card:nth-child(1) { --i: 0; }
+.z-stack__card:nth-child(2) { --i: 1; }
+.z-stack__card:nth-child(3) { --i: 2; }
+.z-stack__card:nth-child(4) { --i: 3; }
+.z-stack__card:nth-child(5) { --i: 4; }
+.z-stack__card:nth-child(6) { --i: 5; }
+.z-stack__card:nth-child(7) { --i: 6; }
+.z-stack__card:nth-child(8) { --i: 7; }
+
+.z-stack__card--top {
+  --i: 8;
+  border-color: var(--color-accent);
+  box-shadow: var(--shadow-accent-glow);
+}
+
+.z-stack__card code,
+.z-stack__card span {
+  white-space: nowrap;
+}
+
+.z-stack__card span {
+  color: var(--color-text-muted);
+  text-align: right;
+}
+
+@media (max-width: 30rem) {
+  .z-stack {
+    --z-step: var(--space-1);
+  }
+  /* The top card's note is a sentence; let it drop under its label instead of splitting a token. */
+  .z-stack__card--top {
+    flex-wrap: wrap;
+    row-gap: var(--space-1);
+  }
+  .z-stack__card--top span {
+    white-space: normal;
+    text-align: start;
+  }
+}
+
+/* ---- Spacing scale: label, the step at true size, and where it belongs ---- */
+.space-rows {
+  display: grid;
+  grid-template-columns: max-content minmax(0, var(--space-32)) minmax(0, 1fr);
+  column-gap: var(--space-6);
+}
+
+.space-row {
+  display: contents;
+}
+
+.space-row > * {
+  align-self: center;
+  padding-block: var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.space-row__cell {
+  display: flex;
+  align-items: center;
+  min-height: 12px;
+}
+
+.space-row__bar {
+  display: block;
+  height: 12px;
+  max-width: 100%;
+  background: var(--color-accent);
+  border-radius: var(--radius-sm);
+}
+
+/* A role names the band once, where it starts; the rows under it continue it. */
+.space-row__role {
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.space-row__bar--0 { width: var(--space-0); min-width: 2px; background: var(--color-border-strong); }
+.space-row__bar--1 { width: var(--space-1); }
+.space-row__bar--2 { width: var(--space-2); }
+.space-row__bar--3 { width: var(--space-3); }
+.space-row__bar--4 { width: var(--space-4); }
+.space-row__bar--5 { width: var(--space-5); }
+.space-row__bar--6 { width: var(--space-6); }
+.space-row__bar--8 { width: var(--space-8); }
+.space-row__bar--10 { width: var(--space-10); }
+.space-row__bar--12 { width: var(--space-12); }
+.space-row__bar--16 { width: var(--space-16); }
+.space-row__bar--20 { width: var(--space-20); }
+.space-row__bar--24 { width: var(--space-24); }
+.space-row__bar--32 { width: var(--space-32); }
+
+.space-row__label {
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+/* Phone: the band names are in the section copy; the step keeps the room. */
+@media (max-width: 40rem) {
+  .space-rows {
+    grid-template-columns: max-content minmax(0, 1fr);
+  }
+  .space-row__role {
+    display: none;
+  }
+}
+
+/* The value-to-unit gap, shown on one readout. */
+.gap-demo {
+  margin-top: var(--space-6);
+  padding: var(--space-5);
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+}
+
+.gap-demo > p {
+  margin: 0;
+}
+
+.gap-demo__readout {
+  --value-unit-gap: var(--gap-value-unit);
+  font-family: var(--font-family-code);
+  font-size: var(--text-headline);
+  line-height: var(--leading-tight);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-primary);
+}
+
+.gap-demo__unit {
+  margin-inline-start: var(--value-unit-gap);
+  font-size: 0.5em;
+  color: var(--color-text-muted);
+}
+
+.gap-demo__label {
+  margin-top: var(--space-3) !important;
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+}
+
+.gap-demo__label .tok {
+  color: var(--color-text-secondary);
+}
+
+/* ---- Radii: each radius on the component it belongs to, at that component's real size ---- */
+.radius-scale {
+  list-style: none;
+  margin: 0 0 var(--space-12);
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  gap: var(--space-8) var(--space-4);
+  align-items: end;
+}
+
+.radius-scale__item {
+  display: grid;
+  gap: var(--space-1);
+  justify-items: start;
+  align-content: end;
+}
+
+.radius-scale__token {
+  margin-top: var(--space-3);
+  white-space: nowrap;
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-primary);
+}
+
+.radius-scale__px {
+  color: var(--color-text-muted);
+}
+
+.radius-scale__use {
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+}
+
+.radius-obj {
+  display: flex;
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border-strong);
+  color: var(--color-text-secondary);
+}
+
+.radius-obj--check {
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-accent-contrast);
+}
+
+.radius-obj--field {
+  align-items: center;
+  min-height: 40px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-md);
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  white-space: nowrap;
+}
+
+.radius-obj--pop {
+  max-width: 13rem;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-3);
+  box-shadow: var(--shadow-2);
+  font-size: var(--text-small);
+  line-height: var(--leading-snug);
+  color: var(--color-text-primary);
+}
+
+.radius-obj--card,
+.radius-obj--panel {
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border-color: var(--color-border);
+}
+
+.radius-obj--card {
+  width: 8.5rem;
+  height: 5.5rem;
+  border-radius: var(--radius-xl);
+}
+
+.radius-obj--panel {
+  width: 9.5rem;
+  height: 7rem;
+  border-radius: var(--radius-2xl);
+  box-shadow: var(--shadow-1);
+}
+
+.radius-obj__line {
+  display: block;
+  height: 6px;
+  width: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-3);
+}
+
+.radius-obj__line--short {
+  width: 60%;
+}
+
+.radius-obj--chip {
+  align-items: center;
+  gap: var(--space-2);
+  padding: 2px var(--space-3) 2px var(--space-2);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-small);
+  font-weight: var(--weight-medium);
+  color: var(--color-success);
+  background: var(--color-success-muted);
+  border-color: color-mix(in oklch, var(--color-success) 40%, transparent);
+  white-space: nowrap;
+}
+
+/* ---- Elevation ----
+   Surface and shadow come from the shared `.elev-N` classes (components.css), so the specimen
+   shows the real pairing: level N = surface N + shadow N. */
+.elevation-card {
+  padding: var(--space-6);
+  border-radius: var(--radius-xl);
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.elevation-card__note {
+  display: block;
+  margin-top: var(--space-1);
+  font-family: var(--font-family-ui);
+  color: var(--color-text-muted);
+}
+
+.elevation-card__note .tok {
+  font-family: var(--font-family-code);
+  color: var(--color-text-secondary);
+}
+
+.elevation-card .swatch__value {
+  margin: var(--space-3) 0 0;
+}
+
+.elevation-card--glow {
+  background: var(--color-surface-1);
+  box-shadow: var(--shadow-accent-glow);
+}
+
+/* ---- Buttons (specimen layout only; visuals are in components.css) ---- */
+/* A fixed track width (auto-fill/minmax), not `flex-wrap`: a flex row wraps only when a whole
+   item no longer fits, which stranded the last (icon) button alone on its own row once the
+   longer captions widened every item ahead of it. A grid decides column count up front from the
+   available width, so every item — caption included — wraps as a whole unit at a width that's
+   correct for ALL of them, not just whichever one happens to run out of room first. */
+.btn-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  gap: var(--space-6) var(--space-4);
+  align-items: start;
+}
+
+/* A fixed first row centres every button (the 40px icon button included) on one line, and every
+   caption starts at the same height. */
+.btn-row > div {
+  display: grid;
+  grid-template-rows: 48px auto;
+  align-items: center;
+  justify-items: start;
+}
+
+.btn-caption {
+  align-self: start;
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+  margin: var(--space-2) 0 0;
+  text-wrap: pretty;
+}
+
+/* ---- Button state matrix, framed as a lab bench so it doesn't contradict "one accent" ---- */
+.bench {
+  padding: var(--space-5) var(--space-6) var(--space-6);
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+}
+
+.bench__label {
+  margin: 0 0 var(--space-5);
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+}
+
+@media (max-width: 40rem) {
+  .bench {
+    padding: var(--space-4);
+  }
+}
+
+.state-matrix {
+  display: grid;
+  grid-template-columns: 8rem repeat(6, minmax(6.5rem, 1fr));
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.state-matrix__row-label {
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+}
+
+/* Forced-state hooks: the same declarations as the real :hover / :active / :focus-visible rules in
+   components.css, scoped to the bench by an attribute no product markup uses, so they can never
+   leak into the site or the app (a SolidJS `is-active` tab class stays inert). Unlayered, so they
+   beat the layered component rules; each variant override is therefore repeated here. The "button
+   state matrix" test proves each forced state equals the real one. */
+.state-matrix .btn[data-force="hover"]::before {
+  opacity: 1;
+}
+
+.state-matrix .btn[data-force="active"]::before {
+  background: var(--state-press);
+  opacity: 1;
+}
+
+.state-matrix .btn:is(.btn--tertiary, .btn--icon)[data-force="active"]::before {
+  background: var(--state-press-ghost);
+}
+
+.state-matrix .btn--destructive[data-force="active"]::before {
+  background: var(--state-press-danger);
+}
+
+.state-matrix .btn[data-force="focus"] {
+  box-shadow: var(--focus-ring), var(--focus-ring-companion, 0 0 #0000);
+}
+
+.field .input[data-force="focus"] {
+  border-color: var(--color-accent);
+  box-shadow: var(--focus-ring), var(--focus-ring-companion, 0 0 #0000);
+}
+
+@media (max-width: 48rem) {
+  .state-matrix {
+    grid-template-columns: repeat(3, minmax(6rem, 1fr));
+  }
+  .state-matrix__row-label {
+    grid-column: 1 / -1;
+    margin-top: var(--space-4);
+  }
+}
+
+/* At very narrow widths even 3 fixed-minimum columns don't fit inside the page gutter (`.wrap`'s
+   16px/24px side padding) — a `minmax(6rem, 1fr)` TRACK can shrink, but the `.btn` items inside it
+   still carry their own content-driven `min-width: auto`, and letting THEM overflow their track
+   (rather than the track itself refusing to shrink) is what pushed `scrollWidth` past the viewport.
+   Free wrapping sidesteps the fixed-column math entirely: every button is exactly as wide as its
+   own label needs and simply flows to the next line once a row runs out of room. */
+@media (max-width: 26rem) {
+  .state-matrix {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .state-matrix__row-label {
+    flex-basis: 100%;
+    margin-top: var(--space-4);
+  }
+}
+
+/* ---- Draw-on diagram: HTML nodes + an SVG connector layer ----
+   Labels are real HTML text (always at the actual --text-small size, never a scaled-down SVG
+   <text> that shrinks to ~5px once a 640-unit viewBox is squeezed into a 390px viewport) with a
+   thin SVG line drawn behind/through them for the connecting "trace." Horizontal layout above
+   40rem, vertical below — two connector SVGs, toggled by the same breakpoint as the grid. */
+.pipeline-card {
+  padding: var(--space-8) var(--space-6);
+  background: var(--color-surface-1);
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--color-border);
+}
+
+.pipeline-wrap {
+  position: relative;
+}
+
+.pipeline__connector {
+  position: absolute;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.pipeline__connector line {
+  fill: none;
+  stroke: var(--color-accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+/* Insets to the CENTRE of column 1 and column 4 of a 4-equal-column grid (12.5% and 87.5%), not
+   the full 0-100% track: a node's circle sits centred in its own column (`.pipeline__node` is
+   `align-items: center; text-align: center`), so column-centre-to-column-centre is the same as
+   circle-centre-to-circle-centre. The internal `<line x2="100%">` (preview.html, no viewBox, so no
+   letterboxing) fills exactly this inset box, so it starts and ends AT those centres instead of overshooting past
+   node 1 and node 4 the way a 0-100%-wide connector with a merely-inset path used to. */
+.pipeline__connector--h {
+  top: 28px;
+  left: 12.5%;
+  width: 75%;
+  height: 4px;
+}
+
+/* Hidden by default (desktop); shown and positioned only under the mobile breakpoint below, where
+   `--pipeline-v-*` are set by preview.ts's positionPipelineConnector() from the REAL, rendered
+   centres of the first/last `.pipeline__n` circles — see that function's own comment for why a
+   fixed CSS offset can't do this reliably (node heights vary: some carry a `.pipeline__sub` line,
+   some don't). The custom-property fallbacks below are a reasonable static guess for the instant
+   between first paint and that script's first measurement, or for a JS-disabled visitor entirely. */
+.pipeline__connector--v {
+  display: none;
+}
+
+.pipeline {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.pipeline__node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--space-2);
+  padding-inline: var(--space-2);
+}
+
+.pipeline__n {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--color-surface-3);
+  border: 2px solid var(--color-accent);
+  color: var(--color-text-primary);
+  font-family: var(--font-family-code);
+  font-size: var(--text-title);
+  font-weight: var(--weight-semibold);
+}
+
+.pipeline__label {
+  margin: 0;
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.pipeline__sub {
+  margin: 0;
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+}
+
+@media (max-width: 40rem) {
+  .pipeline {
+    grid-template-columns: 1fr;
+    gap: var(--space-8);
+  }
+
+  /* Left-aligned timeline: a fixed 56px circle column with labels to its right, so the connector
+     line running down the circle column never has to cross through any label text the way a
+     centred connector running full-height behind centred text used to (it struck through every
+     one of "model" / "measure" / "screen, then soak" / "best config" / "serve"). */
+  .pipeline__node {
+    display: grid;
+    grid-template-columns: 56px 1fr;
+    column-gap: var(--space-4);
+    align-items: center;
+    text-align: start;
+    padding-inline: 0;
+  }
+
+  .pipeline__n {
+    grid-row: 1 / span 2;
+  }
+
+  .pipeline__label,
+  .pipeline__sub {
+    grid-column: 2;
+  }
+
+  .pipeline__connector--h {
+    display: none;
+  }
+
+  .pipeline__connector--v {
+    display: block;
+    top: var(--pipeline-v-top, 28px);
+    left: var(--pipeline-v-left, 26px);
+    width: 4px;
+    height: var(--pipeline-v-height, calc(100% - 56px));
+  }
+}
+
+/* ---- Motion token demo ---- */
+/* A grid, not `flex` with `flex: 1 1 auto` on the labels: that flex rule let the trailing "easing"
+   label get pushed to the far right of the row by the extra space `flex-wrap` left available,
+   instead of sitting snugly next to its own select. The grid gives the chip and Play button their
+   own fixed-width columns and the two duration/easing groups equal, adjacent flexible columns. */
+.motion-demo {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) auto auto auto;
+  align-items: end;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  background: var(--color-surface-1);
+  border-radius: var(--radius-lg);
+}
+
+/* Tablet: the rail takes its own row, controls sit together beneath it. */
+@media (max-width: 64rem) {
+  .motion-demo {
+    grid-template-columns: repeat(3, auto);
+    justify-content: start;
+  }
+  .motion-demo__track {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 40rem) {
+  .motion-demo {
+    grid-template-columns: 1fr;
+  }
+  .motion-demo__label {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+}
+
+/* The note under the demo panel needs its own breathing room: `.section__desc` only carries a
+   bottom margin because it normally sits directly under a section title, not under a panel. */
+.motion-demo__note {
+  margin-top: var(--space-4);
+}
+
+/* A wide rail, not a 16px dot nudging 48px inside its own grid column: at that scale an easing
+   curve's shape — and a spring's overshoot in particular — is too small a travel distance to
+   actually see. The rail's own width becomes the chip's full travel distance (via `--track-w`,
+   measured by preview.ts so it can never drift from the rail's real rendered size), so the same
+   demo now shows the shape of whichever easing curve is selected, not just "it moved." */
+.motion-demo__track {
+  position: relative;
+  height: 24px;
+  min-width: 12rem;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-2);
+  overflow: hidden;
+}
+
+.motion-demo__chip {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-pill);
+  background: var(--color-accent);
+  transition: transform var(--motion-demo-duration, 320ms) var(--motion-demo-ease, var(--ease-standard));
+}
+
+/* Only the rail previews on hover: hovering Play or a select must not pre-move the chip, or a
+   click on Play would have nothing left to show. `.is-at-end` is the reduced-motion Play: the
+   chip jumps to its end state (transition: none below) instead of travelling. */
+.motion-demo__chip.is-at-end {
+  transform: translateX(calc(var(--track-w, 200px) - 24px));
+}
+
+@media (hover: hover) {
+  .motion-demo__track:hover .motion-demo__chip {
+    transform: translateX(calc(var(--track-w, 200px) - 24px));
+  }
+}
+
+.motion-demo__hint {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.motion-demo__hint:empty {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .motion-demo__chip {
+    transition: none;
+  }
+}
+
+.motion-demo__label {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-1);
+  /* A <select>'s intrinsic (min-content) width is its longest <option>'s text, which a native
+     control never wraps — `min-width: 0` is required for this grid cell to actually shrink below
+     that at narrow viewports instead of forcing the page wider than the viewport. */
+  min-width: 0;
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+/* Sized to its widest option (the select's own intrinsic width) at the small code size, so no
+   option is ever clipped at any width and it reads as part of the system, not raw native chrome.
+   The input's own --space-3 block padding keeps it the same height as the Play button beside it. */
+.motion-demo select.input {
+  min-width: 12ch;
+  font-size: var(--text-small);
+}
+
+/* ---- Footer ---- */
+.footer {
+  margin-top: var(--space-32);
+  padding-top: var(--space-8);
+  border-top: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+}
+
+/* Full width on a phone. After the base rule on purpose: same specificity, so source order decides. */
+@media (max-width: 40rem) {
+  .motion-demo select.input {
+    width: 100%;
+  }
+}
+
+/* ---- In context: one result card, dark and light islands side by side ---- */
+.result-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-6);
+}
+
+/* One card per row until each card is wide enough for three readouts (below ~1024px the three
+   channels would squeeze a "34.0 tok/s" value past its own column). */
+@media (max-width: 64rem) {
+  .result-pair {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

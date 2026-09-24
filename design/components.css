@@ -1,0 +1,1303 @@
+/*
+ * Cerebro shared UI components (buttons, form controls, code block, term definition, comparison
+ * bars, stat tiles), used unmodified by the Astro site and the Tauri/SolidJS app. Specimen-only
+ * styling, including the forced-state hooks of the button state bench, lives in preview.css.
+ *
+ * Every :hover visual sits behind `@media (hover: hover)`: on touch, a tapped control would
+ * otherwise keep its hover look until the next tap elsewhere. :focus-visible stays separate.
+ *
+ * Button states animate only an `::before` overlay's opacity or a custom-property transform
+ * (motion.css), never colour, shadow or size.
+ *
+ * Layers, lowest to highest: base (element resets), components, focus. Layered rules lose to any
+ * unlayered consumer CSS, so the focus ring also uses `!important` (tested with an unlayered
+ * override in tests/preview.spec.ts).
+ */
+@layer cerebro.base, cerebro.components, cerebro.focus;
+
+/* The number-to-unit gap, resolved to px ON the value element (a registered <length> computes
+   there), so a smaller unit inherits the value's gap instead of re-resolving 0.3em against its own
+   font size. Every readout gets the same gap in em of its number. */
+@property --value-unit-gap {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 0px;
+}
+
+@layer cerebro.base {
+  /* Beats the UA `code { font-family: monospace }` rule (and its font-size quirk) everywhere. */
+  code, kbd, samp, pre {
+    font-family: var(--font-family-code);
+    font-size: 1em;
+    font-variant-ligatures: none;
+  }
+
+  /* Inline code chip. `nowrap` so `--duration-draw` never splits at its hyphens; long commands
+     belong in a .code-block. */
+  :not(pre) > code {
+    white-space: nowrap;
+    font-size: 0.875em;
+    padding: 0.1em 0.35em;
+    border-radius: var(--radius-sm);
+    background: var(--color-surface-2);
+    color: var(--color-text-primary);
+  }
+}
+
+@layer cerebro.components {
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Buttons                                                                 */
+/* ---------------------------------------------------------------------- */
+
+.btn {
+  position: relative;
+  isolation: isolate;
+  appearance: none;
+  border: 1px solid transparent; /* every variant shares one box height */
+  cursor: pointer;
+  font-family: var(--font-family-ui);
+  font-size: var(--text-body);
+  font-weight: var(--weight-medium);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-5);
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  white-space: nowrap;
+  line-height: normal; /* a <button> resets to normal; an <a class="btn"> would inherit the body's 1.5 */
+  text-decoration: none; /* a navigation <a class="btn"> looks like its button sibling */
+  color: var(--color-text-primary);
+  background: transparent;
+}
+
+/* Hover/press overlay: only its opacity animates. */
+.btn::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--state-hover);
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+  pointer-events: none;
+}
+
+@media (hover: hover) {
+  .btn:hover::before {
+    opacity: 1;
+  }
+}
+
+.btn:active::before {
+  background: var(--state-press);
+  opacity: 1;
+}
+
+/* No fill to darken on near-black: ghost controls keep a light press in dark (tokens.css). */
+.btn:is(.btn--tertiary, .btn--icon):active::before {
+  background: var(--state-press-ghost);
+}
+
+.btn--primary {
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+}
+
+.btn--secondary {
+  background: var(--color-surface-2);
+  color: var(--color-text-primary);
+  border-color: var(--color-border-strong);
+}
+
+.btn--tertiary {
+  background: transparent;
+  color: var(--color-text-secondary);
+}
+
+.btn--tertiary:focus-visible {
+  color: var(--color-text-primary);
+}
+
+@media (hover: hover) {
+  .btn--tertiary:hover {
+    color: var(--color-text-primary);
+  }
+}
+
+.btn--destructive {
+  background: transparent;
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+}
+
+/* No fill to darken: hover and press tint the control in its own colour, so a press is visible in
+   both themes and on touch, where there is no hover step before it. */
+.btn--destructive::before {
+  background: var(--color-danger-muted);
+}
+
+.btn--destructive:active::before {
+  background: var(--state-press-danger);
+  opacity: 1;
+}
+
+/* Ghost square: no resting fill, only the hover/press overlay. */
+.btn--icon {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  background: transparent;
+  color: var(--color-text-secondary);
+  border-radius: var(--radius-md);
+}
+
+.btn--icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* Confident, not loud: one step up from a primary button (48px, semibold body text); the glow and
+   the magnetic pull carry the emphasis, not size. */
+.btn--hero {
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+  font-size: var(--text-body);
+  font-weight: var(--weight-semibold);
+  padding: var(--space-3) var(--space-6);
+  min-height: 48px;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-accent-glow);
+  --focus-ring-companion: var(--shadow-accent-glow); /* keeps the glow under the focus ring */
+}
+
+/* Trailing arrow on a forward-moving CTA: nudges 3px on hover/focus. Decorative (aria-hidden). */
+.btn__arrow {
+  display: inline-flex;
+  margin-inline-end: calc(-1 * var(--space-1));
+}
+
+.btn__arrow svg {
+  width: 0.9em;
+  height: 0.9em;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .btn__arrow {
+    transition: transform var(--duration-fast) var(--ease-spring);
+  }
+
+  @media (hover: hover) {
+    .btn:hover .btn__arrow {
+      transform: translateX(3px);
+    }
+  }
+
+  .btn:focus-visible .btn__arrow {
+    transform: translateX(3px);
+  }
+}
+
+/* ---- Backdrop grid ----
+   Static decorative 48px grid plus one warm glow, radially masked. An empty aria-hidden div
+   directly in <body>; `inset` (not 100vw) so a classic scrollbar never causes sideways scroll.
+   `--glow-x/-y` place the glow. */
+.backdrop-grid {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: min(68rem, 130vh);
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    radial-gradient(36rem 26rem at var(--glow-x, 74%) var(--glow-y, 42%), var(--color-glow), transparent 70%),
+    linear-gradient(to right, var(--color-grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--color-grid-line) 1px, transparent 1px);
+  background-size: auto, var(--space-12) var(--space-12), var(--space-12) var(--space-12);
+  background-position: 0 0, 50% 0, 50% 0;
+  mask-image: radial-gradient(ellipse 75% 62% at 50% 38%, #000 25%, transparent 78%);
+}
+
+@media (max-width: 64rem) {
+  .backdrop-grid {
+    --glow-x: 50%;
+    --glow-y: 72%;
+  }
+}
+
+@media (forced-colors: active) {
+  .backdrop-grid {
+    display: none;
+  }
+}
+
+/* ---- Theme toggle: sun/moon crossfade, driven by aria-pressed (true = dark) ---- */
+.theme-toggle {
+  position: relative;
+}
+
+.theme-toggle .icon-sun,
+.theme-toggle .icon-moon {
+  transition:
+    opacity var(--duration-fast) var(--ease-standard),
+    transform var(--duration-base) var(--ease-spring);
+}
+
+.theme-toggle .icon-moon {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+}
+
+.theme-toggle[aria-pressed="false"] .icon-moon,
+.theme-toggle[aria-pressed="true"] .icon-sun {
+  opacity: 0;
+  transform: rotate(-90deg) scale(0.6);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .theme-toggle .icon-sun,
+  .theme-toggle .icon-moon {
+    transition: none;
+  }
+}
+
+/* ---- Disabled ---- */
+.btn:is([disabled], [aria-disabled="true"]) {
+  background: var(--color-disabled-bg);
+  color: var(--color-disabled-text);
+  border-color: transparent;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.btn:is([disabled], [aria-disabled="true"])::before {
+  display: none;
+}
+
+/* ---- Loading ----
+   The label fades via opacity so contrast scanners don't flag invisible text; the accessible name
+   is unchanged. Keyboard activation is blocked by initButtonGuards() in motion.ts. */
+.btn[aria-busy="true"] {
+  pointer-events: none;
+}
+
+.btn[aria-busy="true"] .btn__label {
+  opacity: 0;
+}
+
+/* A real element, not ::after, which the light sweep owns. */
+.btn__spinner {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  color: var(--color-text-primary);
+  opacity: 0;
+}
+
+.btn[aria-busy="true"] .btn__spinner {
+  opacity: 1;
+  animation: btn-spin 700ms linear infinite;
+}
+
+.btn--primary .btn__spinner,
+.btn--hero .btn__spinner {
+  color: var(--color-accent-contrast);
+}
+
+@keyframes btn-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn[aria-busy="true"] .btn__spinner {
+    animation: none;
+    border-style: dotted; /* static, still reads as busy */
+    border-top-color: currentColor;
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+/* Form controls                                                          */
+/* ---------------------------------------------------------------------- */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-width: 32rem;
+}
+
+.field__label {
+  font-size: var(--text-small);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+}
+
+/* Border colour changes are instant (a transition would repaint); the focus ring carries the
+   emphasis. */
+.input {
+  font: inherit;
+  font-size: var(--text-body);
+  color: var(--color-text-primary);
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  min-height: 40px;
+}
+
+/* A designed select, not the native chrome. The chevron is the `.select` wrapper's ::after, drawn
+   with two borders (no image, no gradient: the CSP allows no image or data: URL, and a background
+   gradient on the control itself stops contrast checkers from resolving its background). It sits in
+   the end padding, so the text never runs under it, and ignores the pointer, so a click on it still
+   opens the list. Width stays the widest option's (no field-sizing: content), so changing the
+   selection never reflows the row around it.
+   Markup: <span class="select"><select class="input">...</select></span> */
+.select {
+  position: relative;
+  display: inline-grid;
+  min-width: 0;
+}
+
+.select > select.input {
+  width: 100%;
+}
+
+.select::after {
+  content: "";
+  position: absolute;
+  inset-inline-end: calc(var(--space-4) + 1px);
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--color-text-secondary); /* physical: rotated, it points down in LTR and RTL */
+  border-bottom: 1.5px solid var(--color-text-secondary);
+  transform: translateY(-70%) rotate(45deg);
+  pointer-events: none;
+}
+
+select.input {
+  appearance: none;
+  cursor: pointer;
+  padding-inline-end: calc(var(--space-4) + 12px + var(--space-2)); /* chevron box is 12px wide */
+}
+
+.input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.input:focus-visible {
+  border-color: var(--color-accent);
+}
+
+.input[aria-invalid="true"] {
+  border-color: var(--color-danger);
+}
+
+.field__error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+  font-size: var(--text-small);
+  color: var(--color-danger);
+}
+
+/* The icon sits on the first line, however many lines the message wraps to. */
+.field__error svg {
+  flex: none;
+  margin-top: calc((1lh - 14px) / 2);
+}
+
+.field__hint {
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+}
+
+.field__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-6);
+  text-align: center;
+  color: var(--color-text-muted);
+  background: var(--color-surface-1);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-lg);
+  font-size: var(--text-small);
+}
+
+.field__empty-icon {
+  color: var(--color-text-muted);
+}
+
+.field__empty-text {
+  margin: 0;
+  max-width: 32ch;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Code block                                                             */
+/* ---------------------------------------------------------------------- */
+
+.code-block {
+  position: relative;
+  max-inline-size: 44rem;
+  margin: 0;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.code-block__title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.code-block pre {
+  margin: 0;
+  padding: var(--space-4);
+  overflow-x: auto;
+  font: var(--text-code) / 1.6 var(--font-family-code);
+  color: var(--color-text-primary);
+}
+
+/* Undo the inline-code chip inside a block; inherit the block's size. */
+.code-block pre code {
+  font: inherit;
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  color: inherit;
+}
+
+/* Install and hero contexts: commands read at body scale. */
+.code-block--lg pre {
+  font-size: clamp(0.875rem, 0.84rem + 0.15vw, 1rem);
+}
+
+.code-block__prompt {
+  color: var(--color-text-muted);
+  user-select: none;
+}
+
+.code-block__copy {
+  position: relative;
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  color: var(--color-text-muted);
+}
+
+/* 40x40 hit target around the 32px visual. */
+.code-block__copy::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: inherit;
+}
+
+.code-block__copy svg {
+  width: 16px;
+  height: 16px;
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+/* Success swaps to a check icon (never colour alone). */
+.code-block__copy .icon-check {
+  opacity: 0;
+  color: var(--color-success);
+}
+
+.code-block__copy.is-done .icon-copy {
+  opacity: 0;
+}
+
+.code-block__copy.is-done .icon-check {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .code-block__copy svg {
+    transition: none;
+  }
+}
+
+/* Live region: empty at rest, so each result is a text change a screen reader announces. */
+.code-block__status {
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-success);
+  opacity: 1;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+.code-block__status:empty {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .code-block__status {
+    transition: none;
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+/* Term / inline definition (keyboard and touch, never hover-only)        */
+/* ---------------------------------------------------------------------- */
+
+.term {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+}
+
+.term dfn {
+  font-style: normal;
+  border-bottom: 1px dashed var(--color-border-strong);
+}
+
+.term__btn {
+  all: unset;
+  position: relative;
+  cursor: pointer;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-family: var(--font-family-code);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border-strong);
+  line-height: 1;
+  transform: translateY(-4px);
+}
+
+/* 28px hit target (WCAG 2.5.8) around the 16px glyph. */
+.term__btn::after {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+}
+
+.term__btn:focus-visible {
+  color: var(--color-text-primary);
+  border-color: var(--color-text-primary);
+}
+
+@media (hover: hover) {
+  .term__btn:hover {
+    color: var(--color-text-primary);
+    border-color: var(--color-text-primary);
+  }
+}
+
+.term__pop {
+  /* Never wider than the viewport minus a 16px gutter on each side. */
+  max-width: min(36ch, calc(100vw - 2 * var(--space-4)));
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface-3);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-3);
+  font-size: var(--text-small);
+  line-height: var(--leading-relaxed);
+  opacity: 0;
+  transform: translateY(-4px) scale(0.98);
+  /* overlay + display (allow-discrete) keep the popover in the top layer while it fades out. */
+  transition:
+    opacity var(--duration-fast) var(--ease-standard),
+    transform var(--duration-fast) var(--ease-emphasized),
+    overlay var(--duration-fast) allow-discrete,
+    display var(--duration-fast) allow-discrete;
+}
+
+.term__pop:popover-open {
+  opacity: 1;
+  transform: none;
+}
+
+@starting-style {
+  .term__pop:popover-open {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .term__pop {
+    transition: none;
+    transform: none;
+  }
+}
+
+/* Anchored below its trigger where supported, else the Popover API's centred default. Anchor names
+   are set per instance by initTerms() (terms.ts): one shared name would resolve to the last
+   trigger in the document. */
+@supports (anchor-name: --cerebro-term-fallback-probe) {
+  /* Too narrow beside the trigger (phones): use the full row under it, 16px from each edge. */
+  @position-try --cerebro-term-below-wide {
+    position-area: bottom span-all;
+    margin: var(--space-2) var(--space-4) 0;
+  }
+
+  @position-try --cerebro-term-above-wide {
+    position-area: top span-all;
+    margin: 0 var(--space-4) var(--space-2);
+  }
+
+  /* The inline-end margin keeps a gutter from the viewport edge; flip-inline mirrors it. */
+  .term__pop {
+    position-area: bottom span-right;
+    position-try-fallbacks: flip-inline, --cerebro-term-below-wide, flip-block, --cerebro-term-above-wide;
+    margin: var(--space-2) var(--space-4) 0 0;
+    inset: auto;
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+/* Comparison morph (default vs tuned bars)                               */
+/* ---------------------------------------------------------------------- */
+
+/* The "illustrative" flag is a figcaption inside the same bordered figure, so a crop of the bars
+   can never lose it (docs/CLAIMS.md rule zero). */
+.comparison-figure {
+  margin: 0;
+  padding: var(--space-6);
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  display: grid;
+  gap: var(--space-5);
+}
+
+/* One grid; rows use subgrid so every track starts and ends at the same x. */
+.comparison {
+  display: grid;
+  grid-template-columns: minmax(6rem, max-content) minmax(0, 1fr) auto;
+  row-gap: var(--space-4);
+  column-gap: var(--space-4);
+}
+
+.comparison__row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: center;
+}
+
+.comparison__label {
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+/* An instrument scale: quarter ticks show in the unfilled part of the track. Each tick is its own
+   1px image placed by percentage: background-position snaps to whole pixels, whereas a 1px stripe
+   in a 25%-period repeating gradient lands on sub-pixel edges and can rasterise to nothing. */
+.comparison__track {
+  --tick: linear-gradient(var(--color-border), var(--color-border));
+  display: block;
+  height: 12px;
+  border-radius: var(--radius-pill);
+  background:
+    var(--tick) 25% 0 / 1px 100% no-repeat,
+    var(--tick) 50% 0 / 1px 100% no-repeat,
+    var(--tick) 75% 0 / 1px 100% no-repeat,
+    var(--color-surface-2);
+  overflow: hidden;
+}
+
+.bar {
+  display: block;
+  height: 100%; /* width is the final length, from --bar-to (motion.css) */
+  border-radius: inherit;
+  background: var(--color-text-muted);
+  /* Slid, never scaled (motion.css), so this pill keeps its round caps. */
+}
+
+.bar--tuned {
+  background: var(--color-accent);
+}
+
+.comparison__value {
+  font-family: var(--font-family-code);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-primary);
+  font-size: var(--text-small);
+  min-width: 7ch;
+  text-align: right;
+}
+
+/* Phone: label and value on one line, a full-width track underneath, so the contrast between the
+   two bars stays readable. */
+@media (max-width: 40rem) {
+  .comparison-figure {
+    padding: var(--space-5);
+  }
+
+  .comparison {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: var(--space-5);
+  }
+
+  .comparison__row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "label value"
+      "track track";
+    row-gap: var(--space-2);
+    column-gap: var(--space-3);
+  }
+
+  .comparison__label {
+    grid-area: label;
+  }
+
+  .comparison__value {
+    grid-area: value;
+    min-width: 0;
+  }
+
+  .comparison__track {
+    grid-area: track;
+    height: 10px;
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+/* Stat tile (count-up numbers, always with a provenance or flag slot)    */
+/* ---------------------------------------------------------------------- */
+
+.stat-tile {
+  padding: var(--space-6);
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+}
+
+/* Below --text-headline so multi-digit values stay on one line in a three-column row. */
+.stat-tile__value {
+  font-family: var(--font-family-code);
+  font-size: clamp(1.75rem, 1.35rem + 1.6vw, 2.5rem);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  margin: 0;
+}
+
+/* The one live value on a screen (accent is never on every tile). Text role, not the fill. */
+.stat-tile--live .stat-tile__value {
+  color: var(--color-accent-text);
+}
+
+.stat-tile__of {
+  color: var(--color-text-muted);
+  font-size: 0.55em;
+}
+
+/* One number-to-unit gap everywhere: set on the value, applied by the unit (see @property above). */
+:is(.stat-tile__value, .metric__value, .comparison__value) {
+  --value-unit-gap: var(--gap-value-unit);
+}
+
+:is(.stat-tile__unit, .metric__unit, .comparison__unit) {
+  margin-inline-start: var(--value-unit-gap);
+}
+
+/* Units read as a small muted label, like an instrument readout. */
+.stat-tile__unit {
+  font-size: 0.5em;
+  color: var(--color-text-muted);
+  font-weight: var(--weight-regular);
+}
+
+.stat-tile__label {
+  color: var(--color-text-secondary);
+  margin: var(--space-2) 0 0;
+}
+
+/* Every tile carries exactly one of: `__flag` (not a measurement) or `__source`/`__provenance`
+   (a real one). The flag is a neutral DISCLOSURE, not a warning: secondary text, a dashed strong
+   border and a hatched dot, so it never competes with the accent value beside it and never wears
+   down what the warning colour means. Inter, not mono, so the exact wording fits one line.
+   `justify-self` keeps the pill at its natural width inside any grid parent. */
+.stat-tile__flag {
+  display: inline-flex;
+  justify-self: start;
+  align-self: start;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 100%;
+  margin-top: var(--space-3);
+  font-family: var(--font-family-ui);
+  font-size: var(--text-small);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-snug);
+  color: var(--color-text-secondary);
+  background: var(--color-surface-2);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-pill);
+  padding: 2px var(--space-3) 2px var(--space-2);
+}
+
+.stat-tile__flag::before {
+  content: "";
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: repeating-linear-gradient(45deg, currentColor 0 1px, transparent 1px 3px);
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+
+.stat-tile__source {
+  display: block;
+  margin-top: var(--space-2);
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+}
+
+.stat-tile__provenance {
+  margin: var(--space-3) 0 0;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-1) var(--space-3);
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+}
+
+.stat-tile__provenance dt {
+  color: var(--color-text-secondary);
+}
+
+.stat-tile__provenance dd {
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Elevation: level N = surface N + shadow N                              */
+/* ---------------------------------------------------------------------- */
+
+/* A drop shadow alone is invisible on near-black, so each level also steps up a surface: in dark,
+   distance reads as a lighter surface; in light, the shadow carries it. */
+.elev-1 { background: var(--color-surface-1); box-shadow: var(--shadow-1); }
+.elev-2 { background: var(--color-surface-2); box-shadow: var(--shadow-2); }
+.elev-3 { background: var(--color-surface-3); box-shadow: var(--shadow-3); }
+
+/* ---------------------------------------------------------------------- */
+/* Result card: what `cerebro tune` hands back                            */
+/* ---------------------------------------------------------------------- */
+
+/* Colours come only from tokens, so the card re-themes inside any [data-theme] island. */
+/* Head, figure, actions: in a stretched row (two cards side by side) the figure takes the slack,
+   so the heads and the action rows of neighbouring cards stay aligned. */
+.result-card {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: var(--space-5);
+  padding: var(--space-6);
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-2);
+}
+
+.result-card__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.result-card__eyebrow {
+  margin: 0 0 var(--space-1);
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.result-card__model {
+  margin: 0;
+  font-family: var(--font-family-code);
+  font-size: var(--text-body);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.result-card__status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 2px var(--space-3) 2px var(--space-2);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-small);
+  font-weight: var(--weight-medium);
+  color: var(--color-success);
+  background: var(--color-success-muted);
+  border: 1px solid color-mix(in oklch, var(--color-success) 40%, transparent);
+  white-space: nowrap;
+}
+
+.result-card__status-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.result-card__figure {
+  margin: 0;
+  display: grid;
+  align-content: start;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+
+/* The disclosure and the status share the caption, both inside the flagged figure, so no crop can
+   keep "Soak passed" and lose "Illustrative data". */
+.result-card__caption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-3);
+}
+
+.result-card__caption > .stat-tile__flag {
+  margin-top: 0;
+}
+
+/* Three readouts side by side, split by hairlines like an instrument's channels. Values share one
+   bottom line (align-items: end) whether or not their label carries a qualifier line. */
+.result-card__metrics {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: end;
+  gap: var(--space-4);
+}
+
+/* The hairline sits in the middle of the gap, so it costs the readouts no width. */
+.metric + .metric {
+  position: relative;
+}
+
+.metric + .metric::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: calc(var(--space-4) / -2);
+  border-inline-start: 1px solid var(--color-border);
+}
+
+.metric {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.metric__label {
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+/* The condition a value was measured under ("depth 8k"): its own line in a column, so a narrow
+   card never pushes a label into the next channel; inline after a dot in the phone's row layout. */
+.metric__qual {
+  display: block;
+}
+
+.metric__value {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  font-family: var(--font-family-code);
+  font-size: clamp(1.375rem, 1.2rem + 0.7vw, 1.75rem);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+}
+
+/* The one live value on the card. Text role, not the fill. */
+.metric--live .metric__value {
+  color: var(--color-accent-text);
+}
+
+.metric__unit {
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+}
+
+.result-card__spark {
+  display: block;
+  width: 100%;
+  height: 44px;
+  overflow: visible;
+}
+
+.result-card__spark-base {
+  stroke: var(--color-text-muted);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+  vector-effect: non-scaling-stroke;
+}
+
+/* Information-carrying line: the accent TEXT token, 3:1 on the surface in both themes. */
+.result-card__spark-line {
+  fill: none;
+  stroke: var(--color-accent-text);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.result-card__provenance {
+  margin: 0;
+}
+
+/* Status chip variants. A result that isn't a win never wears the success colour. */
+.result-card__status--neutral {
+  color: var(--color-text-secondary);
+  background: var(--color-surface-2);
+  border-color: var(--color-border-strong);
+}
+
+.result-card__status--active {
+  color: var(--color-accent-text);
+  background: var(--color-accent-muted);
+  border-color: color-mix(in oklch, var(--color-accent-text) 40%, transparent);
+}
+
+.result-card__status-icon {
+  flex: none;
+  width: 12px;
+  height: 12px;
+}
+
+/* "Defaults were fastest": the plain-words reason, under the comparison. */
+.result-card__note {
+  margin: 0;
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+  max-width: 52ch;
+}
+
+.result-card__figure > .comparison {
+  row-gap: var(--space-3);
+}
+
+/* ---- Measuring: best so far, the live trace, a determinate step list, progress and one live line ---- */
+.result-card__best {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.result-card__best dd {
+  margin: 0;
+}
+
+/* Beside a taller neighbour the live trace takes the card's slack (rows: caption, best, trace,
+   steps, progress, live line), so the panel never ends in an empty band; stacked, it is 44px. */
+.result-card--measuring .result-card__figure {
+  grid-template-rows: auto auto minmax(44px, 1fr);
+}
+
+.result-card__spark--live {
+  height: 100%;
+  min-height: 44px;
+}
+
+.tune-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-3);
+}
+
+.tune-steps__step {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+}
+
+.tune-steps__mark {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid var(--color-border-strong);
+  color: var(--color-text-secondary);
+}
+
+.tune-steps__mark svg {
+  width: 12px;
+  height: 12px;
+}
+
+.tune-steps__label {
+  color: var(--color-text-secondary);
+}
+
+.tune-steps__meta {
+  font-family: var(--font-family-code);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.tune-steps__step[data-state="done"] .tune-steps__mark {
+  background: var(--color-surface-2);
+}
+
+.tune-steps__step[aria-current="step"] .tune-steps__label {
+  color: var(--color-text-primary);
+  font-weight: var(--weight-medium);
+}
+
+.tune-steps__step[aria-current="step"] .tune-steps__mark {
+  border-color: var(--color-accent-text);
+}
+
+.tune-steps__step[aria-current="step"] .tune-steps__mark::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-accent-text);
+}
+
+/* The fill is a `.bar` (its length from a `.bar--pNN` class) with no [data-bar]: it never grows on
+   scroll, it shows the current progress, and a live update slides in with setBarValue() from
+   motion.ts (a jump under reduced motion). */
+.tune-progress {
+  display: block;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-2);
+  overflow: hidden;
+}
+
+.result-card__live {
+  margin: 0;
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.result-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3) var(--space-4);
+}
+
+.result-card__endpoint {
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+@media (max-width: 30rem) {
+  .result-card {
+    padding: var(--space-4);
+  }
+  .result-card__figure {
+    padding: var(--space-4);
+  }
+  .result-card__metrics {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-3);
+  }
+  .metric {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: baseline;
+  }
+  .metric + .metric::before {
+    content: none;
+  }
+  .metric__qual {
+    display: inline;
+  }
+  .metric__qual::before {
+    content: " · " / "";
+  }
+}
+
+} /* end @layer cerebro.components */
+
+/* ---------------------------------------------------------------------- */
+/* Focus ring (highest layer + !important: see the header)                */
+/* ---------------------------------------------------------------------- */
+
+@layer cerebro.focus {
+  /* Two-tone box-shadow ring; the transparent outline still draws in forced-colors mode.
+     `--focus-ring-companion` lets a component keep its own shadow under the ring. */
+  :is(button, a, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: 2px solid transparent !important;
+    outline-offset: 2px !important;
+    box-shadow: var(--focus-ring), var(--focus-ring-companion, 0 0 #0000) !important;
+  }
+}

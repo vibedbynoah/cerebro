@@ -1,0 +1,349 @@
+/*
+ * Cerebro design tokens.
+ *
+ * Dark is the default theme. Light applies under [data-theme="light"], or under
+ * prefers-color-scheme: light when no theme is set explicitly.
+ *
+ * Colours are OKLCH, declared once per token as light-dark(LIGHT, DARK) and switched by
+ * `color-scheme`. Custom properties are unregistered, so they store the light-dark() text
+ * unresolved: it is evaluated where var() is used, against that element's color-scheme. That is
+ * why a nested [data-theme] island re-themes everything inside it.
+ *
+ * Every documented text/background pair meets WCAG 2.2 AA (4.5:1 text, 3:1 large text/UI) in both
+ * themes against --color-bg and every surface. tests/preview.spec.ts measures the rendered colours;
+ * run `npm test` after changing any colour.
+ *
+ * Hue 75/85: warm neutral. Hue 62-64: the calibrated-amber accent. Danger (~20-25) and warning
+ * (97-98) sit at least 30deg of rendered hue from the accent-as-text role and from each other in both
+ * themes (tests/consistency.spec.ts "text roles stay distinct"), so a link never reads as a warning.
+ */
+
+:root {
+  color-scheme: dark;
+}
+
+/* OS preference governs color-scheme only when nothing on the page has opted in explicitly. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    color-scheme: light;
+  }
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+}
+
+/* An explicit dark island works even nested inside a light-themed ancestor. */
+[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+:root,
+[data-theme="light"],
+[data-theme="dark"] {
+  /* ---- Surfaces: light-dark(LIGHT, DARK) ---- */
+  --color-bg: light-dark(oklch(98.5% 0.004 85), oklch(16% 0.012 75));
+  --color-surface-1: light-dark(oklch(95.5% 0.006 85), oklch(20% 0.014 75));
+  --color-surface-2: light-dark(oklch(91.5% 0.008 85), oklch(24% 0.016 75));
+  --color-surface-3: light-dark(oklch(86.5% 0.011 85), oklch(29% 0.018 75));
+
+  /* Decorative divider — no AA requirement. Never used for text or a focusable edge. */
+  --color-border: light-dark(oklch(80% 0.014 75), oklch(34% 0.02 75));
+  /* Interactive edge (inputs, bounded cards): 3:1 on bg and every surface, both themes. */
+  --color-border-strong: light-dark(oklch(52% 0.02 75), oklch(60% 0.02 75));
+
+  /* ---- Text ---- */
+  --color-text-primary: light-dark(oklch(20% 0.014 75), oklch(94% 0.01 75));
+  --color-text-secondary: light-dark(oklch(38% 0.02 75), oklch(80% 0.015 75));
+  --color-text-muted: light-dark(oklch(46% 0.02 75), oklch(68.5% 0.02 75));
+
+  /* ---- Brand + status ----
+     Accent has a FILL role (buttons, the tuned bar) and a TEXT role (links, the one live value),
+     both amber in both themes. Never use the fill as text or the text token as a fill. */
+  --color-accent: light-dark(oklch(72% 0.15 64), oklch(76% 0.14 62)); /* fill */
+  --color-accent-contrast: light-dark(oklch(18% 0.03 60), oklch(16% 0.02 62)); /* text on fill */
+  --color-accent-text: light-dark(oklch(47% 0.11 62), oklch(80% 0.13 64)); /* accent as text/link/trace on bg */
+  --color-accent-muted: light-dark(oklch(72% 0.15 64 / 0.12), oklch(76% 0.14 62 / 0.14));
+
+  --color-success: light-dark(oklch(38% 0.11 150), oklch(76% 0.15 150));
+  --color-success-contrast: light-dark(oklch(99% 0.01 150), oklch(14% 0.02 150));
+  --color-success-muted: light-dark(oklch(38% 0.11 150 / 0.1), oklch(76% 0.15 150 / 0.14));
+
+  /* Every light foreground must hold 4.5:1 on surface-3 (L 86.5%), which pins it near L 46%, so
+     warning separates from accent-text (hue 62) by hue alone: 98 renders ~36deg away in light and
+     97 ~33deg away in dark (measured from rendered pixels; hue 80 was only 16deg away and read as
+     the same brown-ochre as a link). */
+  --color-warning: light-dark(oklch(46% 0.09 98), oklch(84% 0.15 97));
+  --color-warning-contrast: light-dark(oklch(99% 0.01 98), oklch(16% 0.02 97));
+  --color-warning-muted: light-dark(oklch(46% 0.09 98 / 0.1), oklch(84% 0.15 97 / 0.14));
+
+  /* At least 30deg of hue or 15% lightness from the accent in both themes (tested). */
+  --color-danger: light-dark(oklch(46% 0.21 25), oklch(72% 0.19 20));
+  --color-danger-contrast: light-dark(oklch(99% 0.005 20), oklch(14% 0.02 20));
+  --color-danger-muted: light-dark(oklch(46% 0.21 25 / 0.1), oklch(72% 0.19 20 / 0.14));
+
+  /* Two-tone ring: a bg-coloured gap, then text-primary (never the accent, which would vanish on
+     an accent button). */
+  --color-focus-ring: var(--color-text-primary);
+  --focus-ring: 0 0 0 2px var(--color-bg), 0 0 0 4px var(--color-focus-ring);
+
+  /* ---- Hover/press overlays, faded in via ::before opacity (components.css) ----
+     Press darkens in both themes, so a filled button reads pushed in, never lit up. Ghost controls
+     (tertiary, icon) have no fill to darken on near-black, so they keep a light press in dark. */
+  --state-hover: light-dark(oklch(0% 0 0 / 0.06), oklch(100% 0 0 / 0.08));
+  --state-press: light-dark(oklch(0% 0 0 / 0.1), oklch(0% 0 0 / 0.16));
+  --state-press-ghost: light-dark(oklch(0% 0 0 / 0.1), oklch(100% 0 0 / 0.12));
+  /* Destructive has no fill either: it hovers with --color-danger-muted and presses with a deeper
+     tint of its own danger hue, never a grey overlay that would be invisible on near-black. In
+     light a stronger tint is darker; in dark the press is a low-lightness red, so it reads pushed
+     in (never brighter than the hover tint) yet stays visibly red against rest. Danger text on it
+     stays AA (tests/consistency.spec.ts "press reads pushed in"). */
+  --state-press-danger: light-dark(oklch(46% 0.21 25 / 0.18), oklch(42% 0.16 22 / 0.3));
+
+  /* ---- Backdrop: decorative grid and glow, far below any contrast threshold on purpose ---- */
+  --color-grid-line: light-dark(oklch(20% 0.02 75 / 0.07), oklch(94% 0.01 75 / 0.055));
+  --color-glow: light-dark(oklch(72% 0.15 64 / 0.16), oklch(76% 0.14 62 / 0.11));
+
+  /* ---- Disabled ---- */
+  --color-disabled-bg: light-dark(oklch(91.5% 0.006 80), oklch(24% 0.01 75));
+  --color-disabled-text: light-dark(oklch(60% 0.01 80), oklch(58% 0.01 75));
+
+  /* ---- Elevation ----
+     light-dark() takes colours, not shadow lists, so each layer wraps its own colour; a layer used
+     in one theme only is `transparent` in the other. Dark adds an inset top highlight and a
+     hairline ring, because a drop shadow alone vanishes on near-black. */
+  --shadow-1:
+    0 1px 2px light-dark(oklch(40% 0.02 75 / 0.10), oklch(0% 0 0 / 0.36)),
+    0 1px 1px light-dark(oklch(40% 0.02 75 / 0.08), transparent),
+    inset 0 1px 0 light-dark(transparent, oklch(100% 0 0 / 0.04)),
+    0 0 0 1px light-dark(transparent, oklch(100% 0 0 / 0.03));
+  --shadow-2:
+    0 4px 12px light-dark(oklch(40% 0.02 75 / 0.12), oklch(0% 0 0 / 0.5)),
+    0 2px 4px light-dark(oklch(40% 0.02 75 / 0.08), transparent),
+    inset 0 1px 0 light-dark(transparent, oklch(100% 0 0 / 0.06)),
+    0 0 0 1px light-dark(transparent, oklch(100% 0 0 / 0.04));
+  --shadow-3:
+    0 12px 32px light-dark(oklch(40% 0.02 75 / 0.16), oklch(0% 0 0 / 0.56)),
+    0 4px 10px light-dark(oklch(40% 0.02 75 / 0.10), transparent),
+    inset 0 1px 0 light-dark(transparent, oklch(100% 0 0 / 0.08)),
+    0 0 0 1px light-dark(transparent, oklch(100% 0 0 / 0.05));
+  --shadow-accent-glow:
+    0 0 0 1px light-dark(oklch(72% 0.15 64 / 0.4), oklch(76% 0.14 62 / 0.4)),
+    0 8px 24px light-dark(oklch(72% 0.15 64 / 0.16), oklch(76% 0.14 62 / 0.18));
+
+  /* Light-sweep highlight (motion.css). Resolves per element, so theme islands get the right one. */
+  --sweep-highlight: light-dark(oklch(20% 0 0 / 0.06), oklch(100% 0 0 / 0.16));
+}
+
+/* Same values for engines without light-dark() (before Chrome 123 / Safari 17.5), which would
+   otherwise drop every colour token. Generated from the declarations above by scripts/gen-css.mjs
+   (npm run gen); `npm run check` fails if it drifts. Edit the light-dark() source, never this. */
+/* BEGIN GENERATED: light-dark fallback */
+@supports not (color: light-dark(#000, #fff)) {
+  :root,
+  [data-theme="dark"] {
+    --color-bg: oklch(16% 0.012 75);
+    --color-surface-1: oklch(20% 0.014 75);
+    --color-surface-2: oklch(24% 0.016 75);
+    --color-surface-3: oklch(29% 0.018 75);
+    --color-border: oklch(34% 0.02 75);
+    --color-border-strong: oklch(60% 0.02 75);
+    --color-text-primary: oklch(94% 0.01 75);
+    --color-text-secondary: oklch(80% 0.015 75);
+    --color-text-muted: oklch(68.5% 0.02 75);
+    --color-accent: oklch(76% 0.14 62);
+    --color-accent-contrast: oklch(16% 0.02 62);
+    --color-accent-text: oklch(80% 0.13 64);
+    --color-accent-muted: oklch(76% 0.14 62 / 0.14);
+    --color-success: oklch(76% 0.15 150);
+    --color-success-contrast: oklch(14% 0.02 150);
+    --color-success-muted: oklch(76% 0.15 150 / 0.14);
+    --color-warning: oklch(84% 0.15 97);
+    --color-warning-contrast: oklch(16% 0.02 97);
+    --color-warning-muted: oklch(84% 0.15 97 / 0.14);
+    --color-danger: oklch(72% 0.19 20);
+    --color-danger-contrast: oklch(14% 0.02 20);
+    --color-danger-muted: oklch(72% 0.19 20 / 0.14);
+    --state-hover: oklch(100% 0 0 / 0.08);
+    --state-press: oklch(0% 0 0 / 0.16);
+    --state-press-ghost: oklch(100% 0 0 / 0.12);
+    --state-press-danger: oklch(42% 0.16 22 / 0.3);
+    --color-grid-line: oklch(94% 0.01 75 / 0.055);
+    --color-glow: oklch(76% 0.14 62 / 0.11);
+    --color-disabled-bg: oklch(24% 0.01 75);
+    --color-disabled-text: oklch(58% 0.01 75);
+    --shadow-1: 0 1px 2px oklch(0% 0 0 / 0.36), 0 1px 1px transparent, inset 0 1px 0 oklch(100% 0 0 / 0.04), 0 0 0 1px oklch(100% 0 0 / 0.03);
+    --shadow-2: 0 4px 12px oklch(0% 0 0 / 0.5), 0 2px 4px transparent, inset 0 1px 0 oklch(100% 0 0 / 0.06), 0 0 0 1px oklch(100% 0 0 / 0.04);
+    --shadow-3: 0 12px 32px oklch(0% 0 0 / 0.56), 0 4px 10px transparent, inset 0 1px 0 oklch(100% 0 0 / 0.08), 0 0 0 1px oklch(100% 0 0 / 0.05);
+    --shadow-accent-glow: 0 0 0 1px oklch(76% 0.14 62 / 0.4), 0 8px 24px oklch(76% 0.14 62 / 0.18);
+    --sweep-highlight: oklch(100% 0 0 / 0.16);
+  }
+
+  [data-theme="light"] {
+    --color-bg: oklch(98.5% 0.004 85);
+    --color-surface-1: oklch(95.5% 0.006 85);
+    --color-surface-2: oklch(91.5% 0.008 85);
+    --color-surface-3: oklch(86.5% 0.011 85);
+    --color-border: oklch(80% 0.014 75);
+    --color-border-strong: oklch(52% 0.02 75);
+    --color-text-primary: oklch(20% 0.014 75);
+    --color-text-secondary: oklch(38% 0.02 75);
+    --color-text-muted: oklch(46% 0.02 75);
+    --color-accent: oklch(72% 0.15 64);
+    --color-accent-contrast: oklch(18% 0.03 60);
+    --color-accent-text: oklch(47% 0.11 62);
+    --color-accent-muted: oklch(72% 0.15 64 / 0.12);
+    --color-success: oklch(38% 0.11 150);
+    --color-success-contrast: oklch(99% 0.01 150);
+    --color-success-muted: oklch(38% 0.11 150 / 0.1);
+    --color-warning: oklch(46% 0.09 98);
+    --color-warning-contrast: oklch(99% 0.01 98);
+    --color-warning-muted: oklch(46% 0.09 98 / 0.1);
+    --color-danger: oklch(46% 0.21 25);
+    --color-danger-contrast: oklch(99% 0.005 20);
+    --color-danger-muted: oklch(46% 0.21 25 / 0.1);
+    --state-hover: oklch(0% 0 0 / 0.06);
+    --state-press: oklch(0% 0 0 / 0.1);
+    --state-press-ghost: oklch(0% 0 0 / 0.1);
+    --state-press-danger: oklch(46% 0.21 25 / 0.18);
+    --color-grid-line: oklch(20% 0.02 75 / 0.07);
+    --color-glow: oklch(72% 0.15 64 / 0.16);
+    --color-disabled-bg: oklch(91.5% 0.006 80);
+    --color-disabled-text: oklch(60% 0.01 80);
+    --shadow-1: 0 1px 2px oklch(40% 0.02 75 / 0.10), 0 1px 1px oklch(40% 0.02 75 / 0.08), inset 0 1px 0 transparent, 0 0 0 1px transparent;
+    --shadow-2: 0 4px 12px oklch(40% 0.02 75 / 0.12), 0 2px 4px oklch(40% 0.02 75 / 0.08), inset 0 1px 0 transparent, 0 0 0 1px transparent;
+    --shadow-3: 0 12px 32px oklch(40% 0.02 75 / 0.16), 0 4px 10px oklch(40% 0.02 75 / 0.10), inset 0 1px 0 transparent, 0 0 0 1px transparent;
+    --shadow-accent-glow: 0 0 0 1px oklch(72% 0.15 64 / 0.4), 0 8px 24px oklch(72% 0.15 64 / 0.16);
+    --sweep-highlight: oklch(20% 0 0 / 0.06);
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme]) {
+      --color-bg: oklch(98.5% 0.004 85);
+      --color-surface-1: oklch(95.5% 0.006 85);
+      --color-surface-2: oklch(91.5% 0.008 85);
+      --color-surface-3: oklch(86.5% 0.011 85);
+      --color-border: oklch(80% 0.014 75);
+      --color-border-strong: oklch(52% 0.02 75);
+      --color-text-primary: oklch(20% 0.014 75);
+      --color-text-secondary: oklch(38% 0.02 75);
+      --color-text-muted: oklch(46% 0.02 75);
+      --color-accent: oklch(72% 0.15 64);
+      --color-accent-contrast: oklch(18% 0.03 60);
+      --color-accent-text: oklch(47% 0.11 62);
+      --color-accent-muted: oklch(72% 0.15 64 / 0.12);
+      --color-success: oklch(38% 0.11 150);
+      --color-success-contrast: oklch(99% 0.01 150);
+      --color-success-muted: oklch(38% 0.11 150 / 0.1);
+      --color-warning: oklch(46% 0.09 98);
+      --color-warning-contrast: oklch(99% 0.01 98);
+      --color-warning-muted: oklch(46% 0.09 98 / 0.1);
+      --color-danger: oklch(46% 0.21 25);
+      --color-danger-contrast: oklch(99% 0.005 20);
+      --color-danger-muted: oklch(46% 0.21 25 / 0.1);
+      --state-hover: oklch(0% 0 0 / 0.06);
+      --state-press: oklch(0% 0 0 / 0.1);
+      --state-press-ghost: oklch(0% 0 0 / 0.1);
+      --state-press-danger: oklch(46% 0.21 25 / 0.18);
+      --color-grid-line: oklch(20% 0.02 75 / 0.07);
+      --color-glow: oklch(72% 0.15 64 / 0.16);
+      --color-disabled-bg: oklch(91.5% 0.006 80);
+      --color-disabled-text: oklch(60% 0.01 80);
+      --shadow-1: 0 1px 2px oklch(40% 0.02 75 / 0.10), 0 1px 1px oklch(40% 0.02 75 / 0.08), inset 0 1px 0 transparent, 0 0 0 1px transparent;
+      --shadow-2: 0 4px 12px oklch(40% 0.02 75 / 0.12), 0 2px 4px oklch(40% 0.02 75 / 0.08), inset 0 1px 0 transparent, 0 0 0 1px transparent;
+      --shadow-3: 0 12px 32px oklch(40% 0.02 75 / 0.16), 0 4px 10px oklch(40% 0.02 75 / 0.10), inset 0 1px 0 transparent, 0 0 0 1px transparent;
+      --shadow-accent-glow: 0 0 0 1px oklch(72% 0.15 64 / 0.4), 0 8px 24px oklch(72% 0.15 64 / 0.16);
+      --sweep-highlight: oklch(20% 0 0 / 0.06);
+    }
+  }
+}
+/* END GENERATED: light-dark fallback */
+
+/* ================= Non-colour tokens (theme-independent) ================= */
+
+:root {
+  /* ---- 4px spacing scale ---- */
+  --space-0: 0px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-20: 80px;
+  --space-24: 96px;
+  --space-32: 128px;
+
+  /* ---- Radii ---- */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
+  --radius-pill: 999px;
+
+  /* ---- Type scale (fluid: clamp(min, preferred-vw, max)) ---- */
+  /* Metric-matched fallbacks (fonts.css) come before the generic families, so the swap barely moves. */
+  --font-family-ui: "Inter Variable", "Inter Fallback", "Inter Fallback Arial", system-ui, -apple-system, sans-serif;
+  --font-family-display: "Fraunces Variable", "Fraunces Fallback", "Fraunces Fallback Times", Georgia, serif;
+  --font-family-code: "JetBrains Mono Variable", "JetBrains Mono Fallback", ui-monospace, "Cascadia Code", monospace;
+
+  --text-display: clamp(2.75rem, 2.1rem + 3.2vw, 5rem);
+  --text-headline: clamp(2rem, 1.65rem + 1.75vw, 3.25rem);
+  --text-title: clamp(1.375rem, 1.22rem + 0.75vw, 1.875rem);
+  --text-body: clamp(1rem, 0.96rem + 0.2vw, 1.125rem);
+  --text-small: clamp(0.8125rem, 0.79rem + 0.1vw, 0.875rem);
+  --text-code: clamp(0.8125rem, 0.8rem + 0.06vw, 0.875rem);
+
+  --leading-tight: 1.08;
+  --leading-snug: 1.25;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.65;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* Tighter for large serif display, looser for small uppercase mono labels. */
+  --tracking-display: -0.02em;
+  --tracking-headline: -0.01em;
+  --tracking-eyebrow: 0.08em;
+
+  /* Space between a number and its unit ("34.0 tok/s"), in em of the NUMBER, so it scales with the
+     value size. Resolved on the value element (components.css), never a literal space. */
+  --gap-value-unit: 0.3em;
+
+  /* ---- Motion ---- */
+  --duration-instant: 120ms;
+  --duration-fast: 200ms;
+  --duration-base: 320ms;
+  --duration-slow: 600ms;
+  /* Named exceptions to the 600ms ceiling: data arriving, not a UI state change. */
+  --duration-count: 900ms;
+  --duration-draw: 900ms;
+
+  /* Standard: for state changes that just need to feel responsive. */
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  /* Emphasized: for larger, attention-worthy transitions (panels, reveals, draw-on). */
+  --ease-emphasized: cubic-bezier(0.2, 0, 0, 1);
+  /* Spring: a slight overshoot for playful, physical confirmation (press, pop-in). */
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  /* Exit: quicker out than in. */
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+
+  /* ---- Z-index scale ----
+     Popovers render in the top layer, above every value here; never try to out-z-index one. */
+  --z-base: 0;
+  --z-raised: 10;
+  --z-sticky: 100;
+  --z-dropdown: 200;
+  --z-overlay: 300;
+  --z-modal: 400;
+  --z-toast: 500;
+  --z-tooltip: 600;
+}

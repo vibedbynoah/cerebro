@@ -1,0 +1,56 @@
+{
+  "name": "@cerebro/design",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "Shared Cerebro design system: tokens, fonts, motion primitives and the living style specimen. Imported by both the marketing site (Astro) and the desktop app (Tauri/SolidJS).",
+  "type": "module",
+  "exports": {
+    "./tokens.css": "./tokens.css",
+    "./fonts.css": "./fonts.css",
+    "./motion.css": "./motion.css",
+    "./components.css": "./components.css",
+    "./motion": "./motion.ts",
+    "./terms": "./terms.ts",
+    "./contrast": "./contrast.ts",
+    "./theme-init.js": "./theme-init.js",
+    "./fonts/*": "./fonts/*"
+  },
+  "files": [
+    "tokens.css",
+    "fonts.css",
+    "motion.css",
+    "components.css",
+    "motion.ts",
+    "terms.ts",
+    "contrast.ts",
+    "theme-init.ts",
+    "theme-init.js",
+    "fonts",
+    "DESIGN.md"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit -p tsconfig.json && node scripts/gen-css.mjs --check && node scripts/check-build.mjs",
+    "gen": "node scripts/gen-css.mjs",
+    "build": "tsc -p tsconfig.build.json",
+    "serve": "npm run build && node scripts/serve.mjs",
+    "preshoot": "npm run build",
+    "shoot": "node scripts/shoot.mjs",
+    "refs": "node scripts/refs.mjs",
+    "fonts:sync": "node scripts/fonts-sync.mjs",
+    "fonts:metrics": "node scripts/measure-fallbacks.mjs",
+    "pretest": "npm run build",
+    "test": "playwright test",
+    "test:stability": "npm run build && playwright test -g \"axe accessibility scan\" --repeat-each=3"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "@fontsource-variable/fraunces": "5.3.0",
+    "@fontsource-variable/inter": "5.3.0",
+    "@fontsource-variable/jetbrains-mono": "5.3.0",
+    "@playwright/test": "1.55.1",
+    "@types/node": "24.7.2",
+    "playwright-core": "1.55.1",
+    "typescript": "5.9.3"
+  }
+}

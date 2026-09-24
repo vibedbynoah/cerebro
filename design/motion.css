@@ -1,0 +1,377 @@
+/*
+ * Cerebro shared motion CSS, driven by motion.ts. Transform and opacity only, except `[data-draw]`
+ * (stroke-dashoffset, see motion.ts). Everything is neutralised under prefers-reduced-motion.
+ *
+ * Gates for hidden start states:
+ *  - `motion-pending` (theme-init.js, before first paint): hides reveal/count-up targets and
+ *    undraws `[data-draw]` strokes, so the finished state never flashes before JS runs. A
+ *    zero-length animation delayed 2.5 s restores them if motion.ts never arrives (CSP block,
+ *    failed load).
+ *  - `motion-ready` (initMotion()) plus `[data-motion-armed]` on the element: the real start
+ *    states. A primitive arms each element it observes, in the same task, and disarms it on
+ *    cleanup. Only armed elements are ever hidden, so markup no primitive owns (mounted later, or
+ *    in a component that never called init) always renders final, and so does everything without JS.
+ */
+
+:root.motion-pending:not(.motion-ready) :is(.reveal, .reveal-emphasized, .pop-in, [data-count-to]) {
+  opacity: 0;
+  animation: cerebro-failsafe 0s linear 2.5s forwards;
+}
+
+@keyframes cerebro-failsafe {
+  to {
+    opacity: 1;
+  }
+}
+
+/* Strokes too, wherever they sit: a diagram outside any .reveal must not paint drawn, vanish when
+   motion-ready applies, then draw again. */
+:root.motion-pending:not(.motion-ready) [data-draw] {
+  stroke-dasharray: 1 1000;
+  stroke-dashoffset: 1;
+  animation: cerebro-failsafe-draw 0s linear 2.5s forwards;
+}
+
+/* The failsafe ends with no dash at all, so it can't truncate a stretched non-scaling stroke. */
+@keyframes cerebro-failsafe-draw {
+  to {
+    stroke-dashoffset: 0;
+    stroke-dasharray: none;
+  }
+}
+
+/* ---- Scroll reveal ---- */
+
+.reveal,
+.reveal-emphasized {
+  transition:
+    opacity var(--duration-slow) var(--ease-emphasized) var(--reveal-delay, 0ms),
+    transform var(--duration-slow) var(--ease-emphasized) var(--reveal-delay, 0ms);
+}
+
+:root.motion-ready .reveal[data-motion-armed]:not(.is-visible) {
+  opacity: 0;
+  transform: translateY(16px);
+}
+
+/* Hero-weight variant: rises further and scales in slightly. */
+:root.motion-ready .reveal-emphasized[data-motion-armed]:not(.is-visible) {
+  opacity: 0;
+  transform: translateY(28px) scale(0.98);
+}
+
+.reveal.is-visible,
+.reveal-emphasized.is-visible {
+  opacity: 1;
+  transform: none;
+}
+
+/* ---- Draw-on SVG strokes (documented exception: stroke-dashoffset) ---- */
+
+[data-draw] {
+  fill: none;
+}
+
+/* pathLength="1" on every path makes this static: no length measurement needed. The dash is one
+   path length and the gap a thousand, so the hidden state stays hidden at any transform scale. */
+:root.motion-ready [data-draw][data-motion-armed] {
+  stroke-dasharray: 1 1000;
+  stroke-dashoffset: 1;
+}
+
+/* A non-scaling stroke in a stretched SVG lays dashes out in screen px: motion.ts measures an
+   upper bound for its length (`--draw-len`, pathLength units) and adds `.draw--scaled`. */
+:root.motion-ready [data-draw][data-motion-armed].draw--scaled {
+  stroke-dasharray: var(--draw-len) 1000;
+  stroke-dashoffset: var(--draw-len);
+}
+
+:root.motion-ready [data-draw][data-motion-armed].is-drawn {
+  stroke-dashoffset: 0;
+  transition: stroke-dashoffset var(--duration-draw) var(--ease-emphasized) var(--draw-delay, 0ms);
+}
+
+/* Drawn means no dash: the final state never depends on dash arithmetic, and a resize after the
+   draw can never re-truncate the stroke. */
+[data-draw].is-draw-done {
+  stroke-dasharray: none !important;
+}
+
+/* ---- Magnetic hover + press spring ---- */
+/* Both can sit on one element; each writes only a custom property and this rule composes them. */
+
+[data-magnetic],
+[data-press] {
+  transform: translate(var(--mx, 0px), var(--my, 0px)) scale(var(--press-scale, 1));
+  transition: transform var(--duration-base) var(--ease-spring);
+}
+
+[data-magnetic].is-tracking {
+  transition-duration: 60ms;
+  transition-timing-function: linear;
+}
+
+[data-press].is-pressed {
+  --press-scale: 0.96;
+  transition-duration: var(--duration-instant);
+  transition-timing-function: var(--ease-standard);
+}
+
+/* Firm (destructive actions): no overshoot on press or release. */
+[data-press="firm"] {
+  transition-timing-function: var(--ease-standard);
+}
+
+[data-press="firm"].is-pressed {
+  --press-scale: 0.98;
+}
+
+/* ---- Light sweep on hover ---- */
+
+.sweep {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+/* Never on a control that cannot be clicked right now. */
+.sweep:not([aria-busy="true"], [disabled], [aria-disabled="true"])::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: linear-gradient(115deg, transparent 30%, var(--sweep-highlight) 48%, var(--sweep-highlight) 52%, transparent 70%);
+  transform: translateX(-130%);
+  opacity: 0;
+}
+
+/* Plays once per hover or keyboard focus; never loops. Hover only where a real hover exists: on
+   touch a tap would leave the highlight parked over the label. */
+.sweep:not([aria-busy="true"], [disabled], [aria-disabled="true"]):focus-visible::after {
+  transform: translateX(130%);
+  opacity: 1;
+  transition:
+    transform var(--duration-slow) var(--ease-emphasized),
+    opacity var(--duration-instant) linear;
+}
+
+@media (hover: hover) {
+  .sweep:not([aria-busy="true"], [disabled], [aria-disabled="true"]):hover::after {
+    transform: translateX(130%);
+    opacity: 1;
+    transition:
+      transform var(--duration-slow) var(--ease-emphasized),
+      opacity var(--duration-instant) linear;
+  }
+}
+
+/* ---- Comparison morph (bars grow on scroll) ---- */
+
+/* Registered with an HONEST initial value: an engine that can't compute the final width shows an
+   empty track, never a full (flattering) bar. */
+@property --bar-to {
+  syntax: "<number>";
+  inherits: false;
+  initial-value: 0;
+}
+
+/* The bar's box is its final length (a static width, set once, never animated) and it slides in
+   from behind the left edge of its overflow-hidden track: transform-only motion, and the pill keeps
+   both round caps at every value (scaleX() would squash them into square edges). Because the box
+   never extends past the track in its finished state, nothing beside the track (a label, a value)
+   is ever overlapped by an invisible, clipped part of the bar, which contrast checkers and
+   hit-testing would otherwise see. A live value change slides from the old length with
+   setBarValue() (motion.ts). */
+.bar {
+  width: calc(var(--bar-to) * 100%);
+  transform: none;
+  transition: transform var(--duration-slow) var(--ease-emphasized) var(--bar-delay, 0ms);
+}
+
+/* Progressive enhancement only: engines with typed attr() read data-bar-to directly. Gated so an
+   engine without it never sees the declaration (it would compute to the initial 0 and override the
+   class below). */
+@supports (scale: attr(data-bar-to type(<number>), 1)) {
+  .bar:where([data-bar-to]) {
+    --bar-to: attr(data-bar-to type(<number>), 0);
+  }
+}
+
+/* The final width in markup, for every engine and no-JS visitors: `.bar--p18` = 18%. Generated by
+   scripts/gen-css.mjs (npm run gen); `npm run check` fails if this block drifts. Declared after the
+   attr() rule so the class wins when both are present; motion.ts's inline value wins over both. */
+/* BEGIN GENERATED: bar widths */
+.bar--p0 { --bar-to: 0; }
+.bar--p1 { --bar-to: 0.01; }
+.bar--p2 { --bar-to: 0.02; }
+.bar--p3 { --bar-to: 0.03; }
+.bar--p4 { --bar-to: 0.04; }
+.bar--p5 { --bar-to: 0.05; }
+.bar--p6 { --bar-to: 0.06; }
+.bar--p7 { --bar-to: 0.07; }
+.bar--p8 { --bar-to: 0.08; }
+.bar--p9 { --bar-to: 0.09; }
+.bar--p10 { --bar-to: 0.1; }
+.bar--p11 { --bar-to: 0.11; }
+.bar--p12 { --bar-to: 0.12; }
+.bar--p13 { --bar-to: 0.13; }
+.bar--p14 { --bar-to: 0.14; }
+.bar--p15 { --bar-to: 0.15; }
+.bar--p16 { --bar-to: 0.16; }
+.bar--p17 { --bar-to: 0.17; }
+.bar--p18 { --bar-to: 0.18; }
+.bar--p19 { --bar-to: 0.19; }
+.bar--p20 { --bar-to: 0.2; }
+.bar--p21 { --bar-to: 0.21; }
+.bar--p22 { --bar-to: 0.22; }
+.bar--p23 { --bar-to: 0.23; }
+.bar--p24 { --bar-to: 0.24; }
+.bar--p25 { --bar-to: 0.25; }
+.bar--p26 { --bar-to: 0.26; }
+.bar--p27 { --bar-to: 0.27; }
+.bar--p28 { --bar-to: 0.28; }
+.bar--p29 { --bar-to: 0.29; }
+.bar--p30 { --bar-to: 0.3; }
+.bar--p31 { --bar-to: 0.31; }
+.bar--p32 { --bar-to: 0.32; }
+.bar--p33 { --bar-to: 0.33; }
+.bar--p34 { --bar-to: 0.34; }
+.bar--p35 { --bar-to: 0.35; }
+.bar--p36 { --bar-to: 0.36; }
+.bar--p37 { --bar-to: 0.37; }
+.bar--p38 { --bar-to: 0.38; }
+.bar--p39 { --bar-to: 0.39; }
+.bar--p40 { --bar-to: 0.4; }
+.bar--p41 { --bar-to: 0.41; }
+.bar--p42 { --bar-to: 0.42; }
+.bar--p43 { --bar-to: 0.43; }
+.bar--p44 { --bar-to: 0.44; }
+.bar--p45 { --bar-to: 0.45; }
+.bar--p46 { --bar-to: 0.46; }
+.bar--p47 { --bar-to: 0.47; }
+.bar--p48 { --bar-to: 0.48; }
+.bar--p49 { --bar-to: 0.49; }
+.bar--p50 { --bar-to: 0.5; }
+.bar--p51 { --bar-to: 0.51; }
+.bar--p52 { --bar-to: 0.52; }
+.bar--p53 { --bar-to: 0.53; }
+.bar--p54 { --bar-to: 0.54; }
+.bar--p55 { --bar-to: 0.55; }
+.bar--p56 { --bar-to: 0.56; }
+.bar--p57 { --bar-to: 0.57; }
+.bar--p58 { --bar-to: 0.58; }
+.bar--p59 { --bar-to: 0.59; }
+.bar--p60 { --bar-to: 0.6; }
+.bar--p61 { --bar-to: 0.61; }
+.bar--p62 { --bar-to: 0.62; }
+.bar--p63 { --bar-to: 0.63; }
+.bar--p64 { --bar-to: 0.64; }
+.bar--p65 { --bar-to: 0.65; }
+.bar--p66 { --bar-to: 0.66; }
+.bar--p67 { --bar-to: 0.67; }
+.bar--p68 { --bar-to: 0.68; }
+.bar--p69 { --bar-to: 0.69; }
+.bar--p70 { --bar-to: 0.7; }
+.bar--p71 { --bar-to: 0.71; }
+.bar--p72 { --bar-to: 0.72; }
+.bar--p73 { --bar-to: 0.73; }
+.bar--p74 { --bar-to: 0.74; }
+.bar--p75 { --bar-to: 0.75; }
+.bar--p76 { --bar-to: 0.76; }
+.bar--p77 { --bar-to: 0.77; }
+.bar--p78 { --bar-to: 0.78; }
+.bar--p79 { --bar-to: 0.79; }
+.bar--p80 { --bar-to: 0.8; }
+.bar--p81 { --bar-to: 0.81; }
+.bar--p82 { --bar-to: 0.82; }
+.bar--p83 { --bar-to: 0.83; }
+.bar--p84 { --bar-to: 0.84; }
+.bar--p85 { --bar-to: 0.85; }
+.bar--p86 { --bar-to: 0.86; }
+.bar--p87 { --bar-to: 0.87; }
+.bar--p88 { --bar-to: 0.88; }
+.bar--p89 { --bar-to: 0.89; }
+.bar--p90 { --bar-to: 0.9; }
+.bar--p91 { --bar-to: 0.91; }
+.bar--p92 { --bar-to: 0.92; }
+.bar--p93 { --bar-to: 0.93; }
+.bar--p94 { --bar-to: 0.94; }
+.bar--p95 { --bar-to: 0.95; }
+.bar--p96 { --bar-to: 0.96; }
+.bar--p97 { --bar-to: 0.97; }
+.bar--p98 { --bar-to: 0.98; }
+.bar--p99 { --bar-to: 0.99; }
+.bar--p100 { --bar-to: 1; }
+/* END GENERATED: bar widths */
+
+:root.motion-ready .bar[data-motion-armed]:not(.is-visible) {
+  transform: translateX(-100%);
+}
+
+/* ---- Pop-in (badges, chips, diagram nodes) ---- */
+
+.pop-in {
+  transition:
+    opacity var(--duration-base) var(--ease-spring),
+    transform var(--duration-base) var(--ease-spring);
+}
+
+:root.motion-ready .pop-in[data-motion-armed]:not(.is-visible) {
+  opacity: 0;
+  transform: scale(0.92);
+}
+
+.pop-in.is-visible {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* ---- Reduced motion: final states, no transitions ---- */
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal,
+  .reveal-emphasized,
+  .pop-in,
+  [data-magnetic],
+  [data-press],
+  [data-draw],
+  .bar,
+  .sweep::after {
+    transition: none !important;
+    animation: none !important;
+  }
+
+  :root.motion-pending:not(.motion-ready) :is(.reveal, .reveal-emphasized, .pop-in, [data-count-to]),
+  :root.motion-ready :is(.reveal, .reveal-emphasized, .pop-in)[data-motion-armed]:not(.is-visible) {
+    opacity: 1;
+    transform: none;
+  }
+
+  [data-magnetic],
+  [data-press] {
+    --mx: 0px;
+    --my: 0px;
+    --press-scale: 1;
+    transform: none !important;
+  }
+
+  :root.motion-ready [data-draw],
+  :root.motion-pending [data-draw] {
+    stroke-dasharray: none !important;
+    stroke-dashoffset: 0 !important;
+    animation: none;
+  }
+
+  .bar {
+    transform: none !important;
+  }
+
+  .sweep::after {
+    display: none;
+  }
+
+  html {
+    scroll-behavior: auto !important;
+  }
+}

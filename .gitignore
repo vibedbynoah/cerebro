@@ -31,3 +31,24 @@ src-tauri/gen/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Design system: compiled JS (built from .ts for the dependency-free preview server only;
+# Astro/Vite and the Tauri app compile the .ts sources directly and never need these)
+/design/motion.js
+/design/preview.js
+/design/contrast.js
+/design/terms.js
+/design/*.js.map
+
+# Design system: reference screenshots of other companies' sites, for local comparison only
+/design/review/refs/
+
+# Design system: Playwright run artifacts (not build output, regenerated every `npm test`/`npm run shoot`)
+/design/test-results/
+/design/playwright-report/
+
+# Design system: regenerated specimen screenshots (~5 MB per `npm run shoot`)
+/design/review/shots/
+
+# Python bytecode (tools/local review scripts)
+__pycache__/
