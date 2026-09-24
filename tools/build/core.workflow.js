@@ -11,12 +11,15 @@ const BUILDER = 'claude-opus-5-5'
 const CLERK = 'claude-sonnet-5'
 const CRITIC = 'claude-opus-5-5'
 const MAX_ROUNDS = 8
-const REPO = 'C:/Users/noahm/Projects/cerebro-core'
+const REPO = (args && args.repo) || 'C:/Users/noahm/Projects/cerebro-core'
+const BRANCH = (args && args.branch) || 'core'
+// args.only runs a subset (independent components in a second worktree, owner asked for parallel systems).
+const ONLY = (args && args.only) || null
 const TOOLS = 'C:/Users/noahm/Projects/cerebro/tools/local'
 const LLAMA = 'C:/bench/llamacpp-official'
 const TINY = 'C:/Users/noahm/.lmstudio/models/skiesoffire/bastion-control/bastion-control-0.5b-f16.gguf'
 
-const CONTEXT = `REPOSITORY: ${REPO} (git branch core). Cerebro Engine: open-source (Apache-2.0), Windows-first, fully offline local LLM harness. Read docs/RESTART.md first (what exists, owner requirements, plan), docs/CLAIMS.md (binding), docs/specs/effort-levels.md, and the crates you touch. Kept crates: cerebro-flags (closed llama.cpp flag allowlist, argv emission), cerebro-probe (CPU/GPU/backend identity, SHA-256 manifest, DACL audit), cerebro-supervisor (preflight gate, job-contained spawn with env allowlist, lifecycle), cerebro-bench (llama-bench JSON parse + stats), cerebro-store (hash-chained result records); crates/cerebro-config is parked (not a workspace member).
+const CONTEXT = `REPOSITORY: ${REPO} (git branch ${BRANCH}). Cerebro Engine: open-source (Apache-2.0), Windows-first, fully offline local LLM harness. Read docs/RESTART.md first (what exists, owner requirements, plan), docs/CLAIMS.md (binding), docs/specs/effort-levels.md, and the crates you touch. Kept crates: cerebro-flags (closed llama.cpp flag allowlist, argv emission), cerebro-probe (CPU/GPU/backend identity, SHA-256 manifest, DACL audit), cerebro-supervisor (preflight gate, job-contained spawn with env allowlist, lifecycle), cerebro-bench (llama-bench JSON parse + stats), cerebro-store (hash-chained result records); crates/cerebro-config is parked (not a workspace member).
 OWNER RULES: speed and performance are core values; everything works with no network; the user can switch off ANY protection (sandbox, integrity check, folder audit, permission prompts) through settings: safe defaults, one neutral recorded warning, never unrepresentable, never nagging. Measured on this machine: tuned flags beat llama.cpp defaults ~6x for a 30B MoE that does not fit VRAM, but defaults won for a small model that fits: never assume, always measure, and never recommend a configuration slower than llama.cpp's own automatic settings.
 STYLE: match the kept crates: typed errors (thiserror), no unwrap/expect/panic outside tests, docs on every pub item, unsafe only in small Win32 FFI functions with SAFETY comments, tests that would fail if the code were wrong. Use vetted crates for anything cryptographic (rand/getrandom OsRng, subtle for constant-time compare, sha2, ed25519-dalek); never hand-roll crypto.
 BUILD (PowerShell; msys2 link.exe shadows MSVC, so this preamble is required): $vc = "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\VC\\Tools\\MSVC\\14.51.36231\\bin\\Hostx64\\x64"; $sdk = "\${env:ProgramFiles(x86)}\\Windows Kits\\10\\bin\\10.0.26100.0\\x64"; $env:PATH = "$vc;$sdk;$env:PATH"; then cargo test --workspace and cargo clippy --workspace --all-targets -- -D warnings.
@@ -103,7 +106,7 @@ Score 10 only with zero findings. Any critical caps at 4, any major at 7, any mi
 
 const results = []
 for (const task of TASKS) {
-  if (SKIP.includes(task.id)) continue
+  if (SKIP.includes(task.id) || (ONLY && !ONLY.includes(task.id))) continue
   let findings = null, guidance = null, passed = false, last = null, halted = null
   for (let round = 1; round <= MAX_ROUNDS; round++) {
     const b = await agent(builderPrompt(task, round, findings, guidance), { label: `build:${task.id}:r${round}`, phase: 'Core', schema: BUILD_RESULT, model: BUILDER, effort: 'high' })
@@ -112,12 +115,22 @@ for (const task of TASKS) {
     if (!c) { halted = `critic r${round}`; break }
     last = c; findings = c.findings; guidance = c.guidance
     log(`${task.id} r${round}: ${c.score}/10, ${c.findings.length} findings`)
-    if (c.findings.length === 0 && c.score >= 10) { passed = true; break }
+    // Owner rule 2026-09-24: no score bar, but no issue accepted: pass on zero critical/major, then a polish round fixes every minor.
+    if (c.findings.every(f => f.severity === 'minor')) { passed = true; break }
   }
   if (halted) { results.push({ id: task.id, status: 'halted', where: halted }); log(`halted at ${task.id} (${halted}); resume with skip for committed tasks`); break }
-  const open = last ? last.findings : []
-  const commit = await agent(`Commit one finished Cerebro engine component in ${REPO} (branch core).
-Component: ${task.id} (${task.crate}). Review: ${passed ? 'passed 10/10, zero findings' : `NOT at 10/10 after ${MAX_ROUNDS} rounds; ${open.length} findings remain`}.
+  let open = last ? last.findings : []
+  if (passed && open.length) {
+    const p = await agent(`FINAL POLISH round for Cerebro engine component ${task.id} (${task.crate}). The senior reviewer found no critical or major issues. Fix every remaining minor finding below properly (never by weakening a test or suppressing a lint), then run cargo test --workspace and cargo clippy --workspace --all-targets -- -D warnings and the component's ignored live tests, and confirm all pass. No reviewer follows this round, so be thorough.
+${CONTEXT}
+MINOR FINDINGS
+${JSON.stringify(open, null, 1)}
+Report exact result lines and what changed for each finding.`, { label: `polish:${task.id}`, phase: 'Core', schema: BUILD_RESULT, model: BUILDER, effort: 'high' })
+    if (!p) { results.push({ id: task.id, status: 'halted', where: 'polish' }); break }
+    open = []
+  }
+  const commit = await agent(`Commit one finished Cerebro engine component in ${REPO} (branch ${BRANCH}).
+Component: ${task.id} (${task.crate}). Review: ${passed ? 'passed: no critical or major findings, every minor fixed in the polish round' : `NOT at 10/10 after ${MAX_ROUNDS} rounds; ${open.length} findings remain`}.
 ${open.length ? `First append these open findings to docs/build/open-findings.md under "${task.id}":\n${JSON.stringify(open, null, 1)}\n` : ''}
 Run git status; stage only this component's crate directories, the root Cargo.toml and Cargo.lock, and docs/build/open-findings.md if changed. Never stage target/ or secrets. Commit with an imperative first line, a short body, and these final lines exactly:
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

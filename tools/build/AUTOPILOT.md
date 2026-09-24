@@ -4,8 +4,8 @@
 
 | Job | Script | Run id | Resume args | Started |
 |---|---|---|---|---|
-| Front ends: design system, then website + desktop app in parallel | tools/build/frontend.workflow.js | wf_84912725-b06 | {"skip": [ids of tasks already committed]} | 2026-09-22 23:4x |
-| Engine wave A (worktree cerebro-core, branch core): hardening, config, bench-run, models, hardware-backends, tune, server, hub, cli | tools/build/core.workflow.js | wf_932a2a40-60a | {"skip": [ids already committed]} | 2026-09-23 00:1x |
+| Front ends: design system, then website + desktop app in parallel | tools/build/frontend.workflow.js | wf_21c6a3cb-4d8 | {"skip": [ids of tasks already committed]} | 2026-09-22 23:4x |
+| Engine wave A (worktree cerebro-core, branch core): hardening, config, bench-run, models, hardware-backends, tune, server, hub, cli | tools/build/core.workflow.js | wf_8fbf0255-b05 | {"skip": [ids already committed]} | 2026-09-23 00:1x |
 | Fresh research (free models, detached python, PID in docs/research/2026-09b/driver.out) | tools/research/run_research.py | - | rerun the script; it skips finished subtasks | 2026-09-23 00:0x |
 
 Worktrees: `C:\Users\noahm\Projects\cerebro` (main, design system), `cerebro-site` (branch site),
@@ -13,7 +13,7 @@ Worktrees: `C:\Users\noahm\Projects\cerebro` (main, design system), `cerebro-sit
 
 ## Rules
 
-- Models: builders `claude-sonnet-5`, critics `claude-opus-5-5`. Never plain `opus`.
+- Models (owner, 2026-09-23): builders AND critics `claude-opus-5-5`; only commit/merge clerk steps use `claude-sonnet-5`. Never plain `opus`.
 - Pass = 10/10 with zero findings (owner rule), max 8 rounds, then commit with open findings logged.
 - Free first passes on local Gemma-4-E4B (`tools/local/local_review.py`), boilerplate on local Qwen
   (`tools/local/qwen_task.py`). Local server stops itself after 15 idle minutes.

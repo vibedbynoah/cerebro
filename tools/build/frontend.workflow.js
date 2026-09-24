@@ -165,10 +165,18 @@ ${RULES}
 TASK BRIEF
 ${task.brief}
 ${fix}
-DEFINITION OF DONE FOR THIS ROUND: the build passes; every test passes (always run the full test script, never skip it); you took fresh headless screenshots and looked at them yourself (Read the PNG files) and fixed what looked wrong; you ran the local visual review against the reference screenshots and the local code review and addressed every valid point. Report exact test result lines, the screenshot paths, and the local review scores.`
+${round > (LEGACY[task.id] || 0)
+  ? `DEFINITION OF DONE FOR THIS ROUND: the build passes; every test passes (always run the full test script, never skip it); you took fresh headless screenshots and had them judged by the local visual review against the reference screenshots (do NOT open the PNG files yourself: visual judging is delegated to the free local model to save credits), fixed every valid visual point, and ran the local code review and addressed every valid point. Report exact test result lines, the screenshot paths, and the local review scores.`
+  : `DEFINITION OF DONE FOR THIS ROUND: the build passes; every test passes (always run the full test script, never skip it); you took fresh headless screenshots and looked at them yourself (Read the PNG files) and fixed what looked wrong; you ran the local visual review against the reference screenshots and the local code review and addressed every valid point. Report exact test result lines, the screenshot paths, and the local review scores.`}`
 }
 
-function criticPrompt(task, repo) {
+// Owner rule 2026-09-24: visual judging runs on the free local Gemma-4-E4B, not on Opus, to save
+// credits. Rounds up to LEGACY[task] already ran with the old prompt and keep it, so a resume
+// replays them from the journal instead of paying for them again.
+const LEGACY = (args && args.legacy) || { 'design-system': 5 }
+
+function criticPrompt(task, repo, round) {
+  if (round > (LEGACY[task.id] || 0)) return criticPromptLocalVisual(task, repo)
   return `You are a harsh senior design engineer, security reviewer AND mentor for Cerebro. Another builder made this and will revise it from your review alone, so give exact, actionable guidance. Your bar: would this ship on anthropic.com or linear.app today, flawless in function, visuals, accessibility, performance and security? Anything short of that is a finding.
 ${PRODUCT}
 REPOSITORY: ${repo}
@@ -188,22 +196,61 @@ PROCEDURE
 Score 10 only with zero findings of any severity. Any critical caps the score at 4, any major at 7, any minor at 9.`
 }
 
+function criticPromptLocalVisual(task, repo) {
+  return `You are a harsh senior design engineer, security reviewer AND mentor for Cerebro. Another builder made this and will revise it from your review alone, so give exact, actionable guidance. Your bar: would this ship on anthropic.com or linear.app today, flawless in function, visuals, accessibility, performance and security? Anything short of that is a finding.
+${PRODUCT}
+REPOSITORY: ${repo}
+${RULES}
+
+TASK UNDER REVIEW: ${task.id}
+BRIEF IT MUST SATISFY
+${task.brief}
+
+PROCEDURE
+1. git status / git diff; read every changed or new file.
+2. Build, run the full test script, and run the screenshot script yourself. Report exact results. Kill every process you started.
+3. VISUAL REVIEW IS DELEGATED to the free local Gemma-4-E4B model (owner rule: do not open or read the PNG screenshots yourself). Run the local visual review on the fresh screenshots in batches of at most 4 images, including 1-2 reference screenshots from design/review/refs when present: python ${TOOLS}/local_review.py --images <shots> --refs <refs> --focus "<screen, width, theme>". Treat its visual issues as candidate findings: keep the ones that are consistent with what you see in the code (layout, tokens, spacing, states), drop ones the code clearly contradicts, and list the screenshots it reviewed in screenshots_reviewed. Judge motion, states (hover, focus, empty, loading, error) and responsiveness from the code.
+4. Check every brief requirement (missing = major), functional correctness, accessibility, performance budgets, and every security requirement (a violation is critical).
+5. For EVERY finding give suggested_code (a concrete sketch, at most ~40 lines) or an empty string for a trivial fix; then write guidance: root_causes, an ordered plan, design_advice, pitfalls, tests_to_add.
+6. Do NOT edit files.
+Score honestly out of 10; the task passes when there are no critical and no major findings.`
+}
+
+// Owner rule 2026-09-24: loosen the 10/10 score bar, but no issue may be accepted. A task passes
+// review once no critical or major findings remain; any remaining minor findings are then fixed by
+// the builder in a final polish round (tests and local review re-run) before the commit.
+function polishPrompt(task, repo, minors) {
+  return `You are the builder doing the FINAL POLISH round for Cerebro task ${task.id}. The senior reviewer found no critical or major issues; fix every remaining minor finding below properly (never by weakening a test or suppressing a check), then run the full test script and the screenshot script and confirm everything passes. No reviewer follows this round, so be thorough.
+${PRODUCT}
+REPOSITORY: ${repo}
+${RULES}
+MINOR FINDINGS TO FIX
+${JSON.stringify(minors, null, 1)}
+Report exact test result lines and what you changed for each finding.`
+}
+
 async function runTask(task, repo, phaseName) {
   let findings = null, guidance = null, passed = false, last = null
   for (let round = 1; round <= MAX_ROUNDS; round++) {
     const b = await agent(builderPrompt(task, repo, round, findings, guidance),
       { label: `build:${task.id}:r${round}`, phase: phaseName, schema: BUILD_RESULT, model: BUILDER, effort: 'high' })
     if (!b) return { id: task.id, status: 'halted', where: `builder r${round}` }
-    const c = await agent(criticPrompt(task, repo),
+    const c = await agent(criticPrompt(task, repo, round),
       { label: `critic:${task.id}:r${round}`, phase: phaseName, schema: CRITIC_RESULT, model: CRITIC, effort: 'high' })
     if (!c) return { id: task.id, status: 'halted', where: `critic r${round}` }
     last = c; findings = c.findings; guidance = c.guidance
     log(`${task.id} r${round}: ${c.score}/10, ${c.findings.length} findings`)
-    if (c.findings.length === 0 && c.score >= 10) { passed = true; break }
+    if (c.findings.every(f => f.severity === 'minor')) { passed = true; break }
   }
-  const open = last ? last.findings : []
+  let open = last ? last.findings : []
+  if (passed && open.length) {
+    const p = await agent(polishPrompt(task, repo, open),
+      { label: `polish:${task.id}`, phase: phaseName, schema: BUILD_RESULT, model: BUILDER, effort: 'high' })
+    if (!p) return { id: task.id, status: 'halted', where: 'polish' }
+    open = []
+  }
   const commit = await agent(`Commit one finished Cerebro front-end task in ${repo}.
-Task: ${task.id} (directory ${task.dir}). Review status: ${passed ? 'passed 10/10 with zero findings' : `NOT at 10/10 after ${MAX_ROUNDS} rounds; ${open.length} findings remain`}.
+Task: ${task.id} (directory ${task.dir}). Review status: ${passed ? 'passed: no critical or major findings, and every minor finding fixed in the polish round' : `NOT passed after ${MAX_ROUNDS} rounds; ${open.length} findings remain`}.
 ${open.length ? `First append these open findings to docs/build/open-findings.md under a heading "${task.id}" (create it if needed):\n${JSON.stringify(open, null, 1)}\n` : ''}
 Run git status. Stage only files under ${task.dir}/ plus any root files this task legitimately changed (Cargo.toml, Cargo.lock, .gitignore, docs/build/open-findings.md). Never stage review/ screenshot folders, node_modules, dist, target or secrets. Commit with an imperative first line, a short body, and these two final lines exactly:
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
