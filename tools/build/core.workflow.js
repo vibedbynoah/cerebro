@@ -11,6 +11,7 @@ const BUILDER = 'claude-opus-5-5'
 const CLERK = 'claude-sonnet-5'
 const CRITIC = 'claude-opus-5-5'
 const MAX_ROUNDS = 8
+const DONE = (args && args.done) || {}
 const REPO = (args && args.repo) || 'C:/Users/noahm/Projects/cerebro-core'
 const BRANCH = (args && args.branch) || 'core'
 // args.only runs a subset (independent components in a second worktree, owner asked for parallel systems).
@@ -107,30 +108,38 @@ Score 10 only with zero findings. Any critical caps at 4, any major at 7, any mi
 const results = []
 for (const task of TASKS) {
   if (SKIP.includes(task.id) || (ONLY && !ONLY.includes(task.id))) continue
-  let findings = null, guidance = null, passed = false, last = null, halted = null
-  for (let round = 1; round <= MAX_ROUNDS; round++) {
-    const b = await agent(builderPrompt(task, round, findings, guidance), { label: `build:${task.id}:r${round}`, phase: 'Core', schema: BUILD_RESULT, model: BUILDER, effort: 'high' })
+  // Owner rule 2026-09-29: one pass. Build, review once, then one fix round repairs every critical
+  // and major finding and verifies each minor (fix the real ones). args.done replays rounds already
+  // run under the old loop so no finished work is repeated.
+  let last = null, halted = null
+  const rounds = Math.max(1, DONE[task.id] || 0)
+  for (let round = 1; round <= rounds; round++) {
+    const b = await agent(builderPrompt(task, round, last && last.findings, last && last.guidance), { label: `build:${task.id}:r${round}`, phase: 'Core', schema: BUILD_RESULT, model: BUILDER, effort: 'high' })
     if (!b) { halted = `builder r${round}`; break }
     const c = await agent(criticPrompt(task), { label: `critic:${task.id}:r${round}`, phase: 'Core', schema: CRITIC_RESULT, model: CRITIC, effort: 'high' })
     if (!c) { halted = `critic r${round}`; break }
-    last = c; findings = c.findings; guidance = c.guidance
+    last = c
     log(`${task.id} r${round}: ${c.score}/10, ${c.findings.length} findings`)
-    // Owner rule 2026-09-24: no score bar, but no issue accepted: pass on zero critical/major, then a polish round fixes every minor.
-    if (c.findings.every(f => f.severity === 'minor')) { passed = true; break }
   }
   if (halted) { results.push({ id: task.id, status: 'halted', where: halted }); log(`halted at ${task.id} (${halted}); resume with skip for committed tasks`); break }
-  let open = last ? last.findings : []
-  if (passed && open.length) {
-    const p = await agent(`FINAL POLISH round for Cerebro engine component ${task.id} (${task.crate}). The senior reviewer found no critical or major issues. Fix every remaining minor finding below properly (never by weakening a test or suppressing a lint), then run cargo test --workspace and cargo clippy --workspace --all-targets -- -D warnings and the component's ignored live tests, and confirm all pass. No reviewer follows this round, so be thorough.
+  const major = last.findings.filter(f => f.severity !== 'minor').length
+  if (last.findings.length) {
+    const p = await agent(`ONE FIX ROUND for Cerebro engine component ${task.id} (${task.crate}). No reviewer follows you, so this round decides the result.
+1. Fix every critical and major finding below properly (never by weakening a test or suppressing a lint).
+2. Verify each minor finding: decide whether it is real by reading the code or writing a test. Fix every real one; for any not real, say why in one line.
+3. Keep it maximally fast: never slower than llama.cpp defaults, no needless allocation or blocking on hot paths.
+4. Run cargo test --workspace, cargo clippy --workspace --all-targets -- -D warnings, and the component's ignored live tests; confirm all pass and no llama-server/llama-bench process remains.
 ${CONTEXT}
-MINOR FINDINGS
-${JSON.stringify(open, null, 1)}
-Report exact result lines and what changed for each finding.`, { label: `polish:${task.id}`, phase: 'Core', schema: BUILD_RESULT, model: BUILDER, effort: 'high' })
-    if (!p) { results.push({ id: task.id, status: 'halted', where: 'polish' }); break }
-    open = []
+FINDINGS
+${JSON.stringify(last.findings, null, 1)}
+MENTOR GUIDANCE
+${JSON.stringify(last.guidance || {}, null, 1)}
+Report exact result lines and what changed for each finding.`, { label: `fix:${task.id}`, phase: 'Core', schema: BUILD_RESULT, model: BUILDER, effort: 'high' })
+    if (!p) { results.push({ id: task.id, status: 'halted', where: 'fix' }); break }
   }
+  const passed = true, open = []
   const commit = await agent(`Commit one finished Cerebro engine component in ${REPO} (branch ${BRANCH}).
-Component: ${task.id} (${task.crate}). Review: ${passed ? 'passed: no critical or major findings, every minor fixed in the polish round' : `NOT at 10/10 after ${MAX_ROUNDS} rounds; ${open.length} findings remain`}.
+Component: ${task.id} (${task.crate}). Review: one review pass found ${last.findings.length} findings (${major} critical/major); the fix round repaired the critical/major ones and verified every minor.
 ${open.length ? `First append these open findings to docs/build/open-findings.md under "${task.id}":\n${JSON.stringify(open, null, 1)}\n` : ''}
 Run git status; stage only this component's crate directories, the root Cargo.toml and Cargo.lock, and docs/build/open-findings.md if changed. Never stage target/ or secrets. Commit with an imperative first line, a short body, and these final lines exactly:
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

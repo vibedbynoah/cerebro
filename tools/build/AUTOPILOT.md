@@ -15,7 +15,7 @@ Worktrees: `C:\Users\noahm\Projects\cerebro` (main, design system), `cerebro-sit
 ## Rules
 
 - Models (owner, 2026-09-23): builders AND critics `claude-opus-5-5`; only commit/merge clerk steps use `claude-sonnet-5`. Never plain `opus`.
-- Pass (owner, 2026-09-24): no critical or major findings (no score bar), then a builder polish round fixes every minor before commit; max 8 rounds. Visual judging uses local Gemma-4-E4B, not Opus (frontend legacy rounds: design-system <= 5).
+- One pass (owner, 2026-09-29): build, one Opus review, then one fix round that repairs every critical/major finding and verifies each minor (fixes the real ones), plus a local Gemma visual check; then commit. No score bar, no second review. Resume args carry `done` = {task: rounds already run under the old loop} so those replay from cache (core-hardening 7, models 1); frontend resumes with skip ["design-system"].
 - Free first passes on local Gemma-4-E4B (`tools/local/local_review.py`), boilerplate on local Qwen
   (`tools/local/qwen_task.py`). Local server stops itself after 15 idle minutes.
 - A halted run (usage limit) resumes with its run id; add committed task ids to `skip`.

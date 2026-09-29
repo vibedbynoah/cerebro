@@ -216,41 +216,49 @@ PROCEDURE
 Score honestly out of 10; the task passes when there are no critical and no major findings.`
 }
 
-// Owner rule 2026-09-24: loosen the 10/10 score bar, but no issue may be accepted. A task passes
-// review once no critical or major findings remain; any remaining minor findings are then fixed by
-// the builder in a final polish round (tests and local review re-run) before the commit.
-function polishPrompt(task, repo, minors) {
-  return `You are the builder doing the FINAL POLISH round for Cerebro task ${task.id}. The senior reviewer found no critical or major issues; fix every remaining minor finding below properly (never by weakening a test or suppressing a check), then run the full test script and the screenshot script and confirm everything passes. No reviewer follows this round, so be thorough.
+// Owner rule 2026-09-29: one pass. Build once, review once, then a single fix round repairs every
+// critical and major finding and verifies each minor one (fix the real ones, explain the rest). No
+// second review. DONE maps tasks that already ran review rounds under the old loop to their round
+// count, so a resume replays those rounds from the journal and continues from the latest review.
+const DONE = (args && args.done) || {}
+function fixPrompt(task, repo, findings, guidance) {
+  return `You are the builder doing the ONE FIX ROUND for Cerebro task ${task.id}. No reviewer follows you, so this round decides the result.
 ${PRODUCT}
 REPOSITORY: ${repo}
 ${RULES}
-MINOR FINDINGS TO FIX
-${JSON.stringify(minors, null, 1)}
-Report exact test result lines and what you changed for each finding.`
+1. Fix every critical and major finding below properly (never by weakening a test, hiding an element or suppressing a check).
+2. Then verify each minor finding: read the code or screenshot and decide whether it is real. Fix every real one; for any you judge not real, say why in one line.
+3. Maximize performance and make it look stunning: no jank, no layout shift, fast first paint, polished spacing and motion.
+4. Run the full test script and the screenshot script, then run the local visual review (python C:/Users/noahm/Projects/cerebro/tools/local/local_review.py --images <the new screenshots> --focus "${task.id}") and fix any critical or major visual issue it reports that you confirm is real. Do not open the PNGs yourself.
+FINDINGS
+${JSON.stringify(findings, null, 1)}
+MENTOR GUIDANCE
+${JSON.stringify(guidance || {}, null, 1)}
+Report exact test result lines, what you changed for each finding, and the local review verdict.`
 }
 
 async function runTask(task, repo, phaseName) {
-  let findings = null, guidance = null, passed = false, last = null
-  for (let round = 1; round <= MAX_ROUNDS; round++) {
-    const b = await agent(builderPrompt(task, repo, round, findings, guidance),
+  let last = null
+  const rounds = Math.max(1, DONE[task.id] || 0)
+  for (let round = 1; round <= rounds; round++) {
+    const b = await agent(builderPrompt(task, repo, round, last && last.findings, last && last.guidance),
       { label: `build:${task.id}:r${round}`, phase: phaseName, schema: BUILD_RESULT, model: BUILDER, effort: 'high' })
     if (!b) return { id: task.id, status: 'halted', where: `builder r${round}` }
     const c = await agent(criticPrompt(task, repo, round),
       { label: `critic:${task.id}:r${round}`, phase: phaseName, schema: CRITIC_RESULT, model: CRITIC, effort: 'high' })
     if (!c) return { id: task.id, status: 'halted', where: `critic r${round}` }
-    last = c; findings = c.findings; guidance = c.guidance
+    last = c
     log(`${task.id} r${round}: ${c.score}/10, ${c.findings.length} findings`)
-    if (c.findings.every(f => f.severity === 'minor')) { passed = true; break }
   }
-  let open = last ? last.findings : []
-  if (passed && open.length) {
-    const p = await agent(polishPrompt(task, repo, open),
-      { label: `polish:${task.id}`, phase: phaseName, schema: BUILD_RESULT, model: BUILDER, effort: 'high' })
-    if (!p) return { id: task.id, status: 'halted', where: 'polish' }
-    open = []
+  const major = last.findings.filter(f => f.severity !== 'minor').length
+  if (last.findings.length) {
+    const p = await agent(fixPrompt(task, repo, last.findings, last.guidance),
+      { label: `fix:${task.id}`, phase: phaseName, schema: BUILD_RESULT, model: BUILDER, effort: 'high' })
+    if (!p) return { id: task.id, status: 'halted', where: 'fix' }
   }
+  const passed = true, open = []
   const commit = await agent(`Commit one finished Cerebro front-end task in ${repo}.
-Task: ${task.id} (directory ${task.dir}). Review status: ${passed ? 'passed: no critical or major findings, and every minor finding fixed in the polish round' : `NOT passed after ${MAX_ROUNDS} rounds; ${open.length} findings remain`}.
+Task: ${task.id} (directory ${task.dir}). Review status: one review pass found ${last.findings.length} findings (${major} critical/major); the fix round repaired the critical/major ones and verified every minor.
 ${open.length ? `First append these open findings to docs/build/open-findings.md under a heading "${task.id}" (create it if needed):\n${JSON.stringify(open, null, 1)}\n` : ''}
 Run git status. Stage only files under ${task.dir}/ plus any root files this task legitimately changed (Cargo.toml, Cargo.lock, .gitignore, docs/build/open-findings.md). Never stage review/ screenshot folders, node_modules, dist, target or secrets. Commit with an imperative first line, a short body, and these two final lines exactly:
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
