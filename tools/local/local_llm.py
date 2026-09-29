@@ -30,7 +30,12 @@ from pathlib import Path
 
 HOME = Path(os.environ["LOCALAPPDATA"]) / "cerebro-local"
 KEY_FILE = HOME / "api.key"
-LLAMA_SERVER = Path(r"C:\bench\llamacpp-official\llama-server.exe")
+# First existing binary wins; CEREBRO_LLAMA_SERVER overrides. C:\bench was found empty on
+# 2026-09-29, so the list falls back to the vendored b10751 build.
+_CANDIDATES = [os.environ.get("CEREBRO_LLAMA_SERVER", ""),
+               r"C:\bench\llamacpp-official\llama-server.exe",
+               r"C:\Users\noahm\Projects\qwen-flash-next\llama.cpp-b10751\llama-server.exe"]
+LLAMA_SERVER = next((Path(c) for c in _CANDIDATES if c and Path(c).is_file()), Path(_CANDIDATES[1]))
 IDLE_S = 15 * 60
 LMS = Path(r"C:\Users\noahm\.lmstudio\models")
 
