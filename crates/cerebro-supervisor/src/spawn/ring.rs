@@ -3,14 +3,14 @@
 //! Two independent bounds are needed, not one: the number of lines retained (so a long-running
 //! server does not grow memory forever) and the size of any single line (so one pathological line —
 //! a server that logs a multi-gigabyte JSON blob with no newline, say — cannot grow memory without
-//! bound before the per-line cap even has a chance to apply). [`BoundedLineReader`] enforces the
+//! bound before the per-line cap even has a chance to apply). [`read_bounded_lines`] enforces the
 //! second bound while reading, byte by byte, *before* a line is ever assembled into a `String`;
 //! [`LineRing`] enforces the first, afterward.
 
 use std::collections::VecDeque;
 use std::io::Read;
 
-/// Marker appended to a line that was cut short at [`BoundedLineReader`]'s byte cap.
+/// Marker appended to a line that was cut short at [`read_bounded_lines`]'s byte cap.
 const TRUNCATED_SUFFIX: &str = "…[truncated]";
 
 /// A fixed-capacity tail of the most recent output lines, for crash diagnostics.

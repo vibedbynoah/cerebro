@@ -25,13 +25,27 @@
 //!    PowerShell for interpretation, so there is no shell metacharacter-injection surface
 //!    (ARCHITECTURE.md section 8). Argument *value* injection is a separate concern this module
 //!    does not own — it is `cerebro-flags`'s closed allowlist's job, upstream of here.
-//! 2. **A closed environment.** `env::build_child_env` rebuilds the child's entire environment
-//!    block from nothing; see that module's docs for why an inherited `LLAMA_ARG_*` would bypass
-//!    the flag allowlist [`crate::preflight::build_hardened_server_argv`] already proved safe.
+//! 2. **A closed environment.** [`cerebro_probe::child_env::build_child_env`] rebuilds the child's
+//!    entire environment block from nothing; see that module's docs for why an inherited
+//!    `GGML_BACKEND_PATH` would load a DLL from outside the audited directory and an inherited
+//!    `LLAMA_ARG_*` would bypass the flag allowlist
+//!    [`crate::preflight::build_hardened_server_argv`] already proved safe. It is the one definition
+//!    of a backend child's environment: `cerebro_probe::backend::probe_with`'s queries use the same
+//!    function under the same setting, so the two cannot drift. User
+//!    switchable: the one [`crate::protections::Protections`] value for this launch — read from
+//!    [`crate::preflight::Preflighted::protections`] for [`spawn_preflighted`], or passed directly
+//!    to [`spawn_unaudited`], never a second, independent copy on [`SpawnOptions`] that could
+//!    disagree with it — having [`crate::protections::Protections::enforce_environment_allowlist`]
+//!    off does not simply hand the child Cerebro's raw ambient environment — see
+//!    [`effective_child_env`] for what still gets re-pinned even then — and is recorded as a
+//!    [`ChildHandle::protection_warnings`] entry.
 //! 3. **A process tree that cannot outlive Cerebro.** `job::JobHandle` assigns the child to a
 //!    Windows Job Object armed with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; see that module's docs
 //!    for why a bare child PID is not enough once `llama-server` can itself spawn an `--rpc`
-//!    worker (ARCHITECTURE.md section 5).
+//!    worker (ARCHITECTURE.md section 5). Also user switchable, the same way and for the same
+//!    reason as item 2: [`crate::protections::Protections::contain_in_job_object`] off leaves the
+//!    child unassigned to any job — though [`ChildHandle`]'s own `Drop` still terminates the
+//!    immediate process in that case; see its documentation.
 //! 4. **Bounded, durable diagnostics.** `ring::LineRing` and `log::RotatingLog` give a crash
 //!    investigator the child's recent output without letting a pathological line or a
 //!    long-running chatty server grow memory or disk without bound.
@@ -86,7 +100,6 @@
 
 #[cfg(windows)]
 mod job;
-mod env;
 mod log;
 mod ring;
 
@@ -126,15 +139,34 @@ pub const MAX_LINE_BYTES: usize = 8192;
 /// Deliberately excludes `args` — that is a per-invocation value passed to [`spawn_preflighted`] or
 /// [`spawn_unaudited`] directly, while these fields describe the launch *environment*, which a
 /// caller (the lifecycle layer) tends to hold fixed across a preflight-and-retry cycle.
+///
+/// Also deliberately excludes [`crate::protections::Protections`]: an earlier version of this type
+/// carried its own copy, which let a caller preflight a launch with every protection on and then
+/// spawn it with, say, job containment off — two independent settings for one launch that could
+/// disagree with each other. There is now exactly one [`crate::protections::Protections`] value per
+/// launch: [`spawn_preflighted`] reads it from [`crate::preflight::Preflighted::protections`], and
+/// [`spawn_unaudited`] (which has no `Preflighted` to read it from) takes it as an explicit
+/// parameter instead.
 #[derive(Debug, Clone)]
 pub struct SpawnOptions {
     /// Directory pinned as `TEMP`/`TMP` in the child's environment. Must already exist and be
-    /// owned by Cerebro — see [`env`]'s module docs for why this is never copied from the parent
+    /// owned by Cerebro — see [`cerebro_probe::child_env`]'s module docs for why this is never copied from the parent
     /// process's own `TEMP`/`TMP`. Enforced, not merely assumed: `spawn_windows_at` refuses a
-    /// missing path, a non-directory, or a reparse point (junction/symlink) with
-    /// [`SpawnError::UnsafeDir`] before opening anything or spawning a child — see
-    /// `verify_owned_dir` in this module.
+    /// missing path, a non-directory, or (while
+    /// [`crate::protections::Protections::refuse_redirected_paths`] is on) a path with a junction or
+    /// symlink anywhere on it, with [`SpawnError::UnsafeDir`] before opening anything or spawning a
+    /// child — see `verify_owned_dir` in this module. With that switch off the link is followed and
+    /// the child's `TEMP`/`TMP` is the resolved target, never the link.
     pub temp_dir: PathBuf,
+    /// Directory GPU drivers keep compiled kernels and pipelines in for this child:
+    /// `CUDA_CACHE_PATH` is `<cache_dir>\cuda`, and `LOCALAPPDATA`/`APPDATA` are `cache_dir` itself,
+    /// in both states of the environment allowlist (see [`cerebro_probe::child_env`]'s "Driver
+    /// caches" for the measured cost of dropping them: 19-22 s per launch against 1.2-1.4 s warm with
+    /// PTX JIT forced). Checked exactly like `temp_dir` (see that field) and refused with
+    /// [`SpawnError::UnsafeDir`] rather than dropped. Use one directory per backend build, and give
+    /// `cerebro_probe::backend::probe_with_cache` the same one (after [`verify_cache_dir`]) so
+    /// identifying the backend warms the cache this launch reads.
+    pub cache_dir: PathBuf,
     /// Value for `CUDA_VISIBLE_DEVICES`, if the launch should restrict which GPU the CUDA backend
     /// sees. `None` omits the variable entirely.
     pub cuda_visible_devices: Option<String>,
@@ -234,9 +266,10 @@ pub enum SpawnError {
     #[error("spawning a supervised child is implemented for Windows only")]
     UnsupportedPlatform,
 
-    /// `env::system_directory` could not resolve the real Windows system directory from the
-    /// kernel. Without it there is no trustworthy value for `PATH`/`SystemRoot`/`windir` to build
-    /// on — see `env`'s module docs on why those are constructed, never copied from the parent.
+    /// [`cerebro_probe::child_env::system_directory`] could not resolve the real Windows system
+    /// directory from the kernel. Without it there is no trustworthy value for
+    /// `PATH`/`SystemRoot`/`windir` to build on — see [`cerebro_probe::child_env`]'s module docs on
+    /// why those are constructed, never copied from the parent.
     #[error("could not resolve the system directory: {0}")]
     SystemDirectoryUnavailable(String),
 
@@ -341,11 +374,21 @@ impl AcceptUnauditedBackend {
     }
 }
 
-/// A running, job-contained child process, plus its bounded diagnostic state.
+/// A running, ordinarily job-contained child process, plus its bounded diagnostic state.
 ///
-/// Dropping a `ChildHandle` kills the entire process tree it heads — see `job::JobHandle`'s
-/// documentation for the kernel mechanism this relies on. [`ChildHandle::kill`] triggers the same
-/// thing early, without waiting for the value itself to go out of scope.
+/// When this launch had [`crate::protections::Protections::contain_in_job_object`] on (the
+/// default), dropping a `ChildHandle` kills the entire process tree it heads — see
+/// `job::JobHandle`'s documentation for the kernel mechanism this relies on — and
+/// [`ChildHandle::kill`] triggers the same thing early, without waiting for the value itself to go
+/// out of scope. With that protection turned off for this launch, no Job Object exists, so nothing
+/// but the immediate process is ever guaranteed to stop — but this type's own `Drop` impl (below)
+/// still terminates that immediate process on an ordinary drop, exactly as [`ChildHandle::kill`]
+/// would, so a launch that turned job containment off is never worse than "the immediate process
+/// leaks" for every path that runs Rust drop glue at all (cancellation, an early return, a normal
+/// panic unwind). Only Cerebro itself being killed or crashing — where no Drop glue runs anywhere
+/// in the process — still leaves that immediate process (and anything *it* spawned) running; see
+/// [`crate::protections::Protections::contain_in_job_object`]'s own documentation for that residual
+/// risk, which only a real Job Object closes.
 pub struct ChildHandle {
     child: Mutex<Child>,
     /// `None` once [`ChildHandle::kill`] has run; see that method's documentation for why this is
@@ -355,12 +398,28 @@ pub struct ChildHandle {
     #[cfg(windows)]
     job: Mutex<Option<job::JobHandle>>,
     ring: Arc<Mutex<LineRing>>,
+    /// The spawn-owned protections ([`crate::protections::Protections::enforce_environment_allowlist`],
+    /// [`crate::protections::Protections::contain_in_job_object`]) that the [`crate::protections::Protections`]
+    /// value passed to [`spawn_preflighted`] or [`spawn_unaudited`] had turned off for this launch,
+    /// each as a structured warning. Empty when both were on. For [`spawn_unaudited`] only, also
+    /// [`crate::protections::Protections::refuse_redirected_paths`] when it is off; a preflighted
+    /// launch already carries that one in [`crate::preflight::Preflighted::warnings`], so the
+    /// launch record lists it once. See [`ChildHandle::protection_warnings`].
+    protection_warnings: Vec<crate::protections::ProtectionWarning>,
 }
 
 impl ChildHandle {
     /// The child's process ID.
     pub fn pid(&self) -> u32 {
         lock_or_recover(&self.child).id()
+    }
+
+    /// The spawn-owned protections this launch turned off, each as a structured warning — the
+    /// spawn-time half of the launch record; see [`crate::preflight::Preflighted::warnings`] for the
+    /// preflight-time half and [`crate::protections::Protections`] for the full owner rule. Empty
+    /// when every protection this launch's [`crate::protections::Protections`] value governs was on.
+    pub fn protection_warnings(&self) -> &[crate::protections::ProtectionWarning] {
+        &self.protection_warnings
     }
 
     /// Poll whether the child has exited, without blocking. See
@@ -384,12 +443,15 @@ impl ChildHandle {
     /// (or calling [`ChildHandle::kill`]) is guaranteed to tear down its whole process tree rather
     /// than just the immediate PID.
     ///
-    /// The only way this is ever `false` is the documented assign-after-exit race this module's
-    /// top-level docs describe: a child that exits in the narrow window between `Command::spawn` and
-    /// `AssignProcessToJobObject` is not a containment failure (there is nothing left to contain),
-    /// but it does mean no Job Object exists for this handle. `false` also once
-    /// [`ChildHandle::kill`] has run, for the same reason `kill` is idempotent — see that method's
-    /// documentation.
+    /// `false` in three cases: the documented assign-after-exit race this module's top-level docs
+    /// describe (a child that exits in the narrow window between `Command::spawn` and
+    /// `AssignProcessToJobObject` is not a containment failure — there is nothing left to contain —
+    /// but it does mean no Job Object exists for this handle); this launch having
+    /// [`crate::protections::Protections::contain_in_job_object`] turned off, which skips creating a
+    /// Job Object at all (see [`spawn_windows_at`]); or once [`ChildHandle::kill`] has run, for the
+    /// same reason `kill` is idempotent — see that method's documentation. The second case is the
+    /// only one that is not itself a race or a one-way transition: it holds for this handle's entire
+    /// life.
     ///
     /// Exposed as data, not only through [`std::fmt::Debug`], so a caller (or a test) can act on it,
     /// or assert it, without parsing a `{handle:?}` string — a test that only string-matched the
@@ -408,26 +470,38 @@ impl ChildHandle {
         false
     }
 
-    /// Kill the child, and via the Job Object everything it spawned — without waiting for this
-    /// handle to be dropped.
+    /// Kill the child — and, when this launch was assigned to a Job Object, everything it spawned
+    /// too — without waiting for this handle to be dropped.
     ///
-    /// Asynchronous: this only closes the job handle, which tells the kernel to terminate the whole
+    /// Closes the job handle first, when one exists, which tells the kernel to terminate the whole
     /// assigned process tree; it does not itself wait for that termination to complete. A caller
     /// whose next move depends on the child truly being gone — most importantly, relaunching on the
     /// same `--port`, which races the old process's listening socket if the kernel has not yet torn
     /// it down — must call [`ChildHandle::kill_and_wait`] instead.
     ///
+    /// Also always kills the immediate child process directly, whether or not a Job Object exists
+    /// for this handle. `job` can be `None` for two different reasons — the documented
+    /// assign-after-exit race (nothing left alive to kill anyway), or
+    /// [`crate::protections::Protections::contain_in_job_object`] having been turned off for a
+    /// launch that is very much still running — and only the direct kill here covers the second
+    /// case; relying on the job alone would leave this method doing nothing at all for a launch
+    /// that turned that one protection off.
+    ///
     /// Idempotent: a second call, from any thread, after the first has already run (or after the
-    /// child already exited on its own) does nothing, rather than surfacing an error for a process
-    /// that is already gone.
+    /// child already exited on its own) does nothing beyond re-attempting a kill on an
+    /// already-gone process, which the OS reports as an ordinary (silently ignored) error rather
+    /// than a panic — never surfacing one for a process that is already gone.
     #[cfg(windows)]
     pub fn kill(&self) {
         // Taking the job out of the `Option` and dropping it here — rather than calling some
-        // inverse of `AssignProcessToJobObject`, or `TerminateProcess` on the child directly — is
-        // what makes this idempotent for free: a second call finds `None` already and does
-        // nothing. See `job::JobHandle`'s `Drop` impl for the kernel mechanism this triggers.
+        // inverse of `AssignProcessToJobObject` — is what makes the job-handle half of this
+        // idempotent for free: a second call finds `None` already and does nothing more here. See
+        // `job::JobHandle`'s `Drop` impl for the kernel mechanism this triggers.
         let mut guard = lock_or_recover(&self.job);
         drop(guard.take());
+        // Always also kill the immediate process directly — see this method's own documentation for
+        // why the job handle alone is not enough once job containment can be turned off.
+        let _ = lock_or_recover(&self.child).kill();
     }
 
     /// Non-Windows stub. No Job Object exists on this platform to contain a spawned tree, so this
@@ -467,6 +541,35 @@ impl ChildHandle {
                 return Ok(None);
             }
             std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for ChildHandle {
+    /// Guarantee the immediate child never outlives an ordinary drop of this handle, even when this
+    /// launch turned [`crate::protections::Protections::contain_in_job_object`] off.
+    ///
+    /// When a Job Object exists (the default), it does the work: dropping `self.job`'s `Option`
+    /// drops the `job::JobHandle` inside it, which closes the kernel handle and triggers
+    /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` for the whole assigned tree — this function's own
+    /// explicit kill below would be redundant in that case, so it is skipped. When no Job Object
+    /// exists — containment turned off for this launch, or the documented assign-after-exit race —
+    /// nothing else here kills anything on an ordinary drop, which is exactly the gap a lifecycle
+    /// task cancelled on runtime shutdown, an early return that drops [`ChildHandle`], or a panic
+    /// unwind could fall into (see [`ChildHandle`]'s own top-level documentation): this still
+    /// terminates the immediate process, if it is still running, before returning. It does not wait
+    /// for the OS to confirm the kill — a caller whose next step depends on that must call
+    /// [`ChildHandle::kill_and_wait`] explicitly instead, exactly as before this impl existed.
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        let contained = lock_or_recover(&self.job).is_some();
+        #[cfg(not(windows))]
+        let contained = false;
+        if !contained {
+            let mut child = lock_or_recover(&self.child);
+            if matches!(child.try_wait(), Ok(None)) {
+                let _ = child.kill();
+            }
         }
     }
 }
@@ -518,7 +621,7 @@ fn verify_spawn_target(backend_dir: &Path, tool_name: &str) -> Result<(), SpawnE
 /// [`SpawnError::BackendDirNotPathSafe`]'s own docs for why it lives here, in [`spawn_windows_at`],
 /// rather than in [`verify_spawn_target`] (which only [`spawn_unaudited`] calls). Kept as its own
 /// function, next to nothing else, so it stays trivially auditable: the entire hazard this guards
-/// against is that [`env::build_child_env`] concatenates `backend_dir` into `PATH` with `;` as the
+/// against is that [`cerebro_probe::child_env::build_child_env`] concatenates `backend_dir` into `PATH` with `;` as the
 /// separator, so this check has to live at the same choke point every caller of that function passes
 /// through, not merely alongside it.
 #[cfg(windows)]
@@ -538,17 +641,35 @@ fn reject_path_unsafe_backend_dir(backend_dir: &Path) -> Result<(), SpawnError> 
     Ok(())
 }
 
-/// Reject a caller-supplied directory that is missing, not a directory, or reached through a
-/// reparse point (junction or symlink) anywhere along its path, before this module opens or writes
-/// through it.
+/// Whether a temp or log directory reached through a junction or symlink is refused or followed:
+/// the spawn-side half of [`crate::protections::Protections::refuse_redirected_paths`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirLinks {
+    /// Refuse a reparse point anywhere on the path. The default.
+    Refuse,
+    /// Follow every link, then use the directory's real path, read back from the handle that was
+    /// opened and checked, so the child never gets the link.
+    Follow,
+}
+
+/// Check a caller-supplied directory before this module opens or writes through it, and return the
+/// path to use for it: `dir` itself under [`DirLinks::Refuse`], the resolved target under
+/// [`DirLinks::Follow`]. Missing, relative or not-a-directory is refused either way.
 ///
-/// Walks every path component from the filesystem root down to `dir` itself with
-/// [`std::fs::symlink_metadata`] — never [`std::fs::metadata`], which follows a reparse point and so
-/// could never see the one thing this function exists to catch — exactly the reasoning
+/// Under [`DirLinks::Refuse`], walks every path component from the filesystem root down to `dir`
+/// itself with [`std::fs::symlink_metadata`] — never [`std::fs::metadata`], which follows a reparse
+/// point and so could never see the one thing this check exists to catch — exactly the reasoning
 /// `cerebro_probe::backend::dacl::check_path_chain` uses for the backend directory's own DACL audit.
 /// A leaf-only check (an earlier version of this function) catches a junction *at* `dir` but misses
 /// one anywhere in its ancestors (`C:\cerebro\<junction>\temp`), which redirects everything Cerebro
 /// writes to `dir` just as effectively.
+///
+/// Under [`DirLinks::Follow`] (the user turned the redirected-path refusal off, e.g. because
+/// `%LOCALAPPDATA%` was moved to another drive with a junction), the directory is opened once,
+/// following every link, checked through that handle, and its path read back from the same handle
+/// ([`crate::preflight::win_path::final_path`]), so the child is handed the directory that was
+/// checked. The `\\?\` prefix is dropped for a drive-letter or UNC result (see [`plain_form`]),
+/// since `TEMP`/`TMP` reach programs that do not expect it.
 ///
 /// Deliberately does *not* also run the DACL audit `crate::preflight` runs on `backend_dir`: unlike
 /// the backend directory (a long-lived, shared install ggml loads DLLs from), `temp_dir` and the log
@@ -556,12 +677,18 @@ fn reject_path_unsafe_backend_dir(backend_dir: &Path) -> Result<(), SpawnError> 
 /// module docs record that this exact development machine's `%TEMP%` already has a DACL that would
 /// fail a real audit closed for every fixture rooted under it — repeating that audit here would
 /// refuse every ordinary caller-supplied scratch directory on this machine, not just a hostile one.
-/// This check instead targets the concrete redirection hazard named in the brief: a junction or
-/// symlink silently retargeting where the child's `TEMP`/`TMP` or crash log actually lands.
+/// This check instead targets the concrete redirection hazard: a junction or symlink silently
+/// retargeting where the child's `TEMP`/`TMP` or crash log actually lands.
 #[cfg(windows)]
-fn verify_owned_dir(role: &'static str, dir: &Path) -> Result<(), SpawnError> {
-    use std::os::windows::fs::MetadataExt;
-    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+fn verify_owned_dir(
+    role: &'static str,
+    dir: &Path,
+    links: DirLinks,
+) -> Result<PathBuf, SpawnError> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+    };
 
     let bad = |cause: String| SpawnError::UnsafeDir {
         role,
@@ -579,6 +706,22 @@ fn verify_owned_dir(role: &'static str, dir: &Path) -> Result<(), SpawnError> {
         return Err(bad("must be an absolute path".to_string()));
     }
 
+    if links == DirLinks::Follow {
+        // `FILE_FLAG_BACKUP_SEMANTICS` is what lets `CreateFileW` open a directory at all; without
+        // `FILE_FLAG_OPEN_REPARSE_POINT` every link on the way, the last one included, is followed.
+        let handle = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(dir)
+            .map_err(|e| bad(e.to_string()))?;
+        if !handle.metadata().map_err(|e| bad(e.to_string()))?.is_dir() {
+            return Err(bad("not a directory".to_string()));
+        }
+        let resolved =
+            crate::preflight::win_path::final_path(&handle).map_err(|e| bad(e.to_string()))?;
+        return Ok(plain_form(resolved));
+    }
+
     let mut chain: Vec<&Path> = dir.ancestors().collect();
     chain.reverse(); // filesystem root first, `dir` itself last.
 
@@ -588,8 +731,9 @@ fn verify_owned_dir(role: &'static str, dir: &Path) -> Result<(), SpawnError> {
         if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
             return Err(bad(format!(
                 "{} is a reparse point (junction or symlink); every component of the path used \
-                 to reach it must be the real object, not a redirect",
-                component.display()
+                 to reach it must be the real object, not a redirect ({})",
+                component.display(),
+                crate::protections::Protection::RedirectedPathRefusal.settings_hint()
             )));
         }
         if component == dir {
@@ -603,12 +747,83 @@ fn verify_owned_dir(role: &'static str, dir: &Path) -> Result<(), SpawnError> {
     if !dir_meta.is_dir() {
         return Err(bad("not a directory".to_string()));
     }
-    Ok(())
+    Ok(dir.to_path_buf())
+}
+
+/// The role name [`SpawnError::UnsafeDir`] reports for [`SpawnOptions::cache_dir`].
+#[cfg(windows)]
+const CACHE_DIR_ROLE: &str = "driver cache directory";
+
+/// Check a driver cache directory the way a launch will ([`SpawnOptions::cache_dir`]) and return
+/// the path to use: `dir` itself while [`crate::protections::Protections::refuse_redirected_paths`]
+/// is on (a junction anywhere on it is refused), its resolved target while it is off. Missing,
+/// relative or not-a-directory is refused either way.
+///
+/// For callers that start the backend outside a launch: pass the result to
+/// `cerebro_probe::backend::probe_with_cache`, so the probe's queries and the server share one
+/// checked cache and a junction the user did not allow never reaches either.
+pub fn verify_cache_dir(
+    dir: &Path,
+    protections: &crate::protections::Protections,
+) -> Result<PathBuf, SpawnError> {
+    #[cfg(windows)]
+    {
+        let links = if protections.refuse_redirected_paths {
+            DirLinks::Refuse
+        } else {
+            DirLinks::Follow
+        };
+        verify_owned_dir(CACHE_DIR_ROLE, dir, links)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (dir, protections);
+        Err(SpawnError::UnsupportedPlatform)
+    }
+}
+
+/// `path` (from `GetFinalPathNameByHandleW`, so `\\?\`-prefixed) in its plain DOS form when it has
+/// one: `\\?\C:\x` becomes `C:\x` and `\\?\UNC\srv\share\x` becomes `\\srv\share\x`. A path with no
+/// plain form (a volume-GUID path) is returned unchanged; it is still absolute and names the same
+/// directory. Reassembled from [`Path::components`], never by string surgery, so no path can turn
+/// relative here (`\\?\UNC\...` stripped by string would become the relative `UNC\...`).
+#[cfg(windows)]
+fn plain_form(path: PathBuf) -> PathBuf {
+    use std::path::{Component, Prefix};
+
+    let mut components = path.components();
+    let rebuilt = match components.next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::VerbatimDisk(drive) => {
+                if !matches!(components.next(), Some(Component::RootDir)) {
+                    return path;
+                }
+                let mut out = PathBuf::from(format!("{}:\\", char::from(drive)));
+                out.extend(components.map(|c| c.as_os_str()));
+                out
+            }
+            Prefix::VerbatimUNC(server, share) => {
+                let mut out = PathBuf::from(r"\\");
+                out.push(server);
+                out.push(share);
+                out.extend(components.map(|c| c.as_os_str()));
+                out
+            }
+            _ => return path,
+        },
+        _ => return path,
+    };
+    rebuilt
 }
 
 /// Launch `tool_name` (resolved as `backend_dir.join(tool_name)`) as a job-contained child, with a
 /// closed environment, no window, and bounded/logged output capture — without requiring a
 /// [`crate::preflight::Preflighted`] proof.
+///
+/// `protections` is taken explicitly, not read from `options` (which no longer carries a copy at
+/// all — see [`SpawnOptions`]'s own docs): a caller with no [`crate::preflight::Preflighted`] to
+/// source it from must still state the one value this launch's environment and containment
+/// decisions are made against.
 ///
 /// `accept` is not optional and not free to construct: [`AcceptUnauditedBackend::new`] refuses a
 /// blank reason, so every call to this function is attributable to someone's stated judgment call.
@@ -617,7 +832,7 @@ fn verify_owned_dir(role: &'static str, dir: &Path) -> Result<(), SpawnError> {
 /// discipline [`crate::preflight::AllowUnsafeDacl`] applies one layer up.
 ///
 /// `backend_dir` is used both as the child's `current_dir` and as the sole non-system entry of its
-/// constructed `PATH` (see [`env`]'s module docs) — the same "spawn is pinned to the audited
+/// constructed `PATH` (see [`cerebro_probe::child_env`]'s module docs) — the same "spawn is pinned to the audited
 /// directory" discipline `cerebro_probe::backend::probe_command` documents for the lighter-weight
 /// `--version`/`--list-devices` queries. Beyond `verify_spawn_target`'s shape check on
 /// `backend_dir`/`tool_name`, this function does not audit anything itself: no DACL audit, no
@@ -629,17 +844,25 @@ pub fn spawn_unaudited(
     tool_name: &str,
     args: &[String],
     options: &SpawnOptions,
+    protections: crate::protections::Protections,
     accept: &AcceptUnauditedBackend,
 ) -> Result<ChildHandle, SpawnError> {
     let _ = accept;
     #[cfg(windows)]
     {
         verify_spawn_target(backend_dir, tool_name)?;
-        spawn_windows_at(&backend_dir.join(tool_name), backend_dir, args, options)
+        spawn_windows_at(
+            &backend_dir.join(tool_name),
+            backend_dir,
+            args,
+            options,
+            protections,
+            RedirectRecord::Here,
+        )
     }
     #[cfg(not(windows))]
     {
-        let _ = (backend_dir, tool_name, args, options);
+        let _ = (backend_dir, tool_name, args, options, protections);
         Err(SpawnError::UnsupportedPlatform)
     }
 }
@@ -652,6 +875,10 @@ pub fn spawn_unaudited(
 /// than routing back through `verify_spawn_target`: a `Preflighted` value existing at all is
 /// already proof `preflight::verify_tool_name` accepted this exact `backend_dir`/`tool_name` pair,
 /// so re-parsing the same strings here would only restate a fact the type already guarantees.
+/// Likewise reads [`crate::preflight::Preflighted::protections`] rather than taking a second,
+/// independent value from the caller: preflight and spawn must agree on exactly one
+/// [`crate::protections::Protections`] per launch, never two copies that could disagree — see
+/// [`SpawnOptions`]'s own docs.
 ///
 /// `args` is expected to come from [`crate::preflight::build_hardened_server_argv`], but this
 /// function does not itself check that — see this module's top-level "what this module does not
@@ -668,6 +895,8 @@ pub fn spawn_preflighted(
             preflighted.backend_dir(),
             args,
             options,
+            preflighted.protections(),
+            RedirectRecord::Preflight,
         )
     }
     #[cfg(not(windows))]
@@ -675,6 +904,18 @@ pub fn spawn_preflighted(
         let _ = (preflighted, args, options);
         Err(SpawnError::UnsupportedPlatform)
     }
+}
+
+/// Where [`crate::protections::Protections::refuse_redirected_paths`] being off is recorded for one
+/// launch. The switch is enforced by both preflight (model and key files) and spawn (temp and log
+/// directories), but the launch record must list it once.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedirectRecord {
+    /// [`crate::preflight::Preflighted::warnings`] already carries it ([`spawn_preflighted`]).
+    Preflight,
+    /// Nothing else records it, so [`ChildHandle::protection_warnings`] does ([`spawn_unaudited`]).
+    Here,
 }
 
 /// Shared core of [`spawn_unaudited`] and [`spawn_preflighted`]: `program` is already proved to be a bare
@@ -686,6 +927,8 @@ fn spawn_windows_at(
     backend_dir: &Path,
     args: &[String],
     options: &SpawnOptions,
+    protections: crate::protections::Protections,
+    redirect_record: RedirectRecord,
 ) -> Result<ChildHandle, SpawnError> {
     use std::os::windows::io::AsRawHandle;
     use std::os::windows::process::CommandExt;
@@ -704,33 +947,73 @@ fn spawn_windows_at(
     reject_path_unsafe_backend_dir(backend_dir)?;
 
     // Validated before anything is opened or spawned — a junction here would otherwise only be
-    // discovered once the child was already writing through it.
-    verify_owned_dir("temp directory", &options.temp_dir)?;
+    // discovered once the child was already writing through it. With the redirected-path refusal
+    // off, a link is followed and the resolved target is what the child and the log get.
+    let links = if protections.refuse_redirected_paths {
+        DirLinks::Refuse
+    } else {
+        DirLinks::Follow
+    };
+    let bad_log_path = || SpawnError::UnsafeDir {
+        role: "crash log path",
+        path: options.log_path.display().to_string(),
+        cause: "must be an absolute path inside a Cerebro-owned directory".to_string(),
+    };
+    let temp_dir = verify_owned_dir("temp directory", &options.temp_dir, links)?;
+    // Refused like the temp directory, never silently dropped: without it every launch on a GPU the
+    // build carries only PTX for (or a Vulkan build) recompiles its kernels (see `SpawnOptions`).
+    let cache_dir = verify_owned_dir(CACHE_DIR_ROLE, &options.cache_dir, links)?;
     let log_parent = options
         .log_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .ok_or_else(|| SpawnError::UnsafeDir {
-            role: "crash log path",
-            path: options.log_path.display().to_string(),
-            cause: "must be an absolute path inside a Cerebro-owned directory".to_string(),
-        })?;
-    verify_owned_dir("log directory", log_parent)?;
+        .ok_or_else(bad_log_path)?;
+    let log_dir = verify_owned_dir("log directory", log_parent, links)?;
+    let log_path = match links {
+        DirLinks::Refuse => options.log_path.clone(),
+        DirLinks::Follow => log_dir.join(options.log_path.file_name().ok_or_else(bad_log_path)?),
+    };
 
     // Opened before the child exists: a failure here must never leave an unkillable, uncontained
     // process behind for a caller to clean up.
     let log = Arc::new(Mutex::new(RotatingLog::open(
-        options.log_path.clone(),
+        log_path,
         options.log_max_bytes,
     )?));
 
-    let system32 = env::system_directory()?;
-    let child_env = env::build_child_env(
+    // The two spawn-owned protections: recorded here, once, so both the environment block and the
+    // job-containment decision below read the same snapshot of `protections` — passed in as one
+    // argument, not read piecemeal from `options` (which carries no copy of it at all — see
+    // `SpawnOptions`'s own docs), so the two decisions can never disagree.
+    let mut protection_warnings = Vec::new();
+    if let Some(w) = protections.environment_allowlist_warning() {
+        protection_warnings.push(w);
+    }
+    if let Some(w) = protections.job_containment_warning() {
+        protection_warnings.push(w);
+    }
+    // Shared with preflight: recorded here only when no preflight record exists to carry it, so a
+    // preflighted launch's record lists it exactly once.
+    if redirect_record == RedirectRecord::Here {
+        if let Some(w) = protections.redirect_warning() {
+            protection_warnings.push(w);
+        }
+    }
+
+    let system32 = cerebro_probe::child_env::system_directory().map_err(|e| {
+        SpawnError::SystemDirectoryUnavailable(match e {
+            cerebro_probe::ProbeError::SystemDirectoryUnavailable { cause } => cause,
+            other => other.to_string(),
+        })
+    })?;
+    let child_env = effective_child_env(
+        &protections,
         std::env::vars_os(),
         &system32,
         backend_dir,
-        &options.temp_dir,
+        &temp_dir,
         options.cuda_visible_devices.as_deref(),
+        &cache_dir,
     );
 
     let mut command = Command::new(program);
@@ -751,34 +1034,41 @@ fn spawn_windows_at(
 
     // Containment must be assigned before this function returns a `ChildHandle` to anyone — see
     // this module's top-level docs for why the gap between `spawn` above and `assign` here is
-    // accepted rather than closed with `CREATE_SUSPENDED`.
-    let job_result = job::JobHandle::create().and_then(|job| {
-        // `child.as_raw_handle()` is the live process handle `Command::spawn` just produced,
-        // owned by `child` for at least as long as `child` itself is not dropped, which is well
-        // past this call — `job::JobHandle::assign`'s own contract requires exactly that.
-        let raw = child.as_raw_handle() as HANDLE;
-        job.assign(raw).map(|()| job)
-    });
-    let job = match job_result {
-        Ok(job) => Some(job),
-        Err(e) => {
-            // `AssignProcessToJobObject` reports `ERROR_ACCESS_DENIED` both for a genuine
-            // permissions problem and for a process that has already exited (measured on this
-            // machine — see this module's top-level docs) — indistinguishable by error code alone.
-            // A `--version`-style child routinely wins this race by exiting in single-digit
-            // milliseconds, and that is a successful run, not a containment failure: there is
-            // nothing left to contain, so the caller still gets a `ChildHandle` with `job` left
-            // `None` and whatever the child already printed. Only the still-running case is a real
-            // containment failure worth killing for.
-            match child.try_wait() {
-                Ok(Some(_already_exited)) => None,
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(e);
+    // accepted rather than closed with `CREATE_SUSPENDED`. `Protections::contain_in_job_object` off
+    // skips creating a Job Object at all — the `None` this leaves `job` at is already the exact
+    // representable state the assign-failure race below can also produce, so no new state is needed
+    // to honour this switch, only a reason not to have tried in the first place.
+    let job = if protections.contain_in_job_object {
+        let job_result = job::JobHandle::create().and_then(|job| {
+            // `child.as_raw_handle()` is the live process handle `Command::spawn` just produced,
+            // owned by `child` for at least as long as `child` itself is not dropped, which is well
+            // past this call — `job::JobHandle::assign`'s own contract requires exactly that.
+            let raw = child.as_raw_handle() as HANDLE;
+            job.assign(raw).map(|()| job)
+        });
+        match job_result {
+            Ok(job) => Some(job),
+            Err(e) => {
+                // `AssignProcessToJobObject` reports `ERROR_ACCESS_DENIED` both for a genuine
+                // permissions problem and for a process that has already exited (measured on this
+                // machine — see this module's top-level docs) — indistinguishable by error code
+                // alone. A `--version`-style child routinely wins this race by exiting in
+                // single-digit milliseconds, and that is a successful run, not a containment
+                // failure: there is nothing left to contain, so the caller still gets a
+                // `ChildHandle` with `job` left `None` and whatever the child already printed. Only
+                // the still-running case is a real containment failure worth killing for.
+                match child.try_wait() {
+                    Ok(Some(_already_exited)) => None,
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(e);
+                    }
                 }
             }
         }
+    } else {
+        None
     };
 
     let stdout = child.stdout.take().ok_or(SpawnError::StdioMissing {
@@ -819,7 +1109,37 @@ fn spawn_windows_at(
         child: Mutex::new(child),
         job: Mutex::new(job),
         ring,
+        protection_warnings,
     })
+}
+
+/// The exact environment block the child receives, honouring
+/// `protections.enforce_environment_allowlist`: a thin adapter from this crate's
+/// [`crate::protections::Protections`] to [`cerebro_probe::child_env::effective_child_env`], which
+/// documents what "off" still pins (`PATH` first entries, `TEMP`/`TMP`, `CUDA_VISIBLE_DEVICES`, the
+/// driver cache variables) and why. `cache_dir` is required here, not optional: every supervised
+/// launch pins its driver caches (see [`SpawnOptions::cache_dir`]). Kept as a function of its own
+/// so the on/off decision stays unit-testable without spawning a real process, against the same
+/// `Protections` value `spawn_windows_at` reads.
+#[cfg(windows)]
+fn effective_child_env(
+    protections: &crate::protections::Protections,
+    parent_env: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    system32: &Path,
+    backend_dir: &Path,
+    temp_dir: &Path,
+    cuda_visible_devices: Option<&str>,
+    cache_dir: &Path,
+) -> std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString> {
+    cerebro_probe::child_env::effective_child_env(
+        protections.enforce_environment_allowlist,
+        parent_env,
+        system32,
+        backend_dir,
+        Some(temp_dir),
+        cuda_visible_devices,
+        Some(cache_dir),
+    )
 }
 
 /// Spawn a named background thread that drains `reader` (stdout or stderr) into both the shared
@@ -1014,18 +1334,11 @@ mod tests {
         std::fs::create_dir(&target).expect("create junction target");
         let link = root.join("junction-temp");
 
-        let script = format!(
-            "New-Item -ItemType Junction -Path '{}' -Target '{}' | Out-Null",
-            link.display(),
-            target.display()
-        );
-        let status = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .status()
-            .expect("run New-Item -ItemType Junction");
-        assert!(status.success(), "creating a junction needs no special privilege");
+        cerebro_probe::backend::create_junction_for_tests(&link, &target)
+            .expect("creating a junction needs no special privilege");
 
-        let err = verify_owned_dir("temp directory", &link).expect_err("a junction must be refused");
+        let err = verify_owned_dir("temp directory", &link, DirLinks::Refuse)
+            .expect_err("a junction must be refused");
         assert!(matches!(err, SpawnError::UnsafeDir { .. }), "{err:?}");
 
         let _ = std::fs::remove_dir(&link);
@@ -1052,26 +1365,122 @@ mod tests {
         std::fs::create_dir_all(real.join("temp")).expect("create real target directory tree");
         let link = root.join("link");
 
-        let script = format!(
-            "New-Item -ItemType Junction -Path '{}' -Target '{}' | Out-Null",
-            link.display(),
-            real.display()
-        );
-        let status = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .status()
-            .expect("run New-Item -ItemType Junction");
-        assert!(status.success(), "creating a junction needs no special privilege");
+        cerebro_probe::backend::create_junction_for_tests(&link, &real)
+            .expect("creating a junction needs no special privilege");
 
         // `link\temp` resolves through the junction to `real\temp`, which is itself an ordinary
         // directory with no reparse attribute of its own — only its *ancestor* `link` is a junction.
         let reached_through_junction = link.join("temp");
-        let err = verify_owned_dir("temp directory", &reached_through_junction)
-            .expect_err("a directory reached only through an ancestor junction must be refused");
+        let err = verify_owned_dir(
+            "temp directory",
+            &reached_through_junction,
+            DirLinks::Refuse,
+        )
+        .expect_err("a directory reached only through an ancestor junction must be refused");
         assert!(matches!(err, SpawnError::UnsafeDir { .. }), "{err:?}");
 
         let _ = std::fs::remove_dir(&link);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_temp_dir_behind_a_parent_junction_resolves_to_its_target_with_the_refusal_off() {
+        // The off half of `a_temp_dir_reached_through_a_parent_junction_is_refused`: the same path
+        // is accepted, and what comes back (what the child's TEMP will be) is the real directory,
+        // in plain drive-letter form, never the link.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after the Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "cerebro-supervisor-spawn-follow-root-{}-{nanos}",
+            std::process::id()
+        ));
+        let real = root.join("real");
+        std::fs::create_dir_all(real.join("temp")).expect("create real target directory tree");
+        let link = root.join("link");
+        cerebro_probe::backend::create_junction_for_tests(&link, &real)
+            .expect("creating a junction needs no special privilege");
+
+        let through = link.join("temp");
+        let refused = verify_owned_dir("temp directory", &through, DirLinks::Refuse);
+        let followed = verify_owned_dir("temp directory", &through, DirLinks::Follow);
+        let at_link = verify_owned_dir("temp directory", &link, DirLinks::Follow);
+        let expected = plain_form(std::fs::canonicalize(real.join("temp")).expect("canonicalize"));
+        let expected_link = plain_form(std::fs::canonicalize(&real).expect("canonicalize"));
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&root);
+
+        let refused = refused.expect_err("on: refused");
+        assert!(
+            refused.to_string().contains(
+                &crate::protections::Protection::RedirectedPathRefusal.settings_hint()
+            ),
+            "{refused}"
+        );
+        let followed = followed.expect("off: followed");
+        assert_eq!(followed, expected);
+        assert!(
+            !followed.to_string_lossy().starts_with(r"\\?\"),
+            "{}",
+            followed.display()
+        );
+        assert!(
+            !followed.to_string_lossy().contains("link"),
+            "{}",
+            followed.display()
+        );
+        assert_eq!(
+            at_link.expect("off: a junction at the leaf is followed too"),
+            expected_link
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn following_links_still_refuses_a_file_a_missing_path_and_a_relative_path() {
+        let file = std::env::temp_dir().join(format!(
+            "cerebro-supervisor-spawn-follow-file-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&file, b"not a directory").expect("create a plain file");
+        let as_file = verify_owned_dir("temp directory", &file, DirLinks::Follow);
+        let _ = std::fs::remove_file(&file);
+        assert!(
+            matches!(&as_file, Err(SpawnError::UnsafeDir { cause, .. }) if cause.contains("not a directory")),
+            "{as_file:?}"
+        );
+        let missing = std::env::temp_dir().join("cerebro-supervisor-spawn-follow-missing-x9q");
+        assert!(matches!(
+            verify_owned_dir("temp directory", &missing, DirLinks::Follow),
+            Err(SpawnError::UnsafeDir { .. })
+        ));
+        assert!(matches!(
+            verify_owned_dir("temp directory", Path::new("relative"), DirLinks::Follow),
+            Err(SpawnError::UnsafeDir { cause, .. }) if cause.contains("absolute")
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn plain_form_drops_only_a_verbatim_prefix_and_never_turns_a_path_relative() {
+        assert_eq!(
+            plain_form(PathBuf::from(r"\\?\C:\a\b")),
+            PathBuf::from(r"C:\a\b")
+        );
+        assert_eq!(
+            plain_form(PathBuf::from(r"\\?\UNC\srv\share\x")),
+            PathBuf::from(r"\\srv\share\x")
+        );
+        assert_eq!(plain_form(PathBuf::from(r"C:\a")), PathBuf::from(r"C:\a"));
+        let guid = PathBuf::from(r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\t");
+        assert_eq!(
+            plain_form(guid.clone()),
+            guid,
+            "no plain form: kept, still absolute"
+        );
+        assert!(plain_form(PathBuf::from(r"\\?\UNC\srv\share\x")).is_absolute());
     }
 
     #[test]
@@ -1094,6 +1503,7 @@ mod tests {
     fn a_backend_dir_containing_a_semicolon_is_refused_before_any_io() {
         let bogus_options = SpawnOptions {
             temp_dir: PathBuf::from("never-checked-relative-path"),
+            cache_dir: PathBuf::from("never-checked-relative-path"),
             cuda_visible_devices: None,
             log_path: PathBuf::from("never-checked-either"),
             log_max_bytes: 1024,
@@ -1103,6 +1513,8 @@ mod tests {
             Path::new(r"C:\a;C:\evil"),
             &[],
             &bogus_options,
+            crate::protections::Protections::default(),
+            RedirectRecord::Here,
         )
         .expect_err("a backend_dir containing ';' must be refused");
         assert!(matches!(err, SpawnError::BackendDirNotPathSafe(_)), "{err:?}");
@@ -1141,6 +1553,7 @@ mod tests {
         );
         let bogus_options = SpawnOptions {
             temp_dir: PathBuf::from("never-checked-relative-path"),
+            cache_dir: PathBuf::from("never-checked-relative-path"),
             cuda_visible_devices: None,
             log_path: PathBuf::from("never-checked-either"),
             log_max_bytes: 1024,
@@ -1153,8 +1566,12 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_relative_temp_dir_is_refused_with_a_reason_that_names_the_problem() {
-        let err = verify_owned_dir("temp directory", Path::new("relative-temp"))
-            .expect_err("a relative temp dir must be refused");
+        let err = verify_owned_dir(
+            "temp directory",
+            Path::new("relative-temp"),
+            DirLinks::Refuse,
+        )
+        .expect_err("a relative temp dir must be refused");
         match err {
             SpawnError::UnsafeDir { cause, .. } => {
                 assert!(cause.contains("absolute"), "{cause:?}");
@@ -1179,6 +1596,7 @@ mod tests {
 
         let options = SpawnOptions {
             temp_dir: scratch.clone(),
+            cache_dir: scratch.clone(),
             cuda_visible_devices: None,
             log_path: PathBuf::from("spawn.log"), // no directory component at all
             log_max_bytes: 1024,
@@ -1190,6 +1608,8 @@ mod tests {
             Path::new(r"C:\Windows\System32"),
             &[],
             &options,
+            crate::protections::Protections::default(),
+            RedirectRecord::Here,
         )
         .expect_err("a log_path with no parent directory must be refused");
         assert!(
@@ -1198,6 +1618,95 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// A launch whose driver cache directory is unusable is refused before anything is opened or
+    /// spawned, never run with the cache silently dropped (which would recompile every kernel).
+    #[cfg(windows)]
+    #[test]
+    fn an_unusable_cache_dir_refuses_the_launch_before_anything_is_spawned() {
+        let scratch = std::env::temp_dir().join(format!(
+            "cerebro-supervisor-spawn-cache-refused-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&scratch).expect("create a valid scratch dir for this test");
+        for bad in [
+            PathBuf::from("relative-cache"),
+            scratch.join("does-not-exist"),
+        ] {
+            let options = SpawnOptions {
+                temp_dir: scratch.clone(),
+                cache_dir: bad.clone(),
+                cuda_visible_devices: None,
+                log_path: scratch.join("spawn.log"),
+                log_max_bytes: 1024,
+            };
+            let err = spawn_windows_at(
+                Path::new(r"C:\Windows\System32\this-is-never-executed.exe"),
+                Path::new(r"C:\Windows\System32"),
+                &[],
+                &options,
+                crate::protections::Protections::default(),
+                RedirectRecord::Here,
+            )
+            .expect_err("an unusable cache dir must be refused");
+            assert!(
+                matches!(err, SpawnError::UnsafeDir { role: CACHE_DIR_ROLE, .. }),
+                "{}: {err:?}",
+                bad.display()
+            );
+        }
+        assert!(
+            !scratch.join("spawn.log").exists(),
+            "the refusal must come before the crash log is opened"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verify_cache_dir_refuses_a_junction_on_and_follows_it_to_the_target_off() {
+        let root = std::env::temp_dir().join(format!(
+            "cerebro-supervisor-spawn-cache-junction-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let real = root.join("real-cache");
+        std::fs::create_dir_all(&real).expect("create the real cache dir");
+        let link = root.join("cache-link");
+        cerebro_probe::backend::create_junction_for_tests(&link, &real)
+            .expect("junctions need no privilege");
+
+        let on = crate::protections::Protections::default();
+        let off = crate::protections::Protections {
+            refuse_redirected_paths: false,
+            ..on
+        };
+        let refused = verify_cache_dir(&link, &on);
+        let followed = verify_cache_dir(&link, &off);
+        let plain = verify_cache_dir(&real, &on);
+        let relative = verify_cache_dir(Path::new("relative-cache"), &off);
+        let expected = plain_form(std::fs::canonicalize(&real).expect("canonicalize"));
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&root);
+
+        let refused = refused.expect_err("on: a junction is refused");
+        assert!(
+            matches!(&refused, SpawnError::UnsafeDir { role: CACHE_DIR_ROLE, .. }),
+            "{refused:?}"
+        );
+        assert!(
+            refused.to_string().contains(
+                &crate::protections::Protection::RedirectedPathRefusal.settings_hint()
+            ),
+            "{refused}"
+        );
+        assert_eq!(followed.expect("off: followed"), expected, "the target, never the link");
+        assert_eq!(plain.expect("a real directory passes"), real);
+        assert!(
+            matches!(relative, Err(SpawnError::UnsafeDir { .. })),
+            "relative is refused in both states: {relative:?}"
+        );
     }
 
     /// Pins the naming [`spawn_reader_thread`] gives each reader thread, and — more usefully —
@@ -1381,6 +1890,187 @@ mod tests {
         assert!(got[0].len() < MAX_LINE_BYTES + 100, "line was not bounded: {} bytes", got[0].len());
     }
 
+    /// [`effective_child_env`]'s own tests — exercising the allowlist on/off decision, and the
+    /// settings re-pinning that must survive it off, without spawning a real process. See that
+    /// function's own doc comment, which promises exactly this.
+    #[cfg(windows)]
+    #[test]
+    fn allowlist_on_strips_llama_arg_and_lets_the_launchs_own_cuda_setting_win() {
+        let parent = vec![
+            (
+                std::ffi::OsString::from("LLAMA_ARG_PORT"),
+                std::ffi::OsString::from("9999"),
+            ),
+            (
+                std::ffi::OsString::from("CUDA_VISIBLE_DEVICES"),
+                std::ffi::OsString::from("0,1"),
+            ),
+        ];
+        let env = effective_child_env(
+            &crate::protections::Protections::default(),
+            parent.into_iter(),
+            Path::new(r"C:\Windows\System32"),
+            Path::new(r"C:\backend"),
+            Path::new(r"C:\t"),
+            Some("1"),
+            Path::new(r"C:\cache"),
+        );
+        assert!(
+            !env.keys()
+                .any(|k| k.to_string_lossy().starts_with("LLAMA_ARG_")),
+            "{env:?}"
+        );
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("CUDA_VISIBLE_DEVICES")),
+            Some(&std::ffi::OsString::from("1")),
+            "the launch's own cuda_visible_devices setting must win over an ambient value"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn allowlist_off_inherits_ambient_names_but_keeps_settings_pinned() {
+        let parent = vec![
+            (
+                std::ffi::OsString::from("LLAMA_ARG_PORT"),
+                std::ffi::OsString::from("1"),
+            ),
+            (
+                std::ffi::OsString::from("Path"),
+                std::ffi::OsString::from(r"C:\evil"),
+            ),
+            (
+                std::ffi::OsString::from("CUDA_VISIBLE_DEVICES"),
+                std::ffi::OsString::from("0,1"),
+            ),
+            (
+                std::ffi::OsString::from("TEMP"),
+                std::ffi::OsString::from(r"C:\ambient-temp"),
+            ),
+        ];
+        let off = crate::protections::Protections {
+            enforce_environment_allowlist: false,
+            ..crate::protections::Protections::default()
+        };
+        let env = effective_child_env(
+            &off,
+            parent.into_iter(),
+            Path::new(r"C:\Windows\System32"),
+            Path::new(r"C:\backend"),
+            Path::new(r"C:\t"),
+            Some("1"),
+            Path::new(r"C:\cache"),
+        );
+        // The one thing the allowlist protection itself governs: an ambient LLAMA_ARG_* still gets
+        // through once it is off.
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("LLAMA_ARG_PORT")),
+            Some(&std::ffi::OsString::from("1")),
+            "turning the allowlist off must still let an ambient LLAMA_ARG_* reach the child"
+        );
+        // Everything that is a *setting*, not a protection, must stay pinned regardless.
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("TEMP")),
+            Some(&std::ffi::OsString::from(r"C:\t"))
+        );
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("CUDA_VISIBLE_DEVICES")),
+            Some(&std::ffi::OsString::from("1")),
+            "the launch's own cuda_visible_devices setting must win even with the allowlist off"
+        );
+        let path_keys: Vec<_> = env
+            .keys()
+            .filter(|k| k.eq_ignore_ascii_case(std::ffi::OsStr::new("path")))
+            .collect();
+        assert_eq!(
+            path_keys.len(),
+            1,
+            "exactly one PATH-named key must survive: {env:?}"
+        );
+        assert_eq!(
+            env.get(path_keys[0])
+                .map(|v| v.to_string_lossy().into_owned()),
+            Some(r"C:\backend;C:\Windows\System32;C:\evil".to_string()),
+            "allowlist off: the inherited PATH reaches the child after the pinned backend_dir and \
+             System32 entries, in one PATH-named key"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn allowlist_on_never_passes_the_inherited_path() {
+        let parent = vec![(
+            std::ffi::OsString::from("Path"),
+            std::ffi::OsString::from(r"C:\evil"),
+        )];
+        let env = effective_child_env(
+            &crate::protections::Protections::default(),
+            parent.into_iter(),
+            Path::new(r"C:\Windows\System32"),
+            Path::new(r"C:\backend"),
+            Path::new(r"C:\t"),
+            None,
+            Path::new(r"C:\cache"),
+        );
+        let paths: Vec<_> = env
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case(std::ffi::OsStr::new("path")))
+            .map(|(_, v)| v.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(paths, vec![r"C:\backend;C:\Windows\System32".to_string()]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn allowlist_off_with_an_empty_inherited_path_adds_no_empty_entry() {
+        let parent = vec![(std::ffi::OsString::from("PATH"), std::ffi::OsString::new())];
+        let off = crate::protections::Protections {
+            enforce_environment_allowlist: false,
+            ..crate::protections::Protections::default()
+        };
+        let env = effective_child_env(
+            &off,
+            parent.into_iter(),
+            Path::new(r"C:\Windows\System32"),
+            Path::new(r"C:\backend"),
+            Path::new(r"C:\t"),
+            None,
+            Path::new(r"C:\cache"),
+        );
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("PATH")),
+            Some(&std::ffi::OsString::from(r"C:\backend;C:\Windows\System32")),
+            "an empty inherited PATH must not leave a trailing ';' (an empty entry)"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn allowlist_off_omits_cuda_visible_devices_when_the_launch_did_not_set_one() {
+        let parent = vec![(
+            std::ffi::OsString::from("CUDA_VISIBLE_DEVICES"),
+            std::ffi::OsString::from("0,1"),
+        )];
+        let off = crate::protections::Protections {
+            enforce_environment_allowlist: false,
+            ..crate::protections::Protections::default()
+        };
+        let env = effective_child_env(
+            &off,
+            parent.into_iter(),
+            Path::new(r"C:\Windows\System32"),
+            Path::new(r"C:\backend"),
+            Path::new(r"C:\t"),
+            None,
+            Path::new(r"C:\cache"),
+        );
+        assert!(
+            !env.contains_key(std::ffi::OsStr::new("CUDA_VISIBLE_DEVICES")),
+            "None means omit, per SpawnOptions::cuda_visible_devices's own docs — even with the \
+             allowlist off, an ambient value must not resurrect it: {env:?}"
+        );
+    }
+
     #[cfg(windows)]
     mod live {
         use super::*;
@@ -1412,6 +2102,7 @@ mod tests {
         fn options(scratch: &ScratchDir) -> SpawnOptions {
             SpawnOptions {
                 temp_dir: scratch.0.clone(),
+                cache_dir: scratch.0.clone(),
                 cuda_visible_devices: None,
                 log_path: scratch.0.join("spawn.log"),
                 log_max_bytes: 1024 * 1024,
@@ -1447,34 +2138,70 @@ mod tests {
             }
         }
 
-        /// Ask Windows directly whether a process with `pid` still exists, independent of
-        /// anything this crate's own `ChildHandle` tracks — the point of this test is to prove
-        /// the *OS-level* process is gone, not merely that our own bookkeeping thinks so.
-        fn process_is_alive(pid: u32) -> bool {
-            use windows_sys::Win32::Foundation::CloseHandle;
-            use windows_sys::Win32::System::Threading::{
-                GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-            };
+        /// A process watched through a handle opened while it is alive, independent of anything
+        /// this crate's own `ChildHandle` tracks: the point of these tests is the *OS-level*
+        /// process. Holding the handle pins the process's identity, so neither the liveness checks
+        /// nor the cleanup kill can reach an unrelated process that reused the PID (which a
+        /// check-by-PID after the `ChildHandle` is gone could).
+        struct ProcessGuard(windows_sys::Win32::Foundation::HANDLE);
 
-            // Not exposed by `windows-sys` as a named constant; documented by Win32
-            // (`GetExitCodeProcess`) as the fixed sentinel value `259` meaning "this process has
-            // not yet terminated".
-            const STILL_ACTIVE: u32 = 259;
+        impl ProcessGuard {
+            /// Open `pid` for waiting and termination. Panics (test code) if it cannot be opened,
+            /// which means the process was already gone when its PID was read.
+            fn open(pid: u32) -> Self {
+                use windows_sys::Win32::System::Threading::{
+                    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+                    PROCESS_TERMINATE,
+                };
+                // SAFETY: `OpenProcess` takes no pointers; the result is checked for null before
+                // use and closed exactly once, in `Drop`.
+                let handle = unsafe {
+                    OpenProcess(
+                        PROCESS_TERMINATE | PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                        0,
+                        pid,
+                    )
+                };
+                assert!(
+                    !handle.is_null(),
+                    "could not open pid {pid}; it must still be running"
+                );
+                Self(handle)
+            }
 
-            // SAFETY: `pid` is an arbitrary but valid `u32`; `OpenProcess` is documented to return
-            // null on failure (e.g. the process no longer exists), which is checked before the
-            // handle is used for anything. `GetExitCodeProcess` is called with that same
-            // just-validated handle and a live, correctly-sized local `code`. The handle is closed
-            // exactly once, on every path, before returning.
-            unsafe {
-                let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-                if handle.is_null() {
-                    return false;
+            /// Whether the process exits within `timeout` (a zero timeout only polls).
+            fn exited_within(&self, timeout: Duration) -> bool {
+                use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+                use windows_sys::Win32::System::Threading::WaitForSingleObject;
+                let millis = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX - 1);
+                // SAFETY: `self.0` is a live process handle opened with `PROCESS_SYNCHRONIZE`.
+                unsafe { WaitForSingleObject(self.0, millis) == WAIT_OBJECT_0 }
+            }
+
+            /// Whether the process is still running right now.
+            fn is_alive(&self) -> bool {
+                !self.exited_within(Duration::ZERO)
+            }
+
+            /// End the process (test cleanup, for a grandchild outside any Job Object). Harmless
+            /// once it has exited.
+            fn terminate(&self) {
+                // SAFETY: `self.0` is a live process handle opened with `PROCESS_TERMINATE`.
+                unsafe {
+                    windows_sys::Win32::System::Threading::TerminateProcess(self.0, 1);
                 }
-                let mut code: u32 = 0;
-                let ok = GetExitCodeProcess(handle, &mut code);
-                CloseHandle(handle);
-                ok != 0 && code == STILL_ACTIVE
+            }
+        }
+
+        impl Drop for ProcessGuard {
+            fn drop(&mut self) {
+                // Ends the process if a failed assertion left it running; harmless if it already
+                // exited. The held handle guarantees this is the process that was opened.
+                self.terminate();
+                // SAFETY: opened in `open`, closed only here.
+                unsafe {
+                    windows_sys::Win32::Foundation::CloseHandle(self.0);
+                }
             }
         }
 
@@ -1498,6 +2225,7 @@ mod tests {
                 "llama-server.exe",
                 &["--version".to_string()],
                 &opts,
+                crate::protections::Protections::default(),
                 &accept(),
             )
             .expect("spawn llama-server.exe --version");
@@ -1523,10 +2251,9 @@ mod tests {
 
         #[test]
         #[ignore = "runs the real preflight() against the b10751 fixture and spawns llama-server \
-                    from the resulting Preflighted; must run from a non-elevated shell, exactly \
-                    like preflight's own live_b10751_refuses_without_opt_in_and_succeeds_with_it, \
-                    or preflight will refuse with RunningElevated before this test's own \
-                    assertions ever run"]
+                    from the resulting Preflighted; from an elevated shell, where the public \
+                    preflight() refuses with RunningElevated, the Preflighted comes from \
+                    preflight_with with only the elevation answer faked"]
         fn spawn_preflighted_launches_the_tool_preflight_verified() {
             // `spawn_unaudited` is easy to call from a fixture, and every other live test in this
             // file uses it — but `spawn_preflighted` is the only function the product actually
@@ -1545,14 +2272,7 @@ mod tests {
                  in this component's build brief",
                 backend_dir.display()
             );
-            let model = PathBuf::from(
-                r"C:\Users\noahm\.lmstudio\models\skiesoffire\bastion-control\bastion-control-0.5b-f16.gguf",
-            );
-            assert!(
-                model.is_file(),
-                "fixture model not found at {}; see this component's build brief",
-                model.display()
-            );
+            let model = cerebro_probe::fixtures::tiny_gguf().unwrap_or_else(|e| panic!("{e}"));
 
             let (manifest, _) = cerebro_probe::backend::hash_directory(&backend_dir)
                 .expect("hash the real backend dir");
@@ -1580,11 +2300,29 @@ mod tests {
                     )
                     .expect("reason is non-blank"),
                 ),
+                protections: crate::protections::Protections::default(),
             };
-            let preflighted = preflight(&spec).expect(
-                "preflight the fixture backend; run from a non-elevated shell (see this test's \
-                 #[ignore] reason)",
-            );
+            use crate::preflight::{ElevationCheck, ProcessTokenElevation};
+            let elevated = ProcessTokenElevation
+                .is_elevated()
+                .expect("query this test process's own token");
+            let preflighted = if elevated {
+                assert_eq!(
+                    preflight(&spec).err(),
+                    Some(crate::preflight::PreflightError::RunningElevated),
+                    "the public preflight must refuse an elevated process"
+                );
+                crate::preflight::preflight_with(
+                    &spec,
+                    &crate::preflight::HostChecks {
+                        elevation: &NotElevated,
+                        dacl: &crate::preflight::ProbeDaclAuditor,
+                    },
+                )
+            } else {
+                preflight(&spec)
+            }
+            .expect("preflight the fixture backend");
             assert_eq!(preflighted.tool_path(), backend_dir.join("llama-server.exe"));
 
             let opts = options(&scratch);
@@ -1622,12 +2360,13 @@ mod tests {
                 "ping.exe",
                 &["-t".to_string(), "127.0.0.1".to_string()],
                 &opts,
+                crate::protections::Protections::default(),
                 &accept(),
             )
             .expect("spawn a long-running ping.exe");
 
-            let pid = handle.pid();
-            assert!(process_is_alive(pid), "ping.exe should still be running");
+            let child = ProcessGuard::open(handle.pid());
+            assert!(child.is_alive(), "ping.exe should still be running");
             assert_eq!(
                 handle.try_wait().expect("poll before drop"),
                 None,
@@ -1636,7 +2375,10 @@ mod tests {
 
             drop(handle);
 
-            poll_until(Duration::from_secs(2), || (!process_is_alive(pid)).then_some(()));
+            assert!(
+                child.exited_within(Duration::from_secs(2)),
+                "dropping the handle must kill the child"
+            );
         }
 
         /// The `[[bin]]` fixture built specifically for these live tests — see its own module docs
@@ -1681,9 +2423,20 @@ mod tests {
             for i in 0..50 {
                 let scratch = ScratchDir::new(&format!("assign-race-{i}"));
                 let opts = options(&scratch);
-                let handle = spawn_unaudited(&fixture_dir, "cerebro-print-env.exe", &[], &opts, &accept())
-                    .unwrap_or_else(|e| panic!("iteration {i}: spawn must succeed even if the \
-                                                 child already exited, got {e}"));
+                let handle = spawn_unaudited(
+                    &fixture_dir,
+                    "cerebro-print-env.exe",
+                    &[],
+                    &opts,
+                    crate::protections::Protections::default(),
+                    &accept(),
+                )
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "iteration {i}: spawn must succeed even if the \
+                                             child already exited, got {e}"
+                    )
+                });
                 if !handle.is_contained() {
                     saw_an_uncontained_child = true;
                 }
@@ -1726,18 +2479,301 @@ mod tests {
                 "ping.exe",
                 &["-t".to_string(), "127.0.0.1".to_string()],
                 &opts,
+                crate::protections::Protections::default(),
                 &accept(),
             )
             .expect("spawn a long-running ping.exe");
+            let child = ProcessGuard::open(handle.pid());
             assert!(
-                process_is_alive(handle.pid()),
+                child.is_alive(),
                 "ping.exe should still be running, so assignment cannot have lost a race"
             );
             assert!(handle.is_contained(), "a still-running child must report itself contained");
 
-            let pid = handle.pid();
             handle.kill();
-            poll_until(Duration::from_secs(2), || (!process_is_alive(pid)).then_some(()));
+            assert!(
+                child.exited_within(Duration::from_secs(2)),
+                "kill must end the child"
+            );
+        }
+
+        #[test]
+        #[ignore = "spawns a real, long-running child with job containment turned off"]
+        fn is_contained_reports_false_when_job_containment_is_turned_off() {
+            // The off half of the property `is_contained_reports_true_for_a_running_child` proves
+            // for the default: with `Protections::contain_in_job_object` turned off, a still-running
+            // child must report itself uncontained — this switch skips creating a Job Object at all
+            // (see `spawn_windows_at`), which is a deterministic, always-observable effect, unlike
+            // the opportunistic assign-after-exit race `a_child_that_exits_before_job_assignment...`
+            // above can only try to hit.
+            let system32 = PathBuf::from(r"C:\Windows\System32");
+            let scratch = ScratchDir::new("contained-off");
+            let opts = options(&scratch);
+            let protections = crate::protections::Protections {
+                contain_in_job_object: false,
+                ..crate::protections::Protections::default()
+            };
+            let handle = spawn_unaudited(
+                &system32,
+                "ping.exe",
+                &["-t".to_string(), "127.0.0.1".to_string()],
+                &opts,
+                protections,
+                &accept(),
+            )
+            .expect("spawn a long-running ping.exe");
+            let child = ProcessGuard::open(handle.pid());
+            assert!(child.is_alive(), "ping.exe should still be running");
+            assert!(
+                !handle.is_contained(),
+                "job containment is off, so this launch must never report itself contained"
+            );
+            assert_eq!(
+                handle.protection_warnings().len(),
+                1,
+                "exactly one protection was turned off for this launch: {:?}",
+                handle.protection_warnings()
+            );
+            assert_eq!(
+                handle.protection_warnings()[0].protection(),
+                crate::protections::Protection::JobObjectContainment
+            );
+
+            // Without a Job Object, only the immediate PID is guaranteed to die here — exactly the
+            // risk `Protections::contain_in_job_object`'s own documentation names; `ping.exe` has no
+            // children of its own, so `kill` on the immediate process is enough to clean this test up.
+            handle.kill();
+            assert!(
+                child.exited_within(Duration::from_secs(2)),
+                "kill must end the child"
+            );
+        }
+
+        /// An elevation check that always answers "not elevated", so this test reaches spawn from
+        /// this machine's elevated harness shell without turning `refuse_elevation` off (which would
+        /// add a preflight warning unrelated to what this test checks).
+        struct NotElevated;
+
+        impl crate::preflight::ElevationCheck for NotElevated {
+            fn is_elevated(&self) -> Result<bool, crate::preflight::PreflightError> {
+                Ok(false)
+            }
+        }
+
+        #[test]
+        #[ignore = "preflights a copy of the print-env fixture under %TEMP% and spawns it through \
+                    spawn_preflighted with job containment off"]
+        fn spawn_preflighted_honours_the_preflighted_protections() {
+            // The design claim this pins down: one `Protections` per launch, and `spawn_preflighted`
+            // reads it from `Preflighted::protections()`. Every other non-default spawn-switch test
+            // goes through `spawn_unaudited`, so if `spawn_preflighted` regressed to
+            // `Protections::default()`, job containment would silently come back on for every real
+            // launch and no other test would notice. The child must be long-running (the
+            // spawn-grandchild mode parks on its `ping -t` grandchild): a child that exits before
+            // job assignment reports `is_contained() == false` even with containment on, which would
+            // make this assertion pass for the wrong reason.
+            use crate::preflight::{
+                preflight_with, AllowUnsafeDacl, HostChecks, LaunchSpec, PortRequest,
+                ProbeDaclAuditor,
+            };
+
+            let scratch = ScratchDir::new("preflighted-protections");
+            let backend = scratch.0.join("backend");
+            std::fs::create_dir(&backend).expect("create the fixture backend dir");
+            std::fs::copy(
+                print_env_fixture_dir().join("cerebro-print-env.exe"),
+                backend.join("cerebro-print-env.exe"),
+            )
+            .expect("copy the print-env fixture into its own backend dir");
+            let (manifest, _) =
+                cerebro_probe::backend::hash_directory(&backend).expect("hash the fixture backend");
+            // Never loaded: the fixture ignores it. Preflight only checks the GGUF magic.
+            let model = scratch.0.join("model.gguf");
+            std::fs::write(&model, b"GGUF\x03\0\0\0").expect("write a GGUF-magic fixture file");
+            let key_path = scratch.0.join("api.key");
+            std::fs::write(&key_path, "k".repeat(32)).expect("write fixture api key file");
+
+            let spec = LaunchSpec {
+                backend_dir: backend.clone(),
+                tool_name: "cerebro-print-env.exe".to_string(),
+                manifest,
+                model_path: model,
+                draft_model_path: None,
+                port: PortRequest::Any,
+                api_key_file: key_path,
+                allow_unsafe_dacl: Some(
+                    AllowUnsafeDacl::new(
+                        "fixture under %TEMP%, whose ancestors are writable by other principals on \
+                         this development machine",
+                    )
+                    .expect("reason is non-blank"),
+                ),
+                protections: crate::protections::Protections {
+                    contain_in_job_object: false,
+                    // Shared by preflight and spawn, and recorded by preflight alone for this
+                    // path, so the launch record lists it once (asserted below).
+                    refuse_redirected_paths: false,
+                    ..crate::protections::Protections::default()
+                },
+            };
+            let preflighted = preflight_with(
+                &spec,
+                &HostChecks {
+                    elevation: &NotElevated,
+                    dacl: &ProbeDaclAuditor,
+                },
+            )
+            .expect("preflight the print-env fixture");
+            assert!(!preflighted.protections().contain_in_job_object);
+            let preflight_redirects = preflighted
+                .warnings()
+                .iter()
+                .filter(|w| {
+                    matches!(w, crate::preflight::PreflightWarning::ProtectionDisabled(p)
+                        if p.protection() == crate::protections::Protection::RedirectedPathRefusal)
+                })
+                .count();
+            assert_eq!(preflight_redirects, 1, "{:?}", preflighted.warnings());
+
+            let opts = options(&scratch);
+            let handle = spawn_preflighted(&preflighted, &["spawn-grandchild".to_string()], &opts)
+                .expect("spawn the preflighted fixture");
+            let grandchild_pid: u32 = poll_until(Duration::from_secs(5), || {
+                handle.recent_lines().iter().find_map(|line| {
+                    line.strip_prefix("stdout: GRANDCHILD_PID=")
+                        .and_then(|pid| pid.trim().parse().ok())
+                })
+            });
+
+            let contained = handle.is_contained();
+            let warnings: Vec<_> = handle
+                .protection_warnings()
+                .iter()
+                .map(|w| w.protection())
+                .collect();
+            // Opened while both are alive (the fixture is parked on its grandchild), so the cleanup
+            // below reaches exactly these two processes even if a PID is reused afterwards.
+            let child = ProcessGuard::open(handle.pid());
+            let grandchild = ProcessGuard::open(grandchild_pid);
+            // Cleanup before asserting, so a failed assertion cannot leak either process: without a
+            // Job Object only the immediate child dies on `kill`, so the grandchild is ended through
+            // its own held handle.
+            handle.kill();
+            grandchild.terminate();
+            let child_gone = child.exited_within(Duration::from_secs(5));
+            let grandchild_gone = grandchild.exited_within(Duration::from_secs(5));
+            // Without a job the grandchild inherited the output pipe, so the log reader can still be
+            // finishing its last write for a moment after both processes are gone; `ScratchDir`'s
+            // single best-effort removal lost that race and left the directory behind. Retried here
+            // for a bounded time instead (a leftover directory is not worth failing the test over).
+            drop(handle);
+            let removal_started = Instant::now();
+            while std::fs::remove_dir_all(&scratch.0).is_err()
+                && scratch.0.exists()
+                && removal_started.elapsed() < Duration::from_secs(5)
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+
+            assert!(
+                child_gone && grandchild_gone,
+                "cleanup must end both processes"
+            );
+            assert!(
+                !contained,
+                "Preflighted::protections must reach spawn: the child was contained"
+            );
+            assert_eq!(
+                warnings,
+                vec![crate::protections::Protection::JobObjectContainment],
+                "exactly the one spawn-owned protection that was turned off must be recorded; the \
+                 redirect switch is already in the preflight record and must not appear twice"
+            );
+        }
+
+        #[test]
+        #[ignore = "spawns the print-env fixture with its TEMP reached through a junction"]
+        fn a_temp_dir_behind_a_junction_is_refused_on_and_handed_to_the_child_as_its_target_off() {
+            // `%LOCALAPPDATA%` moved to another drive with a junction is the real case. On, the
+            // spawn is refused before any child exists. Off, it proceeds, the child's TEMP is the
+            // junction's target (never the link), and the one switch is recorded exactly once.
+            let fixture_dir = print_env_fixture_dir();
+            let scratch = ScratchDir::new("redirect-temp");
+            let real = scratch.0.join("real");
+            std::fs::create_dir_all(real.join("temp")).expect("create the junction target tree");
+            let link = scratch.0.join("link");
+            cerebro_probe::backend::create_junction_for_tests(&link, &real)
+                .expect("creating a junction needs no special privilege");
+            let opts = SpawnOptions {
+                temp_dir: link.join("temp"),
+                ..options(&scratch)
+            };
+
+            let refused = spawn_unaudited(
+                &fixture_dir,
+                "cerebro-print-env.exe",
+                &[],
+                &opts,
+                crate::protections::Protections::default(),
+                &accept(),
+            );
+            let refused_role = match &refused {
+                Err(SpawnError::UnsafeDir { role, .. }) => Some(*role),
+                _ => None,
+            };
+
+            let protections = crate::protections::Protections {
+                refuse_redirected_paths: false,
+                ..crate::protections::Protections::default()
+            };
+            let handle = spawn_unaudited(
+                &fixture_dir,
+                "cerebro-print-env.exe",
+                &[],
+                &opts,
+                protections,
+                &accept(),
+            )
+            .expect("with the refusal off, a junctioned temp dir is followed");
+            let status = poll_until(Duration::from_secs(5), || {
+                handle.try_wait().expect("poll child exit status")
+            });
+            let lines = poll_until(Duration::from_secs(2), || {
+                let lines = handle.recent_lines();
+                lines
+                    .iter()
+                    .any(|l| l.starts_with("stdout: TEMP="))
+                    .then_some(lines)
+            });
+            let warnings: Vec<_> = handle
+                .protection_warnings()
+                .iter()
+                .map(|w| w.protection())
+                .collect();
+            drop(handle);
+            let _ = std::fs::remove_dir(&link);
+
+            assert_eq!(refused_role, Some("temp directory"), "{refused:?}");
+            assert!(status.success(), "{status:?}");
+            let expected = plain_form(
+                std::fs::canonicalize(real.join("temp")).expect("canonicalize the real temp dir"),
+            );
+            let temp_line = format!("stdout: TEMP={}", expected.display());
+            assert!(
+                lines.contains(&temp_line),
+                "want {temp_line:?} in {lines:?}"
+            );
+            assert!(
+                !lines
+                    .iter()
+                    .any(|l| l.starts_with("stdout: TEMP=") && l.contains("link")),
+                "the child must never be handed the link: {lines:?}"
+            );
+            assert_eq!(
+                warnings,
+                vec![crate::protections::Protection::RedirectedPathRefusal],
+                "spawn_unaudited has no preflight record, so it records the switch itself, once"
+            );
         }
 
         #[test]
@@ -1757,6 +2793,7 @@ mod tests {
                 "cerebro-print-env.exe",
                 &["spawn-grandchild".to_string()],
                 &opts,
+                crate::protections::Protections::default(),
                 &accept(),
             )
             .expect("spawn the print-env fixture in spawn-grandchild mode");
@@ -1767,16 +2804,18 @@ mod tests {
                         .and_then(|pid| pid.trim().parse().ok())
                 })
             });
+            let grandchild = ProcessGuard::open(grandchild_pid);
             assert!(
-                process_is_alive(grandchild_pid),
+                grandchild.is_alive(),
                 "grandchild pid {grandchild_pid} should be running before drop"
             );
 
             drop(handle);
 
-            poll_until(Duration::from_secs(2), || {
-                (!process_is_alive(grandchild_pid)).then_some(())
-            });
+            assert!(
+                grandchild.exited_within(Duration::from_secs(2)),
+                "the job must take the grandchild down with the handle"
+            );
         }
 
         #[test]
@@ -1790,15 +2829,12 @@ mod tests {
             let backend_dir = PathBuf::from(
                 "C:/Users/noahm/Projects/qwen-flash-next/llama.cpp-b10751",
             );
-            let model = PathBuf::from(
-                r"C:\Users\noahm\.lmstudio\models\skiesoffire\bastion-control\bastion-control-0.5b-f16.gguf",
-            );
+            let model = cerebro_probe::fixtures::tiny_gguf().unwrap_or_else(|e| panic!("{e}"));
             assert!(
                 backend_dir.join("llama-server.exe").is_file(),
                 "fixture backend not found at {}",
                 backend_dir.display()
             );
-            assert!(model.is_file(), "fixture model not found at {}", model.display());
 
             // Bind port 0 to get an OS-assigned free loopback port, then release it immediately —
             // there is an inherent, unavoidable TOCTOU gap between that release and llama-server
@@ -1824,6 +2860,7 @@ mod tests {
                     "--no-webui".to_string(),
                 ],
                 &opts,
+                crate::protections::Protections::default(),
                 &accept(),
             )
             .expect("spawn a real llama-server on a loopback port");
@@ -1861,11 +2898,12 @@ mod tests {
                 "ping.exe",
                 &["-t".to_string(), "127.0.0.1".to_string()],
                 &opts,
+                crate::protections::Protections::default(),
                 &accept(),
             )
             .expect("spawn a long-running ping.exe");
-            let pid = handle.pid();
-            assert!(process_is_alive(pid), "ping.exe should still be running");
+            let child = ProcessGuard::open(handle.pid());
+            assert!(child.is_alive(), "ping.exe should still be running");
 
             handle.kill();
             // The second call must be a no-op: no panic, and no effect beyond what the first call
@@ -1873,10 +2911,10 @@ mod tests {
             handle.kill();
 
             // `kill()` only closes the job handle; the kernel tears the tree down asynchronously
-            // afterward (see `kill`'s own doc comment), so `try_wait()` — like `process_is_alive`
-            // below — must be polled rather than asserted once immediately after `kill()` returns.
+            // afterward (see `kill`'s own doc comment), so `try_wait()` must be polled rather than
+            // asserted once immediately after `kill()` returns.
             // An earlier version of this test asserted `try_wait()` a single time right after
-            // polling `process_is_alive` to `false`, which raced the child's own handle becoming
+            // polling a by-PID liveness check to `false`, which raced the child's own handle becoming
             // signaled and failed intermittently even though nothing was actually broken.
             // The exit *status* a job-object kill produces is not part of this test's contract
             // (Windows reports it as a plain, successful-looking exit code for this termination
@@ -1884,7 +2922,7 @@ mod tests {
             // all, which `poll_until` returning at all already proves.
             poll_until(Duration::from_secs(2), || handle.try_wait().expect("try_wait after kill"));
             assert!(
-                !process_is_alive(pid),
+                child.exited_within(Duration::ZERO),
                 "the OS must also agree the process is gone once try_wait reports it"
             );
 

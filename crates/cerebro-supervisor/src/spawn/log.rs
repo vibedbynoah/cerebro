@@ -202,7 +202,7 @@ pub(super) struct RotatingLog {
     /// How long a failed rotation is left alone before being retried. Kept as a field rather than
     /// always reading [`ROTATE_RETRY_BACKOFF`] directly, so a test can inject a backoff short enough
     /// to observe the "retried on a timer, not every line" behavior without a multi-second sleep —
-    /// the same reason [`super::env::build_child_env`] takes an injected parent-environment iterator
+    /// the same reason [`cerebro_probe::child_env::build_child_env`] takes an injected parent-environment iterator
     /// instead of reading `std::env::vars_os()` directly.
     retry_backoff: Duration,
 }
@@ -687,16 +687,10 @@ mod tests {
         std::fs::create_dir(&target).expect("create junction target");
         let log_path = root.join("planted-log");
 
-        let script = format!(
-            "New-Item -ItemType Junction -Path '{}' -Target '{}' | Out-Null",
-            log_path.display(),
-            target.display()
-        );
-        let status = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .status()
-            .expect("run New-Item -ItemType Junction");
-        assert!(status.success(), "creating a junction needs no special privilege");
+        // Through the probe's own DeviceIoControl helper, not a script host: no quoting of a temp
+        // path into a command string, and no window.
+        cerebro_probe::backend::create_junction_for_tests(&log_path, &target)
+            .expect("creating a junction needs no special privilege");
 
         let err = match RotatingLog::open(log_path.clone(), 1024) {
             Ok(_) => panic!("a log path that is itself a reparse point must be refused"),
@@ -726,7 +720,7 @@ mod tests {
     /// later `append_line` then failing with "no open log handle") and silently dropped the very line
     /// that triggered it.
     ///
-    /// Denies `WriteData` (but not `AppendData`) on the log file via `icacls`, the shape of a genuine
+    /// Denies `WriteData` (but not `AppendData`) on the log file with an explicit DACL, the shape of a genuine
     /// append-only ACL: Rust's `.append(true)` requests `FILE_GENERIC_WRITE & !FILE_WRITE_DATA` on
     /// Windows, while `.write(true).truncate(true)` requests the full `FILE_GENERIC_WRITE` — so this
     /// makes the *truncating* open fail with access denied while the *append* reopen still succeeds,
@@ -746,16 +740,15 @@ mod tests {
         let mut log = RotatingLog::open_with_backoff(guard.0.clone(), 8, Duration::ZERO).expect("open log");
         log.append_line("aaaaaa").expect("append under the cap"); // 7 bytes written.
 
-        let user = std::env::var("USERNAME").expect("USERNAME must be set to run this test");
-        let deny = std::process::Command::new("icacls")
-            .args([
-                guard.0.to_str().expect("log path must be valid UTF-8 for icacls"),
-                "/deny",
-                &format!("{user}:(WD)"),
-            ])
-            .status()
-            .expect("run icacls to deny WriteData on the log file");
-        assert!(deny.success(), "icacls /deny must succeed to stage this test");
+        // Staged by SID through Win32 (never `icacls` by user name, which prints into every test
+        // run and can be ambiguous on a domain account): deny WriteData, allow everything else.
+        let me = cerebro_probe::backend::current_user_sid_for_tests()
+            .expect("the process token must be queryable");
+        cerebro_probe::backend::set_dacl_from_sddl_for_tests(
+            &guard.0,
+            &format!("D:(D;;WD;;;{me})(A;;FA;;;{me})"),
+        )
+        .expect("deny WriteData on the log file");
 
         // Comfortably past both the soft cap (8) and the hard cap (32): `.1` is still a blocking
         // directory, so rotation fails too, and the truncating open now fails on the denied ACE.
@@ -778,11 +771,8 @@ mod tests {
 
         // Clear both blocks and prove the log was not left permanently disabled: the very next line
         // must be appended without error, not rejected with "no open log handle".
-        let allow = std::process::Command::new("icacls")
-            .args([guard.0.to_str().expect("utf8 path"), "/remove:d", &user])
-            .status()
-            .expect("run icacls to clear the denial");
-        assert!(allow.success(), "icacls /remove:d must succeed to tear down this test");
+        cerebro_probe::backend::set_dacl_from_sddl_for_tests(&guard.0, &format!("D:(A;;FA;;;{me})"))
+            .expect("clear the denial");
         std::fs::remove_dir(&rotated).expect("clear the simulated rotation block");
 
         log.append_line("cccccc")

@@ -74,8 +74,9 @@ pub(crate) fn backoff_delay(policy: &RestartPolicy, attempt: u32) -> Duration {
 ///
 /// Timestamps are caller-supplied `Duration`s since an arbitrary reference point (the driver uses
 /// time since the supervisor started), not a wall clock read internally — the same "inject the
-/// impure input" discipline [`crate::preflight`] and [`crate::spawn::env`] already use for their own
-/// host state, and what lets this type's tests run without a real clock at all.
+/// impure input" discipline [`mod@crate::preflight`] and [`cerebro_probe::child_env::build_child_env`]
+/// already use for their own host state, and what lets this type's tests run without a
+/// real clock at all.
 #[derive(Debug, Default)]
 pub(crate) struct RestartWindow {
     history: VecDeque<Duration>,

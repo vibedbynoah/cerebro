@@ -28,6 +28,13 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
+# Preflight SHA-256s every backend .exe/.dll before each launch and restart (1.17 GB for the official
+# CUDA build). Unoptimized, sha2 made that 25-46 s per launch in a debug build; with this override a
+# debug build matches release (0.63 s warm page cache, 2.6 s first touch; measured 2026-09-24). Dev
+# builds only; release already builds everything at opt-level 3.
+[profile.dev.package.sha2]
+opt-level = 3
+
 # crates/cerebro-config is carried over but excluded until its duplicate DACL audit and spawn gate
 # are replaced by cerebro-probe / cerebro-supervisor (see docs/RESTART.md).
 

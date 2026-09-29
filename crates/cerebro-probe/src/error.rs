@@ -141,6 +141,27 @@ pub enum ProbeError {
         cause: String,
     },
 
+    /// A tool did not exit (and close its output) within the query deadline, so it was killed.
+    ///
+    /// A driver hang inside `--list-devices` would otherwise block the probe, and every caller
+    /// waiting on it, forever.
+    #[error("{tool} did not finish within {after:?} and was killed")]
+    ToolTimedOut {
+        /// Path of the tool.
+        tool: String,
+        /// The deadline it exceeded.
+        after: std::time::Duration,
+    },
+
+    /// The real Windows system directory could not be resolved from the kernel. Without it there
+    /// is no trustworthy value to build a child's `PATH`/`SystemRoot` on (see
+    /// [`crate::child_env`]), so nothing is spawned.
+    #[error("could not resolve the system directory: {cause}")]
+    SystemDirectoryUnavailable {
+        /// Why, including the Win32 error code.
+        cause: String,
+    },
+
     /// A tool ran and exited non-zero.
     #[error("{tool} exited with status {status}")]
     ToolFailed {
@@ -176,6 +197,17 @@ pub enum ProbeError {
         dir: String,
     },
 
+    /// The backend directory could not be resolved to its canonical on-disk path while the
+    /// folder-permission audit was switched off (see [`crate::backend::FolderAudit`]). Distinct from
+    /// [`ProbeError::UnauditableSecurityDescriptor`] because no audit was attempted.
+    #[error("could not resolve backend directory {dir}: {cause}")]
+    BackendDirUnresolvable {
+        /// Path that was given.
+        dir: String,
+        /// Why resolution failed.
+        cause: String,
+    },
+
     /// The backend directory could not be enumerated.
     #[error("backend directory {dir} could not be read: {cause}")]
     BackendDirUnreadable {
@@ -207,6 +239,17 @@ pub enum ProbeError {
         name: String,
     },
 
+    /// The driver cache directory given to [`crate::backend::probe_with_cache`] is not an absolute
+    /// path to an existing directory. Refused before any query runs: dropping the cache instead
+    /// would make every query pay the kernel compile again with no signal.
+    #[error("driver cache directory {dir} is unusable: {cause}")]
+    CacheDirUnusable {
+        /// The directory as given.
+        dir: String,
+        /// What is wrong with it.
+        cause: String,
+    },
+
     /// The named backend tool is not present in the backend directory.
     #[error("backend tool not found: {tool}")]
     BackendToolMissing {
@@ -214,10 +257,11 @@ pub enum ProbeError {
         tool: String,
     },
 
-    /// The tool name contained path components.
+    /// The tool name is not a bare `.exe` file name (see [`crate::backend::is_bare_exe_name`]).
     ///
-    /// The tool must be a bare file name resolved inside the backend directory. Accepting a path
-    /// would let a crafted configuration point the probe at a binary somewhere else entirely.
+    /// The tool must be a bare `.exe` name resolved inside the backend directory. Accepting a path
+    /// would let a crafted configuration point the probe at a binary somewhere else entirely, and a
+    /// `.bat`/`.cmd` name would be run through `cmd.exe`.
     #[error("backend tool name must be a bare file name inside the backend directory, got {tool:?}")]
     BackendToolEscapesDir {
         /// The offending value.
@@ -240,6 +284,61 @@ pub enum ProbeError {
         detail: String,
     },
 
+    /// The folder-permission audit refused `object` because it is not on a local fixed volume or RAM
+    /// disk: a UNC share, a mapped network drive, a removable or optical drive, a device-namespace
+    /// path, or a path that resolves to one of those. The audit's trusted SIDs (`SYSTEM`,
+    /// `Administrators`, ...) mean this machine's principals only when this machine issued the
+    /// descriptor being read, so it cannot vouch for such a path.
+    ///
+    /// Distinct from [`ProbeError::UnauditableSecurityDescriptor`] because it is a fact about where
+    /// the directory lives, not an I/O failure: retrying cannot change a volume's type, so a caller
+    /// with a restart loop (`cerebro-supervisor`'s lifecycle) can stop at once instead of re-running
+    /// a refusal that can never pass. Worded like that variant so the rendered audit verdict reads
+    /// the same either way.
+    #[error("could not audit {object}: {detail}")]
+    BackendDirNotLocalVolume {
+        /// The path that was refused, as the audit saw it.
+        object: String,
+        /// Which kind of non-local path it is.
+        detail: String,
+    },
+
+    /// The folder-permission audit found a reparse point (symbolic link, junction, mount point, or
+    /// a placeholder such as OneDrive's) on the already-resolved path to the backend directory, or
+    /// directly inside it. The audit examines only the real objects on the path, never a
+    /// redirect's target, so it fails closed.
+    ///
+    /// Distinct from [`ProbeError::UnauditableSecurityDescriptor`] because it is a fact about the
+    /// layout on disk, not an I/O failure: resolution already followed every junction it could, so
+    /// what remains (a volume mount folder, a cloud-files placeholder, a symlinked DLL) is there on
+    /// every retry. A caller with a restart loop (`cerebro-supervisor`'s lifecycle) stops at once
+    /// instead of re-hashing the backend to be refused the same way. Worded like that variant so the
+    /// rendered audit verdict reads the same either way.
+    #[error("could not audit {object}: {detail}")]
+    BackendPathHasReparsePoint {
+        /// The reparse point that was found.
+        object: String,
+        /// What it is and why the audit refuses it.
+        detail: String,
+    },
+
+    /// [`crate::backend::probe_with`] refused to run a backend query because this process is
+    /// elevated and [`crate::backend::ElevationRefusal::Enforce`] is set (the default). Nothing in
+    /// the inference path needs admin rights, and `--list-devices` loads every ggml DLL, so an
+    /// elevated probe would run backend code elevated. The user can turn this protection off.
+    #[error(
+        "refusing to run backend queries: this process is running elevated, and nothing in the \n         inference path needs admin rights (turn elevation refusal off in settings to allow it)"
+    )]
+    RunningElevated,
+
+    /// [`crate::backend::probe_with`] could not determine whether this process is elevated, so it
+    /// refused rather than assume "not elevated" (fail closed, like an unauditable DACL).
+    #[error("could not determine whether this process is elevated: {cause}")]
+    ElevationCheckFailed {
+        /// Why the token query failed.
+        cause: String,
+    },
+
     /// [`crate::backend::probe`] refused to spawn anything from the backend directory because
     /// [`crate::backend::audit_dacl`] did not report [`crate::backend::DaclAudit::OwnerOnly`].
     ///
@@ -251,7 +350,10 @@ pub enum ProbeError {
     /// — or a UI built on this crate — can recover every untrusted principal, path, and right
     /// without re-parsing text written for a human. `UnsafeDacl` has no variant meaning "safe to
     /// spawn", so this field can never hold [`crate::backend::DaclAudit::OwnerOnly`].
-    #[error("refusing to spawn from {dir}: {audit}")]
+    #[error(
+        "refusing to spawn from {dir}: {audit} (turn the folder-permission audit off in settings \
+         to allow this)"
+    )]
     BackendDirUnsafe {
         /// The backend directory that failed the audit.
         dir: String,

@@ -10,8 +10,8 @@
 //! freed exactly once on every path, including the early error returns.
 
 use std::collections::BTreeMap;
-use std::ffi::c_void;
-use std::os::windows::ffi::OsStrExt;
+use std::ffi::{c_void, OsString};
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::ptr::{null, null_mut};
@@ -99,6 +99,11 @@ const DRIVE_FIXED: u32 = 3;
 /// RAM disk is opaque to the network and its DACL is issued by this machine's own kernel, so
 /// [`Trust`]'s well-known SIDs mean what it assumes they mean.
 const DRIVE_RAMDISK: u32 = 6;
+/// `GetDriveTypeW`'s "cannot determine the drive type" return value (`winbase.h`).
+const DRIVE_UNKNOWN: u32 = 0;
+/// `GetDriveTypeW`'s "the root path is invalid" return value (`winbase.h`), e.g. a drive letter with
+/// no volume mounted behind it.
+const DRIVE_NO_ROOT_DIR: u32 = 1;
 
 /// Which kind of object this audit itself is the subject of — as opposed to
 /// [`AuditedObject::Ancestor`], which is never passed to [`untrusted_writes`] and has its own
@@ -219,13 +224,51 @@ struct RawGrant {
     via: GrantVia,
 }
 
-/// Run the audit.
-pub(super) fn audit(dir: &Path) -> Result<Vec<WritableGrant>, ProbeError> {
+/// Resolve `dir` to the canonical, absolute on-disk path a spawn from it would actually use — the
+/// DOS-form target of [`canonical_path`] — after confirming it names a local fixed volume or RAM
+/// disk.
+///
+/// Called once by [`super::probe_with`] (and, through [`super::canonical_backend_dir`], by
+/// `cerebro-supervisor`'s preflight), which then hash, audit and spawn from that one result: the
+/// audit gets it through [`audit_resolved`], which never resolves again, so all three agree on the
+/// exact same physical directory. [`audit`] also calls this, for callers that only want a verdict.
+/// A junction or `subst` alias
+/// anywhere in `dir`'s path, its final component included, is transparently followed by the OS on
+/// every filesystem call regardless of which spelling is used, so hashing or spawning against the as-given spelling would
+/// already reach the same bytes — but resolving it explicitly, once, here, keeps that agreement a
+/// checked invariant rather than a coincidence of OS path resolution, and makes the identity Cerebro
+/// records (and keys every measurement on) the canonical path rather than whichever alias happened
+/// to be passed in.
+///
+/// # One policy for every reparse point
+///
+/// A junction that *is* `dir` (its final component, as with scoop's `apps\<name>\current`) is
+/// followed exactly like an ancestor junction: the risk is the same in both cases (whoever can
+/// repoint the junction chooses the target), and in both cases the target is what gets fully
+/// audited, hashed and spawned from. Callers record the requested and the resolved path side by side
+/// so a changed resolution between launches is visible.
+pub(super) fn canonicalize(dir: &Path) -> Result<PathBuf, ProbeError> {
+    resolve(dir, FinalComponent::Follow)
+}
+
+/// Whether [`canonical_path`] follows a reparse point on the path's final component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinalComponent {
+    /// Follow it: resolve to the target. What [`canonicalize`] does.
+    Follow,
+    /// Open the final component itself (`FILE_FLAG_OPEN_REPARSE_POINT`). What
+    /// [`audit_resolved`]'s re-check does, so a junction swapped in at an already-resolved path's
+    /// own name is seen as a reparse point rather than silently resolved to its new target.
+    Open,
+}
+
+/// [`canonicalize`], with the final-component policy chosen by the caller.
+fn resolve(dir: &Path, last: FinalComponent) -> Result<PathBuf, ProbeError> {
     // Made absolute exactly once, at the very top: every Win32 call below, the directory
     // enumeration, and every reported grant path are derived from this one `PathBuf`. Two spellings
     // of the caller's `dir` (a relative path plus a `set_current_dir` race, or a literal `..`) would
     // otherwise let the security descriptor read and the reported grant describe different things.
-    let dir = std::path::absolute(dir).map_err(|e| {
+    let abs = std::path::absolute(dir).map_err(|e| {
         unauditable(
             &dir.display().to_string(),
             format!("could not make path absolute: {e}"),
@@ -235,16 +278,78 @@ pub(super) fn audit(dir: &Path) -> Result<Vec<WritableGrant>, ProbeError> {
     // Local-fixed-volume precondition, before a single security descriptor is read. Every trust
     // decision below assumes `SYSTEM`, `Administrators`, and the rest of `Trust`'s fixed set mean
     // *this machine's* principals — true only when this machine issued the descriptor.
-    require_local_volume(&dir)?;
+    require_local_volume(&abs)?;
 
     // Resolve `dir`'s DOS-form canonical path before anything else touches it: a `subst` mapping or
     // a `DefineDosDevice` alias is not a reparse point and would otherwise pass `check_path_chain`
     // untouched while every ancestor check below walked the alias's own (unrelated) components
     // instead of the real ones. Every remaining step — the ancestor chain, the directory's own
     // audit, every enumerated file, and every reported grant path — uses this resolved value.
-    let dir = canonical_path(&dir)?;
-    let dir: &Path = &dir;
+    let resolved = canonical_path(&abs, last)?;
 
+    // With `FinalComponent::Open`, a `dir` that is itself a reparse point resolves to its own path:
+    // that is the re-check in `audit_resolved` finding a junction where a real directory was
+    // resolved moments ago, so fail closed. With `FinalComponent::Follow` the result is the final
+    // target and this can only fire on a swap racing the open; `check_path_chain` still rejects a
+    // reparse point planted anywhere on the resolved chain later.
+    let meta =
+        std::fs::symlink_metadata(&resolved).map_err(|e| ProbeError::BackendDirUnreadable {
+            dir: resolved.display().to_string(),
+            cause: e.to_string(),
+        })?;
+    if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(unauditable(
+            &resolved.display().to_string(),
+            "is a reparse point (symbolic link, junction, or similar) where a real directory was \
+             resolved; the path changed after it was resolved, so the audited and spawned \
+             directories could differ",
+        ));
+    }
+    Ok(resolved)
+}
+
+/// Resolve `dir` with [`canonicalize`], then audit the result. For callers that only report the
+/// verdict; a caller that goes on to hash or spawn must resolve once itself and use
+/// [`audit_resolved`] on that exact value.
+pub(super) fn audit(dir: &Path) -> Result<Vec<WritableGrant>, ProbeError> {
+    audit_canonical(&canonicalize(dir)?)
+}
+
+/// Audit a path the caller already got from [`canonicalize`] and will hash and spawn from.
+///
+/// Never retargets the audit: `resolved` is re-resolved only to prove it still resolves to exactly
+/// itself, and the audit then walks `resolved`'s own components. If a component was swapped for a
+/// junction after the caller resolved (rename the real directory away, plant a junction at its
+/// name), re-resolving yields a different path and this fails closed; had the audit simply resolved
+/// again and audited *that*, it would have vouched for the junction's target while the caller
+/// spawned from whatever the junction points at by then. A swap landing after this equality check
+/// is caught by [`check_path_chain`], which rejects any reparse point on `resolved`'s own chain.
+/// Once the chain has passed the ancestor walk, no untrusted principal can alter it.
+///
+/// The comparison is exact on the OS string, deliberately: both sides come from
+/// `GetFinalPathNameByHandleW`, so any difference at all (case, an 8.3 alias, a `..`) means the path
+/// is not the canonical one this audit is meant to vouch for.
+pub(super) fn audit_resolved(resolved: &Path) -> Result<Vec<WritableGrant>, ProbeError> {
+    // `FinalComponent::Open`, not `canonicalize`'s `Follow`: a junction planted at `resolved`'s own
+    // name must be seen as a reparse point, not quietly resolved (a junction pointing straight back
+    // at a same-named directory would otherwise compare equal).
+    let again = resolve(resolved, FinalComponent::Open)?;
+    if again.as_os_str() != resolved.as_os_str() {
+        return Err(unauditable(
+            &resolved.display().to_string(),
+            format!(
+                "now resolves to {}; the path changed after it was resolved (or was never the \
+                 canonical path), so the audited and spawned directories could differ",
+                again.display()
+            ),
+        ));
+    }
+    audit_canonical(resolved)
+}
+
+/// The audit proper, on a path that is already canonical. Never resolves `dir` again; see
+/// [`audit_resolved`] for why.
+fn audit_canonical(dir: &Path) -> Result<Vec<WritableGrant>, ProbeError> {
     let current_user = current_user_sid()?;
     // `object_security(dir)` before `check_path_chain`, deliberately: it is what makes a genuinely
     // missing `dir` fail with the plain `GetNamedSecurityInfoW` "not found" error this crate has
@@ -321,7 +426,7 @@ pub(super) fn audit(dir: &Path) -> Result<Vec<WritableGrant>, ProbeError> {
         })?;
         match classify_entry(link_meta.file_attributes(), link_meta.is_file()) {
             EntryKind::ReparsePoint => {
-                return Err(unauditable(
+                return Err(redirected(
                     &path.display().to_string(),
                     "is a reparse point (symbolic link, junction, or similar); its target's \
                      containing directory is not audited by this crate, so resolving it here \
@@ -429,7 +534,7 @@ fn check_path_chain(dir: &Path) -> Result<Vec<PathBuf>, ProbeError> {
             }
         })?;
         if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Err(unauditable(
+            return Err(redirected(
                 &component.display().to_string(),
                 "is a reparse point (symbolic link, junction, or similar); every component of \
                  the path used to reach the backend directory must be the real object, not a \
@@ -474,7 +579,7 @@ fn has_local_disk_prefix(abs: &Path) -> bool {
 fn require_local_volume(abs: &Path) -> Result<(), ProbeError> {
     let label = abs.display().to_string();
     if !has_local_disk_prefix(abs) {
-        return Err(unauditable(
+        return Err(not_local(
             &label,
             "is not a local disk path (a network share, device-namespace path, or other \
              non-drive-letter path); its DACL's well-known SIDs are not necessarily this \
@@ -496,21 +601,27 @@ fn require_local_volume(abs: &Path) -> Result<(), ProbeError> {
     // SAFETY: the successful call above left `root` NUL-terminated.
     let kind = unsafe { GetDriveTypeW(root.as_ptr()) };
     if kind != DRIVE_FIXED && kind != DRIVE_RAMDISK {
-        // Covers `DRIVE_REMOTE` (a mapped network drive), `DRIVE_UNKNOWN`, and `DRIVE_NO_ROOT_DIR`
-        // alike: none of them is a volume this machine is authoritative for.
-        return Err(unauditable(
-            &label,
-            format!(
-                "is on a drive of type {kind} (GetDriveTypeW), not a local fixed volume or RAM disk"
-            ),
-        ));
+        // None of these is a volume this machine is authoritative for. `DRIVE_UNKNOWN` and
+        // `DRIVE_NO_ROOT_DIR` (a drive letter with nothing mounted behind it right now) stay the
+        // generic, possibly-transient audit failure: the drive may simply not be mounted yet.
+        // `DRIVE_REMOTE` (a mapped network drive), `DRIVE_REMOVABLE` and `DRIVE_CDROM` are a fixed
+        // fact about the volume, so they are reported as the distinct, permanent
+        // `BackendDirNotLocalVolume`.
+        let detail = format!(
+            "is on a drive of type {kind} (GetDriveTypeW), not a local fixed volume or RAM disk"
+        );
+        return Err(if kind == DRIVE_UNKNOWN || kind == DRIVE_NO_ROOT_DIR {
+            unauditable(&label, detail)
+        } else {
+            not_local(&label, detail)
+        });
     }
     Ok(())
 }
 
 /// Resolve `abs` to the real path Windows would use to reach the same file system object: the
-/// DOS-form target of `GetFinalPathNameByHandleW`, opened without following any reparse point on
-/// `abs` itself.
+/// DOS-form target of `GetFinalPathNameByHandleW`. Every ancestor reparse point is followed; one on
+/// `abs`'s own final component is followed only for [`FinalComponent::Follow`].
 ///
 /// A `subst` mapping, a `DefineDosDevice` alias, or an 8.3 short-name spelling can all make a
 /// path's own syntax name a different location than the one it actually resolves to — none of
@@ -519,12 +630,32 @@ fn require_local_volume(abs: &Path) -> Result<(), ProbeError> {
 /// nonexistent) components instead of the real ones. Resolving once, here, and using the result for
 /// every remaining step closes that gap without special-casing any one alias mechanism.
 ///
-/// `FILE_FLAG_OPEN_REPARSE_POINT` is passed so this open cannot itself silently resolve a reparse
-/// point on `abs`; [`check_path_chain`], called afterward with this function's result, is what
-/// rejects that case explicitly.
-fn canonical_path(abs: &Path) -> Result<PathBuf, ProbeError> {
+/// For [`FinalComponent::Open`], `FILE_FLAG_OPEN_REPARSE_POINT` is passed so this open cannot itself
+/// silently resolve a reparse point on `abs`; [`resolve`] then rejects that case explicitly, and
+/// [`check_path_chain`] rejects any reparse point left on the resolved chain.
+///
+/// The resolved value decides where every later step reads from and spawns from — the DACL audit,
+/// the integrity hashes, and the eventual child process — so it is never allowed to become a
+/// *different kind* of path than the one the caller believed it was auditing. Two things this
+/// function is therefore careful about, both load-bearing:
+///
+/// - The UTF-16 buffer `GetFinalPathNameByHandleW` fills is never converted through `String`. An
+///   unpaired UTF-16 surrogate is legal in an NTFS file name (though rare in practice) and
+///   `String::from_utf16_lossy` would silently replace it with U+FFFD, turning this into a *different*
+///   path than the one actually being audited or spawned from. [`OsString::from_wide`] preserves it.
+/// - Only a `\\?\C:\...`-style verbatim disk path is accepted; a verbatim UNC path
+///   (`\\?\UNC\srv\share\...`), a volume-GUID path, or a device-namespace path all fail this function
+///   closed instead. An earlier version stripped the `\\?\` prefix by blind string matching, which
+///   turned `\\?\UNC\srv\share\backend` into the *relative* path `UNC\srv\share\backend` — silently
+///   handing every later caller a path that would resolve against whatever directory happened to be
+///   current at the time, not the intended network location.
+fn canonical_path(abs: &Path, last: FinalComponent) -> Result<PathBuf, ProbeError> {
     let label = abs.display().to_string();
     let wide: Vec<u16> = abs.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let flags = match last {
+        FinalComponent::Follow => FILE_FLAG_BACKUP_SEMANTICS,
+        FinalComponent::Open => FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+    };
     // SAFETY: `wide` is NUL-terminated and outlives the call. Desired access 0 only reads metadata;
     // `FILE_FLAG_BACKUP_SEMANTICS` is required to open a directory at all.
     let handle = unsafe {
@@ -534,7 +665,7 @@ fn canonical_path(abs: &Path) -> Result<PathBuf, ProbeError> {
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             null(),
             OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            flags,
             null_mut(),
         )
     };
@@ -562,10 +693,116 @@ fn canonical_path(abs: &Path) -> Result<PathBuf, ProbeError> {
             "resolved path is longer than this audit can canonicalize",
         ));
     }
-    // SAFETY: the call above reported exactly `n` valid u16s written into `buf`.
-    let resolved = String::from_utf16_lossy(&buf[..n as usize]);
-    let resolved = resolved.strip_prefix(r"\\?\").unwrap_or(&resolved);
-    Ok(PathBuf::from(resolved))
+    // Never converted through `String` — see this function's own docs. `buf.get(..n)` rather than
+    // indexing: `n < cap == buf.len()` was just checked above, but bounds-checking the slice rather
+    // than trusting the Win32 return value costs nothing and cannot panic if it were ever wrong.
+    let wide_resolved = buf.get(..n as usize).ok_or_else(|| {
+        unauditable(
+            &label,
+            "GetFinalPathNameByHandleW reported an out-of-range length",
+        )
+    })?;
+    let resolved = OsString::from_wide(wide_resolved);
+    let disk_path = match simplify_verbatim(Path::new(&resolved)) {
+        Some(SimplifiedPrefix::Disk(p)) => p,
+        _ => {
+            return Err(not_local(
+                &label,
+                "resolves to a non-drive-letter path (a UNC share, volume-GUID path, or device \
+                 path); this audit only vouches for a local drive-letter path",
+            ));
+        }
+    };
+    // `require_local_volume` already ran on `abs` in `canonicalize`, on the caller's own spelling —
+    // re-proven here, on the path this function is actually about to hand back, because a reparse
+    // point can make the two disagree (see this function's own docs and `canonicalize`'s).
+    require_local_volume(&disk_path)?;
+    Ok(disk_path)
+}
+
+/// A verbatim-prefixed absolute Windows path, reduced to its plain DOS-form equivalent —
+/// distinguishing a local drive-letter path from a UNC share, since callers trust the two very
+/// differently (see [`canonical_path`] and [`plain_canonicalize`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SimplifiedPrefix {
+    /// `C:\...`, from a [`Prefix::Disk`] or [`Prefix::VerbatimDisk`] prefix.
+    Disk(PathBuf),
+    /// `\\server\share\...`, from a [`Prefix::UNC`] or [`Prefix::VerbatimUNC`] prefix.
+    Unc(PathBuf),
+}
+
+/// Reduce `path`'s prefix component to its plain DOS-form equivalent, without ever converting
+/// through `String` — so an unpaired UTF-16 surrogate anywhere in `path`, legal on NTFS, survives
+/// unchanged (see [`canonical_path`]'s own docs for why that matters). Returns `None` for a prefix
+/// with no plain-form equivalent at all: a volume-GUID path (`\\?\Volume{...}\...`) or a `\\.\`
+/// device-namespace path.
+///
+/// Built on [`Path::components`] rather than a hand-rolled string search: that is the same parser
+/// the standard library itself uses to interpret a Windows path prefix (it operates on the path's
+/// `OsStr` directly, never on a lossily-converted `str`), so this only has to *reassemble* the pieces
+/// it reports, never re-derive which prefix shape they came from.
+fn simplify_verbatim(path: &Path) -> Option<SimplifiedPrefix> {
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return None;
+    };
+    match prefix.kind() {
+        Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => {
+            // A resolved, absolute drive-letter path always carries a root component right after its
+            // prefix (`C:foo`, with no root, is a different, drive-relative path shape that neither
+            // `GetFinalPathNameByHandleW` nor `std::fs::canonicalize` ever produces) — checked with a
+            // `match`, not assumed, so a surprising input fails this function rather than silently
+            // building a path that looks rooted but is not.
+            if !matches!(components.next(), Some(Component::RootDir)) {
+                return None;
+            }
+            let mut rebuilt = PathBuf::from(format!("{}:\\", drive as char));
+            for c in components {
+                rebuilt.push(c.as_os_str());
+            }
+            Some(SimplifiedPrefix::Disk(rebuilt))
+        }
+        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+            // A UNC prefix has an implicit root (see `std::path::Prefix::has_implicit_root`): no
+            // separate `RootDir` component follows it, unlike the disk-letter case above.
+            let mut rebuilt = PathBuf::from(r"\\");
+            rebuilt.push(server);
+            rebuilt.push(share);
+            for c in components {
+                rebuilt.push(c.as_os_str());
+            }
+            Some(SimplifiedPrefix::Unc(rebuilt))
+        }
+        _ => None,
+    }
+}
+
+/// Resolve `dir` to its canonical on-disk path, following every reparse point (in `dir` itself and
+/// every ancestor) exactly as [`canonicalize`] does, but applying none of that function's trust
+/// preconditions: no local-fixed-volume requirement, and a UNC result is kept rather than refused.
+///
+/// Used only when the caller has explicitly turned the folder-permission audit off — see
+/// [`crate::backend::FolderAudit::SkippedByUserSetting`] and
+/// `cerebro_supervisor::preflight::DaclAuditor::resolve_unaudited` — since without that audit
+/// running, there is no [`Trust`] set whose well-known SIDs a non-local volume's DACL would even
+/// mean anything against. Still real path resolution, not a bypass of it: the result is still the
+/// literal, absolute, on-disk path a spawn from `dir` would use, with every ancestor reparse point
+/// followed, exactly as `canonicalize` behaves for the shapes it accepts.
+pub(super) fn plain_canonicalize(dir: &Path) -> Result<PathBuf, ProbeError> {
+    // Not `unauditable`: no audit runs on this path, so its "could not audit" wording would mislead.
+    let unresolvable = |cause: String| ProbeError::BackendDirUnresolvable {
+        dir: dir.display().to_string(),
+        cause,
+    };
+    let canonical = std::fs::canonicalize(dir).map_err(|e| unresolvable(e.to_string()))?;
+    match simplify_verbatim(&canonical) {
+        Some(SimplifiedPrefix::Disk(p)) => Ok(p),
+        Some(SimplifiedPrefix::Unc(p)) => Ok(p),
+        None => Err(unresolvable(format!(
+            "{} has no plain DOS-form equivalent (a volume-GUID or device path)",
+            canonical.display()
+        ))),
+    }
 }
 
 /// Every grant of `mask` on one object's own security descriptor to a principal outside `trust`,
@@ -846,6 +1083,24 @@ fn unauditable(object: &str, detail: impl Into<String>) -> ProbeError {
     }
 }
 
+/// A reparse point on the resolved chain or directly inside the audited directory: a fixed fact
+/// about the layout (a volume mount folder, a OneDrive or dedup placeholder, an AppExecLink, a
+/// symlinked DLL), reported distinctly from an audit that could not complete so a caller with a
+/// restart loop can stop at once. See [`ProbeError::BackendPathHasReparsePoint`].
+fn redirected(object: &str, detail: impl Into<String>) -> ProbeError {
+    ProbeError::BackendPathHasReparsePoint {
+        object: object.to_string(),
+        detail: detail.into(),
+    }
+}
+
+fn not_local(object: &str, detail: impl Into<String>) -> ProbeError {
+    ProbeError::BackendDirNotLocalVolume {
+        object: object.to_string(),
+        detail: detail.into(),
+    }
+}
+
 /// Attach `object` to a failure that does not otherwise name what it was examining — a bare
 /// [`ProbeError::Win32`], in every call site that uses this.
 ///
@@ -904,7 +1159,7 @@ fn object_security(path: &Path) -> Result<ObjectSecurity, ProbeError> {
 }
 
 /// Build a security descriptor from SDDL, for tests that must not depend on any file's ACL.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn sddl_descriptor(sddl: &str) -> Result<LocalMemory, ProbeError> {
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -938,7 +1193,7 @@ fn sddl_descriptor(sddl: &str) -> Result<LocalMemory, ProbeError> {
 /// without it, `SetNamedSecurityInfoW` keeps every existing inherited ACE and only adds `sddl`'s
 /// entries as new explicit ones, which under an inherited ACE this development machine's own
 /// `%TEMP%` carries would leave old grants in place underneath a supposedly clean baseline.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn set_dacl_from_sddl(path: &Path, sddl: &str) -> Result<(), ProbeError> {
     use windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW;
     use windows_sys::Win32::Security::PROTECTED_DACL_SECURITY_INFORMATION;
@@ -985,24 +1240,35 @@ pub(super) fn set_dacl_from_sddl(path: &Path, sddl: &str) -> Result<(), ProbeErr
 /// unlike a symbolic link — needs no privilege and no Developer Mode to create, which is exactly why
 /// it is the reparse type an unprivileged attacker can actually plant, and why the path-pinning
 /// audit has to be tested against a real one rather than only a symlink that may not be creatable at
-/// all on the machine running the test.
-#[cfg(test)]
+/// all on the machine running the test. Also compiled under the `test-support` feature, for
+/// [`super::create_junction_for_tests`].
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn create_junction(link: &Path, target: &Path) -> Result<(), ProbeError> {
     use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
     use windows_sys::Win32::System::SystemServices::IO_REPARSE_TAG_MOUNT_POINT;
     use windows_sys::Win32::System::IO::DeviceIoControl;
 
     let label = link.display().to_string();
-    std::fs::create_dir(link)
-        .map_err(|e| unauditable(&label, format!("could not create the link's own directory: {e}")))?;
 
+    // Everything that can fail before the link's directory exists is computed first, so those
+    // failures leave nothing behind.
+    //
     // The substitute name inside a reparse point must be an NT path (`\??\C:\...`), not the Win32
     // path this function otherwise deals in.
     let target_abs = std::path::absolute(target)
         .map_err(|e| unauditable(&label, format!("could not make junction target absolute: {e}")))?;
     let sub: Vec<u16> = format!(r"\??\{}", target_abs.display()).encode_utf16().collect();
-    let sub_bytes = u16::try_from(sub.len() * 2)
-        .map_err(|_| unauditable(&label, "junction target path is too long"))?;
+    // Every length field is a `u16` byte count, and `ReparseDataLength` adds 12 more bytes to the
+    // substitute name's: checked, so a target near the 32 KiB path limit is a typed error, never an
+    // arithmetic overflow (a panic in a debug build).
+    let too_long = || unauditable(&label, "junction target path is too long");
+    let sub_bytes = sub
+        .len()
+        .checked_mul(2)
+        .and_then(|n| u16::try_from(n).ok())
+        .ok_or_else(too_long)?;
+    let data_len = sub_bytes.checked_add(12).ok_or_else(too_long)?;
+    let print_off = sub_bytes.checked_add(2).ok_or_else(too_long)?;
 
     // A minimal MOUNT_POINT_REPARSE_BUFFER: a substitute name, a NUL terminator pair, and an empty
     // print name (offset past the substitute name and terminator, length zero — Explorer never sees
@@ -1010,9 +1276,9 @@ pub(super) fn create_junction(link: &Path, target: &Path) -> Result<(), ProbeErr
     // UTF-16 code units, and `ReparseDataLength` excludes the 8-byte `REPARSE_DATA_BUFFER` header.
     let mut buf = Vec::<u8>::new();
     buf.extend_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
-    buf.extend_from_slice(&(sub_bytes + 12).to_le_bytes()); // ReparseDataLength
+    buf.extend_from_slice(&data_len.to_le_bytes()); // ReparseDataLength
     buf.extend_from_slice(&0u16.to_le_bytes()); // Reserved
-    for field in [0u16, sub_bytes, sub_bytes + 2, 0u16] {
+    for field in [0u16, sub_bytes, print_off, 0u16] {
         // SubstituteNameOffset, SubstituteNameLength, PrintNameOffset, PrintNameLength.
         buf.extend_from_slice(&field.to_le_bytes());
     }
@@ -1020,6 +1286,21 @@ pub(super) fn create_junction(link: &Path, target: &Path) -> Result<(), ProbeErr
         buf.extend_from_slice(&unit.to_le_bytes());
     }
     buf.extend_from_slice(&[0, 0, 0, 0]); // Substitute- and print-name NUL terminators.
+    let len =
+        u32::try_from(buf.len()).map_err(|_| unauditable(&label, "reparse buffer too long"))?;
+
+    std::fs::create_dir(link).map_err(|e| {
+        unauditable(
+            &label,
+            format!("could not create the link's own directory: {e}"),
+        )
+    })?;
+    // From here on a failure removes the empty directory just created, so a failed call leaves
+    // nothing behind. The Win32 error is captured before `remove_dir` can overwrite it.
+    let fail = |err: ProbeError| {
+        let _ = std::fs::remove_dir(link);
+        err
+    };
 
     let wide_link: Vec<u16> = link.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
     // SAFETY: `wide_link` is NUL-terminated and outlives the call. `FILE_FLAG_OPEN_REPARSE_POINT |
@@ -1037,12 +1318,11 @@ pub(super) fn create_junction(link: &Path, target: &Path) -> Result<(), ProbeErr
         )
     };
     if handle == INVALID_HANDLE_VALUE {
-        return Err(last_error("CreateFileW"));
+        return Err(fail(last_error("CreateFileW")));
     }
     let handle = OwnedHandle(handle);
 
     let mut returned: u32 = 0;
-    let len = u32::try_from(buf.len()).map_err(|_| unauditable(&label, "reparse buffer too long"))?;
     // SAFETY: `handle` was just opened with the flags this FSCTL requires; `buf` is a valid,
     // initialized input buffer of `len` bytes that outlives the call; no output buffer is requested,
     // so the null/0 output arguments are exactly what the API documents as acceptable.
@@ -1059,7 +1339,10 @@ pub(super) fn create_junction(link: &Path, target: &Path) -> Result<(), ProbeErr
         )
     };
     if ok == 0 {
-        return Err(last_error("DeviceIoControl(FSCTL_SET_REPARSE_POINT)"));
+        let err = last_error("DeviceIoControl(FSCTL_SET_REPARSE_POINT)");
+        // The handle must be closed before the directory can be removed.
+        drop(handle);
+        return Err(fail(err));
     }
     Ok(())
 }
@@ -1222,8 +1505,9 @@ fn current_user_sid() -> Result<String, ProbeError> {
 /// Exposes [`current_user_sid`] to `backend`'s on-disk test module, which needs the real value to
 /// pin a baseline or restoration ACL to an account that can still list, read, and delete what it
 /// creates — a baseline pinned to `SYSTEM`/`Administrators` only would leave a non-elevated test
-/// runner with no access to its own temp directory the moment it applied it.
-#[cfg(test)]
+/// runner with no access to its own temp directory the moment it applied it. Also compiled under
+/// the `test-support` feature, for [`super::current_user_sid_for_tests`].
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn test_current_user_sid() -> Result<String, ProbeError> {
     current_user_sid()
 }
@@ -1316,6 +1600,109 @@ mod tests {
 
     fn findings_masked(sddl: &str, mask: u32) -> Vec<RawGrant> {
         ancestor_grants(&security(sddl), &trust(), mask)
+    }
+
+    // `simplify_verbatim` is pure — no disk or Win32 access — so these run on every platform this
+    // crate's tests do, unlike the rest of this module's disk-backed tests.
+
+    #[test]
+    fn verbatim_disk_prefix_becomes_plain_drive_letter_form() {
+        let got = simplify_verbatim(Path::new(r"\\?\C:\backend\bin"));
+        assert_eq!(
+            got,
+            Some(SimplifiedPrefix::Disk(PathBuf::from(r"C:\backend\bin")))
+        );
+    }
+
+    #[test]
+    fn plain_disk_prefix_is_already_accepted() {
+        // `GetFinalPathNameByHandleW` always returns the verbatim form, but this function must not
+        // *require* it — a caller-supplied path (e.g. into `plain_canonicalize`) may already be plain.
+        let got = simplify_verbatim(Path::new(r"C:\backend\bin"));
+        assert_eq!(
+            got,
+            Some(SimplifiedPrefix::Disk(PathBuf::from(r"C:\backend\bin")))
+        );
+    }
+
+    #[test]
+    fn verbatim_unc_becomes_plain_unc_form_but_is_a_distinct_variant_from_disk() {
+        let got = simplify_verbatim(Path::new(r"\\?\UNC\srv\share\backend"));
+        assert_eq!(
+            got,
+            Some(SimplifiedPrefix::Unc(PathBuf::from(r"\\srv\share\backend")))
+        );
+    }
+
+    #[test]
+    fn plain_unc_is_already_accepted() {
+        let got = simplify_verbatim(Path::new(r"\\srv\share\backend"));
+        assert_eq!(
+            got,
+            Some(SimplifiedPrefix::Unc(PathBuf::from(r"\\srv\share\backend")))
+        );
+    }
+
+    #[test]
+    fn volume_guid_and_device_paths_have_no_plain_form() {
+        assert_eq!(
+            simplify_verbatim(Path::new(
+                r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\backend"
+            )),
+            None
+        );
+        assert_eq!(
+            simplify_verbatim(Path::new(r"\\?\GLOBALROOT\Device\Backend")),
+            None
+        );
+    }
+
+    #[test]
+    fn canonical_path_refuses_a_verbatim_unc_resolution_instead_of_turning_it_relative() {
+        // The exact regression this function exists to close: an earlier version stripped `\\?\` by
+        // blind string matching, which turned `\\?\UNC\srv\share\backend` into the *relative* path
+        // `UNC\srv\share\backend` — a spelling that would resolve against whatever directory happened
+        // to be current, not the network location it actually named. `canonical_path` itself cannot
+        // be called without a real, already-open Win32 handle, so this exercises the same
+        // `simplify_verbatim` decision that function's UNC branch depends on, and additionally proves
+        // the wrong "just strip the prefix" fix is not what is implemented here.
+        let naive_strip = r"\\?\UNC\srv\share\backend"
+            .strip_prefix(r"\\?\")
+            .expect("test input carries the verbatim prefix");
+        assert!(
+            !Path::new(naive_strip).is_absolute(),
+            "sanity check: blindly stripping `\\\\?\\` from a verbatim UNC path really does produce \
+             a relative path, which is the defect this test guards against"
+        );
+        assert!(
+            matches!(
+                simplify_verbatim(Path::new(r"\\?\UNC\srv\share\backend")),
+                Some(SimplifiedPrefix::Unc(_))
+            ),
+            "a verbatim UNC path must resolve to an absolute UNC form, or (for the audited path in \
+             canonical_path, which only accepts SimplifiedPrefix::Disk) be refused outright — never \
+             silently become relative"
+        );
+    }
+
+    #[test]
+    fn simplify_verbatim_preserves_an_unpaired_utf16_surrogate() {
+        // Legal in an NTFS file name, and exactly what `String::from_utf16_lossy` would corrupt into
+        // U+FFFD — this proves the lossless `OsString`-based path this module now takes instead.
+        let mut wide: Vec<u16> = r"\\?\C:\backend\".encode_utf16().collect();
+        wide.push(0xD800); // an unpaired high surrogate: not valid UTF-16, valid on NTFS.
+        let path = PathBuf::from(OsString::from_wide(&wide));
+
+        let got =
+            simplify_verbatim(&path).expect("a verbatim disk prefix must still be recognized");
+        let SimplifiedPrefix::Disk(rebuilt) = got else {
+            panic!("expected SimplifiedPrefix::Disk, got {got:?}");
+        };
+        assert_eq!(
+            rebuilt.as_os_str().encode_wide().last(),
+            Some(0xD800),
+            "the unpaired surrogate must survive unchanged, not be replaced with U+FFFD"
+        );
     }
 
     #[test]

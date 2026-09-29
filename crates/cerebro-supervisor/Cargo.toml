@@ -56,19 +56,18 @@ tokio = { version = "1", features = ["test-util", "io-util", "rt-multi-thread"] 
 # reparse-point attribute bit on a model file or a caller-supplied temp/log directory
 # (Win32_Storage_FileSystem), the Job Object that contains a spawned child tree
 # (Win32_System_JobObjects), resolving the real system directory for the child's environment rather
-# than trusting an inherited variable (Win32_System_SystemInformation), and `GetConsoleWindow` in the
+# than trusting an inherited variable (Win32_System_SystemInformation), `GetConsoleWindow` in the
 # `cerebro-print-env` fixture, which proves a spawned child got no console window at all
-# (Win32_System_Console) — see that fixture's own module docs. No FFI outside those.
+# (Win32_System_Console) — see that fixture's own module docs — and `GetExtendedTcpTable`, which tells
+# the lifecycle whether a 401 came from our own child's listener or from another process that won the
+# port (Win32_NetworkManagement_IpHelper; see `lifecycle::listener`). No FFI outside those.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
-    # `CreateToolhelp32Snapshot`/`Process32FirstW`/`Process32NextW`, used only by
-    # `lifecycle`'s own `#[ignore]`d live test to enumerate every `llama-server.exe` process on the
-    # whole machine by name (not merely poll one known PID) when it asserts none remain after `stop`.
-    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_JobObjects",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",

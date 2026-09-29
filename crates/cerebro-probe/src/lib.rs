@@ -20,9 +20,13 @@
 #![deny(missing_docs)]
 
 pub mod backend;
+pub mod child_env;
 pub mod cpu;
 pub mod error;
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixtures;
 pub mod gpu;
+pub mod token;
 
 pub use backend::{
     AddressableDevice, AuditedObject, BackendIdentity, BackendProbe, DaclAudit, GrantVia,

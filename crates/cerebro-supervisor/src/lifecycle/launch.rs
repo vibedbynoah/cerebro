@@ -17,6 +17,9 @@ use thiserror::Error;
 use crate::preflight::{self, LaunchSpec, PortRequest};
 use crate::spawn::{self, SpawnOptions};
 
+use super::listener::ListenerOwner;
+use super::LaunchRecord;
+
 /// A supervised child's exit, reduced to the two facts [`super::classify`] needs and nothing else —
 /// not [`std::process::ExitStatus`] itself, so a fake implementation of [`SupervisedChild`] can
 /// construct one directly instead of needing a real OS process (or a platform-specific
@@ -39,8 +42,16 @@ pub(crate) trait SupervisedChild: Send + Sync {
     fn recent_lines(&self) -> Vec<String>;
 
     /// Kill the child and wait up to `timeout` for the OS to confirm it is gone. `true` once
-    /// confirmed gone; `false` if `timeout` elapsed first.
+    /// confirmed gone; `false` if `timeout` elapsed first. Synchronous and potentially slow (up to
+    /// `timeout`) — [`super::run`] never calls this inline; see its own `stop_child` helper, which
+    /// runs it on `tokio::task::spawn_blocking`.
     fn stop(&self, timeout: Duration) -> Result<bool, LaunchError>;
+
+    /// Who owns the TCP listener on `127.0.0.1:port`: this child's own process, another process
+    /// that won the port after preflight released it, nobody yet, or unknown. Readiness polling
+    /// sends nothing (the bearer key included) until this answers [`ListenerOwner::Ours`]; see
+    /// `super::listener`.
+    fn listener_owner(&self, port: u16) -> ListenerOwner;
 }
 
 impl SupervisedChild for spawn::ChildHandle {
@@ -59,14 +70,24 @@ impl SupervisedChild for spawn::ChildHandle {
             .map(|status| status.is_some())
             .map_err(|e| LaunchError::Child(e.to_string()))
     }
+
+    fn listener_owner(&self, port: u16) -> ListenerOwner {
+        // `self` holds the child's process handle, so its PID cannot be reused while this runs.
+        super::listener::listener_owner(self.pid(), port)
+    }
 }
 
-/// A freshly preflighted and spawned child, plus the port it is actually listening on (the concrete
+/// A freshly preflighted and spawned child, the port it is actually listening on (the concrete
 /// value [`crate::preflight::Preflighted::port`] resolved to, not merely the [`PortRequest`] asked
-/// for).
+/// for), and this launch's own [`LaunchRecord`].
+///
+/// `child` is an `Arc`, not a `Box`: [`super::run`] hands a clone of it to `tokio::task::spawn_blocking`
+/// every time it needs to stop the child, so that synchronous, potentially-`timeout`-long wait never
+/// runs inline on the async driver task — see `super::run`'s own `stop_child` helper.
 pub(crate) struct Launched {
-    pub(crate) child: Box<dyn SupervisedChild>,
+    pub(crate) child: std::sync::Arc<dyn SupervisedChild>,
     pub(crate) port: u16,
+    pub(crate) record: LaunchRecord,
 }
 
 /// Everything that can make a launch attempt fail, before the child is even running to have an
@@ -139,9 +160,19 @@ impl Launcher for RealLauncher {
 
         let port = preflighted.port();
         let child = spawn::spawn_preflighted(&preflighted, &argv, &self.spawn_options)?;
-        Ok(Launched {
-            child: Box::new(child),
+        let record = LaunchRecord {
+            preflight_warnings: preflighted.warnings().to_vec(),
+            protection_warnings: child.protection_warnings().to_vec(),
             port,
+            requested_backend_dir: self.base_spec.backend_dir.clone(),
+            backend_dir: preflighted.backend_dir().to_path_buf(),
+            backend_hashes: preflighted.backend_hashes().clone(),
+            pid: child.pid(),
+        };
+        Ok(Launched {
+            child: std::sync::Arc::new(child),
+            port,
+            record,
         })
     }
 }

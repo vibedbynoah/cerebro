@@ -1,7 +1,9 @@
-//! Win32 handle-to-path resolution used by [`super::verify_model_file`].
+//! Win32 handle-to-path resolution used by [`super::verify_model_file`], `verify_api_key_file`, and
+//! `crate::spawn` (for a temp or log directory reached through a link while
+//! `Protections::refuse_redirected_paths` is off).
 //!
-//! Split out for the same reason `elevation.rs` is: a small, reviewable `unsafe` surface kept apart
-//! from the pure decision logic in `super`.
+//! Split out as a small, reviewable `unsafe` surface kept apart from the pure decision logic in
+//! `super`.
 
 use std::ffi::OsString;
 use std::fs::File;
@@ -90,6 +92,24 @@ mod tests {
     /// A uniquely named temp file, removed on drop, mirroring `preflight`'s own `TempDir` helper.
     struct TempFile(PathBuf);
 
+    /// A temp-file path unique per process and per call, made only of characters valid in an NTFS
+    /// file name. An earlier version formatted `SystemTime` with `{:?}`, whose `SystemTime {
+    /// intervals: N }` contains a `:`, which NTFS reads as a stream separator: the test wrote an
+    /// alternate data stream on a file named up to the colon, and `TempFile` removed the stream,
+    /// leaving that file behind in %TEMP% on every run.
+    fn unique_temp_path(tag: &str) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        std::env::temp_dir().join(format!(
+            "cerebro-supervisor-{tag}-{}-{nanos}-{n}.txt",
+            std::process::id()
+        ))
+    }
+
     impl Drop for TempFile {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
@@ -98,11 +118,7 @@ mod tests {
 
     #[test]
     fn final_path_of_a_real_open_file_agrees_with_canonicalize() {
-        let path = std::env::temp_dir().join(format!(
-            "cerebro-supervisor-win-path-test-{}-{:?}.txt",
-            std::process::id(),
-            std::time::SystemTime::now()
-        ));
+        let path = unique_temp_path("win-path-test");
         let mut created = File::create(&path).expect("create fixture file");
         created.write_all(b"x").expect("write fixture file");
         drop(created);
@@ -128,11 +144,7 @@ mod tests {
         // exceed 512 UTF-16 units, which this development machine's does not; an off-by-one in the
         // `written < buf.len()` success/retry distinction, or in `buf.resize(written, 0)`, would
         // still pass such a test.
-        let path = std::env::temp_dir().join(format!(
-            "cerebro-supervisor-win-path-grow-test-{}-{:?}.txt",
-            std::process::id(),
-            std::time::SystemTime::now()
-        ));
+        let path = unique_temp_path("win-path-grow-test");
         std::fs::write(&path, b"x").expect("write fixture file");
         let guard = TempFile(path.clone());
 
