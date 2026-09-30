@@ -1,0 +1,199 @@
+import type { JSX } from "solid-js";
+
+/**
+ * Cerebro's own icon set. One grid for every glyph: 24x24 viewBox, 1.6 px stroke drawn in
+ * currentColor, round caps and joins, no fills except small solid dots, ~2.5 px optical padding.
+ * Decorative by default (aria-hidden); the control that holds an icon carries the accessible name.
+ */
+const GLYPHS = {
+  home: () => (
+    <>
+      <path d="M3.5 10.8 12 4l8.5 6.8" />
+      <path d="M5.8 9.2v10.3h12.4V9.2" />
+      <path d="M10 19.5v-5.2h4v5.2" />
+    </>
+  ),
+  hub: () => (
+    <>
+      <path d="M12 4v10.2" />
+      <path d="m7.8 10.2 4.2 4.2 4.2-4.2" />
+      <path d="M4 14.5v4A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5v-4" />
+    </>
+  ),
+  models: () => (
+    <>
+      <path d="M12 3.8 20.5 8 12 12.2 3.5 8Z" />
+      <path d="m3.5 12 8.5 4.2 8.5-4.2" />
+      <path d="m3.5 16 8.5 4.2 8.5-4.2" />
+    </>
+  ),
+  tune: () => (
+    <>
+      <path d="M4.4 17.8a8.6 8.6 0 1 1 15.2 0" />
+      <path d="m12 13.6 4-4" />
+      <circle cx="12" cy="13.6" r="1.4" />
+      <path d="M7.4 9.6 6.3 8.5M12 7.2V5.7" />
+    </>
+  ),
+  chat: () => (
+    <path d="M20 11.4c0 3.9-3.6 7-8 7-1.2 0-2.4-.2-3.4-.7L4.2 19.3l1.2-3.5A6.5 6.5 0 0 1 4 11.4c0-3.9 3.6-7 8-7s8 3.1 8 7Z" />
+  ),
+  images: () => (
+    <>
+      <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
+      <circle cx="9" cy="9.8" r="1.7" />
+      <path d="m4 17.4 5-4.9 3.9 3.8 2.6-2.5 4.6 4.5" />
+    </>
+  ),
+  documents: () => (
+    <>
+      <path d="M6.5 3.5h7l4.5 4.5v11a1.5 1.5 0 0 1-1.5 1.5h-10A1.5 1.5 0 0 1 5 19V5a1.5 1.5 0 0 1 1.5-1.5Z" />
+      <path d="M13.5 3.5V8H18" />
+      <path d="M8.5 12.5h7M8.5 16h4.5" />
+    </>
+  ),
+  plugins: () => (
+    <>
+      <path d="M9 3.5v4M15 3.5v4" />
+      <path d="M6.5 7.5h11V11a5.5 5.5 0 0 1-11 0Z" />
+      <path d="M12 16.5v4" />
+    </>
+  ),
+  tools: () => (
+    <path d="M14.6 4.2a4.3 4.3 0 0 0-5 5.7L4 15.5V20h4.5l5.6-5.6a4.3 4.3 0 0 0 5.7-5l-2.7 2.7-2.6-.6-.6-2.6Z" />
+  ),
+  security: () => (
+    <>
+      <path d="M12 3.5 19 6v5.4c0 4.3-2.9 7.6-7 9.1-4.1-1.5-7-4.8-7-9.1V6Z" />
+      <path d="m8.9 12 2.2 2.2 4-4.2" />
+    </>
+  ),
+  settings: () => (
+    <>
+      <path d="M18.76 12.7 20.76 14.08 19.66 16.72 17.28 16.29 16.29 17.28 16.72 19.66 14.08 20.76 12.7 18.76 11.3 18.76 9.92 20.76 7.28 19.66 7.71 17.28 6.72 16.29 4.34 16.72 3.24 14.08 5.24 12.7 5.24 11.3 3.24 9.92 4.34 7.28 6.72 7.71 7.71 6.72 7.28 4.34 9.92 3.24 11.3 5.24 12.7 5.24 14.08 3.24 16.72 4.34 16.29 6.72 17.28 7.71 19.66 7.28 20.76 9.92 18.76 11.3Z" />
+      <circle cx="12" cy="12" r="2.8" />
+    </>
+  ),
+  // ---- Interface glyphs ----
+  search: () => (
+    <>
+      <circle cx="10.8" cy="10.8" r="6.3" />
+      <path d="m15.5 15.5 4.5 4.5" />
+    </>
+  ),
+  sidebar: () => (
+    <>
+      <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
+      <path d="M9.5 4.5v15" />
+    </>
+  ),
+  minimize: () => <path d="M5 12h14" />,
+  maximize: () => <rect x="5.5" y="5.5" width="13" height="13" rx="1.5" />,
+  // Windows' restore glyph: the front window, with the back one peeking out top-right.
+  restore: () => (
+    <>
+      <rect x="5.5" y="8.5" width="10" height="10" rx="1.5" />
+      <path d="M8.5 8.5v-2a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-2" />
+    </>
+  ),
+  close: () => <path d="m6 6 12 12M18 6 6 18" />,
+  sun: () => (
+    <>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2.8v2M12 19.2v2M21.2 12h-2M4.8 12h-2M18.5 5.5l-1.4 1.4M6.9 17.1l-1.4 1.4M18.5 18.5l-1.4-1.4M6.9 6.9 5.5 5.5" />
+    </>
+  ),
+  moon: () => <path d="M19.5 14.2A7.8 7.8 0 0 1 9.8 4.5a7.8 7.8 0 1 0 9.7 9.7Z" />,
+  monitor: () => (
+    <>
+      <rect x="3.5" y="4.5" width="17" height="11.5" rx="2" />
+      <path d="M9 20h6M12 16v4" />
+    </>
+  ),
+  copy: () => (
+    <>
+      <rect x="8.5" y="8.5" width="11" height="11" rx="2" />
+      <path d="M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8A1.5 1.5 0 0 0 6 15.5h2.5" />
+    </>
+  ),
+  check: () => <path d="m5 12.5 4.4 4.4L19 7.3" />,
+  info: () => (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 11v5.5" />
+      <circle cx="12" cy="7.8" r=".6" class="icon-dot" />
+    </>
+  ),
+  alert: () => (
+    <>
+      <path d="M10.5 4.6a1.7 1.7 0 0 1 3 0l7 12.6a1.7 1.7 0 0 1-1.5 2.5H5a1.7 1.7 0 0 1-1.5-2.5Z" />
+      <path d="M12 9.5v4.2" />
+      <circle cx="12" cy="16.6" r=".6" class="icon-dot" />
+    </>
+  ),
+  bolt: () => <path d="M13.2 3.5 5.5 13.4h6l-1 7.1 7.8-10h-6.1Z" />,
+  chip: () => (
+    <>
+      <rect x="6.5" y="6.5" width="11" height="11" rx="2" />
+      <rect x="9.5" y="9.5" width="5" height="5" rx=".8" />
+      <path d="M9.5 3.5v3M14.5 3.5v3M9.5 17.5v3M14.5 17.5v3M3.5 9.5h3M3.5 14.5h3M17.5 9.5h3M17.5 14.5h3" />
+    </>
+  ),
+  offline: () => (
+    <>
+      <path d="M4 4l16 16" />
+      <path d="M8.6 12.9a5 5 0 0 1 3.4-1.2M5.3 9.6a9.5 9.5 0 0 1 3.1-2M13.9 7.3a9.5 9.5 0 0 1 4.8 2.3" />
+      <circle cx="12" cy="17.2" r=".7" class="icon-dot" />
+    </>
+  ),
+  online: () => (
+    <>
+      <path d="M5.3 9.6a9.5 9.5 0 0 1 13.4 0" />
+      <path d="M8.6 12.9a5 5 0 0 1 6.8 0" />
+      <circle cx="12" cy="17.2" r=".7" class="icon-dot" />
+    </>
+  ),
+  arrowRight: () => <path d="M5 12h13.5M13.5 7l5 5-5 5" />,
+  lock: () => (
+    <>
+      <rect x="5" y="10.5" width="14" height="9.5" rx="2" />
+      <path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" />
+    </>
+  ),
+} satisfies Record<string, () => JSX.Element>;
+
+export type IconName = keyof typeof GLYPHS;
+
+export const ICON_NAMES = Object.keys(GLYPHS) as IconName[];
+
+export function Icon(props: { name: IconName; class?: string; size?: number }): JSX.Element {
+  const glyph = () => GLYPHS[props.name]();
+  return (
+    <svg
+      class={props.class ? `icon ${props.class}` : "icon"}
+      viewBox="0 0 24 24"
+      width={props.size ?? 20}
+      height={props.size ?? 20}
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.6"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+      data-icon={props.name}
+    >
+      {glyph()}
+    </svg>
+  );
+}
+
+/** Cerebro's mark: an instrument dial (ring, one reading, a hub). Amber via the accent-text role. */
+export function BrandMark(props: { size?: number }): JSX.Element {
+  return (
+    <svg class="brand-mark" viewBox="0 0 24 24" width={props.size ?? 20} height={props.size ?? 20} aria-hidden="true">
+      <circle cx="12" cy="12" r="8.6" fill="none" stroke="currentColor" stroke-width="1.8" />
+      <path d="M12 12 16.6 7.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+      <circle cx="12" cy="12" r="2.2" fill="currentColor" />
+    </svg>
+  );
+}

@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Cerebro IPC isolation</title>
+    <!-- Tauri's isolation pattern loads this page in a sandboxed iframe on its own origin and runs
+         every IPC message from the app through window.__TAURI_ISOLATION_HOOK__ (index.js) before
+         encrypting it for the Rust side. Tauri inlines index.js at build time and adds its hash to
+         this page's CSP, so no inline code is authored here. -->
+    <script src="index.js"></script>
+  </head>
+  <body></body>
+</html>

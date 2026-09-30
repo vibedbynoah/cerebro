@@ -1,0 +1,35 @@
+{
+  "name": "@cerebro/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "Cerebro desktop app: Tauri v2 shell (src-tauri) and SolidJS UI (ui). The UI also runs in a plain browser against the typed mock service (web mode) for headless testing.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --config ui/vite.config.ts",
+    "build": "vite build --config ui/vite.config.ts && node scripts/check-bundle.mjs ui/dist",
+    "build:desktop": "vite build --config ui/vite.config.ts --mode desktop && node scripts/check-bundle.mjs ui/dist-desktop",
+    "preview": "node scripts/serve.mjs",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "test": "npm run check && vitest run --config ui/vite.config.ts && npm run build && playwright test",
+    "shoot": "npm run build && node scripts/shoot.mjs",
+    "tauri:check": "npm run build:desktop && cargo check -p cerebro-desktop --locked"
+  },
+  "dependencies": {
+    "@ark-ui/solid": "5.39.2",
+    "@tauri-apps/api": "2.12.0",
+    "solid-js": "1.9.15"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "@playwright/test": "1.55.1",
+    "@solidjs/testing-library": "0.8.10",
+    "@types/node": "24.7.2",
+    "jsdom": "30.1.1",
+    "playwright-core": "1.55.1",
+    "typescript": "5.9.3",
+    "vite": "8.3.1",
+    "vite-plugin-solid": "2.11.14",
+    "vitest": "5.0.1"
+  }
+}

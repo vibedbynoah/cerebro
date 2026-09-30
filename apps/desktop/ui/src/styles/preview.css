@@ -1,0 +1,605 @@
+/* Planned-screen preview (components/Preview.tsx): what the screen will do, and a wireframe sketch
+   that assembles when the card is revealed. Transform and opacity only; reduced motion shows the
+   finished sketch at once. */
+
+.preview {
+  position: relative;
+  margin-top: var(--space-10);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 24rem);
+  gap: var(--space-8);
+  padding: var(--space-8);
+  overflow: hidden;
+  isolation: isolate;
+}
+
+/* A soft accent glow behind the sketch: depth without noise. */
+.preview::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  top: -30%;
+  right: -12%;
+  width: 60%;
+  height: 160%;
+  background: radial-gradient(closest-side, var(--color-accent-muted), transparent);
+  pointer-events: none;
+}
+
+.notice + .preview {
+  margin-top: var(--space-6);
+}
+
+.preview__text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.preview__status {
+  gap: var(--space-2);
+}
+
+.preview__status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.preview__title {
+  margin: var(--space-4) 0 0;
+  max-width: 24ch;
+  font-family: var(--font-family-display);
+  font-size: 1.625rem;
+  font-weight: 500;
+  line-height: var(--leading-snug);
+  letter-spacing: var(--tracking-headline);
+  color: var(--color-text-primary);
+  text-wrap: balance;
+}
+
+.preview__lede {
+  margin: var(--space-3) 0 0;
+  max-width: 52ch;
+  line-height: var(--leading-relaxed);
+  color: var(--color-text-secondary);
+}
+
+.preview__features {
+  list-style: none;
+  margin: var(--space-6) 0 0;
+  padding: var(--space-6) 0 0;
+  display: grid;
+  gap: var(--space-4);
+  width: 100%;
+  border-top: 1px solid var(--color-border);
+}
+
+.preview__feature {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-3);
+}
+
+.preview__feature-icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-2);
+  color: var(--color-accent-text);
+}
+
+.preview__feature-title {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.preview__feature-desc {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--text-small);
+  line-height: var(--leading-relaxed);
+  color: var(--color-text-secondary);
+}
+
+.preview__extra {
+  margin-top: var(--space-5);
+}
+
+.preview__art {
+  position: relative;
+  align-self: stretch;
+  display: grid;
+  align-content: center;
+  min-height: 20rem;
+  padding: var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background-color: var(--color-bg);
+  /* Depth: a warm light from the top-right corner over the dot grid, and a 1px lit top edge. */
+  background-image:
+    radial-gradient(120% 80% at 85% 0%, var(--color-accent-muted), transparent 60%),
+    radial-gradient(var(--color-border) 1px, transparent 1px);
+  background-size:
+    100% 100%,
+    16px 16px;
+  background-position:
+    0 0,
+    8px 8px;
+  color: var(--color-text-muted);
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklch, var(--color-text-primary) 8%, transparent),
+    var(--shadow-1);
+}
+
+/* Every sketch card catches the same light on its top edge and sits slightly above the grid. */
+.sk:not(.sk-tile) {
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklch, var(--color-text-primary) 6%, transparent),
+    0 1px 2px oklch(0% 0 0 / 0.12);
+}
+
+/* One focal point per sketch, in the accent: the action the finished screen is built around. */
+.sk-send,
+.sk-btn--primary {
+  box-shadow:
+    0 0 0 3px var(--color-accent-muted),
+    0 2px 8px color-mix(in oklch, var(--color-accent) 35%, transparent);
+}
+
+.sk-file.is-hit {
+  box-shadow:
+    inset 0 0 0 1px color-mix(in oklch, var(--color-accent) 55%, transparent),
+    0 2px 10px color-mix(in oklch, var(--color-accent) 18%, transparent);
+}
+
+.sk-fit[data-fit="tight"] {
+  box-shadow: 0 0 0 3px var(--color-accent-muted);
+}
+
+.sk.sk-card--focus {
+  border-color: color-mix(in oklch, var(--color-accent) 45%, var(--color-border));
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklch, var(--color-text-primary) 6%, transparent),
+    0 0 0 3px var(--color-accent-muted);
+}
+
+/* ---- Skeleton pieces ---- */
+
+.sk-stack {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.sk-line {
+  display: block;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-3);
+}
+
+.sk-line--1 {
+  width: 88%;
+}
+
+.sk-line--2 {
+  width: 62%;
+}
+
+.sk-line--3 {
+  width: 76%;
+}
+
+.sk-line--meta {
+  width: 38%;
+  height: 5px;
+  opacity: 0.7;
+}
+
+.sk-line--code {
+  background: var(--color-accent-muted);
+}
+
+.sk-bubble {
+  display: grid;
+  gap: 7px;
+  width: 86%;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-1);
+}
+
+.sk-bubble--out {
+  justify-self: end;
+  width: 52%;
+  border-color: transparent;
+  background: var(--color-accent-muted);
+}
+
+.sk-bubble--out .sk-line {
+  background: var(--color-accent);
+  opacity: 0.45;
+}
+
+.sk-code {
+  display: grid;
+  gap: 6px;
+  margin-top: 3px;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-2);
+}
+
+.sk-input,
+.sk-search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 40px;
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-1);
+}
+
+.sk-search {
+  border-color: var(--color-border);
+}
+
+.sk-input .sk-line,
+.sk-search .sk-line {
+  width: 42%;
+}
+
+.sk-caret {
+  width: 2px;
+  height: 14px;
+  border-radius: 1px;
+  background: var(--color-accent);
+}
+
+.sk-send {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  margin-inline-start: auto;
+  border-radius: var(--radius-md);
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+}
+
+.sk-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-1);
+}
+
+.sk-row__text {
+  display: grid;
+  gap: 6px;
+}
+
+.sk-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--color-surface-3);
+}
+
+.sk-avatar--square {
+  border-radius: var(--radius-md);
+  background: var(--color-accent-muted);
+}
+
+.sk-fit {
+  position: relative;
+  width: 56px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-3);
+  overflow: hidden;
+}
+
+.sk-fit__fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-success);
+  transform-origin: left center;
+}
+
+.sk-fit[data-fit="tight"] .sk-fit__fill {
+  background: var(--color-accent);
+}
+
+.sk-fit__fill--45 {
+  width: 45%;
+}
+
+.sk-fit__fill--70 {
+  width: 70%;
+}
+
+.sk-fit__fill--92 {
+  width: 92%;
+}
+
+.sk-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.sk-grid--2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.sk-tile {
+  aspect-ratio: 1;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: linear-gradient(135deg, var(--color-surface-2), var(--color-surface-3));
+}
+
+.sk-tile--2,
+.sk-tile--6 {
+  background: linear-gradient(160deg, var(--color-accent-muted), var(--color-surface-2) 70%);
+}
+
+.sk-tile--4 {
+  background: radial-gradient(circle at 30% 30%, var(--color-accent-muted), var(--color-surface-2) 65%);
+}
+
+.sk-card {
+  position: relative;
+  display: grid;
+  gap: 8px;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-1);
+}
+
+.sk-card .sk-avatar {
+  margin-bottom: 4px;
+}
+
+.sk-toggle {
+  position: absolute;
+  top: var(--space-3);
+  right: var(--space-3);
+  width: 26px;
+  height: 14px;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-3);
+}
+
+.sk-toggle::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--color-bg);
+}
+
+.sk-toggle[data-on="true"] {
+  background: var(--color-success);
+}
+
+.sk-toggle[data-on="true"]::after {
+  transform: translateX(12px);
+}
+
+.sk-split {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.sk-file {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+}
+
+.sk-file .sk-line {
+  flex: 1;
+}
+
+.sk-file.is-hit {
+  border-color: transparent;
+  background: var(--color-accent-muted);
+  color: var(--color-accent-text);
+}
+
+.sk-answer {
+  width: auto;
+}
+
+.sk-cites {
+  display: flex;
+  gap: 4px;
+  margin-top: 3px;
+}
+
+.sk-cite {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: var(--color-accent-muted);
+  color: var(--color-accent-text);
+  font-family: var(--font-family-code);
+  font-size: 0.625rem;
+  line-height: 1;
+}
+
+.sk-prompt {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-2);
+  box-shadow: var(--shadow-2);
+}
+
+.sk-prompt__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-accent-text);
+}
+
+.sk-prompt__head .sk-line {
+  flex: 1;
+  max-width: 60%;
+}
+
+.sk-prompt__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.sk-btn {
+  width: 56px;
+  height: 22px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-3);
+}
+
+.sk-btn--primary {
+  border-color: transparent;
+  background: var(--color-accent);
+}
+
+/* ---- Assembly: the pieces rise in one after another once the card is revealed ---- */
+
+.preview.is-visible .sk {
+  animation: sk-rise var(--duration-slow) var(--ease-emphasized) 120ms both;
+}
+
+.preview.is-visible .sk:nth-child(2) {
+  animation-delay: 200ms;
+}
+
+.preview.is-visible .sk:nth-child(3) {
+  animation-delay: 280ms;
+}
+
+.preview.is-visible .sk:nth-child(4) {
+  animation-delay: 360ms;
+}
+
+.preview.is-visible .sk:nth-child(5) {
+  animation-delay: 440ms;
+}
+
+.preview.is-visible .sk:nth-child(6) {
+  animation-delay: 520ms;
+}
+
+.preview.is-visible .sk-fit__fill {
+  animation: sk-grow var(--duration-slow) var(--ease-emphasized) 560ms both;
+}
+
+.preview.is-visible .sk-toggle[data-on="true"]::after {
+  animation: sk-knob var(--duration-base) var(--ease-spring) 680ms both;
+}
+
+.preview.is-visible .sk-caret {
+  animation: sk-fade var(--duration-base) var(--ease-standard) 620ms both;
+}
+
+@keyframes sk-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+}
+
+@keyframes sk-grow {
+  from {
+    transform: scaleX(0);
+  }
+}
+
+@keyframes sk-knob {
+  from {
+    transform: translateX(0);
+  }
+}
+
+@keyframes sk-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+/* ---- Narrow windows ---- */
+
+@media (max-width: 1100px) {
+  .preview {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 20rem);
+    gap: var(--space-6);
+    padding: var(--space-6);
+  }
+}
+
+@media (max-width: 860px) {
+  .preview {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .preview__art {
+    min-height: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .preview .sk,
+  .preview .sk-fit__fill,
+  .preview .sk-caret,
+  .preview .sk-toggle::after {
+    animation: none !important;
+  }
+}
+
+@media (forced-colors: active) {
+  .sk-line,
+  .sk-fit__fill,
+  .sk-toggle,
+  .sk-btn--primary,
+  .sk-send,
+  .sk-caret {
+    forced-color-adjust: none;
+  }
+}

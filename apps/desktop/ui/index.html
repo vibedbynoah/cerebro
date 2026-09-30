@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+    <title>Cerebro</title>
+    <meta name="description" content="Cerebro Engine: measure, tune and run local language models on your own machine, offline." />
+    <!-- ui/vite.config.ts injects, right after <meta charset>: the CSP meta fallback (web build only) and
+         design/theme-init.js, a classic render-blocking script that applies the stored theme and
+         the motion gate before first paint. External, so `script-src 'self'` allows it. -->
+    <link rel="preload" as="font" type="font/woff2" crossorigin href="../../../design/fonts/inter/inter-latin-wght-normal.woff2" />
+    <link rel="preload" as="font" type="font/woff2" crossorigin href="../../../design/fonts/fraunces/fraunces-latin-standard-normal.woff2" />
+    <script type="module" src="./src/main.tsx"></script>
+  </head>
+  <body>
+    <noscript><p class="noscript">Cerebro needs JavaScript to run its interface.</p></noscript>
+    <div id="root"></div>
+  </body>
+</html>

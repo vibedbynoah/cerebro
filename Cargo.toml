@@ -6,6 +6,7 @@ members = [
     "crates/cerebro-supervisor",
     "crates/cerebro-bench",
     "crates/cerebro-store",
+    "apps/desktop/src-tauri",
 ]
 
 [workspace.package]

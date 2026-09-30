@@ -1,0 +1,45 @@
+[package]
+name = "cerebro-desktop"
+description = "Cerebro desktop shell: a Tauri v2 window around the SolidJS UI in ../ui, isolation pattern on, deny-by-default capabilities"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+name = "cerebro_desktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cerebro-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+# Exact pins: the shell's security boundary lives in these crates, so an upgrade is a reviewed change.
+tauri-build = { version = "=2.7.0", default-features = false, features = ["config-json", "isolation"] }
+
+[dependencies]
+# No `devtools` feature: the inspector exists in debug builds only and is compiled out of release.
+# No `dynamic-acl`: capabilities are fixed at build time and cannot be widened at runtime.
+tauri = { version = "=2.12.0", default-features = false, features = ["wry", "compression", "common-controls-v6", "isolation", "x11", "dbus"] }
+serde = { workspace = true }
+# 256-bit secrets from the OS CSPRNG and constant-time comparison (src/secret.rs). Vetted crates only;
+# nothing here is hand-rolled.
+getrandom = "=0.3.4"
+subtle = "=2.6.1"
+# Wipes secrets from memory when they are dropped (src/secret.rs). Already in the tree through
+# ed25519-dalek; pinned to the same version so the lockfile gains no new crate.
+zeroize = { version = "=1.9.0", default-features = false }
+# Ed25519 update signatures (src/update_sig.rs), verify_strict only.
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std", "fast", "zeroize"] }
+
+[features]
+# Set by `tauri build` for release bundles: serve the UI from the embedded assets, not the dev server.
+custom-protocol = ["tauri/custom-protocol"]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
