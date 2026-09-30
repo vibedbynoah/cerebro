@@ -26,8 +26,8 @@
 //! A principal who can write this directory can plant a symlink or NTFS junction named
 //! `settings.json` that silently redirects every read to a file of their choosing. `settings.json`
 //! is a higher-value target for exactly that than most files this workspace handles: it names
-//! [`crate::schema::BackendSection::dir`] and [`crate::schema::SecuritySection::backend_path`],
-//! i.e. the inputs to [`crate::profile::DefaultPreflighter::decide`]. So every read here opens with
+//! [`crate::schema::BackendSection::dir`] (where DLLs are loaded from) and every protection switch.
+//! So every read here opens with
 //! `FILE_FLAG_OPEN_REPARSE_POINT` and refuses on `FILE_ATTRIBUTE_REPARSE_POINT`, mirroring
 //! `cerebro_store`'s identical guard (`crates/cerebro-store/src/store.rs`) on a lower-value file for
 //! the identical reason.
@@ -85,7 +85,7 @@ fn read_err(path: &Path, e: &std::io::Error) -> ConfigError {
 /// inside this function rather than at module scope: pulling them in unconditionally would be an
 /// unused import on a non-Windows build under `-D warnings` -- `cerebro_store` documents this exact
 /// trap next to its own copy of this guard (`crates/cerebro-store/src/store.rs`). Both are safe std
-/// APIs, so this stays under the crate's `#![forbid(unsafe_code)]`.
+/// APIs, so this stays under the crate's `#![deny(unsafe_code)]`.
 #[cfg(windows)]
 fn open_settings_file(path: &Path) -> Result<std::fs::File, ConfigError> {
     use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
@@ -126,7 +126,7 @@ impl ConfigFile {
     /// make this distinction: it is documented to return `false` for every one of those failures,
     /// not just for "does not exist," so gating the bootstrap on it (an earlier version of this
     /// function did) would silently replace a config that merely could not be stat'ed at that
-    /// instant with [`Settings::default`] -- destroying a user's `security.model_roots`,
+    /// instant with [`Settings::default`] -- destroying a user's `models.folders`,
     /// `backend.dir` and `api` configuration for a reason that had nothing to do with the file's
     /// content.
     pub fn open(dir: &Path) -> Result<Self, ConfigError> {
@@ -170,7 +170,7 @@ impl ConfigFile {
     /// Apply `patch` from `source` and persist it, or leave memory and disk both untouched.
     ///
     /// The whole patch is validated before anything is committed (see
-    /// [`Settings::apply_patch`](crate::schema::Settings::apply_patch)), and a failed [`save`
+    /// [`Settings::apply_patch`]), and a failed [`save`
     ///](Self::save) rolls `current` back to what it was before the patch: `current` must never
     /// describe a document that is not the one on disk, or a later, unrelated `save()` would
     /// silently overwrite whatever the file actually holds.
@@ -279,8 +279,7 @@ impl ConfigFile {
             // `ConfigError::Invalid::message`'s doc comment.
             message: cap_echo(&e.to_string()),
         })?;
-        // Structural checks `serde` alone cannot express (currently: `backend.dir` and
-        // `security.backend_path` must agree) apply on every load, not just on a patch.
+        // Structural checks `serde` alone cannot express apply on every load, not just on a patch.
         settings.validate()?;
         Ok(settings)
     }
@@ -879,31 +878,31 @@ mod tests {
         assert_eq!(reopened.current(), &fixture);
     }
 
-    /// This exact document is also part of the EVAL_PLAN §6.4 poisoned-config corpus: it is the
-    /// canonical attempt to smuggle the removed `allow_unsafe_dacl` escape hatch back in through a
-    /// hand-edited file rather than through code review.
-    fn poisoned_allow_unsafe_dacl_document() -> String {
+    /// A hand-edited file carrying a key nobody reviewed, under the protections section where a
+    /// misspelled switch would otherwise be silently ignored (and the protection left in a state
+    /// the user did not choose).
+    fn unknown_protection_key_document() -> String {
         let mut value = serde_json::to_value(Settings::default()).expect("serialize default");
-        value["security"]
+        value["protections"]
             .as_object_mut()
-            .expect("security is an object")
-            .insert("allow_unsafe_dacl".to_string(), serde_json::Value::Bool(true));
-        serde_json::to_string_pretty(&value).expect("serialize poisoned document")
+            .expect("protections is an object")
+            .insert("verify_backend_integrty".to_string(), serde_json::Value::Bool(false));
+        serde_json::to_string_pretty(&value).expect("serialize document")
     }
 
     #[test]
-    fn hand_written_allow_unsafe_dacl_file_is_rejected_and_keeps_last_good() {
+    fn hand_written_unknown_key_file_is_rejected_and_keeps_last_good() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut file = ConfigFile::open(dir.path()).expect("bootstrap default");
         let last_good = file.current().clone();
 
-        std::fs::write(dir.path().join(SETTINGS_FILE_NAME), poisoned_allow_unsafe_dacl_document())
-            .expect("write poisoned file");
+        std::fs::write(dir.path().join(SETTINGS_FILE_NAME), unknown_protection_key_document())
+            .expect("write file with an unknown key");
 
         let err = file.reload().unwrap_err();
         match &err {
             ConfigError::Invalid { message, .. } => {
-                assert!(message.contains("allow_unsafe_dacl"), "message: {message}");
+                assert!(message.contains("verify_backend_integrty"), "message: {message}");
             }
             other => panic!("expected an unknown-field Invalid error, got {other:?}"),
         }
@@ -972,14 +971,16 @@ mod tests {
                 const LEAVES: &[&str] = &[
                     "/api/port",
                     "/version",
-                    "/runtime/n_ctx",
-                    "/runtime/cache_type_k",
                     "/sampler/temp",
                     "/sampler/top_k",
                     "/ui/theme_contrast",
-                    "/security/model_roots",
-                    "/security/lan_mode",
-                    "/models/roots",
+                    "/models/folders",
+                    "/network/lan_mode",
+                    "/protections/refuse_elevation",
+                    "/effort/answer_reserve_tokens",
+                    "/effort/levels/high/review_passes",
+                    "/verbosity/levels",
+                    "/plugins/capabilities",
                 ];
                 let mut value: serde_json::Value = serde_json::from_slice(base_json).expect("seed parses");
                 let ptr = LEAVES[rng.random_range(0..LEAVES.len())];
@@ -988,9 +989,10 @@ mod tests {
                 // without a suffix -- is equally a type mismatch; the suffix exists purely so two
                 // cases hitting the same leaf still produce two different documents.
                 let marker: u64 = rng.random_range(0..u64::MAX);
-                if let Some(slot) = value.pointer_mut(ptr) {
-                    *slot = serde_json::json!(format!("not-the-right-type-{marker:x}"));
-                }
+                // `expect`, not `if let`: a leaf missing from the seed would leave the document
+                // valid and the case would silently test nothing.
+                let slot = value.pointer_mut(ptr).expect("every fuzz leaf exists in the seed");
+                *slot = serde_json::json!(format!("not-the-right-type-{marker:x}"));
                 serde_json::to_vec(&value).expect("reserialize")
             }
             _ => {
@@ -1000,8 +1002,21 @@ mod tests {
                 // vary across the corpus rather than always being `version`. Spliced into the raw
                 // text, since `serde_json::Value` itself would just collapse the duplicate on parse
                 // rather than preserving it for the next parse.
-                const SECTIONS: &[&str] =
-                    &["\"models\"", "\"backend\"", "\"runtime\"", "\"sampler\"", "\"api\"", "\"ui\"", "\"security\""];
+                // Every top-level section. `"network"` also names a plugin capability, but the
+                // top-level key is serialized first, so `replacen(.., 1)` duplicates the section.
+                const SECTIONS: &[&str] = &[
+                    "\"models\"",
+                    "\"backend\"",
+                    "\"load\"",
+                    "\"sampler\"",
+                    "\"effort\"",
+                    "\"verbosity\"",
+                    "\"api\"",
+                    "\"ui\"",
+                    "\"network\"",
+                    "\"protections\"",
+                    "\"plugins\"",
+                ];
                 // The duplicate's own (unused, since the whole document is rejected before any
                 // value is inspected) first value also varies across cases, so two cases splicing
                 // the same section still land on two different documents.

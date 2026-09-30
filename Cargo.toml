@@ -6,6 +6,7 @@ members = [
     "crates/cerebro-supervisor",
     "crates/cerebro-bench",
     "crates/cerebro-store",
+    "crates/cerebro-config",
 ]
 
 [workspace.package]
@@ -34,7 +35,3 @@ strip = true
 # builds only; release already builds everything at opt-level 3.
 [profile.dev.package.sha2]
 opt-level = 3
-
-# crates/cerebro-config is carried over but excluded until its duplicate DACL audit and spawn gate
-# are replaced by cerebro-probe / cerebro-supervisor (see docs/RESTART.md).
-

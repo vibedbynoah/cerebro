@@ -48,8 +48,9 @@ pub enum ConfigError {
     /// The settings file's content is not a valid `Settings` document.
     ///
     /// Covers every content-level failure uniformly: JSON syntax errors, a value of the wrong
-    /// type, an unknown field (`#[serde(deny_unknown_fields)]`), a duplicate key, and content that
-    /// is not valid UTF-8 at all. All of these are "the bytes on disk do not describe a `Settings`"
+    /// type, an unknown field (`#[serde(deny_unknown_fields)]`), a duplicate key (a struct field,
+    /// or a key of a map-backed section such as `load.presets` or `effort.levels`), and content
+    /// that is not valid UTF-8 at all. All of these are "the bytes on disk do not describe a `Settings`"
     /// and all of them leave the last good in-memory configuration untouched.
     #[error("{path} is not a valid settings file at line {line}, column {column}: {message}")]
     Invalid {
@@ -121,7 +122,7 @@ pub enum ConfigError {
     /// [`crate::schema::Settings::apply_patch`].
     #[error("{by:?} may not modify the security-locked pointer {pointer}")]
     LockedPointerRefused {
-        /// The JSON pointer that was locked, e.g. `/security/lan_mode`.
+        /// The JSON pointer that was locked, e.g. `/network/lan_mode`.
         ///
         /// Echoes untrusted input -- an [`Source::Api`] caller chooses this string -- so it is
         /// capped to [`MAX_ECHO_CHARS`] at construction; see [`cap_echo`].
@@ -156,22 +157,17 @@ pub enum ConfigError {
         path: PathBuf,
     },
 
-    /// `backend.dir` and `security.backend_path` name different directories.
-    ///
-    /// The former is where a spawn actually loads `ggml-*` DLLs from; the latter is what
-    /// [`crate::profile::Preflighter`] audits for write permissions before every spawn. Letting the
-    /// two drift apart is exactly how a poisoned settings file could point the audit at a clean
-    /// directory while the spawn still comes from a hostile one, so this is refused as soon as the
-    /// document is parsed or patched -- [`crate::profile::DefaultPreflighter::decide`]
-    /// independently re-checks the same property against the real filesystem at spawn time.
-    #[error("backend.dir ({backend_dir}) and security.backend_path ({security_backend_path}) must name the same directory")]
-    BackendPathDisagreement {
-        /// `backend.dir` as parsed.
-        backend_dir: PathBuf,
-        /// `security.backend_path` as parsed.
-        security_backend_path: PathBuf,
+    /// A value is well-typed but breaks a rule of the settings document: an active preset that does
+    /// not exist, a default level that names no level, a duplicate rank, a bound exceeded.
+    #[error("{pointer}: {reason}")]
+    SettingRejected {
+        /// JSON pointer of the offending value, e.g. `/effort/default_level`, or the field name
+        /// when the value is checked outside a document (a thread count built directly). User-chosen
+        /// key names inside it are truncated to 80 characters.
+        pointer: String,
+        /// What rule it breaks.
+        reason: String,
     },
-
     /// A sampler field is outside the range llama.cpp -- and `cerebro_store::SamplerProfile`, which
     /// records the run -- would accept.
     #[error("sampler.{field} = {value} is out of range")]

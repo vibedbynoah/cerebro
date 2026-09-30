@@ -12,14 +12,17 @@ authors.workspace = true
 thiserror.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-# The closed flag allowlist: runtime.* fields are typed newtypes/enums that map only onto flags
+# The closed flag allowlist: load.* fields are typed newtypes/enums that map only onto flags
 # already defined there, so a value that cannot be expressed as one of its variants cannot be
 # constructed here either.
 cerebro-flags = { path = "../cerebro-flags" }
-# `DaclAudit` is reused as-is for the spawn-decision surface (`profile::Preflighter`) rather than
-# redefined here, so "is this directory safe to spawn from" has exactly one implementation in the
-# workspace.
+# The workspace's one DACL reader: the secret store audits its blobs and key files with
+# `audit_object_dacl` and names the user it trusts with `current_user_sid`, rather than keeping a
+# second ACL walk here.
 cerebro-probe = { path = "../cerebro-probe" }
+# The launch gate. `Settings::launch_spec` hands preflight its `LaunchSpec`, with the user's
+# protection switches mapped onto `Protections`, instead of this crate deciding spawns itself.
+cerebro-supervisor = { path = "../cerebro-supervisor" }
 # File-watching crate, pinned exactly rather than with a caret range. `watch()` must debounce and
 # must survive the watched file being deleted and recreated (an editor "safe save" does exactly
 # that), which rules out watching a file handle directly and requires watching the parent
@@ -44,9 +47,8 @@ zeroize = "=1.9.0"
 # never silently drift from what a caller elsewhere in this workspace actually implements.
 rand_core = "=0.10.1"
 
-# DPAPI (`CryptProtectData`/`CryptUnprotectData`), converting the owner-only SDDL to a
-# `SECURITY_ATTRIBUTES`, and the owner-only DACL audit in `secrets` have no portable API and no
-# safe-Rust equivalent -- see `cerebro-probe`'s identical rationale for depending on this crate
+# DPAPI (`CryptProtectData`/`CryptUnprotectData`) and converting the owner-only SDDL to a
+# `SECURITY_ATTRIBUTES` in `secrets` have no portable API and no safe-Rust equivalent -- see `cerebro-probe`'s identical rationale for depending on this crate
 # directly rather than shelling out to PowerShell.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
@@ -61,6 +63,9 @@ windows-sys = { version = "0.61", features = [
 # Isolated per-test directories for file.rs's disk-touching tests (comment stripping, size cap,
 # reload/fuzz, watch) and profile.rs's path-resolution tests.
 tempfile = "3"
+# `test-support` for staging an exact ACL (`set_dacl_from_sddl_for_tests`) and a junction in tests,
+# through the same Win32 helpers probe itself tests.
+cerebro-probe = { path = "../cerebro-probe", features = ["test-support"] }
 # Test-only: `a_sampler_from_settings_is_always_recordable` (schema.rs) pins `SamplerSection`'s
 # validated bounds to `SamplerProfile::new`'s so the two numeric contracts can never drift apart
 # without a red test. Not a runtime dependency -- this crate does not otherwise know results
@@ -70,6 +75,10 @@ cerebro-store = { path = "../cerebro-store" }
 # gives a reproducible, non-cryptographic generator, which is exactly what a deterministic test
 # fixture needs -- reproducibility, not unpredictability.
 rand = "0.10"
+# Test-only: `schema_name_pattern_agrees_with_check_name` (load.rs) compiles the published JSON
+# Schema name pattern and runs it beside `check_name`, so the schema and the crate cannot disagree
+# on which preset/level names are legal. The pattern avoids lookaround, so this engine accepts it.
+regex = "1"
 
 [lints.rust]
 # `deny`, not `forbid`: every module except `secrets` still bans unsafe code outright (see

@@ -34,12 +34,12 @@
 //! DPAPI answers "who can decrypt this," not "who can overwrite or delete it." A principal who can
 //! write inside the secrets directory could replace a `.dpapi` blob, delete it, or (if the
 //! directory itself were writable by others) plant an entirely different file there. Every file and
-//! directory this module creates is therefore given the SDDL `D:P(A;;FA;;;OW)(A;;FA;;;SY)` --
-//! File-All-Access to the owner and to `SYSTEM` only, `P` marking the ACL protected so nothing
-//! above it in the tree can inject an inherited ACE that would widen it. [`audit_owner_only`] reads
-//! that ACL back and reports a [`cerebro_probe::DaclAudit`], the same three-state type
-//! `cerebro-probe` uses for the backend-directory check, so "could not verify" is never mistaken
-//! for "verified, fine" here either.
+//! directory this module creates is therefore given the SDDL `D:P(A;;FA;;;<user SID>)(A;;FA;;;SY)`
+//! -- File-All-Access to the current user and to `SYSTEM` only, `P` marking the ACL protected so
+//! nothing above it in the tree can inject an inherited ACE that would widen it. The audit methods
+//! ([`SecretStore::audit_dir`], [`SecretStore::audit_secret`], [`KeyFile::audit`]) read that ACL
+//! back through `cerebro-probe`'s single-object audit, the workspace's one DACL reader, so "could not
+//! verify" is never mistaken for "verified, fine" here either.
 //!
 //! # KeyFile and process-kill
 //!
@@ -228,6 +228,11 @@ pub enum SecretsError {
     /// DPAPI and the owner-only ACLs this module relies on have no equivalent outside Windows.
     #[error("secret storage is implemented for Windows only")]
     UnsupportedPlatform,
+
+    /// The current user's SID, which every owner-only ACL here names, could not be read from the
+    /// process token. Carries the probe's own error text.
+    #[error("could not identify the current user for an owner-only ACL: {0}")]
+    UserIdentity(String),
 }
 
 /// Constant, versioned prefix mixed into every entropy value.
@@ -246,11 +251,21 @@ fn entropy_for(id: SecretId) -> Vec<u8> {
     entropy
 }
 
-/// SDDL granting File-All-Access to the object's owner and to `SYSTEM` only. `P` marks the ACL
+/// SDDL granting File-All-Access to the current user and to `SYSTEM` only. `P` marks the ACL
 /// protected, so nothing above the object in the directory tree can inject an inherited ACE that
 /// would widen this -- see the module documentation's "Why the on-disk ACL matters" section.
+///
+/// The user is named by SID (from [`cerebro_probe::backend::current_user_sid`]), not by the SDDL
+/// alias `OW`: `OW` stores the OWNER RIGHTS SID (S-1-3-4), which
+/// [`cerebro_probe::backend::audit_object_dacl`] decides on SIDs alone and does not trust, so the
+/// audit of a freshly written file would report it. Naming the exact principal the audit trusts
+/// keeps writer and auditor in agreement by construction.
 #[cfg(windows)]
-const OWNER_ONLY_SDDL: &str = "D:P(A;;FA;;;OW)(A;;FA;;;SY)";
+fn owner_only_sddl() -> Result<String, SecretsError> {
+    let sid = cerebro_probe::backend::current_user_sid()
+        .map_err(|e| SecretsError::UserIdentity(e.to_string()))?;
+    Ok(format!("D:P(A;;FA;;;{sid})(A;;FA;;;SY)"))
+}
 
 /// UTF-16, NUL-terminated, suitable for any Win32 `PCWSTR`/`PWSTR` parameter this module passes a
 /// path or a literal string through.
@@ -272,7 +287,7 @@ fn last_error() -> u32 {
     unsafe { windows_sys::Win32::Foundation::GetLastError() }
 }
 
-/// An owner-only `SECURITY_ATTRIBUTES`, built once from [`OWNER_ONLY_SDDL`] and freed exactly once
+/// An owner-only `SECURITY_ATTRIBUTES`, built once from [`owner_only_sddl`] and freed exactly once
 /// on drop.
 #[cfg(windows)]
 struct OwnerOnlySecurityDescriptor {
@@ -286,7 +301,7 @@ impl OwnerOnlySecurityDescriptor {
             ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
         };
 
-        let wide = to_wide(OWNER_ONLY_SDDL);
+        let wide = to_wide(owner_only_sddl()?);
         let mut descriptor: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR = std::ptr::null_mut();
         // SAFETY: `wide` is a live, NUL-terminated UTF-16 string for the duration of this call.
         // `descriptor` starts null and receives, on success, a `PSECURITY_DESCRIPTOR` Windows
@@ -340,7 +355,7 @@ impl Drop for OwnerOnlySecurityDescriptor {
 ///
 /// If it already exists (from an earlier run, or created concurrently), its ACL is left exactly as
 /// found: Windows only honors `SECURITY_ATTRIBUTES` at creation time, and this function does not
-/// attempt to retroactively tighten a directory it did not itself create. [`audit_owner_only`]
+/// attempt to retroactively tighten a directory it did not itself create. [`SecretStore::audit_dir`]
 /// exists so a caller can check rather than silently trust that case.
 #[cfg(windows)]
 fn create_owner_only_dir_if_missing(dir: &Path) -> Result<(), SecretsError> {
@@ -402,21 +417,95 @@ fn create_owner_only_file(path: &Path) -> Result<std::fs::File, SecretsError> {
     Ok(unsafe { std::fs::File::from_raw_handle(handle as std::os::windows::io::RawHandle) })
 }
 
-/// Replace whatever is at `path` with a fresh owner-only file containing `bytes`.
+/// Unique per-call suffix for [`write_owner_only_file`]'s temp names (process id plus this
+/// counter), the same scheme as `crate::file`'s `TMP_COUNTER`.
+#[cfg(windows)]
+static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Replace whatever is at `path` with an owner-only file containing `bytes`, atomically.
 ///
-/// Deletes any pre-existing file at `path` first (best-effort; absence is not an error) so the
-/// `CREATE_NEW` this performs always reflects *this* call's ACL, never one an earlier write -- or a
-/// hostile pre-plant -- left behind.
+/// The bytes go to a fresh owner-only temp file beside `path` (`CREATE_NEW`, so nothing planted
+/// at that name can be written through), are `fsync`ed, and the temp file is then renamed over
+/// `path` (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, same volume). A same-volume rename moves
+/// the file object together with its own protected DACL, so the result carries *this* call's
+/// owner-only ACL, never one an earlier write or a hostile pre-plant left at `path`. And a crash
+/// or a failure at any step leaves the previous secret intact: there is no moment at which
+/// neither the old nor the new blob exists, as there was with delete-then-create.
 #[cfg(windows)]
 fn write_owner_only_file(path: &Path, bytes: &[u8]) -> Result<(), SecretsError> {
     use std::io::Write as _;
 
-    let _ = std::fs::remove_file(path);
-    let mut file = create_owner_only_file(path)?;
-    file.write_all(bytes)
-        .map_err(|e| SecretsError::Io { path: path.to_path_buf(), cause: e.to_string() })?;
-    file.sync_all()
-        .map_err(|e| SecretsError::Io { path: path.to_path_buf(), cause: e.to_string() })
+    let io_err = |e: std::io::Error| SecretsError::Io { path: path.to_path_buf(), cause: e.to_string() };
+    let unique = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.tmp-{}-{unique}", std::process::id()));
+
+    let written = create_owner_only_file(&tmp).and_then(|mut file| {
+        file.write_all(bytes).map_err(io_err)?;
+        file.sync_all().map_err(io_err)
+    });
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        io_err(e)
+    })
+}
+
+/// Largest `.dpapi` blob [`SecretStore::get`] reads. DPAPI output for a 32-byte bearer token or a
+/// Hugging Face token is well under 1 KiB; the cap only stops a planted multi-GB file from being
+/// read into memory whole.
+#[cfg(windows)]
+const MAX_SECRET_BLOB_BYTES: u64 = 64 * 1024;
+
+/// `FILE_FLAG_OPEN_REPARSE_POINT` (winbase.h): open a link itself, never what it points at.
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+/// `FILE_FLAG_BACKUP_SEMANTICS` (winbase.h): required to open a directory handle at all.
+#[cfg(windows)]
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+/// `FILE_ATTRIBUTE_REPARSE_POINT` (winnt.h).
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+/// Read the blob at `path`: `None` when absent, a typed error for a reparse point (this module
+/// never creates one, so a link here was planted) or a file over [`MAX_SECRET_BLOB_BYTES`].
+#[cfg(windows)]
+fn read_blob(path: &Path) -> Result<Option<Vec<u8>>, SecretsError> {
+    use std::io::Read as _;
+    use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    let io_err = |cause: String| SecretsError::Io { path: path.to_path_buf(), cause };
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        // `FILE_FLAG_BACKUP_SEMANTICS` so a planted *directory* junction opens too (it grants no
+        // privilege by itself) and is refused by the attribute check below, like a file symlink,
+        // instead of surfacing as an unexplained "access denied".
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io_err(e.to_string())),
+    };
+    let meta = file.metadata().map_err(|e| io_err(e.to_string()))?;
+    if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io_err("the secret blob is a reparse point (symlink or junction)".to_string()));
+    }
+    // Sized from the metadata when it is plausible, so a normal read makes one allocation; the
+    // `take` bound, not the metadata, is what enforces the cap.
+    let mut ciphertext = Vec::with_capacity(meta.len().min(MAX_SECRET_BLOB_BYTES) as usize);
+    file.take(MAX_SECRET_BLOB_BYTES + 1)
+        .read_to_end(&mut ciphertext)
+        .map_err(|e| io_err(e.to_string()))?;
+    if ciphertext.len() as u64 > MAX_SECRET_BLOB_BYTES {
+        return Err(io_err(format!("the secret blob exceeds {MAX_SECRET_BLOB_BYTES} bytes")));
+    }
+    Ok(Some(ciphertext))
 }
 
 /// Owns one Windows-allocated `CRYPT_INTEGER_BLOB` and frees it with `LocalFree` exactly once, on
@@ -549,278 +638,6 @@ fn unprotect(id: SecretId, ciphertext: &[u8]) -> Result<Vec<u8>, SecretsError> {
     Ok(plaintext)
 }
 
-/// `ACCESS_ALLOWED_ACE_TYPE` (winnt.h). Defined locally, rather than by adding the
-/// `Win32_System_SystemServices` feature for two constants, matching
-/// `crate::file`/`crate::profile`'s own local copies of `FILE_FLAG_OPEN_REPARSE_POINT` and
-/// `FILE_ATTRIBUTE_REPARSE_POINT` for the identical reason.
-#[cfg(windows)]
-const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
-
-/// `ACCESS_DENIED_ACE_TYPE` (winnt.h). See [`ACCESS_ALLOWED_ACE_TYPE`]'s doc comment.
-#[cfg(windows)]
-const ACCESS_DENIED_ACE_TYPE: u8 = 1;
-
-/// Read the DACL of `path` and report whether any principal other than its owner, `SYSTEM`, or
-/// `Administrators` holds a write-capable right on it.
-///
-/// This is [`cerebro_probe::DaclAudit`], the same three-state type `cerebro-probe` audits backend
-/// directories with, so "could not check" is never mistaken for "checked, fine" here either --
-/// house rule S6. `cerebro-probe`'s own `audit_dacl` is not reused directly: it is a private
-/// implementation detail of `cerebro_probe::backend::probe` (a backend-directory probe that shells
-/// out to `llama-server --version`), not a general-purpose "audit this path" function, and it is
-/// not yet implemented there (it returns [`cerebro_probe::DaclAudit::Unknown`] unconditionally).
-/// This function is that implementation, written against the one type both crates already share,
-/// so nothing here depends on `cerebro-probe`'s internals changing.
-///
-/// Only `ACCESS_ALLOWED_ACE` entries are inspected. An `ACCESS_DENIED_ACE` is skipped (it can only
-/// narrow access, and this function asks the narrower, sufficient question "does any *allow* ACE
-/// grant a write-capable right to an unexpected trustee" rather than attempting full
-/// effective-permissions evaluation across ACE ordering and inheritance). Any other ACE type --
-/// object ACEs, callback ACEs, conditional ACEs -- could in principle still grant access, so
-/// encountering one reports [`cerebro_probe::DaclAudit::Unknown`] rather than silently skipping it,
-/// per house rule S6.
-#[cfg(windows)]
-fn audit_owner_only(path: &Path) -> cerebro_probe::DaclAudit {
-    audit_owner_only_inner(path)
-        .unwrap_or(cerebro_probe::DaclAudit::Unknown("owner-only DACL audit could not complete"))
-}
-
-#[cfg(windows)]
-fn audit_owner_only_inner(path: &Path) -> Result<cerebro_probe::DaclAudit, SecretsError> {
-    use windows_sys::Win32::Foundation::{GENERIC_ALL, GENERIC_WRITE, LocalFree};
-    use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
-    use windows_sys::Win32::Security::{
-        GetAce, WinBuiltinAdministratorsSid, WinCreatorOwnerRightsSid, WinLocalSystemSid, ACCESS_ALLOWED_ACE,
-        ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-    };
-    use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_APPEND_DATA, FILE_WRITE_DATA, WRITE_DAC, WRITE_OWNER};
-
-    /// Every access bit this audit treats as "can modify the object," combined once so the loop
-    /// below is a single mask test rather than a chain of comparisons that could individually be
-    /// forgotten to update. `FILE_APPEND_DATA` doubles as `FILE_ADD_SUBDIRECTORY` (same bit) and
-    /// `FILE_WRITE_DATA` as `FILE_ADD_FILE` (same bit); both readings are write-capable, so the
-    /// single import covers files and directories alike.
-    const WRITE_CAPABLE_MASK: u32 = GENERIC_ALL | GENERIC_WRITE | FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE | WRITE_DAC | WRITE_OWNER;
-
-    let wide = to_wide(path);
-    let mut owner_sid: PSID = std::ptr::null_mut();
-    let mut dacl: *mut ACL = std::ptr::null_mut();
-    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-
-    // SAFETY: `wide` is a live NUL-terminated path. The group-SID and SACL out-parameters are left
-    // null, which is documented as legal when the corresponding bit is not set in `securityinfo`
-    // (only `OWNER_SECURITY_INFORMATION` and `DACL_SECURITY_INFORMATION` are requested).
-    // `descriptor` receives, on success, ownership of a `LocalAlloc`'d buffer that `owner_sid` and
-    // `dacl` merely point *into* -- freeing `descriptor` exactly once (`_free_descriptor` below) is
-    // therefore correct and sufficient; `owner_sid`/`dacl` must never be freed separately.
-    let status = unsafe {
-        GetNamedSecurityInfoW(
-            wide.as_ptr(),
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            &mut owner_sid,
-            std::ptr::null_mut(),
-            &mut dacl,
-            std::ptr::null_mut(),
-            &mut descriptor,
-        )
-    };
-    if status != 0 {
-        return Err(SecretsError::Win32 { call: "GetNamedSecurityInfoW", code: status });
-    }
-
-    struct FreeDescriptor(PSECURITY_DESCRIPTOR);
-    impl Drop for FreeDescriptor {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                // SAFETY: allocated by `GetNamedSecurityInfoW` via `LocalAlloc`; freed here exactly
-                // once, for the same reason as every other `LocalFree` in this module.
-                unsafe { LocalFree(self.0 as windows_sys::Win32::Foundation::HLOCAL) };
-            }
-        }
-    }
-    let _free_descriptor = FreeDescriptor(descriptor);
-
-    if dacl.is_null() {
-        // A null DACL means "no protection at all": every principal has every right. Never
-        // possible for a file or directory this module created (it always supplies the explicit
-        // owner-only SDDL), so this is only reachable auditing something else -- and it is
-        // unambiguously unsafe, not merely unknown.
-        return Ok(cerebro_probe::DaclAudit::WritableByOthers(vec![
-            "(no DACL at all: every principal has every right)".to_string(),
-        ]));
-    }
-
-    let system_sid = well_known_sid(WinLocalSystemSid)?;
-    let admins_sid = well_known_sid(WinBuiltinAdministratorsSid)?;
-    // The SDDL alias `OW` this module writes (`OWNER_ONLY_SDDL`) does not expand to the object's
-    // *current* owner SID at rest -- it stores the literal, special "OWNER RIGHTS" SID (S-1-3-4),
-    // which Windows resolves to whatever principal owns the object *at access-check time*. That is
-    // precisely why `OW` is the idiomatic way to write an owner-only ACE (it keeps working if
-    // ownership is ever transferred, unlike embedding a literal user SID would), but it also means
-    // this audit must accept this specific well-known SID as expected, not just the literal
-    // `owner_sid` `GetNamedSecurityInfoW` reported -- the two are related but are not the same SID.
-    let owner_rights_sid = well_known_sid(WinCreatorOwnerRightsSid)?;
-
-    // SAFETY: `dacl` is non-null and was populated by the successful call above, and remains valid
-    // through this whole function (kept alive by `_free_descriptor`, which drops only at the end of
-    // this function's scope). This reads only the ACL's own fixed header field.
-    let ace_count = unsafe { (*dacl).AceCount };
-
-    let mut others = Vec::new();
-    for index in 0..u32::from(ace_count) {
-        let mut ace_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
-        // SAFETY: `dacl` is valid (see above) and `index < ace_count`, which is exactly what
-        // `GetAce` requires of `dwaceindex`.
-        let ok = unsafe { GetAce(dacl, index, &mut ace_ptr) };
-        if ok == 0 {
-            return Err(SecretsError::Win32 { call: "GetAce", code: last_error() });
-        }
-        // SAFETY: `ace_ptr` is non-null (`GetAce` succeeded) and every ACE, of any type, begins
-        // with an `ACE_HEADER` -- reading only that common prefix is in bounds regardless of the
-        // ACE's actual type.
-        let ace_type = unsafe { (*ace_ptr.cast::<ACE_HEADER>()).AceType };
-
-        if ace_type == ACCESS_DENIED_ACE_TYPE {
-            continue;
-        }
-        if ace_type != ACCESS_ALLOWED_ACE_TYPE {
-            return Ok(cerebro_probe::DaclAudit::Unknown(
-                "DACL contains an ACE type this audit does not model",
-            ));
-        }
-
-        // SAFETY: `ace_type == ACCESS_ALLOWED_ACE_TYPE` was just confirmed, so `ace_ptr` points to
-        // an `ACCESS_ALLOWED_ACE` (`Header`, then `Mask`, then the inline SID starting at
-        // `SidStart`); Windows guarantees `Header.AceSize` covers at least this fixed prefix for
-        // this ACE type.
-        let ace = unsafe { &*ace_ptr.cast::<ACCESS_ALLOWED_ACE>() };
-        if ace.Mask & WRITE_CAPABLE_MASK == 0 {
-            continue;
-        }
-
-        // SAFETY: `SidStart` is the address of the ACE's inline, variable-length SID, which is
-        // valid for as many bytes as the SID's own sub-authority count declares -- exactly the
-        // memory `EqualSid`/`LookupAccountSidW` read, and well within `Header.AceSize`.
-        let sid: PSID = std::ptr::addr_of!(ace.SidStart) as PSID;
-
-        let is_expected = sid_equals(sid, owner_sid)
-            || sid_equals(sid, system_sid.as_ptr() as PSID)
-            || sid_equals(sid, admins_sid.as_ptr() as PSID)
-            || sid_equals(sid, owner_rights_sid.as_ptr() as PSID);
-        if !is_expected {
-            others.push(describe_sid(sid));
-        }
-    }
-
-    if others.is_empty() {
-        Ok(cerebro_probe::DaclAudit::OwnerOnly)
-    } else {
-        Ok(cerebro_probe::DaclAudit::WritableByOthers(others))
-    }
-}
-
-/// Build one of the fixed well-known SIDs (`SYSTEM`, `Administrators`) into a stack buffer sized to
-/// [`windows_sys::Win32::Security::SECURITY_MAX_SID_SIZE`], the documented maximum size of any SID.
-#[cfg(windows)]
-fn well_known_sid(
-    sid_type: windows_sys::Win32::Security::WELL_KNOWN_SID_TYPE,
-) -> Result<[u8; windows_sys::Win32::Security::SECURITY_MAX_SID_SIZE as usize], SecretsError> {
-    use windows_sys::Win32::Security::{CreateWellKnownSid, SECURITY_MAX_SID_SIZE};
-
-    let mut buf = [0u8; SECURITY_MAX_SID_SIZE as usize];
-    let mut size = buf.len() as u32;
-    // SAFETY: `buf` is exactly `SECURITY_MAX_SID_SIZE` bytes and `size` communicates that capacity;
-    // on success the API writes the SID's actual length back into `size`, which this function does
-    // not need further (the SID itself, in `buf`, is what callers compare against).
-    let ok = unsafe { CreateWellKnownSid(sid_type, std::ptr::null_mut(), buf.as_mut_ptr().cast(), &mut size) };
-    if ok == 0 {
-        return Err(SecretsError::Win32 { call: "CreateWellKnownSid", code: last_error() });
-    }
-    Ok(buf)
-}
-
-/// Whether two SIDs identify the same trustee.
-#[cfg(windows)]
-fn sid_equals(a: windows_sys::Win32::Security::PSID, b: windows_sys::Win32::Security::PSID) -> bool {
-    use windows_sys::Win32::Security::EqualSid;
-    if a.is_null() || b.is_null() {
-        return false;
-    }
-    // SAFETY: both `a` and `b` are non-null and point at initialized SIDs, live for the duration of
-    // this call -- either an ACE's own inline SID (kept alive by the audit's `descriptor`) or one
-    // of `well_known_sid`'s stack buffers (kept alive by its caller's local variable).
-    unsafe { EqualSid(a, b) != 0 }
-}
-
-/// Best-effort human-readable name for a trustee SID, for
-/// [`cerebro_probe::DaclAudit::WritableByOthers`]'s finding list. Falls back to the SID's string
-/// form (`S-1-5-...`) when the account cannot be looked up (an orphaned SID from a deleted
-/// account), rather than losing the finding entirely.
-#[cfg(windows)]
-fn describe_sid(sid: windows_sys::Win32::Security::PSID) -> String {
-    use windows_sys::Win32::Security::LookupAccountSidW;
-
-    let mut name = [0u16; 256];
-    let mut name_len = name.len() as u32;
-    let mut domain = [0u16; 256];
-    let mut domain_len = domain.len() as u32;
-    let mut use_: i32 = 0;
-    // SAFETY: `sid` is a live, valid SID for the duration of this call. `name`/`domain` are
-    // fixed-size stack buffers, and `name_len`/`domain_len` communicate their capacity in `u16`
-    // elements (what this API expects) and receive the lengths actually written back.
-    let ok = unsafe {
-        LookupAccountSidW(
-            std::ptr::null(),
-            sid,
-            name.as_mut_ptr(),
-            &mut name_len,
-            domain.as_mut_ptr(),
-            &mut domain_len,
-            &mut use_,
-        )
-    };
-    if ok != 0 {
-        let name = String::from_utf16_lossy(&name[..name_len as usize]);
-        let domain = String::from_utf16_lossy(&domain[..domain_len as usize]);
-        if domain.is_empty() {
-            return name;
-        }
-        return format!("{domain}\\{name}");
-    }
-    string_sid(sid).unwrap_or_else(|| "(unknown trustee)".to_string())
-}
-
-/// The `S-1-5-...` string form of a SID, via `ConvertSidToStringSidW`.
-#[cfg(windows)]
-fn string_sid(sid: windows_sys::Win32::Security::PSID) -> Option<String> {
-    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
-
-    let mut ptr: *mut u16 = std::ptr::null_mut();
-    // SAFETY: `sid` is valid for the duration of this call; on success Windows allocates the
-    // output string via `LocalAlloc`, freed exactly once below.
-    let ok = unsafe { ConvertSidToStringSidW(sid, &mut ptr) };
-    if ok == 0 || ptr.is_null() {
-        return None;
-    }
-    // SAFETY: `ptr` is a NUL-terminated wide string Windows just allocated; scanning for the
-    // terminator is the documented way to discover its length before copying it out.
-    let len = unsafe {
-        let mut i = 0usize;
-        while *ptr.add(i) != 0 {
-            i += 1;
-        }
-        i
-    };
-    // SAFETY: `ptr` is valid for `len` initialized `u16` elements per the scan just performed.
-    let text = unsafe { std::slice::from_raw_parts(ptr, len) };
-    let s = String::from_utf16_lossy(text);
-    // SAFETY: `ptr` was allocated by `ConvertSidToStringSidW` via `LocalAlloc`; freed here exactly
-    // once.
-    unsafe { windows_sys::Win32::Foundation::LocalFree(ptr as windows_sys::Win32::Foundation::HLOCAL) };
-    Some(s)
-}
-
 /// DPAPI storage for [`SecretId::ApiBearer`] and [`SecretId::HfToken`].
 ///
 /// See the module documentation for what DPAPI does and does not protect against, and for why the
@@ -863,14 +680,12 @@ impl SecretStore {
     /// # Errors
     /// [`SecretsError::Decrypt`] if the stored blob does not decrypt under `id`'s entropy --
     /// either it was tampered with, or it was written under a *different* [`SecretId`]'s entropy.
-    /// See the module documentation's entropy-separation section.
+    /// See the module documentation's entropy-separation section. [`SecretsError::Io`] if the blob
+    /// cannot be read, is a reparse point, or is larger than any real blob (64 KiB).
     #[cfg(windows)]
     pub fn get(&self, id: SecretId) -> Result<Option<Secret>, SecretsError> {
-        let path = self.path_for(id);
-        let ciphertext = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(SecretsError::Io { path, cause: e.to_string() }),
+        let Some(ciphertext) = read_blob(&self.path_for(id))? else {
+            return Ok(None);
         };
         let plaintext = unprotect(id, &ciphertext)?;
         Ok(Some(Secret::new(plaintext)))
@@ -932,31 +747,18 @@ impl SecretStore {
     /// Audit this store's own `secrets` directory: is it owner-only, as [`open`](Self::open)
     /// created it (or requires a caller's own check if it already existed)?
     ///
-    /// A caller (`cerebro-supervisor`, before ever trusting a secret this store hands back) should
-    /// treat anything other than [`cerebro_probe::DaclAudit::OwnerOnly`] as untrusted -- house rule
-    /// S6, and the same rule [`crate::profile::DefaultPreflighter`] applies to the backend
-    /// directory.
-    #[cfg(windows)]
+    /// This is `cerebro-probe`'s single-object audit
+    /// ([`cerebro_probe::backend::audit_object_dacl`]), the same trusted principals and
+    /// write-capable rights as the backend-directory audit, so the workspace has one DACL reader.
+    /// A caller should treat anything other than [`cerebro_probe::DaclAudit::OwnerOnly`] as
+    /// untrusted: "could not check" is never "checked, fine".
     pub fn audit_dir(&self) -> cerebro_probe::DaclAudit {
-        audit_owner_only(&self.dir)
-    }
-
-    /// Always [`cerebro_probe::DaclAudit::Unknown`] off Windows: there is no DACL to audit.
-    #[cfg(not(windows))]
-    pub fn audit_dir(&self) -> cerebro_probe::DaclAudit {
-        cerebro_probe::DaclAudit::Unknown("DACL auditing is implemented for Windows only")
+        cerebro_probe::backend::audit_object_dacl(&self.dir)
     }
 
     /// Audit one id's `.dpapi` file. See [`audit_dir`](Self::audit_dir).
-    #[cfg(windows)]
     pub fn audit_secret(&self, id: SecretId) -> cerebro_probe::DaclAudit {
-        audit_owner_only(&self.path_for(id))
-    }
-
-    /// Always [`cerebro_probe::DaclAudit::Unknown`] off Windows.
-    #[cfg(not(windows))]
-    pub fn audit_secret(&self, _id: SecretId) -> cerebro_probe::DaclAudit {
-        cerebro_probe::DaclAudit::Unknown("DACL auditing is implemented for Windows only")
+        cerebro_probe::backend::audit_object_dacl(&self.path_for(id))
     }
 }
 
@@ -998,15 +800,8 @@ impl KeyFile {
     }
 
     /// Audit this file's own ACL. See [`SecretStore::audit_dir`].
-    #[cfg(windows)]
     pub fn audit(&self) -> cerebro_probe::DaclAudit {
-        audit_owner_only(&self.path)
-    }
-
-    /// Always [`cerebro_probe::DaclAudit::Unknown`] off Windows.
-    #[cfg(not(windows))]
-    pub fn audit(&self) -> cerebro_probe::DaclAudit {
-        cerebro_probe::DaclAudit::Unknown("DACL auditing is implemented for Windows only")
+        cerebro_probe::backend::audit_object_dacl(&self.path)
     }
 
     /// Delete the key file now, propagating a real failure instead of best-effort-ing it away.
@@ -1183,21 +978,28 @@ mod tests {
         let tampered_err = store.get(SecretId::ApiBearer).expect_err("tampered must fail");
         assert_no_marker(&tampered_err, marker);
 
-        // Win32 (CreateFileW/CREATE_NEW): lock the target file so `set`'s best-effort
-        // remove-then-create-new sequence cannot remove it first, forcing `CreateFileW` itself to
-        // fail with a real Win32 error while the value it was asked to write still carries the
-        // marker.
+        // Win32 (CreateFileW/CREATE_NEW): deny creating files in the secrets directory, so `set`
+        // fails creating its temp file while the value it was asked to write carries the marker.
+        let win32_err = with_file_creation_denied(&store.dir, || {
+            store
+                .set(SecretId::ApiBearer, &Secret::new(marker.as_bytes().to_vec()))
+                .expect_err("a directory that refuses new files must make CreateFileW fail")
+        });
+        assert!(matches!(win32_err, SecretsError::Win32 { call: "CreateFileW", .. }), "got {win32_err:?}");
+        assert_no_marker(&win32_err, marker);
+
+        // Io (rename): lock the target so the final rename over it fails.
         std::fs::write(&path, b"placeholder").expect("seed a real file to lock");
         let lock = std::fs::OpenOptions::new()
             .read(true)
-            .share_mode(0) // no sharing at all: blocks delete, exactly like `file.rs`'s own tests.
+            .share_mode(0) // no sharing at all: blocks replacing it, exactly like `file.rs`'s own tests.
             .open(&path)
             .expect("exclusively lock the blob");
-        let win32_err = store
+        let rename_err = store
             .set(SecretId::ApiBearer, &Secret::new(marker.as_bytes().to_vec()))
-            .expect_err("locked file must make CreateFileW fail");
-        assert!(matches!(win32_err, SecretsError::Win32 { call: "CreateFileW", .. }), "got {win32_err:?}");
-        assert_no_marker(&win32_err, marker);
+            .expect_err("a locked target must make the rename fail");
+        assert!(matches!(rename_err, SecretsError::Io { .. }), "got {rename_err:?}");
+        assert_no_marker(&rename_err, marker);
         drop(lock);
 
         // Io (std::fs::read): lock the file so a concurrent `get` fails at the read step with a
@@ -1220,6 +1022,95 @@ mod tests {
         assert_no_marker(&SecretsError::UnsupportedPlatform, marker);
     }
 
+    /// Run `f` while `dir` grants this user read and traverse only (no file creation), restoring
+    /// the owner-only ACL afterwards so the tempdir can be cleaned up.
+    fn with_file_creation_denied<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+        let me = cerebro_probe::backend::current_user_sid().expect("current user");
+        cerebro_probe::backend::set_dacl_from_sddl_for_tests(dir, &format!("D:P(A;;FRFX;;;{me})(A;;FA;;;SY)"))
+            .expect("make the directory read-only for this user");
+        let out = f();
+        cerebro_probe::backend::set_dacl_from_sddl_for_tests(dir, &format!("D:P(A;;FA;;;{me})(A;;FA;;;SY)"))
+            .expect("restore the owner-only ACL");
+        out
+    }
+
+    /// Names in `dir` other than the store's own blobs: a failed write must leave no temp file.
+    fn stray_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .expect("list")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.ends_with(".dpapi"))
+            .collect()
+    }
+
+    #[test]
+    fn a_failed_set_leaves_the_previous_secret_intact() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SecretStore::open(dir.path()).expect("open store");
+        store.set(SecretId::HfToken, &Secret::new(b"old-token".to_vec())).expect("set old");
+
+        // The create fails: delete-then-create would already have destroyed the old blob here.
+        let err = with_file_creation_denied(&store.dir, || {
+            store.set(SecretId::HfToken, &Secret::new(b"new-token".to_vec())).expect_err("create denied")
+        });
+        assert!(matches!(err, SecretsError::Win32 { call: "CreateFileW", .. }), "got {err:?}");
+        let kept = store.get(SecretId::HfToken).expect("get").expect("the old secret survives");
+        assert_eq!(kept.expose_secret(), b"old-token");
+
+        // The rename fails (target locked): the old blob stays, and the temp file is cleaned up.
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1) // FILE_SHARE_READ only: `get` can still read, but nothing can replace it.
+            .open(store.path_for(SecretId::HfToken))
+            .expect("lock the blob against replacement");
+        let err = store.set(SecretId::HfToken, &Secret::new(b"new-token".to_vec())).expect_err("rename blocked");
+        assert!(matches!(err, SecretsError::Io { .. }), "got {err:?}");
+        let kept = store.get(SecretId::HfToken).expect("get").expect("the old secret survives");
+        assert_eq!(kept.expose_secret(), b"old-token");
+        drop(lock);
+        assert!(stray_files(&store.dir).is_empty(), "{:?}", stray_files(&store.dir));
+
+        // And with nothing in the way the replace goes through, still owner-only.
+        store.set(SecretId::HfToken, &Secret::new(b"new-token".to_vec())).expect("set new");
+        let got = store.get(SecretId::HfToken).expect("get").expect("present");
+        assert_eq!(got.expose_secret(), b"new-token");
+        assert_eq!(store.audit_secret(SecretId::HfToken), cerebro_probe::DaclAudit::OwnerOnly);
+        assert!(stray_files(&store.dir).is_empty(), "{:?}", stray_files(&store.dir));
+    }
+
+    #[test]
+    fn secret_get_refuses_an_oversized_blob() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SecretStore::open(dir.path()).expect("open store");
+        let path = store.path_for(SecretId::ApiBearer);
+        std::fs::write(&path, vec![0u8; MAX_SECRET_BLOB_BYTES as usize + 1]).expect("plant an oversized blob");
+        let err = store.get(SecretId::ApiBearer).expect_err("an oversized blob is refused");
+        assert!(
+            matches!(&err, SecretsError::Io { cause, .. } if cause.contains("exceeds")),
+            "got {err:?}"
+        );
+        // Exactly at the cap it is read (and then fails to decrypt, as junk must).
+        std::fs::write(&path, vec![0u8; MAX_SECRET_BLOB_BYTES as usize]).expect("plant a blob at the cap");
+        let err = store.get(SecretId::ApiBearer).expect_err("junk does not decrypt");
+        assert!(matches!(err, SecretsError::Decrypt { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn secret_get_refuses_a_blob_that_is_a_reparse_point() {
+        // A junction needs no admin rights; this module never creates one, so one here was planted.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SecretStore::open(dir.path()).expect("open store");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("create target");
+        cerebro_probe::backend::create_junction_for_tests(&store.path_for(SecretId::HfToken), &elsewhere)
+            .expect("plant a junction at the blob's name");
+        let err = store.get(SecretId::HfToken).expect_err("a reparse point is refused");
+        assert!(
+            matches!(&err, SecretsError::Io { cause, .. } if cause.contains("reparse point")),
+            "got {err:?}"
+        );
+    }
+
     #[test]
     fn secrets_directory_and_stored_files_are_owner_only_per_dacl_audit() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1232,6 +1123,26 @@ mod tests {
         let file_audit = store.audit_secret(SecretId::ApiBearer);
         assert_eq!(file_audit, cerebro_probe::DaclAudit::OwnerOnly, "got {file_audit:?}");
         assert!(file_audit.is_safe_to_spawn());
+    }
+
+    #[test]
+    fn a_widened_secret_or_key_file_acl_is_reported_by_the_shared_audit() {
+        // The audit must be a real read of the on-disk ACL, not an echo of what `set` wrote: widen
+        // each file after the fact and the verdict must change.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SecretStore::open(dir.path()).expect("open store");
+        store.set(SecretId::HfToken, &Secret::new(b"x".to_vec())).expect("set");
+        let me = cerebro_probe::backend::current_user_sid().expect("current user");
+        let widened = format!("D:P(A;;FA;;;{me})(A;;FW;;;BU)");
+        cerebro_probe::backend::set_dacl_from_sddl_for_tests(&store.path_for(SecretId::HfToken), &widened)
+            .expect("widen the blob's ACL");
+        let audit = store.audit_secret(SecretId::HfToken);
+        assert_eq!(audit.principals().len(), 1, "got {audit:?}");
+        assert!(!audit.is_safe_to_spawn());
+
+        let key = KeyFile::create(dir.path(), &Secret::new(b"child-key".to_vec())).expect("create");
+        cerebro_probe::backend::set_dacl_from_sddl_for_tests(key.path(), &widened).expect("widen the key file");
+        assert!(matches!(key.audit(), cerebro_probe::DaclAudit::WritableByOthers(_)), "{:?}", key.audit());
     }
 
     #[test]

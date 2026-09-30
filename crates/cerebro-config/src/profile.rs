@@ -1,36 +1,43 @@
-//! The security profile: which settings pointers are locked, which [`Source`] may write them, path
-//! canonicalization against the approved model roots, and the spawn-decision surface that
-//! everything else in this crate exists to protect.
+//! Who may write which settings, and model-path resolution against the model folders.
+//!
+//! Launch decisions are not made here: [`Settings::launch_spec`] hands the backend directory and
+//! [`crate::policy::ProtectionsSection::launch`] to `cerebro-supervisor`'s preflight, which owns
+//! the folder audit, the integrity check and every other refusal.
 //!
 //! # House rule S6
 //!
-//! "An unknown state is a refusal, never a warning that proceeds." Every function here follows it:
-//! [`resolve_model_path`] fails closed on a path it cannot fully account for,
-//! [`Settings::apply_patch`] validates an entire patch before committing any of it, and
-//! [`DefaultPreflighter`] refuses on [`DaclAudit::Unknown`] exactly as it refuses on
-//! [`DaclAudit::WritableByOthers`] -- "could not check" is never treated as "checked, fine".
+//! "An unknown state is a refusal, never a warning that proceeds." [`resolve_model_path`] fails
+//! closed on a path it cannot fully account for, and [`Settings::apply_patch`] validates an entire
+//! patch before committing any of it.
 
-use std::path::{Component, Path, PathBuf};
-
-use cerebro_probe::DaclAudit;
+use std::path::{Component, Path, PathBuf, Prefix};
 
 use crate::error::ConfigError;
 use crate::schema::Settings;
 
 /// JSON pointers no [`Source::Api`] patch may ever touch, regardless of value.
 ///
-/// A pointer is locked if it equals one of these exactly or falls beneath one of them (`/security`
-/// covers `/security/lan_mode`, `/security/model_roots`, ...). This is the entire security surface
-/// of [`Settings::apply_patch`]: everything under `/security` (the model-root allowlist, LAN
-/// exposure, the audited backend path), everything under `/backend` (ggml loads DLLs from
-/// `backend.dir` at spawn time -- a live source redirecting it is a DLL-plant vector, not a
-/// preference change), and `/api/bind` (a live source redirecting its own bind address).
+/// A pointer is locked if it equals one of these exactly or falls beneath one of them
+/// (`/protections` covers `/protections/refuse_elevation`, ...):
 ///
-/// Locking a pointer controls *who may write it*, not *what value it may hold* -- that is a
-/// separate, stronger guarantee. See the module documentation on [`crate::schema`] for why
-/// `security.allow_unsafe_dacl` has no representation in [`Settings`] at all, rather than merely
-/// being locked.
-pub const SECURITY_LOCKED: &[&str] = &["/security", "/backend", "/api/bind"];
+/// * `/backend`: ggml loads DLLs from `backend.dir` at spawn time, so a live source redirecting it
+///   is a DLL-plant vector, not a preference change.
+/// * `/api/bind`: a live source redirecting its own bind address.
+/// * `/models/folders`: the only roots a model path may resolve under.
+/// * `/network`: offline mode and LAN exposure.
+/// * `/protections`: a client of the API turning off the guards on its own launches.
+/// * `/plugins`: a plugin granting itself permissions.
+///
+/// Locking controls *who may write* a key, never *what value* it may hold: [`Source::File`] and
+/// [`Source::Gui`] (the user) may set every key, including turning any protection off.
+pub const SECURITY_LOCKED: &[&str] = &[
+    "/backend",
+    "/api/bind",
+    "/models/folders",
+    "/network",
+    "/protections",
+    "/plugins",
+];
 
 /// Whether a JSON pointer ([RFC 6901](https://www.rfc-editor.org/rfc/rfc6901)) falls under
 /// [`SECURITY_LOCKED`].
@@ -40,7 +47,7 @@ pub const SECURITY_LOCKED: &[&str] = &["/security", "/backend", "/api/bind"];
 /// with pointers it parsed itself, not only with pointers this crate built via
 /// [`touched_pointers`], so its contract has to hold for either caller. Comparison never decodes:
 /// decoding both sides before comparing would reopen exactly the ambiguity escaping exists to
-/// remove (a key literally named `security/x` would decode to a segment matching `/security`).
+/// remove (a key literally named `network/x` would decode to a segment matching `/network`).
 pub fn is_security_locked(pointer: &str) -> bool {
     SECURITY_LOCKED
         .iter()
@@ -51,8 +58,7 @@ pub fn is_security_locked(pointer: &str) -> bool {
 ///
 /// This is the entire input to the lock check in [`Settings::apply_patch`]: only [`Source::Api`] is
 /// ever refused a locked pointer. [`Source::File`] (the config file on disk) and [`Source::Gui`]
-/// (a local, already-privileged UI surface) may set any key that exists in the schema at all --
-/// which, for `allow_unsafe_dacl`, is none, by construction, for every source uniformly.
+/// (Cerebro's own UI, i.e. the user) may set any key the schema has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Source {
     /// The settings file on disk, as read by [`crate::file::ConfigFile`].
@@ -70,9 +76,12 @@ fn escape_token(key: &str) -> String {
     key.replace('~', "~0").replace('/', "~1")
 }
 
-/// Recursively collect every JSON pointer a merge-patch object touches, including intermediate
-/// object nodes (so that a patch touching `/security` as a whole, not just a leaf beneath it, is
-/// still caught). Each key is escaped per RFC 6901 as it is appended, so a pointer built here
+/// Recursively collect every JSON pointer a merge-patch object names, including intermediate
+/// object nodes (so a patch naming a fully locked section such as `/protections` as a whole, not
+/// just a leaf beneath it, is caught by name). An *ancestor* of a partially locked key
+/// (`/models` above `/models/folders`) is not locked by name; [`Settings::apply_patch`] catches a
+/// change made through one by comparing effective values after the merge. Each key is escaped per
+/// RFC 6901 as it is appended, so a pointer built here
 /// compares equal to the pointer an external JSON Patch parser would produce for the same key --
 /// see [`is_security_locked`].
 fn touched_pointers(patch: &serde_json::Value, prefix: &str, out: &mut Vec<String>) {
@@ -123,12 +132,15 @@ impl Settings {
     ///    applied, not even the unlocked parts.
     /// 2. Otherwise the patch is merged onto a serialized copy of the current settings and the
     ///    result is deserialized back into [`Settings`]. `#[serde(deny_unknown_fields)]` on every
-    ///    section means an unknown key (an attempted `allow_unsafe_dacl`, a typo) fails this step
-    ///    exactly as it would fail loading a file, from every [`Source`] -- only step 1
-    ///    distinguishes sources at all, and it distinguishes them by pointer, never by key name.
-    /// 3. The merged result must also pass [`Settings::validate`] (currently: `backend.dir` and
-    ///    `security.backend_path` must still agree) -- a patch that pulls them apart is refused
-    ///    exactly as a hand-edited file that did the same would be.
+    ///    section means an unknown key (a typo, a version-1 key) fails this step exactly as it
+    ///    would fail loading a file, from every [`Source`]. A `null` deletes a key, which for an
+    ///    optional load parameter means "back to llama.cpp's automatic value".
+    /// 3. The merged result must also pass [`Settings::validate`] -- a patch that, say, deletes
+    ///    the level `effort.default_level` names is refused exactly as a hand-edited file would be.
+    /// 4. For [`Source::Api`], the effective value at every [`SECURITY_LOCKED`] pointer must be
+    ///    unchanged after the merge. This catches what step 1 cannot see: a `null` on an ancestor
+    ///    (`{"models": null}`) that deletes a locked key without naming it and lets serde fill in
+    ///    its default.
     ///
     /// Only on success is `self` replaced.
     pub fn apply_patch(&mut self, patch: &serde_json::Value, source: Source) -> Result<(), ConfigError> {
@@ -146,20 +158,34 @@ impl Settings {
             }
         }
 
-        let mut merged = serde_json::to_value(&*self).map_err(|e| ConfigError::PatchRejected(e.to_string()))?;
+        let before = serde_json::to_value(&*self).map_err(|e| ConfigError::PatchRejected(e.to_string()))?;
+        let mut merged = before.clone();
         merge_patch(&mut merged, patch);
-        let next: Settings = serde_json::from_value(merged).map_err(|e| ConfigError::PatchRejected(e.to_string()))?;
-        // Structural checks beyond what `serde` alone expresses (currently: `backend.dir` and
-        // `security.backend_path` must agree) apply here too, not just on load -- a patch is just
-        // as capable of introducing the disagreement as a hand-edited file is.
+        let next: Settings =
+            serde_json::from_value(merged).map_err(|e| ConfigError::PatchRejected(crate::error::cap_echo(&e.to_string())))?;
+        // Structural checks beyond what `serde` alone expresses apply here too, not just on load.
         next.validate()?;
+        if source == Source::Api {
+            // The key check above only sees names. A `null` on an ancestor of a partially locked
+            // section (`{"models": null}` above `/models/folders`, `{"api": null}` above
+            // `/api/bind`) deletes the locked key without naming it, and serde then fills in its
+            // default. So compare the *effective* value at every locked pointer, after deserialize
+            // and re-serialize, which also covers any locked key a section gains later.
+            let after = serde_json::to_value(&next).map_err(|e| ConfigError::PatchRejected(e.to_string()))?;
+            if let Some(locked) = SECURITY_LOCKED.iter().find(|p| before.pointer(p) != after.pointer(p)) {
+                return Err(ConfigError::LockedPointerRefused {
+                    pointer: (*locked).to_string(),
+                    by: source,
+                });
+            }
+        }
         *self = next;
         Ok(())
     }
 }
 
-/// Canonicalize `path` and require the result to be under one of `settings`'s approved model roots
-/// ([`crate::schema::SecuritySection::model_roots`]).
+/// Canonicalize `path` and require the result to be under one of `settings`'s model folders
+/// ([`crate::schema::ModelsSection::folders`]).
 ///
 /// Every check below returns the single [`ConfigError::ModelPathNotApproved`] variant, with no
 /// distinguishing detail, so this function is not an oracle a caller could use to enumerate the
@@ -169,16 +195,26 @@ impl Settings {
 /// Rejected outright, on the literal input and again on the canonicalized result (so a reparse
 /// point *inside* an approved root that resolves to one of these on the far side is still caught):
 ///
-/// * any path segment that would make the string ambiguous as a plain local path -- a comma
-///   (reserved as list syntax in several `llama.cpp` flags, per `cerebro-supervisor::preflight`'s
-///   existing rule), or a colon after the drive letter (an NTFS alternate data stream reference);
-/// * a UNC path (`\\server\share\...`), a verbatim UNC path (`\\?\UNC\...`), or a `GLOBALROOT`/
-///   `Device`/`DosDevices` object-namespace path -- none of these name a location under a local
-///   drive letter, which is the only thing an approved root can be.
+/// * any path segment that would make the string ambiguous as a plain path -- a comma (reserved
+///   as list syntax in several `llama.cpp` flags, per `cerebro-supervisor::preflight`'s existing
+///   rule), or a colon after the drive letter (an NTFS alternate data stream reference);
+/// * a device or object-namespace path (`\\.\...`, `\\?\GLOBALROOT\...`, `\??\...`,
+///   `\Device\...`, `\DosDevices\...`), which names no folder a user can list.
 ///
-/// A reparse point (symlink or directory junction) that leaves the root is caught structurally:
-/// `std::fs::canonicalize` resolves it to its real target before the root check runs, so the check
-/// below is comparing real, final path components, not the reparse point's apparent location.
+/// A network share is a folder like any other: a UNC model (`\\nas\models\x.gguf`, or its
+/// verbatim form) resolves when it is under a UNC folder the user listed. A UNC input is checked
+/// against the listed folders *lexically, before any filesystem access*, because resolving an
+/// arbitrary UNC path makes Windows connect to that server and offer this account's credentials.
+///
+/// A reparse point (symlink or directory junction) that leaves every folder is caught
+/// structurally: `std::fs::canonicalize` resolves it to its real target before the root check
+/// runs, so the check compares real, final path components, not the link's apparent location.
+/// That refusal is the user's to switch off: with
+/// [`crate::policy::ProtectionsSection::refuse_redirected_paths`] off (the setting LM Studio and
+/// Ollama users with shared GGUFs need), a path whose *literal* location is under a folder is
+/// accepted wherever its links lead, and the canonical target is returned. The literal location is
+/// compared after lexical normalization (`GetFullPathNameW`); a verbatim path containing `.` or
+/// `..` is never accepted that way.
 ///
 /// # This function only checks; it does not close the window between checking and using
 ///
@@ -191,11 +227,21 @@ impl Settings {
 pub fn resolve_model_path(settings: &Settings, path: &Path) -> Result<PathBuf, ConfigError> {
     reject_path_hazards(path)?;
 
+    let literal = Lexical::of(path);
+    let literally_under_a_folder = || {
+        literal.as_ref().is_some_and(|l| {
+            settings.models.folders.iter().filter_map(|f| Lexical::of(f)).any(|root| l.is_under(&root))
+        })
+    };
+    if is_unc(path) && !literally_under_a_folder() {
+        return Err(ConfigError::ModelPathNotApproved);
+    }
+
     let canonical = std::fs::canonicalize(path).map_err(|_| ConfigError::ModelPathNotApproved)?;
     reject_path_hazards(&canonical)?;
 
     let canonical_components: Vec<Component> = canonical.components().collect();
-    for root in &settings.security.model_roots {
+    for root in &settings.models.folders {
         let Ok(root_canonical) = std::fs::canonicalize(root) else {
             continue;
         };
@@ -207,7 +253,91 @@ pub fn resolve_model_path(settings: &Settings, path: &Path) -> Result<PathBuf, C
         }
     }
 
+    // The target left every folder through a link. That is refused unless the user switched the
+    // redirect refusal off, in which case the literal location decides.
+    if !settings.protections.refuse_redirected_paths && literally_under_a_folder() {
+        return Ok(canonical);
+    }
+
     Err(ConfigError::ModelPathNotApproved)
+}
+
+/// Whether `path` is a UNC path, plain (`\\server\share`) or verbatim (`\\?\UNC\server\share`).
+fn is_unc(path: &Path) -> bool {
+    matches!(
+        path.components().next(),
+        Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
+    )
+}
+
+/// Where a path points, worked out from its text alone (no filesystem access), for comparing a
+/// literal location against a folder.
+#[derive(Debug, PartialEq, Eq)]
+struct Lexical {
+    root: LexicalRoot,
+    parts: Vec<String>,
+}
+
+/// The volume a [`Lexical`] location is on. Plain and verbatim spellings of the same volume are
+/// the same root; letters and server/share names compare ASCII-case-insensitively, as Windows does.
+#[derive(Debug, PartialEq, Eq)]
+enum LexicalRoot {
+    /// A drive letter, upper-cased.
+    Disk(u8),
+    /// A server and share, ASCII-lower-cased.
+    Unc(String, String),
+    /// `/` (non-Windows).
+    Posix,
+}
+
+impl Lexical {
+    /// `path` made absolute with `std::path::absolute` (on Windows `GetFullPathNameW`, the same
+    /// lexical normalization Win32 applies when it opens a path: `.` and `..` resolved, the
+    /// working directory applied to a relative path). `None`, never a guess, for anything that is
+    /// not a plain disk, UNC or POSIX path, for a non-UTF-8 component, and for a `.`/`..` left in a
+    /// verbatim path (which Win32 does not normalize).
+    fn of(path: &Path) -> Option<Lexical> {
+        let absolute = std::path::absolute(path).ok()?;
+        let mut components = absolute.components().peekable();
+        let root = match components.peek() {
+            Some(Component::Prefix(p)) => {
+                let root = match p.kind() {
+                    Prefix::Disk(d) | Prefix::VerbatimDisk(d) => LexicalRoot::Disk(d.to_ascii_uppercase()),
+                    Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => LexicalRoot::Unc(
+                        server.to_str()?.to_ascii_lowercase(),
+                        share.to_str()?.to_ascii_lowercase(),
+                    ),
+                    _ => return None,
+                };
+                components.next();
+                root
+            }
+            Some(Component::RootDir) => LexicalRoot::Posix,
+            _ => return None,
+        };
+        let mut parts = Vec::new();
+        for component in components {
+            match component {
+                Component::RootDir => {}
+                Component::Normal(name) => {
+                    let name = name.to_str()?;
+                    if name == "." || name == ".." {
+                        return None;
+                    }
+                    parts.push(name.to_owned());
+                }
+                Component::CurDir | Component::ParentDir | Component::Prefix(_) => return None,
+            }
+        }
+        Some(Lexical { root, parts })
+    }
+
+    /// Whether `self` is `folder` or lies beneath it, component by component.
+    fn is_under(&self, folder: &Lexical) -> bool {
+        self.root == folder.root
+            && folder.parts.len() <= self.parts.len()
+            && folder.parts.iter().zip(&self.parts).all(|(a, b)| a.eq_ignore_ascii_case(b))
+    }
 }
 
 /// `FILE_FLAG_OPEN_REPARSE_POINT` (winbase.h). Same guard, same rationale, as
@@ -227,7 +357,7 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 /// reads through the handle returned here, so the leaf cannot be swapped between the approval and
 /// the read. `MetadataExt`/`OpenOptionsExt` are imported inside this function, not at module scope,
 /// so a non-Windows build does not carry an unused import under `-D warnings`; both are safe std
-/// APIs, so this stays under the crate's `#![forbid(unsafe_code)]`.
+/// APIs, so this module stays free of `unsafe`.
 ///
 /// # Residual window
 ///
@@ -275,7 +405,7 @@ fn reject_path_hazards(path: &Path) -> Result<(), ConfigError> {
     if raw.contains(',') {
         return Err(ConfigError::ModelPathNotApproved);
     }
-    if is_unc_or_device_path(&raw) {
+    if is_device_path(&raw) {
         return Err(ConfigError::ModelPathNotApproved);
     }
     if has_alternate_data_stream(&raw) {
@@ -290,18 +420,24 @@ fn is_drive_letter_root(body: &str) -> bool {
     bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
-/// Whether `raw` is a UNC path, a verbatim UNC/`GLOBALROOT` path, or an NT native-namespace path --
-/// anything that is not, in the end, a plain local drive-letter path.
-fn is_unc_or_device_path(raw: &str) -> bool {
+/// Whether `raw` is a device or object-namespace path (`\\.\...`, a verbatim path that is neither
+/// a disk nor UNC such as `\\?\GLOBALROOT\...` or `\\?\Volume{...}\...`, or an NT native path),
+/// i.e. anything that is neither a drive-letter path nor a UNC share. UNC shares are left to
+/// [`resolve_model_path`]'s folder check.
+fn is_device_path(raw: &str) -> bool {
+    // Win32 accepts `/` as a separator in `\\.\` and UNC prefixes (`//./pipe/x`), so compare with
+    // every separator spelled `\`. Borrowed, not copied, in the common case of no `/` at all.
+    let normalized: std::borrow::Cow<'_, str> =
+        if raw.contains('/') { raw.replace('/', r"\").into() } else { raw.into() };
+    let raw = normalized.as_ref();
     if let Some(rest) = raw.strip_prefix(r"\\?\") {
         // Verbatim local disk paths (`\\?\C:\...`) are exactly what `std::fs::canonicalize`
-        // itself produces on Windows and must be accepted; verbatim UNC (`\\?\UNC\...`) and
-        // `GLOBALROOT` must not be.
-        let upper = rest.to_ascii_uppercase();
-        return upper.starts_with("UNC") || upper.starts_with("GLOBALROOT") || !is_drive_letter_root(rest);
+        // itself produces on Windows, and `\\?\UNC\server\share\...` is its spelling of a share.
+        let is_verbatim_unc = rest.get(..4).is_some_and(|p| p.eq_ignore_ascii_case(r"UNC\"));
+        return !(is_drive_letter_root(rest) || is_verbatim_unc);
     }
-    if raw.starts_with(r"\\") {
-        return true; // plain UNC, e.g. \\server\share\...
+    if raw.starts_with(r"\\.\") || raw.starts_with(r"\\??\") {
+        return true; // Win32 device namespace
     }
     if raw.starts_with(r"\??\") || raw.starts_with(r"\Device\") || raw.starts_with(r"\DosDevices\") {
         return true; // NT native namespace
@@ -317,116 +453,61 @@ fn has_alternate_data_stream(raw: &str) -> bool {
     rest.contains(':')
 }
 
-/// Outcome of a preflight decision for a prospective backend spawn.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SpawnDecision {
-    /// Nothing observed forbids the spawn.
-    Allow,
-    /// The spawn must not proceed, and why (safe to log or show a user).
-    Refuse {
-        /// Human-readable reason.
-        reason: String,
-    },
-}
-
-/// Decides whether a backend spawn may proceed.
-///
-/// `audited_dir` is in the signature, distinct from whatever [`Settings`] happens to name, on
-/// purpose: a decision about the write-permissions of *one* directory must never be usable to
-/// authorise a spawn from a *different* one. [`DefaultPreflighter::decide`] enforces that by
-/// refusing unless `audited_dir`, [`BackendSection::dir`] and [`SecuritySection::backend_path`] all
-/// canonicalize to the same real directory -- see the
-/// `preflight_refuses_when_the_audited_directory_is_not_the_spawn_directory` test below for the
-/// attack this closes: a poisoned file that points the DACL audit at a clean directory while
-/// `backend.dir` (the one a spawn would actually use) names a hostile one.
-pub trait Preflighter {
-    /// Decide whether to spawn, given the settings in effect, the directory a [`DaclAudit`] was
-    /// actually performed on, and its result.
-    fn decide(&self, settings: &Settings, audited_dir: &Path, dacl: &DaclAudit) -> SpawnDecision;
-}
-
-/// The one [`Preflighter`] Cerebro ships.
-///
-/// Refuses unless all of the following hold, in order (house rule S6: a check this function cannot
-/// complete -- including a path that fails to canonicalize, e.g. because nothing has configured a
-/// backend directory yet -- is a refusal, never treated as safe):
-///
-/// 1. `audited_dir`, `settings.backend.dir` and `settings.security.backend_path` each
-///    canonicalize successfully.
-/// 2. `settings.backend.dir` and `settings.security.backend_path` canonicalize to the same
-///    directory (see [`crate::schema::Settings::validate`], which already checks the literal-path
-///    form of this on every load and patch; this re-checks the filesystem-resolved form, which is
-///    what actually matters here).
-/// 3. `audited_dir` canonicalizes to that same directory -- the audit that produced `dacl` was
-///    actually performed on the directory a spawn would use, not some other one.
-/// 4. `dacl` is [`DaclAudit::OwnerOnly`].
-#[derive(Debug, Default, Clone, Copy)]
-pub struct DefaultPreflighter;
-
-impl Preflighter for DefaultPreflighter {
-    fn decide(&self, settings: &Settings, audited_dir: &Path, dacl: &DaclAudit) -> SpawnDecision {
-        fn refuse(reason: &str) -> SpawnDecision {
-            SpawnDecision::Refuse { reason: reason.to_string() }
-        }
-
-        let Ok(audited) = std::fs::canonicalize(audited_dir) else {
-            return refuse("the audited directory could not be resolved");
-        };
-        let Ok(spawn_dir) = std::fs::canonicalize(&settings.backend.dir) else {
-            return refuse("backend.dir could not be resolved (not configured, or does not exist)");
-        };
-        let Ok(declared) = std::fs::canonicalize(&settings.security.backend_path) else {
-            return refuse("security.backend_path could not be resolved (not configured, or does not exist)");
-        };
-
-        if spawn_dir != declared {
-            return refuse("backend.dir and security.backend_path resolve to different directories");
-        }
-        if audited != spawn_dir {
-            return refuse("the audited directory is not the one a spawn would use");
-        }
-        if !dacl.is_safe_to_spawn() {
-            return refuse("backend directory audit did not establish owner-only write access");
-        }
-        SpawnDecision::Allow
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::schema::full_settings_fixture;
 
     #[test]
-    fn security_backend_and_api_bind_pointers_are_locked() {
-        assert!(is_security_locked("/security"));
-        assert!(is_security_locked("/security/lan_mode"));
-        assert!(is_security_locked("/backend"));
-        assert!(is_security_locked("/backend/dir"));
-        assert!(is_security_locked("/api/bind"));
+    fn every_guarding_section_is_locked_with_its_descendants() {
+        for pointer in [
+            "/backend",
+            "/backend/dir",
+            "/api/bind",
+            "/models/folders",
+            "/models/folders/0",
+            "/network",
+            "/network/lan_mode",
+            "/protections",
+            "/protections/audit_folder_permissions",
+            "/plugins/capabilities/run_commands",
+        ] {
+            assert!(is_security_locked(pointer), "{pointer} must be locked");
+        }
+        // And every entry of the constant itself, with a descendant, so an entry added to the list
+        // is covered without editing this test.
+        for locked in SECURITY_LOCKED {
+            assert!(is_security_locked(locked), "{locked}");
+            assert!(is_security_locked(&format!("{locked}/child")), "{locked}/child");
+        }
     }
 
     #[test]
     fn sibling_and_prefix_lookalike_pointers_are_not_locked() {
-        assert!(!is_security_locked("/models/roots"));
-        assert!(!is_security_locked("/api/enabled"));
-        assert!(!is_security_locked("/api/port"));
-        // A pointer that merely starts with the same characters as a locked one, without a `/`
-        // boundary, must not match -- `/securityish` is not `/security`.
-        assert!(!is_security_locked("/securityish"));
-        assert!(!is_security_locked("/backendish/x"));
+        for pointer in [
+            "/models/default_model",
+            "/api/enabled",
+            "/api/port",
+            "/load/defaults/n_ctx",
+            "/effort/levels/high/instruction",
+            "/verbosity/default_level",
+            // A pointer that merely starts with the same characters as a locked one, without a `/`
+            // boundary, must not match.
+            "/protectionsish",
+            "/backendish/x",
+            "/models/folders2",
+        ] {
+            assert!(!is_security_locked(pointer), "{pointer} must not be locked");
+        }
     }
 
     #[test]
     fn escaped_pointers_round_trip_and_are_not_decoded_before_comparison() {
-        // A key literally named `bind/x` under `/api` escapes to `/api/bind~1x`, which is a
-        // sibling of `/api/bind`, not the same pointer -- decoding before comparing would collapse
-        // that distinction and lock a pointer that was never meant to be.
+        // A key literally named `bind/x` under `/api` escapes to `/api/bind~1x`, a sibling of
+        // `/api/bind`, not the same pointer.
         assert!(!is_security_locked("/api/bind~1x"));
         assert!(is_security_locked("/api/bind"));
-        assert!(is_security_locked("/security/model_roots/0"));
 
-        // `touched_pointers` must produce exactly the escaped form `is_security_locked` expects.
         let mut out = Vec::new();
         touched_pointers(&serde_json::json!({"api": {"bind/x": 1}}), "", &mut out);
         assert!(out.contains(&"/api/bind~1x".to_string()), "{out:?}");
@@ -436,56 +517,131 @@ mod tests {
     #[test]
     fn api_source_is_refused_on_every_locked_pointer() {
         let attempts = [
-            serde_json::json!({"security": {"lan_mode": true}}),
-            serde_json::json!({"security": {"model_roots": ["C:\\"]}}),
+            serde_json::json!({"network": {"lan_mode": true}}),
+            serde_json::json!({"network": {"mode": "online"}}),
+            serde_json::json!({"models": {"folders": ["C:\\"]}}),
             serde_json::json!({"backend": {"dir": "C:\\elsewhere"}}),
             serde_json::json!({"api": {"bind": "loopback6"}}),
+            serde_json::json!({"protections": {"verify_backend_integrity": false}}),
+            serde_json::json!({"plugins": {"default_permission": "always"}}),
         ];
         for patch in attempts {
             let mut settings = full_settings_fixture();
             let before = settings.clone();
             let err = settings.apply_patch(&patch, Source::Api).unwrap_err();
-            assert!(
-                matches!(err, ConfigError::LockedPointerRefused { .. }),
-                "patch {patch} got {err:?}"
-            );
+            assert!(matches!(err, ConfigError::LockedPointerRefused { .. }), "patch {patch} got {err:?}");
             assert_eq!(settings, before, "a refused patch must not be partially applied");
         }
     }
 
     #[test]
-    fn gui_and_file_sources_may_write_the_same_locked_pointers() {
-        let patch = serde_json::json!({"security": {"lan_mode": true}});
-        for source in [Source::Gui, Source::File] {
+    fn api_null_on_an_ancestor_of_a_locked_key_is_refused() {
+        // `{"models": null}` names only `/models`, which is not locked, yet deleting it resets
+        // `models.folders` to empty; `{"api": null}` resets `api.bind` from loopback6 to loopback4.
+        for (patch, locked) in [
+            (serde_json::json!({"models": null}), "/models/folders"),
+            (serde_json::json!({"api": null}), "/api/bind"),
+        ] {
             let mut settings = full_settings_fixture();
-            settings.apply_patch(&patch, source).unwrap_or_else(|e| panic!("{source:?} refused: {e}"));
-            assert!(settings.security.lan_mode);
+            assert!(!settings.models.folders.is_empty() && settings.api.bind == crate::schema::BindAddr::Loopback6);
+            let before = settings.clone();
+            let err = settings.apply_patch(&patch, Source::Api).unwrap_err();
+            assert_eq!(
+                err,
+                ConfigError::LockedPointerRefused { pointer: locked.to_string(), by: Source::Api },
+                "{patch}"
+            );
+            assert_eq!(settings, before, "{patch} must not be partially applied");
+            // The same patch from the user is an ordinary reset to defaults.
+            settings.apply_patch(&patch, Source::Gui).expect("the user may reset a section");
+        }
+        // Siblings of a partially locked key stay writable, including by an ancestor `null` when
+        // the locked value does not change (the defaults already hold it).
+        let mut settings = full_settings_fixture();
+        settings
+            .apply_patch(&serde_json::json!({"models": {"default_model": "x"}}), Source::Api)
+            .expect("a sibling of /models/folders stays writable");
+        assert_eq!(settings.models.default_model.as_deref(), Some("x"));
+        let mut defaults = Settings::default();
+        defaults
+            .apply_patch(&serde_json::json!({"api": null}), Source::Api)
+            .expect("resetting /api changes no locked value when bind is already the default");
+    }
+
+    #[test]
+    fn the_user_may_turn_any_protection_off_from_the_gui_or_the_file() {
+        // Owner rule: every protection is an ordinary setting for the user. Each switch, from both
+        // user sources, lands in the supervisor mapping.
+        let keys = [
+            "verify_backend_integrity",
+            "audit_folder_permissions",
+            "enforce_environment_allowlist",
+            "contain_in_job_object",
+            "refuse_elevation",
+            "refuse_redirected_paths",
+            "sandbox_plugins",
+            "permission_prompts",
+        ];
+        for source in [Source::Gui, Source::File] {
+            for key in keys {
+                let mut settings = Settings::default();
+                settings
+                    .apply_patch(&serde_json::json!({"protections": {key: false}}), source)
+                    .unwrap_or_else(|e| panic!("{source:?} could not turn {key} off: {e}"));
+                assert_eq!(settings.disabled_protections().len(), 1, "{source:?} {key}");
+                let value = serde_json::to_value(settings.protections).expect("serializes");
+                assert_eq!(value[key], false, "{key}");
+            }
         }
     }
 
     #[test]
     fn api_source_may_still_write_unlocked_pointers() {
         let mut settings = full_settings_fixture();
-        let patch = serde_json::json!({"sampler": {"temp": 0.42}});
-        settings.apply_patch(&patch, Source::Api).expect("unlocked pointer is not refused");
+        settings
+            .apply_patch(&serde_json::json!({"sampler": {"temp": 0.42}}), Source::Api)
+            .expect("unlocked pointer is not refused");
         assert_eq!(settings.sampler.temp(), 0.42);
+        settings
+            .apply_patch(
+                &serde_json::json!({"effort": {"levels": {"high": {"instruction": "Edited."}}}}),
+                Source::Api,
+            )
+            .expect("a level instruction is not locked");
+        assert_eq!(settings.effort.levels["high"].instruction, "Edited.");
     }
 
     #[test]
-    fn api_patch_touching_a_locked_pointer_with_an_escaped_key_is_still_refused() {
-        // The genuinely locked pointer is refused specifically as a lock violation.
+    fn a_null_in_a_patch_resets_a_load_parameter_to_automatic() {
         let mut settings = full_settings_fixture();
-        let locked = serde_json::json!({"security": {"model_roots": ["C:\\"]}});
-        let err = settings.apply_patch(&locked, Source::Api).unwrap_err();
-        assert!(matches!(err, ConfigError::LockedPointerRefused { .. }), "got {err:?}");
+        assert!(settings.load.defaults.n_gpu_layers.is_some());
+        settings
+            .apply_patch(&serde_json::json!({"load": {"defaults": {"n_gpu_layers": null}}}), Source::Gui)
+            .expect("reset applies");
+        assert_eq!(settings.load.defaults.n_gpu_layers, None);
+        assert!(settings.load.defaults.n_ctx.is_some(), "siblings untouched");
+    }
 
-        // A key that merely *looks* like it could escape to a locked sibling (`bind/x` under
-        // `/api`, escaping to `/api/bind~1x`, a sibling of `/api/bind`) is not itself locked -- it
-        // is refused only because `ApiSection` denies unknown fields, proving escaping
-        // discriminates rather than merely runs without ever mattering.
+    #[test]
+    fn a_patch_that_breaks_a_cross_field_rule_is_refused_whole() {
+        for patch in [
+            serde_json::json!({"effort": {"levels": {"high": null}}}),
+            serde_json::json!({"load": {"active_preset": "missing"}, "sampler": {"temp": 0.1}}),
+        ] {
+            let mut settings = full_settings_fixture();
+            let before = settings.clone();
+            let err = settings.apply_patch(&patch, Source::Gui).unwrap_err();
+            assert!(matches!(err, ConfigError::SettingRejected { .. }), "{patch}: {err:?}");
+            assert_eq!(settings, before, "nothing from {patch} may be applied");
+        }
+    }
+
+    #[test]
+    fn api_patch_with_an_escaped_lookalike_key_is_an_unknown_field_not_a_lock() {
         let mut settings = full_settings_fixture();
-        let unknown = serde_json::json!({"api": {"bind/x": true}});
-        let err = settings.apply_patch(&unknown, Source::Api).unwrap_err();
+        let err = settings
+            .apply_patch(&serde_json::json!({"api": {"bind/x": true}}), Source::Api)
+            .unwrap_err();
         assert!(matches!(err, ConfigError::PatchRejected(_)), "got {err:?}");
     }
 
@@ -502,9 +658,6 @@ mod tests {
 
     #[test]
     fn a_patch_declaring_an_unsupported_schema_version_is_refused_from_every_source() {
-        // `version` is not itself a `SECURITY_LOCKED` pointer, so this proves the refusal comes
-        // from `Settings::validate` (which every `apply_patch` call ends with), not from the lock
-        // check -- it must hold identically for every `Source`.
         for source in [Source::File, Source::Gui, Source::Api] {
             let mut settings = full_settings_fixture();
             let before = settings.clone();
@@ -512,24 +665,6 @@ mod tests {
             let err = settings.apply_patch(&patch, source).unwrap_err();
             assert!(matches!(err, ConfigError::UnsupportedVersion { .. }), "source {source:?} got {err:?}");
             assert_eq!(settings, before, "a refused patch must not be partially applied");
-        }
-    }
-
-    #[test]
-    fn attempting_to_smuggle_allow_unsafe_dacl_through_a_patch_is_an_unknown_field_refusal() {
-        for source in [Source::File, Source::Gui, Source::Api] {
-            let mut settings = full_settings_fixture();
-            let before = settings.clone();
-            let patch = serde_json::json!({"security": {"allow_unsafe_dacl": true}});
-            let err = settings.apply_patch(&patch, source).unwrap_err();
-            // From Source::Api this could in principle be caught by the lock check first (the
-            // pointer is under /security either way); the property that must hold regardless is
-            // that it is refused and nothing is applied.
-            assert!(
-                matches!(err, ConfigError::LockedPointerRefused { .. } | ConfigError::PatchRejected(_)),
-                "source {source:?} got {err:?}"
-            );
-            assert_eq!(settings, before);
         }
     }
 
@@ -544,129 +679,109 @@ mod tests {
 
     fn settings_with_root(root: &Path) -> Settings {
         let mut settings = full_settings_fixture();
-        settings.security.model_roots = vec![root.to_path_buf()];
+        settings.models.folders = vec![root.to_path_buf()];
         settings
     }
 
     #[test]
-    fn a_file_under_an_approved_root_resolves() {
+    fn a_file_under_a_model_folder_resolves() {
         let (_dir, root, file) = approved_root_with_file();
         let settings = settings_with_root(&root);
-        let resolved = resolve_model_path(&settings, &file).expect("under an approved root");
-        assert_eq!(resolved, std::fs::canonicalize(&file).unwrap());
+        let resolved = resolve_model_path(&settings, &file).expect("under a model folder");
+        assert_eq!(resolved, std::fs::canonicalize(&file).expect("canonicalize"));
     }
 
     #[test]
     fn open_approved_model_returns_a_readable_handle_to_the_approved_file() {
         let (_dir, root, file) = approved_root_with_file();
         let settings = settings_with_root(&root);
-        let (resolved, mut handle) = open_approved_model(&settings, &file).expect("under an approved root");
-        assert_eq!(resolved, std::fs::canonicalize(&file).unwrap());
-
+        let (resolved, mut handle) = open_approved_model(&settings, &file).expect("under a model folder");
+        assert_eq!(resolved, std::fs::canonicalize(&file).expect("canonicalize"));
         let mut contents = Vec::new();
         std::io::Read::read_to_end(&mut handle, &mut contents).expect("read through the returned handle");
         assert_eq!(contents, b"not a real gguf");
     }
 
     #[test]
-    fn open_approved_model_refuses_a_path_outside_every_root() {
+    fn open_approved_model_refuses_a_path_outside_every_folder() {
         let (dir, root, _file) = approved_root_with_file();
         let settings = settings_with_root(&root);
         let outside = dir.path().join("outside.gguf");
         std::fs::write(&outside, b"x").expect("write outside file");
-        let err = open_approved_model(&settings, &outside).unwrap_err();
-        assert_eq!(err, ConfigError::ModelPathNotApproved);
+        assert_eq!(open_approved_model(&settings, &outside).unwrap_err(), ConfigError::ModelPathNotApproved);
     }
 
     #[test]
     fn missing_and_outside_root_produce_the_identical_error() {
         let (dir, root, _file) = approved_root_with_file();
         let settings = settings_with_root(&root);
-
-        let missing = root.join("does-not-exist.gguf");
-        let missing_err = resolve_model_path(&settings, &missing).unwrap_err();
-
+        let missing_err = resolve_model_path(&settings, &root.join("does-not-exist.gguf")).unwrap_err();
         let outside = dir.path().join("outside.gguf");
         std::fs::write(&outside, b"x").expect("write outside file");
         let outside_err = resolve_model_path(&settings, &outside).unwrap_err();
-
         assert_eq!(missing_err, ConfigError::ModelPathNotApproved);
-        assert_eq!(outside_err, ConfigError::ModelPathNotApproved);
         assert_eq!(missing_err, outside_err, "the two failure causes must be indistinguishable");
     }
 
     #[test]
     fn a_sibling_directory_whose_name_extends_the_root_is_rejected() {
-        // The regression test for component comparison: `...\models-evil` has `...\models` as a
-        // *string* prefix but is not under it. A `starts_with` implementation would approve this;
-        // comparing `Component`s cannot, because `models` and `models-evil` are different single
-        // components at the same depth.
+        // `...\models-evil` has `...\models` as a *string* prefix but is not under it; comparing
+        // `Component`s cannot confuse the two.
         let (dir, root, _file) = approved_root_with_file();
-        let lookalike = dir.path().join(format!("{}-evil", root.file_name().expect("root has a name").to_string_lossy()));
+        let lookalike = dir.path().join("models-evil");
         std::fs::create_dir_all(&lookalike).expect("create lookalike dir");
         let evil = lookalike.join("evil.gguf");
         std::fs::write(&evil, b"x").expect("write evil file");
-
         let settings = settings_with_root(&root);
         assert_eq!(resolve_model_path(&settings, &evil).unwrap_err(), ConfigError::ModelPathNotApproved);
         assert_eq!(open_approved_model(&settings, &evil).unwrap_err(), ConfigError::ModelPathNotApproved);
     }
 
     #[test]
-    fn dot_dot_escape_from_an_approved_root_is_rejected() {
+    fn dot_dot_escape_from_a_model_folder_is_rejected() {
         let (dir, root, _file) = approved_root_with_file();
         let sibling = dir.path().join("sibling");
         std::fs::create_dir_all(&sibling).expect("create sibling dir");
-        let evil = sibling.join("evil.gguf");
-        std::fs::write(&evil, b"x").expect("write evil file");
-
+        std::fs::write(sibling.join("evil.gguf"), b"x").expect("write evil file");
         let settings = settings_with_root(&root);
         let escape_path = root.join("..").join("sibling").join("evil.gguf");
-        let err = resolve_model_path(&settings, &escape_path).unwrap_err();
-        assert_eq!(err, ConfigError::ModelPathNotApproved);
+        assert_eq!(resolve_model_path(&settings, &escape_path).unwrap_err(), ConfigError::ModelPathNotApproved);
     }
 
     #[test]
-    fn alternate_data_stream_is_rejected() {
+    fn alternate_data_stream_unc_globalroot_and_comma_paths_are_rejected() {
         let (_dir, root, file) = approved_root_with_file();
-        let settings = settings_with_root(&root);
-        let ads = PathBuf::from(format!("{}:secret", file.display()));
-        let err = resolve_model_path(&settings, &ads).unwrap_err();
-        assert_eq!(err, ConfigError::ModelPathNotApproved);
-    }
-
-    #[test]
-    fn unc_path_is_rejected() {
-        let settings = full_settings_fixture();
-        let unc = PathBuf::from(r"\\server\share\model.gguf");
-        let err = resolve_model_path(&settings, &unc).unwrap_err();
-        assert_eq!(err, ConfigError::ModelPathNotApproved);
-    }
-
-    #[test]
-    fn verbatim_globalroot_path_is_rejected() {
-        let settings = full_settings_fixture();
-        let device = PathBuf::from(r"\\?\GLOBALROOT\Device\Something\model.gguf");
-        let err = resolve_model_path(&settings, &device).unwrap_err();
-        assert_eq!(err, ConfigError::ModelPathNotApproved);
-    }
-
-    #[test]
-    fn comma_in_path_is_rejected() {
-        let (_dir, root, _file) = approved_root_with_file();
         let settings = settings_with_root(&root);
         let commaed = root.join("model,evil.gguf");
         std::fs::write(&commaed, b"x").expect("write file with comma in name");
-        let err = resolve_model_path(&settings, &commaed).unwrap_err();
-        assert_eq!(err, ConfigError::ModelPathNotApproved);
+        for path in [
+            PathBuf::from(format!("{}:secret", file.display())),
+            PathBuf::from(r"\\server\share\model.gguf"),
+            PathBuf::from(r"\\?\GLOBALROOT\Device\Something\model.gguf"),
+            commaed,
+        ] {
+            assert_eq!(
+                resolve_model_path(&settings, &path).unwrap_err(),
+                ConfigError::ModelPathNotApproved,
+                "{}",
+                path.display()
+            );
+        }
     }
 
-    /// Needs no admin: unlike a symlink, a directory junction (`mklink /J`) can be created by any
-    /// local user. Ignored because it touches the real filesystem with a Windows-specific tool
-    /// outside the sandboxed unit-test environment.
     #[test]
-    #[ignore = "creates a real directory junction with mklink /J; run explicitly on Windows"]
-    fn directory_junction_escaping_the_root_is_rejected() {
+    fn no_model_folder_means_nothing_resolves() {
+        let (_dir, _root, file) = approved_root_with_file();
+        assert_eq!(
+            resolve_model_path(&Settings::default(), &file).unwrap_err(),
+            ConfigError::ModelPathNotApproved
+        );
+    }
+
+    /// Needs no admin: unlike a symlink, a directory junction can be created by any local user.
+    #[cfg(windows)]
+    #[test]
+    fn directory_junction_escaping_the_folder_is_rejected() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("models");
         std::fs::create_dir_all(&root).expect("create root");
@@ -675,189 +790,110 @@ mod tests {
         std::fs::write(outside.join("evil.gguf"), b"x").expect("write evil file");
 
         let link = root.join("junction");
-        let status = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(&link)
-            .arg(&outside)
-            .status()
-            .expect("run mklink");
-        assert!(status.success(), "mklink /J failed; junctions need no admin rights but do need dev mode off is fine");
+        cerebro_probe::backend::create_junction_for_tests(&link, &outside).expect("create junction");
 
         let settings = settings_with_root(&root);
-        let via_junction = link.join("evil.gguf");
-        let err = resolve_model_path(&settings, &via_junction).unwrap_err();
+        let err = resolve_model_path(&settings, &link.join("evil.gguf")).unwrap_err();
         assert_eq!(err, ConfigError::ModelPathNotApproved);
     }
 
-    /// A real, on-disk directory whose `backend.dir` and `security.backend_path` already agree,
-    /// suitable as the "clean" side of every [`Preflighter`] test below. Kept separate from
-    /// [`full_settings_fixture`]'s hardcoded real machine path so these tests are self-contained
-    /// and do not depend on anything but a fresh [`tempfile::tempdir`].
-    fn settings_pointing_at(dir: &Path) -> Settings {
-        let mut settings = full_settings_fixture();
-        settings.backend.dir = dir.to_path_buf();
-        settings.security.backend_path = dir.to_path_buf();
-        settings
+    /// Owner rule: the redirect refusal is a protection, so the user can switch it off (shared
+    /// LM Studio / Ollama GGUFs reached through links). Off, the literal location decides.
+    #[cfg(windows)]
+    #[test]
+    fn a_linked_model_resolves_when_the_user_turns_the_redirect_refusal_off() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("models");
+        std::fs::create_dir_all(&root).expect("create root");
+        let shared = dir.path().join("shared");
+        std::fs::create_dir_all(&shared).expect("create shared dir");
+        std::fs::write(shared.join("m.gguf"), b"gguf").expect("write shared model");
+        let link = root.join("lmstudio");
+        cerebro_probe::backend::create_junction_for_tests(&link, &shared).expect("create junction");
+
+        let mut settings = settings_with_root(&root);
+        let via_link = link.join("m.gguf");
+        assert_eq!(resolve_model_path(&settings, &via_link).unwrap_err(), ConfigError::ModelPathNotApproved);
+
+        settings.protections.refuse_redirected_paths = false;
+        let target = std::fs::canonicalize(shared.join("m.gguf")).expect("canonicalize target");
+        assert_eq!(resolve_model_path(&settings, &via_link).expect("literal path is under a folder"), target);
+        let (opened, mut handle) = open_approved_model(&settings, &via_link).expect("opens the real target");
+        assert_eq!(opened, target);
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut handle, &mut bytes).expect("read");
+        assert_eq!(bytes, b"gguf");
+
+        // The literal location must itself be under a folder: the switch does not open `..` escapes
+        // or a path that names the shared folder directly.
+        let dotdot = root.join("..").join("shared").join("m.gguf");
+        assert_eq!(resolve_model_path(&settings, &dotdot).unwrap_err(), ConfigError::ModelPathNotApproved);
+        assert_eq!(
+            resolve_model_path(&settings, &shared.join("m.gguf")).unwrap_err(),
+            ConfigError::ModelPathNotApproved
+        );
     }
 
     #[test]
-    fn no_settings_value_from_any_source_permits_a_spawn_from_an_unsafe_directory() {
-        let clean = tempfile::tempdir().expect("tempdir");
-        let hostile = tempfile::tempdir().expect("tempdir");
-        let hostile_dir = hostile.path().display().to_string();
-        let unsafe_dacl = DaclAudit::WritableByOthers(vec!["ASUS\\CodexSandboxUsers".to_string()]);
-        let unknown_dacl = DaclAudit::Unknown("audit not run");
-        let preflighter = DefaultPreflighter;
-
-        // Every security-relevant key an attacker might try to flip in the attempt to widen a
-        // spawn decision, from every Source, including the removed key itself (which must fail to
-        // apply at all, but the property under test holds either way -- see below).
-        let attempts: Vec<serde_json::Value> = vec![
-            serde_json::json!({"security": {"lan_mode": true}}),
-            serde_json::json!({"security": {"model_roots": ["C:\\"]}}),
-            serde_json::json!({"security": {"backend_path": "C:\\elsewhere"}}),
-            serde_json::json!({"security": {"allow_unsafe_dacl": true}}),
-            serde_json::json!({"backend": {"dir": "C:\\elsewhere", "manifest": "C:\\elsewhere\\m.json"}}),
-            serde_json::json!({"api": {"enabled": true, "bind": "loopback6"}}),
-            // The only shape that survives `Settings::validate`: both coupled backend keys moved
-            // to a real hostile directory at once, which is exactly what a poisoned file would
-            // write, and exactly the attack `BackendPathDisagreement` alone cannot catch because
-            // nothing here disagrees. This must still be refused -- by the audited-directory check
-            // instead, since `decide` re-verifies `audited_dir` against `backend.dir` itself.
-            serde_json::json!({
-                "backend": {"dir": hostile_dir, "manifest": format!("{hostile_dir}\\m.json")},
-                "security": {"backend_path": hostile_dir},
-            }),
-        ];
-
-        for source in [Source::File, Source::Gui, Source::Api] {
-            for patch in &attempts {
-                let mut settings = settings_pointing_at(clean.path());
-                // Whether the patch is accepted or refused is not the property under test here
-                // (that is covered above); what must hold regardless is that the resulting
-                // settings, whatever they are, cannot turn either audited-unsafe decision into
-                // `Allow` -- audited *against the one real directory this test controls*, `clean`,
-                // which is the axis the pre-fix version of this test never varied. The reason
-                // string is deliberately not pinned here (it now legitimately differs between the
-                // ordinary attempts and the coupled-hostile-backend one); the specific reason for
-                // the writable-by-others case is pinned separately, by
-                // `owner_only_matching_directory_is_allowed`'s sibling below and by
-                // `preflight_refuses_when_the_audited_directory_is_not_the_spawn_directory`.
-                let _ = settings.apply_patch(patch, source);
-
-                let unsafe_decision = preflighter.decide(&settings, clean.path(), &unsafe_dacl);
-                assert!(
-                    matches!(unsafe_decision, SpawnDecision::Refuse { .. }),
-                    "source {source:?} patch {patch} allowed a spawn for a writable-by-others directory: {unsafe_decision:?}"
-                );
-                let unknown_decision = preflighter.decide(&settings, clean.path(), &unknown_dacl);
-                assert!(
-                    matches!(unknown_decision, SpawnDecision::Refuse { .. }),
-                    "source {source:?} patch {patch} allowed a spawn for an unaudited directory: {unknown_decision:?}"
-                );
-            }
+    fn device_namespace_paths_are_refused_in_every_spelling() {
+        let (_dir, root, _file) = approved_root_with_file();
+        let mut settings = settings_with_root(&root);
+        settings.protections.refuse_redirected_paths = false;
+        for raw in [
+            r"\\.\pipe\model.gguf",
+            "//./pipe/model.gguf",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1\model.gguf",
+            r"\\?\Volume{00000000-0000-0000-0000-000000000000}\model.gguf",
+            r"\??\C:\model.gguf",
+            r"\Device\HarddiskVolume1\model.gguf",
+        ] {
+            assert!(is_device_path(raw), "{raw}");
+            assert_eq!(
+                resolve_model_path(&settings, Path::new(raw)).unwrap_err(),
+                ConfigError::ModelPathNotApproved,
+                "{raw}"
+            );
+        }
+        for raw in [r"\\?\C:\models\m.gguf", r"\\?\UNC\nas\models\m.gguf", r"\\nas\models\m.gguf", r"C:\m.gguf"] {
+            assert!(!is_device_path(raw), "{raw}");
         }
     }
 
+    #[cfg(windows)]
     #[test]
-    fn writable_by_others_directory_is_refused_with_the_dacl_specific_reason() {
-        // The reason string pinned separately from the sweep above: when `audited_dir` really is
-        // the spawn directory and only the DACL audit itself is unsafe, `decide` must name that
-        // specific cause rather than a generic refusal.
-        let clean = tempfile::tempdir().expect("tempdir");
-        let preflighter = DefaultPreflighter;
-        let settings = settings_pointing_at(clean.path());
-        let unsafe_dacl = DaclAudit::WritableByOthers(vec!["ASUS\\CodexSandboxUsers".to_string()]);
-        assert_eq!(
-            preflighter.decide(&settings, clean.path(), &unsafe_dacl),
-            SpawnDecision::Refuse {
-                reason: "backend directory audit did not establish owner-only write access".to_string(),
-            }
-        );
+    fn lexical_locations_match_across_spellings_and_fail_closed() {
+        let of = |s: &str| Lexical::of(Path::new(s));
+        let share = of(r"\\NAS\Models").expect("plain UNC");
+        for inside in [r"\\nas\models\a.gguf", r"\\?\UNC\nas\MODELS\sub\a.gguf", r"\\nas\models\x\..\a.gguf"] {
+            assert!(of(inside).expect(inside).is_under(&share), "{inside}");
+        }
+        for outside in [r"\\nas\other\a.gguf", r"\\evil\models\a.gguf", r"C:\models\a.gguf"] {
+            assert!(!of(outside).expect(outside).is_under(&share), "{outside}");
+        }
+        let disk = of(r"C:\Models").expect("disk");
+        assert!(of(r"\\?\c:\models\a.gguf").expect("verbatim disk").is_under(&disk));
+        assert!(!of(r"C:\models-evil\a.gguf").expect("lookalike").is_under(&disk));
+        // Verbatim paths are not normalized by Win32, so a `..` left in one is never guessed at.
+        assert_eq!(of(r"\\?\C:\models\..\a.gguf"), None);
+        assert_eq!(of(r"\\.\pipe\x"), None);
     }
 
+    #[cfg(windows)]
     #[test]
-    fn owner_only_matching_directory_is_allowed() {
-        let clean = tempfile::tempdir().expect("tempdir");
-        let preflighter = DefaultPreflighter;
-        let settings = settings_pointing_at(clean.path());
-        assert_eq!(
-            preflighter.decide(&settings, clean.path(), &DaclAudit::OwnerOnly),
-            SpawnDecision::Allow
-        );
-    }
-
-    #[test]
-    fn preflight_refuses_when_the_audited_directory_is_not_the_spawn_directory() {
-        // This is the case the pre-fix `decide` could not fail: the DACL audit is a clean
-        // `OwnerOnly` result, but it was performed on a *different* directory from the one
-        // `backend.dir` names. A caller who audits `security.backend_path` (the documented audit
-        // subject) and trusts the result must not thereby authorise a spawn from `backend.dir`.
-        let clean = tempfile::tempdir().expect("tempdir");
-        let hostile = tempfile::tempdir().expect("tempdir");
-        let mut settings = full_settings_fixture();
-        settings.backend.dir = hostile.path().to_path_buf();
-        settings.security.backend_path = clean.path().to_path_buf();
-
-        let preflighter = DefaultPreflighter;
-        let decision = preflighter.decide(&settings, clean.path(), &DaclAudit::OwnerOnly);
-        assert!(matches!(decision, SpawnDecision::Refuse { .. }), "got {decision:?}");
-    }
-
-    #[test]
-    fn preflight_refuses_when_backend_dir_and_security_backend_path_disagree() {
-        // Both directories are real and both audits would pass individually; only the fact that
-        // the two schema keys disagree makes this unsafe. `Settings::validate` already refuses
-        // this on load/patch (see `settings_with_disagreeing_backend_paths_is_refused` in
-        // `schema.rs`) -- this test is `decide`'s own, independent re-check of the same property,
-        // in case a `Settings` value ever reaches it without having gone through `validate` first.
-        let dir_a = tempfile::tempdir().expect("tempdir");
-        let dir_b = tempfile::tempdir().expect("tempdir");
-        let mut settings = full_settings_fixture();
-        settings.backend.dir = dir_a.path().to_path_buf();
-        settings.security.backend_path = dir_b.path().to_path_buf();
-
-        let preflighter = DefaultPreflighter;
-        let decision = preflighter.decide(&settings, dir_a.path(), &DaclAudit::OwnerOnly);
-        assert!(matches!(decision, SpawnDecision::Refuse { .. }), "got {decision:?}");
-    }
-
-    /// The EVAL_PLAN §6.4 poisoned-config scenario end to end, against the real machine fixture
-    /// rather than a synthetic [`DaclAudit`]: a settings document whose `backend.dir` (and, kept
-    /// consistent so [`Settings::validate`] does not intercept it first) `security.backend_path`
-    /// point at the real `llama.cpp-b10751` build directory, which this development machine's
-    /// `ASUS\CodexSandboxUsers` holds Modify rights on. Ignored because it depends on this
-    /// specific machine's filesystem layout and DACLs, neither of which a general test environment
-    /// has.
-    #[test]
-    #[ignore = "depends on this machine's real llama.cpp-b10751 fixture directory and its DACLs; run explicitly"]
-    fn poisoned_file_cannot_point_the_spawn_at_the_writable_llama_cpp_fixture() {
-        let fixture_dir =
-            PathBuf::from(r"C:\Users\noahm\Projects\qwen-flash-next\llama.cpp-b10751");
-        let mut settings = full_settings_fixture();
-        settings.backend.dir = fixture_dir.clone();
-        settings.security.backend_path = fixture_dir.clone();
-
-        let probe = cerebro_probe::backend::probe(&fixture_dir, "llama-server.exe")
-            .expect("probe the real fixture directory");
-
-        let preflighter = DefaultPreflighter;
-        let decision = preflighter.decide(&settings, &fixture_dir, &probe.dacl);
-        // `DaclAudit::is_safe_to_spawn` is false for both `WritableByOthers` (the DACL audit is
-        // implemented) and `Unknown` (it is not yet, per `cerebro_probe::backend::audit_dacl`'s own
-        // doc comment) -- either way, house rule S6 means this must refuse, never allow.
-        assert!(matches!(decision, SpawnDecision::Refuse { .. }), "got {decision:?}");
-    }
-
-    #[test]
-    fn preflight_refuses_on_an_unconfigured_backend_directory() {
-        // A fresh install's `Settings::default()` has `backend.dir == security.backend_path ==
-        // PathBuf::new()`, which cannot canonicalize. House rule S6 says that is a refusal, not a
-        // pass -- there is nothing to audit, so there is nothing to trust.
-        let clean = tempfile::tempdir().expect("tempdir");
-        let settings = Settings::default();
-        let preflighter = DefaultPreflighter;
-        let decision = preflighter.decide(&settings, clean.path(), &DaclAudit::OwnerOnly);
-        assert!(matches!(decision, SpawnDecision::Refuse { .. }), "got {decision:?}");
+    fn a_unc_model_outside_every_unc_folder_is_refused_before_any_filesystem_access() {
+        // The folder check for a UNC input is lexical, so this refusal never contacts the named
+        // server (`.invalid` cannot resolve even if it did). A share the user listed is accepted
+        // by the same check (see `lexical_locations_match_across_spellings_and_fail_closed`).
+        let (_dir, root, _file) = approved_root_with_file();
+        let mut settings = settings_with_root(&root);
+        settings.models.folders.push(PathBuf::from(r"\\nas.invalid\models"));
+        settings.protections.refuse_redirected_paths = false;
+        for raw in [r"\\attacker.invalid\share\m.gguf", r"\\?\UNC\attacker.invalid\share\m.gguf", r"\\nas.invalid\other\m.gguf"] {
+            assert_eq!(
+                resolve_model_path(&settings, Path::new(raw)).unwrap_err(),
+                ConfigError::ModelPathNotApproved,
+                "{raw}"
+            );
+        }
     }
 }
