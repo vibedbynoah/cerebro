@@ -1,6 +1,6 @@
 [package]
 name = "cerebro-bench"
-description = "Parsing and nonparametric statistics for llama-bench JSON measurement records"
+description = "Safe llama-bench runs, JSON parsing and nonparametric statistics for measurement records"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,6 +12,18 @@ authors.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# `run` builds its argv with the closed flag allowlist, launches through the supervisor's preflight
+# and job-contained spawn, keys results with probe facts, and converts them to the store's key.
+cerebro-flags = { path = "../cerebro-flags" }
+cerebro-probe = { path = "../cerebro-probe" }
+cerebro-store = { path = "../cerebro-store" }
+cerebro-supervisor = { path = "../cerebro-supervisor" }
+# Model and backend digests for the provenance key; the same crate probe and store use.
+sha2 = "0.10"
+
+[dev-dependencies]
+# `fixtures` locates the official llama.cpp build and the tiny GGUF for the live test.
+cerebro-probe = { path = "../cerebro-probe", features = ["test-support"] }
 
 [lints.rust]
 unsafe_code = "forbid"
