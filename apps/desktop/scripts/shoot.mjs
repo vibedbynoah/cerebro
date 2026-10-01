@@ -5,12 +5,14 @@
  * and light at 1280x800, into review/shots/ (gitignored). Each screen is first scrolled through so
  * its scroll reveals and count-ups fire, then returned to the top and captured once nothing is
  * animating. Two extra states per theme: the command palette open, and the collapsed sidebar.
+ * Then every first-run setup step (onboarding-*), in a fresh profile that has never finished it,
+ * driven by the keyboard the way a user would.
  *
  * Headless only (nothing appears on screen); every request that leaves the origin is aborted and
  * fails the run, same as the Playwright suite.
  */
 import { chromium } from "@playwright/test";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startServer } from "./serve.mjs";
@@ -20,6 +22,16 @@ const OUT_DIR = path.resolve(HERE, "../review/shots");
 const ROUTES = ["home", "hub", "models", "tune", "chat", "images", "documents", "plugins", "tools", "security", "settings"];
 /** @type {Array<"dark" | "light">} */
 const THEMES = ["dark", "light"];
+/** What a finished setup leaves in local storage. Key and terms version are read from the app's
+ *  source (ui/src/onboarding/progress.ts), so a terms bump cannot leave this seeding a stale record. */
+const PROGRESS_SRC = await readFile(path.resolve(HERE, "../ui/src/onboarding/progress.ts"), "utf8");
+const constant = (/** @type {string} */ name) => {
+  const m = new RegExp(`export const ${name} = "([^"]+)"`).exec(PROGRESS_SRC);
+  if (!m?.[1]) throw new Error(`${name} not found in progress.ts`);
+  return m[1];
+};
+const ONBOARDING_KEY = constant("ONBOARDING_KEY");
+const DONE_RECORD = JSON.stringify({ v: 1, completed: true, termsVersion: constant("TERMS_VERSION"), model: "qwen3-8b-q5km" });
 
 /** @param {import("@playwright/test").Page} page */
 async function settle(page) {
@@ -45,6 +57,82 @@ async function settle(page) {
   await page.waitForTimeout(150);
 }
 
+/**
+ * @param {import("@playwright/test").Browser} browser
+ * @param {string} origin
+ * @param {string} url
+ * @param {"dark" | "light"} theme
+ * @param {string[]} offOrigin
+ * @param {string[]} problems
+ */
+async function shootOnboarding(browser, origin, url, theme, offOrigin, problems) {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, colorScheme: theme, reducedMotion: "no-preference" });
+  await context.route("**/*", (route) => {
+    const u = route.request().url();
+    if (u.startsWith("data:") || u.startsWith("blob:") || new URL(u).origin === origin) return route.continue();
+    offOrigin.push(u);
+    return route.abort("blockedbyclient");
+  });
+  const page = await context.newPage();
+  page.on("console", (m) => (m.type() === "error" || m.type() === "warning") && problems.push(`onboarding ${theme}: ${m.text()}`));
+  page.on("pageerror", (e) => problems.push(`onboarding ${theme}: ${e.message}`));
+  const shot = async (/** @type {string} */ name) => {
+    await page.evaluate(() => document.fonts.ready);
+    await page
+      .waitForFunction(
+        () => document.getAnimations().every((a) => a.playState !== "running" || a.effect?.getComputedTiming().iterations === Infinity),
+        undefined,
+        { timeout: 8000 },
+      )
+      .catch(() => console.warn("  (some motion was still running; captured anyway)"));
+    await page.mouse.move(1270, 790);
+    await page.waitForTimeout(150);
+    const file = path.join(OUT_DIR, `onboarding-${name}-${theme}.png`);
+    await page.screenshot({ path: file, animations: "disabled" });
+    console.log("Saved", file);
+  };
+  const next = async (/** @type {string} */ step) => {
+    await page.locator("[data-primary]").click();
+    await page.locator(`.onb[data-step="${step}"]`).waitFor();
+  };
+
+  await page.goto(`${url}/`);
+  await page.locator('.onb[data-step="welcome"]').waitFor();
+  await shot("welcome");
+  await next("hardware");
+  await page.locator('.scan-panel[data-state="done"]').waitFor({ timeout: 8000 });
+  await shot("hardware");
+  await next("model");
+  await shot("model");
+  await next("privacy");
+  await shot("privacy");
+  await next("terms");
+  await shot("terms");
+  await page.getByRole("button", { name: "Licenses" }).click();
+  await page.locator(".legal .legal__license").first().waitFor();
+  await shot("legal");
+  await page.keyboard.press("Escape");
+  await page.locator(".legal").waitFor({ state: "detached" });
+  await next("finish");
+  await shot("finish");
+
+  // Off the happy path (the web build's mock failure switches): the hardware check failing, the
+  // model step unranked because of it, and the fallback shown if setup itself breaks.
+  await page.goto(`${url}/?mock=fail-hw`);
+  await page.locator('.onb[data-step="welcome"]').waitFor();
+  await next("hardware");
+  await page.locator('.scan-panel[data-state="error"]').waitFor();
+  await shot("hardware-error");
+  await next("model");
+  await shot("model-unranked");
+  await page.goto(`${url}/?mock=bad-hw`);
+  await page.locator('.onb[data-step="welcome"]').waitFor();
+  await page.locator("[data-primary]").click();
+  await page.locator(".setup-fallback").waitFor();
+  await shot("fallback");
+  await context.close();
+}
+
 async function main() {
   await mkdir(OUT_DIR, { recursive: true });
   const { url, close } = await startServer(0);
@@ -63,6 +151,7 @@ async function main() {
         offOrigin.push(u);
         return route.abort("blockedbyclient");
       });
+      await context.addInitScript(([key, record]) => window.localStorage.setItem(key, record), /** @type {[string, string]} */ ([ONBOARDING_KEY, DONE_RECORD]));
       const page = await context.newPage();
       page.on("console", (m) => (m.type() === "error" || m.type() === "warning") && problems.push(`${theme}: ${m.text()}`));
       page.on("pageerror", (e) => problems.push(`${theme}: ${e.message}`));
@@ -98,6 +187,8 @@ async function main() {
       await page.screenshot({ path: path.join(OUT_DIR, `collapsed-${theme}.png`), animations: "disabled" });
       console.log("Saved", path.join(OUT_DIR, `collapsed-${theme}.png`));
       await context.close();
+
+      await shootOnboarding(browser, origin, url, theme, offOrigin, problems);
     }
   } finally {
     await browser.close();

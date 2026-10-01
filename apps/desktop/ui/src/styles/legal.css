@@ -1,0 +1,316 @@
+/*
+ * The bundled legal documents (legal/LegalDialog.tsx), opened from setup and from Settings > About.
+ * Loaded with the main bundle because Settings uses it on every launch.
+ */
+
+:is(.legal-positioner, .legal, .legal__body, .legal__license, .legal__pre, .legal__pkg-row) {
+  box-sizing: border-box;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Legal documents                                                         */
+/* ---------------------------------------------------------------------- */
+
+.legal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-overlay);
+  background: var(--app-scrim);
+}
+
+.legal-backdrop[data-state="open"] {
+  animation: fade-in var(--duration-base) var(--ease-standard);
+}
+
+.legal-backdrop[data-state="closed"] {
+  animation: fade-out var(--duration-fast) var(--ease-exit);
+}
+
+.legal-positioner {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: grid;
+  place-items: center;
+  padding: var(--space-8) var(--space-4);
+}
+
+.legal {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(46rem, 100%);
+  height: min(44rem, 100%);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-3);
+  overflow: hidden;
+  outline: none;
+  font-size: 0.875rem;
+}
+
+.legal[data-state="open"] {
+  animation: palette-in var(--duration-base) var(--ease-emphasized);
+}
+
+.legal[data-state="closed"] {
+  animation: palette-out var(--duration-fast) var(--ease-exit);
+}
+
+.legal__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.legal__tabs {
+  display: flex;
+  gap: var(--space-1);
+  padding: 3px;
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-1);
+}
+
+.legal__tab {
+  position: relative;
+  isolation: isolate;
+  min-height: 32px;
+  padding: var(--space-1) var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: var(--text-small);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+@media (hover: hover) {
+  .legal__tab:hover {
+    color: var(--color-text-primary);
+  }
+}
+
+.legal__tab[aria-selected="true"] {
+  background: var(--color-surface-3);
+  color: var(--color-text-primary);
+  box-shadow: var(--shadow-1);
+}
+
+.legal__close {
+  flex: none;
+}
+
+.legal__body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-6) var(--space-8) var(--space-8);
+  outline: none;
+}
+
+.legal__doc {
+  display: grid;
+  gap: var(--space-2);
+  max-width: 64ch;
+}
+
+.legal__title {
+  margin: 0;
+  font-family: var(--font-family-display);
+  font-size: 1.75rem;
+  font-weight: 500;
+  line-height: var(--leading-snug);
+  color: var(--color-text-primary);
+}
+
+.legal__summary {
+  margin: 0 0 var(--space-2);
+  color: var(--color-text-secondary);
+}
+
+.legal__section {
+  display: grid;
+  gap: var(--space-2);
+  padding-top: var(--space-5);
+}
+
+.legal__heading {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.legal__p,
+.legal__list {
+  margin: 0;
+  line-height: var(--leading-relaxed);
+  color: var(--color-text-secondary);
+}
+
+.legal__list {
+  display: grid;
+  gap: var(--space-1);
+  padding-inline-start: var(--space-5);
+}
+
+.legal__license {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-1);
+}
+
+.legal__license + .legal__license {
+  margin-top: var(--space-1);
+}
+
+.legal__license-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.legal__license-name {
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.legal__license-id {
+  font-family: var(--font-family-code);
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+}
+
+.legal__license-detail {
+  margin: 0;
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+}
+
+.legal__details {
+  margin-top: var(--space-1);
+}
+
+.legal__summary-toggle {
+  width: max-content;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-small);
+  color: var(--color-accent-text);
+  cursor: pointer;
+}
+
+.legal__pre {
+  max-height: 16rem;
+  margin: var(--space-2) 0 0;
+  padding: var(--space-3);
+  overflow: auto;
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  color: var(--color-text-secondary);
+  font-family: var(--font-family-code);
+  font-size: 0.75rem;
+  line-height: var(--leading-normal);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Generated package lists: one row per package, its licence texts behind its own disclosure. */
+.legal__pkgs {
+  display: grid;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--color-border);
+}
+
+.legal__pkg {
+  border-bottom: 1px solid var(--color-border);
+}
+
+.legal__pkg-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-2) var(--space-1);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  list-style: none;
+  transition: background-color var(--duration-fast) var(--ease-standard);
+}
+
+.legal__pkg-row::-webkit-details-marker {
+  display: none;
+}
+
+@media (hover: hover) {
+  .legal__pkg-row:hover {
+    background-color: var(--color-surface-2);
+  }
+}
+
+.legal__pkg-name {
+  font-size: var(--text-small);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.legal__pkg-version {
+  margin-inline-end: auto;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.legal__pkg-details[open] {
+  padding-bottom: var(--space-3);
+}
+
+.legal__pkg-details > .legal__license-detail {
+  margin-top: var(--space-1);
+}
+
+.legal__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-3) var(--space-6);
+  border-top: 1px solid var(--color-border);
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+/* Settings > About: the same documents, opened in place. */
+.about__docs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+}
+
+.about__doc {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .legal,
+  .legal-backdrop {
+    animation: none !important;
+  }
+}

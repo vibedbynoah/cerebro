@@ -1,7 +1,13 @@
 import { test as base, expect, type Page } from "@playwright/test";
+import { ONBOARDING_KEY, TERMS_VERSION } from "../../ui/src/onboarding/progress";
 
 export const ROUTE_IDS = ["home", "hub", "models", "tune", "chat", "images", "documents", "plugins", "tools", "security", "settings"] as const;
 export type RouteIdE2E = (typeof ROUTE_IDS)[number];
+
+/** What a finished first-run setup leaves in local storage, from the app's own constants, so a
+ *  terms bump never leaves the suite seeding a stale record. */
+export { ONBOARDING_KEY, TERMS_VERSION };
+export const DONE_RECORD = JSON.stringify({ v: 1, completed: true, termsVersion: TERMS_VERSION, model: "qwen3-8b-q5km" });
 
 export interface Guard {
   /** Console errors/warnings, uncaught page errors and CSP violations seen so far. */
@@ -17,9 +23,12 @@ export interface Guard {
  * request to another origin fails the test after it finishes. Off-origin requests are also aborted
  * at the network layer, so nothing can leave the machine even if a check is missed.
  */
-export const test = base.extend<{ guard: Guard }>({
+export const test = base.extend<{ guard: Guard; onboarded: boolean }>({
+  /** Every test starts past first-run setup unless it opts out with `test.use({ onboarded: false })`,
+   *  which gives it a fresh profile that has never finished setup. */
+  onboarded: [true, { option: true }],
   guard: [
-    async ({ page, baseURL }, use) => {
+    async ({ page, baseURL, onboarded }, use) => {
       const origin = new URL(baseURL ?? "http://127.0.0.1").origin;
       const allowed: RegExp[] = [];
       const guard: Guard = {
@@ -42,6 +51,15 @@ export const test = base.extend<{ guard: Guard }>({
         if (!allowed.some((p) => p.test(text))) guard.problems.push(text);
       });
       page.on("pageerror", (err) => guard.problems.push(`pageerror: ${err.message}`));
+      if (onboarded) {
+        // Only when nothing is stored yet, so a test that changes the record keeps its change.
+        await page.addInitScript(
+          ([key, record]) => {
+            if (window.localStorage.getItem(key) === null) window.localStorage.setItem(key, record);
+          },
+          [ONBOARDING_KEY, DONE_RECORD] as const,
+        );
+      }
       await page.addInitScript(() => {
         document.addEventListener("securitypolicyviolation", (e) => {
           console.error(`CSP violation: ${e.violatedDirective} ${e.blockedURI}`);

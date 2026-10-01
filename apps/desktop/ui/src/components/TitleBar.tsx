@@ -1,4 +1,4 @@
-import { createSignal, onCleanup, onMount, type JSX } from "solid-js";
+import { createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
 import type { Platform } from "../platform/platform";
 import { notify } from "../lib/toast";
 import { BrandMark, Icon, type IconName } from "./icons";
@@ -6,8 +6,9 @@ import { BrandMark, Icon, type IconName } from "./icons";
 /**
  * Custom title bar (the native frame is off). The bar itself is the drag handle in the desktop
  * shell (`data-tauri-drag-region`; double-click maximizes); controls inside it stay clickable.
+ * First-run setup shows it without the palette trigger (there is nothing to search yet).
  */
-export function TitleBar(props: { platform: Platform; onOpenPalette: () => void; paletteOpen: boolean }): JSX.Element {
+export function TitleBar(props: { platform: Platform; onOpenPalette?: () => void; paletteOpen?: boolean }): JSX.Element {
   // Maximize turns into Restore while the window is maximized, like native Windows controls. The
   // webview resizes whenever the window does (button, double-click on the bar, Win+Up, snapping),
   // so one resize listener, coalesced to a frame, catches every way the state can change.
@@ -56,19 +57,23 @@ export function TitleBar(props: { platform: Platform; onOpenPalette: () => void;
         </span>
       </div>
       <div class="titlebar__center" data-tauri-drag-region>
-        <button
-          type="button"
-          class="palette-trigger"
-          data-press
-          aria-haspopup="dialog"
-          aria-expanded={props.paletteOpen}
-          aria-keyshortcuts="Control+K"
-          onClick={() => props.onOpenPalette()}
-        >
-          <Icon name="search" size={16} />
-          <span class="palette-trigger__label">Search screens and commands</span>
-          <kbd class="kbd">Ctrl K</kbd>
-        </button>
+        <Show when={props.onOpenPalette}>
+          {(open) => (
+            <button
+              type="button"
+              class="palette-trigger"
+              data-press
+              aria-haspopup="dialog"
+              aria-expanded={props.paletteOpen ?? false}
+              aria-keyshortcuts="Control+K"
+              onClick={() => open()()}
+            >
+              <Icon name="search" size={16} />
+              <span class="palette-trigger__label">Search screens and commands</span>
+              <kbd class="kbd">Ctrl K</kbd>
+            </button>
+          )}
+        </Show>
       </div>
       <div class="window-controls" role="group" aria-label="Window">
         {control(

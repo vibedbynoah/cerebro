@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS, MOCK_MODELS } from "../../ui/src/mock/fixtures";
-import { createMockService, isSettingKey } from "../../ui/src/mock/mock-service";
+import { createMockService, isSettingKey, mockOptionsFromQuery } from "../../ui/src/mock/mock-service";
 import type { LiveStats, SettingKey, Settings } from "../../ui/src/service/types";
 
 describe("mock service", () => {
@@ -102,5 +102,23 @@ describe("mock service", () => {
     await expect(update("integrityCheck", 0)).rejects.toThrow(TypeError);
     expect((await service.getSettings()).integrityCheck).toBe(true);
     expect(isSettingKey("hasOwnProperty")).toBe(false);
+  });
+});
+
+describe("mock failure switches (web and test builds only)", () => {
+  it("reads only exact, known ?mock= values", () => {
+    expect(mockOptionsFromQuery("")).toEqual({});
+    expect(mockOptionsFromQuery("?mock=fail-hw")).toEqual({ failHardware: Number.POSITIVE_INFINITY });
+    expect(mockOptionsFromQuery("?mock=fail-hw-once&mock=fail-catalog")).toEqual({ failHardware: 1, failCatalog: true });
+    for (const q of ["?mock=FAIL-HW", "?mock=fail-hw ", "?mock=__proto__", "?mock=constructor", "?mock=toString", "?fail-hw", "?mock[]=fail-hw"]) {
+      expect(mockOptionsFromQuery(q), q).toEqual({});
+    }
+  });
+
+  it("rejects hardware detection the asked number of times, then answers", async () => {
+    const service = createMockService({ failHardware: 1 });
+    await expect(service.detectHardware()).rejects.toThrow(/hardware detection failed/);
+    expect((await service.detectHardware()).provenance).toBe("illustrative");
+    await expect(createMockService({ failCatalog: true }).listCatalog()).rejects.toThrow(/catalog unavailable/);
   });
 });

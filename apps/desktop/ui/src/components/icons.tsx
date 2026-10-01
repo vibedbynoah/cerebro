@@ -154,6 +154,27 @@ const GLYPHS = {
     </>
   ),
   arrowRight: () => <path d="M5 12h13.5M13.5 7l5 5-5 5" />,
+  arrowLeft: () => <path d="M19 12H5.5M10.5 7l-5 5 5 5" />,
+  // Disclosure: points right when closed, turned down (CSS) when open.
+  chevronRight: () => <path d="m9.5 6 6 6-6 6" />,
+  // Run again: an open circle with its arrowhead.
+  refresh: () => <path d="M19 12a7 7 0 1 1-2.05-4.95M19 4v3.5h-3.5" />,
+  // A graphics card: board, fan, and the bracket edge.
+  gpu: () => (
+    <>
+      <rect x="3.5" y="6.5" width="17" height="10" rx="2" />
+      <circle cx="14.5" cy="11.5" r="2.8" />
+      <path d="M6.5 9.5h3M6.5 12.5h3M6 16.5v2.5" />
+    </>
+  ),
+  // A memory module: the stick, its chips, and the contact edge.
+  memory: () => (
+    <>
+      <rect x="3.5" y="7" width="17" height="8.5" rx="1.5" />
+      <path d="M7 10h2v2.5H7ZM11 10h2v2.5h-2ZM15 10h2v2.5h-2Z" />
+      <path d="M6 15.5V18M9.3 15.5V18M12.6 15.5V18M15.9 15.5V18" />
+    </>
+  ),
   lock: () => (
     <>
       <rect x="5" y="10.5" width="14" height="9.5" rx="2" />

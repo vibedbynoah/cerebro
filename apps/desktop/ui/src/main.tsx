@@ -4,18 +4,21 @@ import "@design/motion.css";
 import "@design/components.css";
 import "./styles/app.css";
 import "./styles/preview.css";
+import "./styles/setup-frame.css";
 
 import { initMotion } from "@design/motion";
 import { render } from "solid-js/web";
 import { App } from "./App";
-import { createMockService } from "./mock/mock-service";
+import { createMockService, mockOptionsFromQuery } from "./mock/mock-service";
 import { createPlatform } from "./platform/platform";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("#root is missing from index.html");
 
-// All data comes from the typed mock until the IPC bridge implements CerebroService.
-const service = createMockService();
+// All data comes from the typed mock until the IPC bridge implements CerebroService. The web build
+// (headless tests, the browser preview) can ask the mock to fail on purpose (`?mock=fail-hw`, see
+// mockOptionsFromQuery) so failure paths are exercised; the desktop build compiles that branch out.
+const service = createMockService(__DESKTOP__ ? {} : mockOptionsFromQuery(window.location.search));
 const platform = await createPlatform();
 
 render(() => <App service={service} platform={platform} />, root);

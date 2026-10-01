@@ -85,3 +85,29 @@ export interface AppInfo {
   /** "desktop" inside the Tauri shell, "web" in a plain browser with the mock service. */
   mode: "desktop" | "web";
 }
+
+/** What first-run setup reads to size models. The mock only ever produces `illustrative`. */
+export interface HardwareProfile {
+  provenance: Provenance;
+  cpu: { name: string; cores: number; threads: number };
+  /** The graphics card llama.cpp can offload to, or null when there is none it can use. */
+  gpu: GpuInfo | null;
+  ramTotalGiB: number;
+}
+
+/** A model setup can recommend before anything is downloaded. */
+export interface CatalogModel {
+  id: string;
+  name: string;
+  /** Parameter count as published, e.g. "30B-A3B". */
+  params: string;
+  /** For a mixture-of-experts model, the parameters active per token as published, e.g. "3B". */
+  activeParams: string | null;
+  architecture: "dense" | "moe";
+  quant: string;
+  /** File size of the quantized GGUF, GiB. */
+  sizeGiB: number;
+  /** One short phrase, e.g. "Coding agent". */
+  goodFor: string;
+  provenance: Provenance;
+}

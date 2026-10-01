@@ -1,0 +1,143 @@
+/*
+ * The first-run setup frame, loaded with the main bundle: the empty frame shown for the moment the
+ * setup chunk takes to load (so first run never flashes blank), and the fallback screen that keeps
+ * the terms reachable if setup itself fails. Everything inside the steps is in onboarding.css.
+ */
+
+.onb {
+  /* Same desktop density as the app frame (.app in app.css). */
+  --text-body: 0.875rem;
+  --text-small: 0.8125rem;
+  --text-code: 0.8125rem;
+  --onb-rail-w: 248px;
+  --onb-gutter: var(--space-12);
+
+  display: grid;
+  grid-template-rows: var(--titlebar-h) minmax(0, 1fr);
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+/* The shared title bar names a grid area of the app frame; here it simply takes the first row. */
+.onb .titlebar {
+  grid-area: auto;
+}
+
+.onb__body {
+  display: grid;
+  grid-template-columns: var(--onb-rail-w) minmax(0, 1fr);
+  min-height: 0;
+}
+
+/* ---- While the setup chunk loads: the same rail and stage, empty ---- */
+
+.onb-frame__rail {
+  background: var(--color-surface-1);
+  border-right: 1px solid var(--color-border);
+}
+
+.onb-frame__stage {
+  outline: none;
+}
+
+/* ---- Setup failed: the terms and Accept stay reachable ---- */
+
+.setup-fallback {
+  display: grid;
+  place-items: center;
+  min-height: 0;
+  padding: var(--space-8) var(--space-6);
+  overflow-y: auto;
+  outline: none;
+}
+
+.setup-fallback__card {
+  box-sizing: border-box;
+  display: grid;
+  gap: var(--space-4);
+  width: min(100%, 36rem);
+  padding: var(--space-8);
+  animation: setup-fallback-in var(--duration-slow) var(--ease-emphasized) both;
+}
+
+.setup-fallback__card .eyebrow {
+  margin: 0;
+}
+
+.setup-fallback__title {
+  margin: 0;
+  font-family: var(--font-family-display);
+  font-size: 1.75rem;
+  font-weight: 500;
+  line-height: var(--leading-snug);
+  letter-spacing: var(--tracking-headline);
+  color: var(--color-text-primary);
+  outline: none;
+}
+
+.setup-fallback__lede {
+  margin: 0;
+  max-width: 60ch;
+  line-height: var(--leading-normal);
+  color: var(--color-text-secondary);
+}
+
+.setup-fallback__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.setup-fallback__note {
+  margin: 0;
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+}
+
+.setup-fallback__note strong {
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-secondary);
+}
+
+.setup-fallback__detail {
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+}
+
+.setup-fallback__detail summary {
+  cursor: pointer;
+  width: fit-content;
+  border-radius: var(--radius-sm);
+}
+
+.setup-fallback__detail p {
+  margin: var(--space-2) 0 0;
+  overflow-wrap: anywhere;
+}
+
+@keyframes setup-fallback-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+@media (max-width: 900px) {
+  .onb--loading .onb__body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .onb-frame__rail {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .setup-fallback__card {
+    animation: none !important;
+  }
+}

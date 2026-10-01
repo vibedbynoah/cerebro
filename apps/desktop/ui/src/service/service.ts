@@ -1,4 +1,4 @@
-import type { GpuInfo, LiveStats, ModelSummary, NetworkState, SettingKey, Settings } from "./types";
+import type { CatalogModel, GpuInfo, HardwareProfile, LiveStats, ModelSummary, NetworkState, SettingKey, Settings } from "./types";
 
 export type Unsubscribe = () => void;
 
@@ -17,6 +17,10 @@ export interface CerebroService {
   subscribeLiveStats(listener: (stats: LiveStats) => void): Unsubscribe;
   listModels(): Promise<ModelSummary[]>;
   getGpu(): Promise<GpuInfo>;
+  /** Processor, graphics card and memory, for first-run setup and model sizing. */
+  detectHardware(): Promise<HardwareProfile>;
+  /** Models setup may recommend. Listing needs no network; downloading one does. */
+  listCatalog(): Promise<CatalogModel[]>;
   getNetwork(): Promise<NetworkState>;
   getSettings(): Promise<Settings>;
   updateSetting<K extends SettingKey>(key: K, value: Settings[K]): Promise<Settings>;

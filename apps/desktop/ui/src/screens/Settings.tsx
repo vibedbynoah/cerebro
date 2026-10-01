@@ -1,7 +1,9 @@
-import { createResource, For, Show, type JSX } from "solid-js";
+import { createResource, createSignal, For, Show, type JSX } from "solid-js";
 import { Icon, type IconName } from "../components/icons";
 import { ScreenHeader, Section } from "../components/Screen";
 import { SettingSwitch } from "../components/SettingSwitch";
+import { LegalDialog } from "../legal/LegalDialog";
+import { LEGAL_DOCS, type LegalDocId } from "../legal/types";
 import type { Platform } from "../platform/platform";
 import { SETTINGS_META, type SettingMeta } from "../lib/settings-meta";
 import { THEME_LABELS, type ThemeChoice, type ThemeController } from "../lib/theme";
@@ -9,8 +11,9 @@ import { useAppState } from "../state";
 
 const THEME_ICONS: Record<ThemeChoice, IconName> = { system: "monitor", dark: "moon", light: "sun" };
 
-export function Settings(props: { theme: ThemeController; platform: Platform }): JSX.Element {
+export function Settings(props: { theme: ThemeController; platform: Platform; onRunSetup: () => void }): JSX.Element {
   const { settings, setSetting } = useAppState();
+  const [legal, setLegal] = createSignal<LegalDocId | null>(null);
   const [info] = createResource(() => props.platform.appInfo());
 
   const group = (g: SettingMeta["group"]) => (
@@ -78,8 +81,25 @@ export function Settings(props: { theme: ThemeController; platform: Platform }):
           </dd>
           <dt>License</dt>
           <dd>Apache-2.0</dd>
+          <dt>Documents</dt>
+          <dd class="about__docs">
+            <For each={LEGAL_DOCS}>
+              {(d) => (
+                <button type="button" class="text-link about__doc" aria-haspopup="dialog" onClick={() => setLegal(d.id)}>
+                  {d.label}
+                </button>
+              )}
+            </For>
+          </dd>
         </dl>
       </Section>
+
+      <Section id="setup" title="First-run setup" description="Walk through the hardware check, a first model, the protections and the terms again. Nothing changes until you choose.">
+        <button type="button" class="btn btn--secondary" data-press onClick={() => props.onRunSetup()}>
+          Run setup again
+        </button>
+      </Section>
+      <LegalDialog doc={legal()} onSelect={setLegal} onClose={() => setLegal(null)} />
     </div>
   );
 }

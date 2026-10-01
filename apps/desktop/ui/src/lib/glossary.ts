@@ -55,6 +55,22 @@ export const GLOSSARY = {
     term: "quality",
     text: "How well a model answers, not how fast: its score on a task benchmark run on this machine. Cerebro always shows it beside speed, because a fast model that answers badly is not a win. A dash means no quality run has finished yet.",
   },
+  cpu: {
+    term: "CPU",
+    text: "The processor: the computer's main chip. It runs whatever part of a model does not fit on the graphics card, more slowly.",
+  },
+  gpu: {
+    term: "GPU",
+    text: "The graphics card. It does many small calculations at once, which is why llama.cpp runs a model much faster on it than on the processor alone.",
+  },
+  ram: {
+    term: "RAM",
+    text: "System memory: the computer's main working memory. Usually larger than video memory, but slower for running a model.",
+  },
+  gguf: {
+    term: "GGUF",
+    text: "The single-file format llama.cpp loads models from. One file holds the model's weights and the details needed to run it.",
+  },
   tuning: {
     term: "tuning",
     text: "Cerebro runs real benchmarks on this machine with different llama.cpp settings and keeps the fastest configuration that stays within its safety checks.",

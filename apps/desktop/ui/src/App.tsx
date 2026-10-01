@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, Match, on, onCleanup, onMount, Switch, type JSX } from "solid-js";
+import { createEffect, createMemo, createSignal, Match, on, onCleanup, onMount, Show, Switch, type JSX } from "solid-js";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import { Sidebar } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
@@ -10,6 +10,8 @@ import { routeById, ROUTES } from "./lib/routes";
 import { readPref, writePref } from "./lib/storage";
 import { createTheme, THEME_LABELS, type ThemeChoice } from "./lib/theme";
 import { notify } from "./lib/toast";
+import { needsOnboarding, readRecord, type OnboardingRecord } from "./onboarding/progress";
+import { Setup } from "./onboarding/SetupShell";
 import type { Platform } from "./platform/platform";
 import { ServiceProvider } from "./service/context";
 import type { CerebroService } from "./service/service";
@@ -27,13 +29,38 @@ export function App(props: { service: CerebroService; platform: Platform }): JSX
   return (
     <ServiceProvider service={props.service}>
       <AppStateProvider>
-        <Shell platform={props.platform} />
+        <Root platform={props.platform} />
       </AppStateProvider>
     </ServiceProvider>
   );
 }
 
-function Shell(props: { platform: Platform }): JSX.Element {
+/**
+ * First run shows setup; after that, the app. Setup is remembered once finished (onboarding/
+ * progress.ts) and can be run again from Settings or the command palette. Setup loads as its own
+ * chunk behind an ErrorBoundary (onboarding/SetupShell.tsx), so it costs later launches nothing and
+ * a failure inside it can never keep anyone out of the app.
+ */
+function Root(props: { platform: Platform }): JSX.Element {
+  const [record, setRecord] = createSignal<OnboardingRecord | null>(readRecord());
+  const [setup, setSetup] = createSignal(needsOnboarding(record()));
+  const done = (next: OnboardingRecord) => {
+    setRecord(next);
+    setSetup(false);
+    // Keyboard and screen-reader users land in the app's content, not on <body>.
+    requestAnimationFrame(() => document.getElementById("main")?.focus({ preventScroll: true }));
+  };
+  return (
+    <>
+      <Show when={setup()} fallback={<Shell platform={props.platform} onRunSetup={() => setSetup(true)} />}>
+        <Setup platform={props.platform} record={record()} onComplete={done} />
+      </Show>
+      <Toasts />
+    </>
+  );
+}
+
+function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Element {
   const theme = createTheme();
   const router = createRouter();
   onCleanup(() => router.dispose());
@@ -103,6 +130,15 @@ function Shell(props: { platform: Platform }): JSX.Element {
       hint: "Ctrl B",
       keywords: "navigation menu panel",
       run: toggleSidebar,
+    },
+    {
+      id: "setup",
+      label: "Run setup again",
+      group: "Help",
+      icon: "bolt",
+      hint: "Hardware check, first model, protections",
+      keywords: "onboarding welcome first run tour wizard",
+      run: props.onRunSetup,
     },
     {
       id: "offline",
@@ -185,7 +221,7 @@ function Shell(props: { platform: Platform }): JSX.Element {
             <Security />
           </Match>
           <Match when={router.route() === "settings"}>
-            <Settings theme={theme} platform={props.platform} />
+            <Settings theme={theme} platform={props.platform} onRunSetup={props.onRunSetup} />
           </Match>
         </Switch>
       </main>
@@ -199,7 +235,6 @@ function Shell(props: { platform: Platform }): JSX.Element {
         commands={commands()}
         returnFocus={() => (focusMainNext ? (main ?? null) : opener)}
       />
-      <Toasts />
     </div>
   );
 }
