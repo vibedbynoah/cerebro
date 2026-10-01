@@ -19,12 +19,16 @@ sha2 = "0.10"
 # shelling out to PowerShell for them would violate the no-shell rule and be far easier to spoof.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
+    # CfgMgr32: which device-class instances are present now (a GPU swapped out keeps its class key).
+    "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_Ioctl",
+    "Win32_System_Power",
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_SystemServices",

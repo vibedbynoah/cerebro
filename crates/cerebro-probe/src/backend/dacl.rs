@@ -448,11 +448,63 @@ fn audit_canonical(dir: &Path) -> Result<Vec<WritableGrant>, ProbeError> {
         );
     }
 
+    Ok(named(raw))
+}
+
+/// Audit exactly one file or directory's own owner and DACL, with the same trusted set and
+/// write-capable masks as [`audit_canonical`], but no ancestor walk and no enumeration.
+///
+/// For objects whose own ACL is the whole question: an owner-only secret blob or key file Cerebro
+/// just created, where the containing folder (a temp directory, a profile directory) is not
+/// something Cerebro chose or can vouch for. The trusted owner is the object's own owner, admitted
+/// on the same terms as a directory owner in [`Trust::new`].
+///
+/// Fails closed like the directory audit: a non-local volume, a missing object, and any Win32 or
+/// parse failure are errors, and an object that is itself a reparse point is
+/// [`ProbeError::BackendPathHasReparsePoint`], since `GetNamedSecurityInfoW` would otherwise read
+/// the link target's descriptor while the caller goes on to use the link.
+pub(super) fn audit_object(path: &Path) -> Result<Vec<WritableGrant>, ProbeError> {
+    let abs = std::path::absolute(path).map_err(|e| {
+        unauditable(
+            &path.display().to_string(),
+            format!("could not make path absolute: {e}"),
+        )
+    })?;
+    require_local_volume(&abs)?;
+    let label = abs.display().to_string();
+    let meta = std::fs::symlink_metadata(&abs).map_err(|e| ProbeError::BackendFileUnreadable {
+        file: label.clone(),
+        cause: e.to_string(),
+    })?;
+    if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(redirected(
+            &label,
+            "is a reparse point (symbolic link, junction, or similar); its target's security \
+             descriptor is not the object's own",
+        ));
+    }
+    let kind = if meta.is_dir() {
+        OwnKind::Directory
+    } else {
+        OwnKind::File
+    };
+    let current_user = current_user_sid()?;
+    let security = object_security(&abs)?;
+    let trust = Trust::new(current_user, security.owner.as_deref());
+    Ok(named(
+        untrusted_writes(&security, kind, &trust)
+            .into_iter()
+            .map(|g| (abs.clone(), g))
+            .collect(),
+    ))
+}
+
+/// Attach a display name and right names to each raw finding.
+fn named(raw: Vec<(PathBuf, RawGrant)>) -> Vec<WritableGrant> {
     // One lookup per distinct SID: the development build has 55 files carrying the same two
     // untrusted ACEs, and each lookup can reach the account database.
     let mut names: BTreeMap<String, String> = BTreeMap::new();
-    Ok(raw
-        .into_iter()
+    raw.into_iter()
         .map(|(path, g)| {
             let principal = names
                 .entry(g.sid.clone())
@@ -468,7 +520,7 @@ fn audit_canonical(dir: &Path) -> Result<Vec<WritableGrant>, ProbeError> {
                 via: g.via,
             }
         })
-        .collect())
+        .collect()
 }
 
 /// What kind of directory entry counts as, for deciding whether to audit it as a regular file, skip
@@ -1445,8 +1497,10 @@ fn sid_at(sid: PSID, label: &str) -> Result<String, ProbeError> {
 /// SID of the user the current process token represents.
 ///
 /// The process token rather than a thread token: Cerebro spawns backends from its own identity,
-/// and the grant that matters is the one that user already holds.
-fn current_user_sid() -> Result<String, ProbeError> {
+/// and the grant that matters is the one that user already holds. Exposed through
+/// [`super::current_user_sid`] so a caller that writes an owner-only ACL names exactly the
+/// principal this audit trusts.
+pub(super) fn current_user_sid() -> Result<String, ProbeError> {
     let mut raw: HANDLE = null_mut();
     // SAFETY: GetCurrentProcess returns a pseudo-handle that needs no closing; `raw` is a live
     // local that receives a real token handle, owned immediately below.
@@ -1505,9 +1559,8 @@ fn current_user_sid() -> Result<String, ProbeError> {
 /// Exposes [`current_user_sid`] to `backend`'s on-disk test module, which needs the real value to
 /// pin a baseline or restoration ACL to an account that can still list, read, and delete what it
 /// creates — a baseline pinned to `SYSTEM`/`Administrators` only would leave a non-elevated test
-/// runner with no access to its own temp directory the moment it applied it. Also compiled under
-/// the `test-support` feature, for [`super::current_user_sid_for_tests`].
-#[cfg(any(test, feature = "test-support"))]
+/// runner with no access to its own temp directory the moment it applied it.
+#[cfg(test)]
 pub(super) fn test_current_user_sid() -> Result<String, ProbeError> {
     current_user_sid()
 }

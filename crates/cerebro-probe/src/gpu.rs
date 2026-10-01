@@ -26,7 +26,8 @@
 //! meant to be called repeatedly: before a run as a gate, and during a soak to detect a leak.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use crate::error::ProbeError;
 
@@ -77,6 +78,17 @@ impl PhysicalGpu {
     }
 }
 
+/// One device's perishable state at one instant: what a benchmark keys to and how busy it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuSample {
+    /// Free device memory in MiB.
+    pub free_mib: u64,
+    /// GPU utilization in percent over the vendor tool's last sample period; `None` where the
+    /// device reports `[N/A]` / `[Not Supported]`. Anything well above zero before a benchmark
+    /// starts means another process is using the GPU, so the measurement would be contended.
+    pub utilization_pct: Option<u32>,
+}
+
 /// Everything physically present, as distinct from anything addressable.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GpuInventory {
@@ -114,6 +126,52 @@ impl GpuInventory {
         }
         Ok(vals)
     }
+
+    /// Re-sample free VRAM and utilization for every known device in one vendor-tool call, in the
+    /// same order as [`GpuInventory::nvidia`]: the pre-benchmark sample, which keys the run and
+    /// records whether the GPU was already busy.
+    pub fn sample(&self) -> Result<Vec<GpuSample>, ProbeError> {
+        let Some(tool) = self.nvidia_smi.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let out = run_tool(
+            tool,
+            &["--query-gpu=memory.free,utilization.gpu", "--format=csv,noheader,nounits"],
+        )?;
+        parse_sample_csv(&out)
+    }
+}
+
+/// Parse `--query-gpu=memory.free,utilization.gpu --format=csv,noheader,nounits` output. Free
+/// memory must be a number; utilization may be `[N/A]`-style text, which becomes `None`.
+pub fn parse_sample_csv(text: &str) -> Result<Vec<GpuSample>, ProbeError> {
+    let mut samples = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let fields: Vec<&str> = line.split(',').map(str::trim).collect();
+        let [free, utilization] = fields.as_slice() else {
+            return Err(ProbeError::ToolOutputMalformed {
+                tool: "nvidia-smi".into(),
+                detail: format!("expected 2 comma-separated fields, got {}", fields.len()),
+            });
+        };
+        let utilization_pct = if utilization.starts_with('[') {
+            None
+        } else {
+            let pct = parse_u64_field(utilization, "utilization.gpu")?;
+            let pct = u32::try_from(pct).ok().filter(|p| *p <= 100).ok_or_else(|| {
+                ProbeError::ToolOutputMalformed {
+                    tool: "nvidia-smi".into(),
+                    detail: format!("utilization.gpu was {pct}, above 100 percent"),
+                }
+            })?;
+            Some(pct)
+        };
+        samples.push(GpuSample {
+            free_mib: parse_u64_field(free, "memory.free")?,
+            utilization_pct,
+        });
+    }
+    Ok(samples)
 }
 
 /// Probe the machine for physically present accelerators.
@@ -146,25 +204,65 @@ pub fn probe() -> Result<GpuInventory, ProbeError> {
 /// directory happens to come first decides which binary Cerebro executes, and Cerebro runs on
 /// machines whose `PATH` contains directories writable by other principals — the development
 /// machine's own llama.cpp directory is modify-writable by a non-owner SID. The driver installs this
-/// tool into the protected system directory, so that is the only place it is honored.
-fn locate_nvidia_smi() -> Option<PathBuf> {
-    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-    let candidate = Path::new(&root).join("System32").join("nvidia-smi.exe");
+/// tool into the protected system directory, so that is the only place it is honored. That directory
+/// comes from the kernel (`GetSystemDirectoryW`), never from `%SystemRoot%`, which the parent
+/// process sets and could point at a folder of its choosing.
+#[cfg(windows)]
+pub(crate) fn locate_nvidia_smi() -> Option<PathBuf> {
+    let candidate = crate::child_env::system_directory().ok()?.join("nvidia-smi.exe");
     candidate.is_file().then_some(candidate)
 }
 
-/// Run a vendor tool with explicit arguments and capture stdout.
+/// Linux: the driver packages install `nvidia-smi` into `/usr/bin` (root-owned); that fixed path is
+/// the only one honoured, for the same reason `PATH` is not searched on Windows.
+#[cfg(target_os = "linux")]
+pub(crate) fn locate_nvidia_smi() -> Option<PathBuf> {
+    let candidate = Path::new("/usr/bin/nvidia-smi");
+    candidate.is_file().then(|| candidate.to_path_buf())
+}
+
+/// No NVIDIA driver ships `nvidia-smi` on any other platform Cerebro builds for.
+#[cfg(not(any(windows, target_os = "linux")))]
+pub(crate) fn locate_nvidia_smi() -> Option<PathBuf> {
+    None
+}
+
+/// How long one vendor-tool query may take before the tool is killed. `nvidia-smi` answers in tens
+/// of milliseconds; it is known to hang during a driver timeout-recovery or when a GPU drops off the
+/// bus, and a benchmark samples it outside the run's own timeout, so the hang must be bounded here.
+pub const TOOL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run a vendor tool with explicit arguments and capture stdout, within [`TOOL_TIMEOUT`].
 ///
 /// No shell is involved: arguments go to the process directly, so quoting and metacharacters carry
 /// no meaning and cannot be used to inject a second command.
-fn run_tool(tool: &Path, args: &[&str]) -> Result<String, ProbeError> {
-    let output = Command::new(tool)
+pub(crate) fn run_tool(tool: &Path, args: &[&str]) -> Result<String, ProbeError> {
+    run_tool_within(tool, args, TOOL_TIMEOUT)
+}
+
+/// [`run_tool`] with an explicit deadline. No window, stdin closed, stderr discarded, stdout kept
+/// up to the probe's query cap; past `timeout` the tool is killed and reaped and
+/// [`ProbeError::ToolTimedOut`] returned.
+fn run_tool_within(tool: &Path, args: &[&str], timeout: Duration) -> Result<String, ProbeError> {
+    let mut command = Command::new(tool);
+    command
         .args(args)
-        .output()
-        .map_err(|e| ProbeError::ToolSpawn {
-            tool: tool.display().to_string(),
-            cause: e.to_string(),
-        })?;
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    // Sampled before and after every benchmark run: from a GUI process without a console, a
+    // console tool would otherwise flash a window each time.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let child = command.spawn().map_err(|e| ProbeError::ToolSpawn {
+        tool: tool.display().to_string(),
+        cause: e.to_string(),
+    })?;
+    let output = crate::backend::collect_bounded_streams(child, tool, timeout)?;
 
     if !output.status.success() {
         return Err(ProbeError::ToolFailed {
@@ -223,6 +321,18 @@ fn parse_u64_field(raw: &str, field: &str) -> Result<u64, ProbeError> {
 mod tests {
     use super::*;
 
+    /// `nvidia-smi` is only ever looked for in the kernel-reported system directory, so a parent
+    /// that sets `%SystemRoot%` elsewhere cannot choose the executable.
+    #[cfg(windows)]
+    #[test]
+    fn nvidia_smi_is_located_only_in_the_kernel_system_directory() {
+        let system = crate::child_env::system_directory().unwrap();
+        match locate_nvidia_smi() {
+            Some(found) => assert_eq!(found, system.join("nvidia-smi.exe")),
+            None => assert!(!system.join("nvidia-smi.exe").is_file()),
+        }
+    }
+
     /// Real captured output from the development machine.
     const REAL: &str =
         "NVIDIA GeForce RTX 3070 Ti Laptop GPU, 8192, 7498, 8.6, 610.74\n";
@@ -278,6 +388,52 @@ mod tests {
     }
 
     #[test]
+    fn a_sample_parses_free_memory_and_optional_utilization() {
+        let samples = parse_sample_csv("7285, 3\n431, [N/A]\n").unwrap();
+        assert_eq!(
+            samples,
+            [
+                GpuSample { free_mib: 7285, utilization_pct: Some(3) },
+                GpuSample { free_mib: 431, utilization_pct: None },
+            ]
+        );
+        assert!(parse_sample_csv("").unwrap().is_empty());
+        for bad in ["7285", "[N/A], 3", "7285, 101", "7285, 3, 9"] {
+            assert!(
+                matches!(parse_sample_csv(bad), Err(ProbeError::ToolOutputMalformed { .. })),
+                "{bad:?}"
+            );
+        }
+    }
+
+    /// A tool that hangs is killed at the deadline, reported as a timeout, and not left running.
+    /// `ping -n 30` to loopback stands in for a hung `nvidia-smi`: always in System32, windowless
+    /// with `CREATE_NO_WINDOW`, and busy for about 29 seconds unless killed.
+    #[cfg(windows)]
+    #[test]
+    fn a_hung_tool_is_killed_at_the_deadline() {
+        let ping = crate::child_env::system_directory().unwrap().join("PING.EXE");
+        let timeout = Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let err = run_tool_within(&ping, &["-n", "30", "127.0.0.1"], timeout).unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(&err, ProbeError::ToolTimedOut { after, .. } if *after == timeout),
+            "{err:?}"
+        );
+        assert!(elapsed >= timeout && elapsed < Duration::from_secs(5), "{elapsed:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_tool_that_fails_is_reported_with_its_status() {
+        let ping = crate::child_env::system_directory().unwrap().join("PING.EXE");
+        // `-n` without its value: ping prints usage and exits non-zero at once.
+        let err = run_tool_within(&ping, &["-n"], Duration::from_secs(10)).unwrap_err();
+        assert!(matches!(err, ProbeError::ToolFailed { .. }), "{err:?}");
+    }
+
+    #[test]
     #[ignore = "requires the development machine's NVIDIA driver and hardware"]
     fn live_probe_finds_the_development_gpu() {
         let inv = probe().unwrap();
@@ -285,5 +441,6 @@ mod tests {
         assert_eq!(inv.nvidia()[0].total_mib(), 8192);
         // Free VRAM is perishable; assert only that a re-sample is shaped correctly.
         assert_eq!(inv.sample_free_vram().unwrap().len(), 1);
+        assert_eq!(inv.sample().unwrap().len(), 1);
     }
 }

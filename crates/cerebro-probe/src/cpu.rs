@@ -444,6 +444,42 @@ pub fn probe() -> Result<CpuTopology, ProbeError> {
     Err(ProbeError::UnsupportedPlatform)
 }
 
+/// The CPU's brand string, e.g. `12th Gen Intel(R) Core(TM) i9-12900H`, from CPUID leaves
+/// `0x8000_0002..=0x8000_0004`: the same text llama.cpp records as `cpu_info`.
+///
+/// Topology alone does not identify a CPU: an i7-12700H and an i9-12900H are both 6P+8E/20T but
+/// clock differently, so a machine identity built only from core counts would merge them. `None`
+/// on a CPU that does not implement the brand leaves, off x86, or when the string is empty.
+pub fn brand_string() -> Option<String> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::__cpuid;
+        if __cpuid(0x8000_0000).eax < 0x8000_0004 {
+            return None;
+        }
+        let mut bytes = Vec::with_capacity(48);
+        for leaf in 0x8000_0002_u32..=0x8000_0004 {
+            let r = __cpuid(leaf);
+            for word in [r.eax, r.ebx, r.ecx, r.edx] {
+                bytes.extend_from_slice(&word.to_le_bytes());
+            }
+        }
+        brand_from_cpuid_bytes(&bytes)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        None
+    }
+}
+
+/// The brand string from CPUID's 48 raw bytes: up to the first NUL, surrounding spaces trimmed
+/// (Intel pads on the left, AMD on the right), `None` if empty or not ASCII.
+fn brand_from_cpuid_bytes(bytes: &[u8]) -> Option<String> {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    let text = std::str::from_utf8(bytes.get(..end)?).ok()?.trim();
+    (!text.is_empty() && text.is_ascii()).then(|| text.to_string())
+}
+
 /// Ask the kernel for the `RelationProcessorCore` records, using the documented two-call pattern.
 ///
 /// The required length is asked for, never guessed: record size varies with `GroupCount` and with
@@ -555,6 +591,26 @@ fn numa_node_count() -> Result<u32, ProbeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_brand_string_is_trimmed_at_its_nul_and_padding() {
+        let mut raw = b"       Intel(R) Core(TM) i9-12900H".to_vec();
+        raw.resize(48, 0);
+        assert_eq!(
+            brand_from_cpuid_bytes(&raw).as_deref(),
+            Some("Intel(R) Core(TM) i9-12900H")
+        );
+        assert_eq!(brand_from_cpuid_bytes(&[0; 48]), None);
+        assert_eq!(brand_from_cpuid_bytes(b"   "), None);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn this_machine_reports_a_brand_string() {
+        // Every x86-64 CPU shipped since 2003 implements the brand leaves.
+        let brand = brand_string().expect("an x86-64 CPU has a brand string");
+        assert!(!brand.is_empty() && brand.trim() == brand, "{brand:?}");
+    }
 
     /// Build one `RelationProcessorCore` record. `trailing` pads the record beyond its group
     /// entries so that tests exercise a `Size` that is not a constant.

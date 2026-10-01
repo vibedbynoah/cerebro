@@ -928,7 +928,47 @@ pub fn set_dacl_from_sddl_for_tests(path: &Path, sddl: &str) -> Result<(), Probe
 /// Test support only, like [`create_junction_for_tests`].
 #[cfg(all(windows, feature = "test-support"))]
 pub fn current_user_sid_for_tests() -> Result<String, ProbeError> {
-    dacl::test_current_user_sid()
+    dacl::current_user_sid()
+}
+
+/// The SID string (`S-1-5-21-...`) of the user this process's token represents: the "current
+/// user" every DACL audit here trusts.
+///
+/// For a caller that writes an owner-only ACL (`cerebro-config`'s secret store) and wants the
+/// written grant to name exactly the principal [`audit_object_dacl`] will accept, rather than a
+/// SDDL alias such as `OW` (OWNER RIGHTS, S-1-3-4) that the audit, deciding on SIDs alone, does not
+/// treat as trusted.
+///
+/// # Platform
+///
+/// Windows only.
+#[cfg(windows)]
+pub fn current_user_sid() -> Result<String, ProbeError> {
+    dacl::current_user_sid()
+}
+
+/// Audit exactly one file or directory: its own owner and DACL, with [`audit_dacl`]'s trusted
+/// principals and write-capable rights, but no ancestor walk and no enumeration of a directory's
+/// contents.
+///
+/// For objects whose own ACL is the whole question, such as an owner-only secret blob or a
+/// per-launch key file Cerebro just created inside a folder it did not choose (a temp or profile
+/// directory, whose ancestors on the development machine are themselves writable by a sandbox
+/// group). Use [`audit_dacl`] for anything code will be loaded from.
+///
+/// Only [`DaclAudit::OwnerOnly`] means no untrusted principal can write, delete or re-ACL the
+/// object. A path that is not on a local fixed volume, is missing, or cannot be read is
+/// [`DaclAudit::Unknown`]; one that is itself a reparse point is [`DaclAudit::Redirected`].
+pub fn audit_object_dacl(path: &Path) -> DaclAudit {
+    #[cfg(windows)]
+    {
+        audit_verdict(dacl::audit_object(path))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        DaclAudit::Unknown("DACL audit is implemented for Windows only; treat as untrusted".into())
+    }
 }
 
 /// [`canonical_backend_dir`], but for a caller that turned the folder-permission audit off (see
@@ -1052,7 +1092,31 @@ fn tool_spawn_error(tool: &Path, e: &std::io::Error) -> ProbeError {
 ///
 /// llama.cpp writes both `--version` and `--list-devices` to stderr, so the streams are merged
 /// (stdout first) rather than reading stdout alone and concluding the tool printed nothing.
-fn collect_bounded(mut child: Child, tool: &Path, timeout: Duration) -> Result<String, ProbeError> {
+fn collect_bounded(child: Child, tool: &Path, timeout: Duration) -> Result<String, ProbeError> {
+    let collected = collect_bounded_streams(child, tool, timeout)?;
+    let mut text = String::from_utf8_lossy(&collected.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&collected.stderr));
+    Ok(text)
+}
+
+/// What a bounded tool run left behind: how it exited and what it wrote (each stream capped at
+/// [`MAX_QUERY_OUTPUT`] bytes; a stream that was not piped is empty).
+#[derive(Debug)]
+pub(crate) struct Collected {
+    pub(crate) status: std::process::ExitStatus,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+}
+
+/// The engine of [`collect_bounded`], shared with the vendor-tool queries in [`crate::gpu`]: wait
+/// for `child` to exit and its piped streams to close within `timeout`, keeping at most
+/// [`MAX_QUERY_OUTPUT`] bytes of each. On the deadline, or any failure, the child is killed and
+/// reaped before this returns; it is never left running.
+pub(crate) fn collect_bounded_streams(
+    mut child: Child,
+    tool: &Path,
+    timeout: Duration,
+) -> Result<Collected, ProbeError> {
     let started = Instant::now();
     let timed_out = || ProbeError::ToolTimedOut {
         tool: tool.display().to_string(),
@@ -1074,21 +1138,27 @@ fn collect_bounded(mut child: Child, tool: &Path, timeout: Duration) -> Result<S
         Err(e) => return Err(abandon(&mut child, tool_spawn_error(tool, &e))),
     };
 
-    match wait_for_exit(&mut child, timeout) {
-        Ok(true) => {}
-        Ok(false) => return Err(abandon(&mut child, timed_out())),
+    let status = match wait_for_exit(&mut child, timeout) {
+        Ok(Some(status)) => status,
+        Ok(None) => return Err(abandon(&mut child, timed_out())),
         Err(e) => return Err(abandon(&mut child, tool_spawn_error(tool, &e))),
-    }
+    };
 
     // The child has exited, but a grandchild that inherited a pipe could still hold it open, so
     // collecting the output is bounded by the same deadline.
-    let mut text = String::new();
-    for rx in [stdout, stderr].into_iter().flatten() {
-        let remaining = timeout.saturating_sub(started.elapsed());
-        let bytes = rx.recv_timeout(remaining).map_err(|_| timed_out())?;
-        text.push_str(&String::from_utf8_lossy(&bytes));
-    }
-    Ok(text)
+    let collect = |rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>| match rx {
+        None => Ok(Vec::new()),
+        Some(rx) => rx
+            .recv_timeout(timeout.saturating_sub(started.elapsed()))
+            .map_err(|_| timed_out()),
+    };
+    let stdout = collect(stdout)?;
+    let stderr = collect(stderr)?;
+    Ok(Collected {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 /// Read up to [`MAX_QUERY_OUTPUT`] bytes of `reader` on a named background thread, then drain and
@@ -1114,13 +1184,16 @@ where
     Ok(rx)
 }
 
-/// Whether `child` exited within `timeout` (`Ok(false)` if it is still running).
+/// `child`'s exit status if it exited within `timeout` (`Ok(None)` if it is still running).
 ///
 /// On Windows this waits on the process handle itself, so it returns the moment the child exits
 /// rather than on the next tick of a polling loop: the probe runs before every tune and launch, and
 /// speed is a core value.
 #[cfg(windows)]
-fn wait_for_exit(child: &mut Child, timeout: Duration) -> std::io::Result<bool> {
+fn wait_for_exit(
+    child: &mut Child,
+    timeout: Duration,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
@@ -1132,26 +1205,65 @@ fn wait_for_exit(child: &mut Child, timeout: Duration) -> std::io::Result<bool> 
     // SAFETY: `child` owns this live process handle for the whole call; waiting on it neither
     // closes nor transfers it.
     match unsafe { WaitForSingleObject(child.as_raw_handle(), millis) } {
-        WAIT_OBJECT_0 => child.try_wait().map(|status| status.is_some()),
-        WAIT_TIMEOUT => Ok(false),
+        WAIT_OBJECT_0 => child.try_wait(),
+        WAIT_TIMEOUT => Ok(None),
         _ => Err(std::io::Error::last_os_error()),
     }
 }
 
-/// Whether `child` exited within `timeout`: a polling fallback for platforms without a waitable
-/// process handle. [`probe_with`] never reaches a query there, so latency does not matter.
+/// `child`'s exit status if it exited within `timeout`: a polling fallback for platforms without a
+/// waitable process handle. [`probe_with`] never reaches a query there, so latency does not matter.
 #[cfg(not(windows))]
-fn wait_for_exit(child: &mut Child, timeout: Duration) -> std::io::Result<bool> {
+fn wait_for_exit(
+    child: &mut Child,
+    timeout: Duration,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
     let started = Instant::now();
     loop {
-        if child.try_wait()?.is_some() {
-            return Ok(true);
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
         }
         if started.elapsed() >= timeout {
-            return Ok(false);
+            return Ok(None);
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// What `--version` reports, each field `None` when the text does not say: (build number, short
+/// commit hash, compiler from the `built with ...` line). See [`parse_version`].
+pub type VersionFields = (Option<u32>, Option<String>, Option<String>);
+
+/// Build number, commit and compiler of the backend in `dir`, from `tool_name --version`, under
+/// the same command construction, environment rule, window suppression, output bound and deadline
+/// as [`probe_with`]'s own query, without its folder audit, hashing or `--list-devices`.
+///
+/// For a directory the caller has already resolved, audited and verified (a preflighted backend
+/// directory): this neither resolves nor audits `dir` again. `llama-bench` has no `--version`, so a
+/// benchmark run asks a sibling tool of the same build (`llama-server.exe`); the caller should
+/// check the build number it gets against the one the benchmark itself reported.
+///
+/// # Errors
+/// [`ProbeError::BackendToolEscapesDir`] for a `tool_name` that is not a bare `.exe` name,
+/// [`ProbeError::BackendToolMissing`] when it is not in `dir`, and the query's own spawn and
+/// timeout errors.
+pub fn query_version(
+    dir: &Path,
+    tool_name: &str,
+    env: EnvironmentAllowlist,
+) -> Result<VersionFields, ProbeError> {
+    if !is_bare_exe_name(tool_name) {
+        return Err(ProbeError::BackendToolEscapesDir {
+            tool: tool_name.to_string(),
+        });
+    }
+    let tool = dir.join(tool_name);
+    if !tool.is_file() {
+        return Err(ProbeError::BackendToolMissing {
+            tool: tool.display().to_string(),
+        });
+    }
+    Ok(parse_version(&run(&tool, dir, &["--version"], env, None)?))
 }
 
 /// Run one query exactly as [`probe_with`] does — same command construction, environment rule,
@@ -1178,7 +1290,7 @@ pub fn query_tool_for_tests(
 /// that is otherwise perfectly usable. The consequence is recorded honestly — a measurement keyed
 /// on a `None` build number is marked as having weaker provenance rather than being silently
 /// treated as comparable.
-pub fn parse_version(text: &str) -> (Option<u32>, Option<String>, Option<String>) {
+pub fn parse_version(text: &str) -> VersionFields {
     let mut build = None;
     let mut commit = None;
     let mut compiler = None;
@@ -2026,6 +2138,74 @@ mod tests {
             assert!(
                 grants.iter().all(|g| !g.path().display().to_string().contains("..")),
                 "{grants:?}"
+            );
+        }
+
+        #[test]
+        fn object_audit_judges_one_file_or_directory_by_its_own_acl() {
+            // The single-object audit must accept an ACL naming only the current user and SYSTEM,
+            // and report anyone else holding a write-capable right on that object alone. It must
+            // not walk ancestors: %TEMP% on the development machine is Modify-writable by a sandbox
+            // group, and a clean object inside it must still audit clean.
+            let me = current_user_sid().expect("process token must be queryable");
+            let tree = TempTree::new("object-audit");
+            let file = tree.0.join("secret.dpapi");
+            std::fs::write(&file, b"blob").expect("create temp file");
+            let sub = tree.0.join("dir");
+            std::fs::create_dir(&sub).expect("create temp dir");
+
+            let owner_only = format!("D:P(A;;FA;;;{me})(A;;FA;;;SY)");
+            dacl::set_dacl_from_sddl(&file, &owner_only).expect("apply owner-only ACL");
+            dacl::set_dacl_from_sddl(&sub, &owner_only).expect("apply owner-only ACL");
+            assert_eq!(audit_object_dacl(&file), DaclAudit::OwnerOnly);
+            assert_eq!(audit_object_dacl(&sub), DaclAudit::OwnerOnly);
+
+            dacl::set_dacl_from_sddl(&file, &format!("D:P(A;;FW;;;BU)(A;;FA;;;{me})"))
+                .expect("apply test ACL");
+            let DaclAudit::WritableByOthers(grants) = audit_object_dacl(&file) else {
+                panic!("BUILTIN\\Users write on the file must be reported");
+            };
+            assert!(
+                grants.iter().all(|g| g.path() == file
+                    && g.applies_to() == AuditedObject::File
+                    && g.sid() == "S-1-5-32-545"),
+                "{grants:?}"
+            );
+
+            // FILE_ADD_FILE is write-capable only when the object is a directory: the object's own
+            // kind picks the mask, exactly as in the directory audit.
+            dacl::set_dacl_from_sddl(&sub, &format!("D:P(A;;0x2;;;BU)(A;;FA;;;{me})"))
+                .expect("apply test ACL");
+            let DaclAudit::WritableByOthers(grants) = audit_object_dacl(&sub) else {
+                panic!("BUILTIN\\Users FILE_ADD_FILE on the directory must be reported");
+            };
+            assert!(
+                grants.iter().any(|g| g.applies_to() == AuditedObject::Directory
+                    && g.rights().contains(&"FILE_ADD_FILE")),
+                "{grants:?}"
+            );
+
+            // OWNER RIGHTS (the SDDL `OW` alias) is not one of the trusted SIDs.
+            dacl::set_dacl_from_sddl(&file, "D:P(A;;FA;;;OW)(A;;FA;;;SY)").expect("apply OW ACL");
+            assert!(matches!(audit_object_dacl(&file), DaclAudit::WritableByOthers(_)));
+            dacl::set_dacl_from_sddl(&file, &owner_only).expect("restore owner-only ACL");
+
+            let missing = tree.0.join("missing.dpapi");
+            assert!(matches!(audit_object_dacl(&missing), DaclAudit::Unknown(_)));
+        }
+
+        #[test]
+        fn object_audit_refuses_a_path_that_is_itself_a_reparse_point() {
+            // Needs no privilege: a junction, unlike a symlink.
+            let tree = TempTree::new("object-audit-junction");
+            let target = tree.0.join("target");
+            std::fs::create_dir(&target).expect("create target");
+            let link = tree.0.join("link");
+            dacl::create_junction(&link, &target).expect("create junction");
+            assert!(
+                matches!(audit_object_dacl(&link), DaclAudit::Redirected(_)),
+                "{:?}",
+                audit_object_dacl(&link)
             );
         }
 

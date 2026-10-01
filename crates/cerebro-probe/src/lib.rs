@@ -23,9 +23,13 @@ pub mod backend;
 pub mod child_env;
 pub mod cpu;
 pub mod error;
+pub mod file_id;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fixtures;
 pub mod gpu;
+pub mod hardware;
+pub mod power;
+pub mod process;
 pub mod token;
 
 pub use backend::{
@@ -34,4 +38,8 @@ pub use backend::{
 };
 pub use cpu::{CpuTopology, PhysicalCore};
 pub use error::ProbeError;
-pub use gpu::{GpuInventory, PhysicalGpu};
+pub use file_id::FileIdentity;
+pub use gpu::{GpuInventory, GpuSample, PhysicalGpu};
+pub use hardware::{Detected, HardwareProfile};
+pub use power::{PowerSource, PowerState};
+pub use process::RunningProcess;

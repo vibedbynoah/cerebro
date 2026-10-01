@@ -1,0 +1,26 @@
+[package]
+name = "cerebro-backends"
+description = "Inference backend registry, hardware capability matrix and backend selection for Cerebro"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+# Hardware facts (HardwareProfile) the matrix gates on, the SHA-256 directory hash every backend
+# folder's integrity manifest reuses, and the system directory WSL is launched from.
+cerebro-probe = { path = "../cerebro-probe" }
+# llama.cpp argv goes through the closed flag allowlist; no other path emits llama.cpp flags.
+cerebro-flags = { path = "../cerebro-flags" }
+
+[dev-dependencies]
+# Reference hardware profiles (RTX 4090, H100, 2x RTX 3090, RX 7900 XTX, Arc A770, Snapdragon X,
+# ...) and the live-test fixture locations.
+cerebro-probe = { path = "../cerebro-probe", features = ["test-support"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
