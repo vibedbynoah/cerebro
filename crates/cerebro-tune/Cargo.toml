@@ -1,0 +1,28 @@
+[package]
+name = "cerebro-tune"
+description = "Measured autotuner: screens llama.cpp configurations against llama.cpp's own automatic settings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+# Candidates are built from the closed flag allowlist, measured with the bench runner, keyed and
+# persisted with the store, and sized from probe's CPU topology and GPU inventory.
+cerebro-bench = { path = "../cerebro-bench" }
+cerebro-flags = { path = "../cerebro-flags" }
+cerebro-probe = { path = "../cerebro-probe" }
+cerebro-store = { path = "../cerebro-store" }
+# `BenchLaunchSpec` and `SpawnOptions` for the production runner.
+cerebro-supervisor = { path = "../cerebro-supervisor" }
+
+[dev-dependencies]
+# `fixtures` locates the official llama.cpp build and the tiny GGUF for the live test.
+cerebro-probe = { path = "../cerebro-probe", features = ["test-support"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"

@@ -8,6 +8,7 @@ members = [
     "crates/cerebro-store",
     "crates/cerebro-config",
     "crates/cerebro-backends",
+    "crates/cerebro-tune",
 ]
 
 [workspace.package]
