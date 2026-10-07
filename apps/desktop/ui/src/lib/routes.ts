@@ -52,13 +52,31 @@ export function routeById(id: RouteId): RouteDef {
   return found;
 }
 
-/** `#/models` -> "models". Anything unknown, malformed or empty is Home. */
+/** `#/models` -> "models"; a query after the route (`#/tune?model=x`) is allowed and ignored here.
+ *  Anything unknown, malformed or empty is Home. */
 export function parseHash(hash: string): RouteId {
-  const match = /^#\/([a-z]+)\/?$/.exec(hash);
+  const match = /^#\/([a-z]+)\/?(?:\?[^#?]*)?$/.exec(hash);
   const id = match?.[1];
   return id !== undefined && isRouteId(id) ? id : "home";
 }
 
 export function hrefFor(id: RouteId): string {
   return `#/${id}`;
+}
+
+/** Library ids are lower-case slugs; anything else in a link is ignored. */
+const MODEL_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+
+/** `#/tune?model=<id>`: a screen opened for one model. */
+export function hrefWithModel(id: RouteId, modelId: string): string {
+  return `${hrefFor(id)}?model=${encodeURIComponent(modelId)}`;
+}
+
+/** The model a link names (`?model=`), when it is a well-formed id; callers still check that the
+ *  library has it before using it. */
+export function modelFromHash(hash: string): string | null {
+  const q = hash.indexOf("?");
+  if (q < 0) return null;
+  const id = new URLSearchParams(hash.slice(q + 1)).get("model");
+  return id !== null && MODEL_ID.test(id) ? id : null;
 }

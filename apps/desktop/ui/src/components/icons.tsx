@@ -181,6 +181,68 @@ const GLYPHS = {
       <path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" />
     </>
   ),
+  // Modalities: text lines, an eye, a microphone, a speaker.
+  text: () => <path d="M5 6.5h14M5 10.5h14M5 14.5h9M5 18.5h6" />,
+  eye: () => (
+    <>
+      <path d="M2.8 12S6.2 5.8 12 5.8 21.2 12 21.2 12 17.8 18.2 12 18.2 2.8 12 2.8 12Z" />
+      <circle cx="12" cy="12" r="2.8" />
+    </>
+  ),
+  mic: () => (
+    <>
+      <rect x="9" y="3.5" width="6" height="10.5" rx="3" />
+      <path d="M5.8 11.2a6.2 6.2 0 0 0 12.4 0M12 17.4v3.1" />
+    </>
+  ),
+  speaker: () => (
+    <>
+      <path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4Z" />
+      <path d="M15.5 9a4.2 4.2 0 0 1 0 6M18 6.5a7.8 7.8 0 0 1 0 11" />
+    </>
+  ),
+  folder: () => <path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h4.2l2 2.2H19a1.5 1.5 0 0 1 1.5 1.5v8.3A1.5 1.5 0 0 1 19 19.5H5A1.5 1.5 0 0 1 3.5 18Z" />,
+  chevron: () => <path d="m8 10 4 4 4-4" />,
+  upload: () => (
+    <>
+      <path d="M12 15.5V4.5" />
+      <path d="m7.8 8.7 4.2-4.2 4.2 4.2" />
+      <path d="M4 14.5v4A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5v-4" />
+    </>
+  ),
+  play: () => <path d="M8 5.5v13l10.5-6.5Z" />,
+  stop: () => <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />,
+  trash: () => (
+    <>
+      <path d="M4.5 7h15M9.5 7V4.8h5V7" />
+      <path d="M6.5 7l.9 12.2a1.5 1.5 0 0 0 1.5 1.3h6.2a1.5 1.5 0 0 0 1.5-1.3L17.5 7" />
+    </>
+  ),
+  plus: () => <path d="M12 5v14M5 12h14" />,
+  undo: () => <path d="M9 14.5 4.5 10 9 5.5M4.5 10h10a5 5 0 0 1 0 10H11" />,
+  // Two chain links: a hard link, one file reached from two places.
+  link: () => (
+    <>
+      <path d="M10 13.8a4 4 0 0 0 5.7.2l3-3a4 4 0 0 0-5.7-5.7l-1.4 1.4" />
+      <path d="M14 10.2a4 4 0 0 0-5.7-.2l-3 3a4 4 0 0 0 5.7 5.7l1.4-1.4" />
+    </>
+  ),
+  sliders: () => (
+    <>
+      <path d="M5 6.5h9M18 6.5h1M5 12h3M12 12h7M5 17.5h7M16 17.5h3" />
+      <circle cx="16" cy="6.5" r="2" />
+      <circle cx="10" cy="12" r="2" />
+      <circle cx="14" cy="17.5" r="2" />
+    </>
+  ),
+  wrench: () => <path d="M14.7 4.2a4.6 4.6 0 0 0-5.4 6.1L4.6 15a1.9 1.9 0 0 0 2.7 2.7l4.7-4.7a4.6 4.6 0 0 0 6.1-5.4l-2.6 2.6-2.5-.4-.4-2.5Z" />,
+  disk: () => (
+    <>
+      <rect x="3.5" y="5" width="17" height="14" rx="2" />
+      <path d="M3.5 14.5h17" />
+      <circle cx="16.5" cy="16.8" r="0.9" class="icon-dot" />
+    </>
+  ),
 } satisfies Record<string, () => JSX.Element>;
 
 export type IconName = keyof typeof GLYPHS;

@@ -75,6 +75,86 @@ export const GLOSSARY = {
     term: "tuning",
     text: "Cerebro runs real benchmarks on this machine with different llama.cpp settings and keeps the fastest configuration that stays within its safety checks.",
   },
+  context: {
+    term: "context length",
+    text: "How many tokens the model can keep in view at once: your messages, its replies and any documents. More context needs more memory.",
+  },
+  offload: {
+    term: "GPU layers",
+    text: "A model is a stack of layers. Each layer placed on the graphics card runs fast; the rest run on the processor. All layers on the GPU is fastest when they fit.",
+  },
+  moeCpu: {
+    term: "experts on CPU",
+    text: "For a mixture-of-experts model, keeps the large expert weights of some layers in system memory while the rest stays on the graphics card. Often the fastest way to run a model bigger than video memory.",
+  },
+  kvCache: {
+    term: "KV cache",
+    text: "The model's short-term memory of the conversation so far. Storing it at lower precision (q8_0 or q4_0 instead of f16) makes it smaller, at a small cost in accuracy.",
+  },
+  flashAttention: {
+    term: "flash attention",
+    text: "A faster, leaner way to compute attention, the step where the model looks back over the context. It is required for a lower-precision V cache.",
+  },
+  threads: {
+    term: "threads",
+    text: "How many processor threads work on the parts of the model that run on the CPU. More is not always faster.",
+  },
+  batch: {
+    term: "batch size",
+    text: "How many prompt tokens are processed in one go. The micro-batch is the slice actually sent to the hardware at once; larger is faster to read a prompt but uses more memory.",
+  },
+  mmap: {
+    term: "memory mapping",
+    text: "Reads the model file straight from disk as it is needed instead of copying it all into memory first. Loads faster and shares memory with the file cache.",
+  },
+  speculative: {
+    term: "speculative decoding",
+    text: "A cheap guess of the next few tokens that the model then checks in one pass. It is distribution-preserving: the model verifies every guessed token, so a bad guess cannot steer the output, it can only waste time.",
+  },
+  ngram: {
+    term: "n-gram speculation",
+    text: "Guesses the next tokens by finding the same short run of text earlier in the conversation. Needs no second model and no extra video memory.",
+  },
+  prefill: {
+    term: "prompt reading",
+    text: "Also called prefill: how fast the model reads your message and any documents before it starts to reply, in tokens per second.",
+  },
+  decode: {
+    term: "writing speed",
+    text: "Also called decode: how fast the model writes its reply, in tokens per second. It slows as the context fills, so Cerebro measures it with an empty context and again with a working amount of text already in view.",
+  },
+  mmproj: {
+    term: "projector",
+    text: "A small companion file (often named mmproj) that turns an image into something the language model can read. A vision model needs its matching projector.",
+  },
+  rope: {
+    term: "RoPE scaling",
+    text: "How the model tracks word positions. Scaling it (YaRN or linear) stretches a model to more context than it was trained on, as its authors specify.",
+  },
+  chatTemplate: {
+    term: "chat template",
+    text: "The recipe that turns a conversation into the exact text format the model was trained on. A wrong template makes a good model answer badly.",
+  },
+  stopToken: {
+    term: "stop token",
+    text: "Text that ends a reply as soon as the model writes it, so it does not run on into a made-up next turn.",
+  },
+  sampler: {
+    term: "sampler",
+    text: "The rules that pick each next token from the model's options. Temperature sets how adventurous it is; top-k, top-p and min-p limit the choices.",
+  },
+  hardLink: {
+    term: "hard link",
+    text: "A second name for the same file on the same drive. Each app still finds the file where it expects it, but the disk stores it only once.",
+  },
+  sha256: {
+    term: "SHA-256",
+    text: "A fingerprint of a file's exact contents. Two files with the same fingerprint are the same file, byte for byte.",
+  },
+  ggufMeta: {
+    term: "GGUF metadata",
+    text: "Named settings stored inside a GGUF file, such as its context length or chat template. llama.cpp reads them when it loads the model.",
+  },
 } as const;
 
 export type GlossaryKey = keyof typeof GLOSSARY;

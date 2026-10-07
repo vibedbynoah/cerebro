@@ -1,9 +1,10 @@
-import { createResource, For, Show, type JSX } from "solid-js";
+import { createResource, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { CodeBlock } from "../components/CodeBlock";
 import { Comparison, shares } from "../components/Figures";
 import { Icon } from "../components/icons";
 import { ScreenHeader, Section } from "../components/Screen";
 import { Term } from "../components/Term";
+import { modelFromHash } from "../lib/routes";
 import { useService } from "../service/context";
 
 /** The stages of a tune, from docs/CLAIMS.md "About measurement". */
@@ -20,6 +21,20 @@ export function Tune(): JSX.Element {
   const [models] = createResource(() => service.listModels());
   const moe = () => models()?.find((m) => m.tune === "tuned");
   const small = () => models()?.find((m) => m.tune === "defaults-fastest");
+  // Opened from a model's Tune action (`#/tune?model=<id>`): that model is the one to tune, once the
+  // library confirms it exists. An unknown or malformed id is ignored.
+  const [hash, setHash] = createSignal(window.location.hash);
+  const onHash = () => setHash(window.location.hash);
+  window.addEventListener("hashchange", onHash);
+  onCleanup(() => window.removeEventListener("hashchange", onHash));
+  const [picked] = createResource(
+    () => modelFromHash(hash()),
+    (id) =>
+      service
+        .listLibrary()
+        .then((list) => list.find((m) => m.id === id && (m.kind === "text" || m.kind === "vision")) ?? null)
+        .catch(() => null),
+  );
 
   return (
     <div class="screen">
@@ -85,7 +100,19 @@ export function Tune(): JSX.Element {
         </Section>
       </Show>
       <Section id="cli" title="Start a tune" description="Tuning a model takes a while and uses the GPU fully; you can keep working in other screens.">
-        <CodeBlock lines={["cerebro tune qwen3-8b-q5km"]} label="Copy command" />
+        <Show when={picked()} keyed fallback={<CodeBlock lines={["cerebro tune qwen3-8b-q5km"]} label="Copy command" />}>
+          {(m) => (
+            <>
+              <p class="tune-picked" data-model={m.id}>
+                <Icon name="models" size={16} />
+                <span>
+                  Selected from Models: <strong>{m.name}</strong> <span class="mono">{m.quant}</span>
+                </span>
+              </p>
+              <CodeBlock lines={[`cerebro tune ${m.id}`]} label="Copy command" />
+            </>
+          )}
+        </Show>
         <p class="hint">
           <Icon name="info" size={16} />
           Starting a tune from this screen arrives in a later build.

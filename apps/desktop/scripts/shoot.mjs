@@ -133,6 +133,107 @@ async function shootOnboarding(browser, origin, url, theme, offOrigin, problems)
   await context.close();
 }
 
+/**
+ * The Models screen's states (models-*): the detail drawer on each tab, the vision and speech
+ * "try it" panels, the disk panel, and the loading and empty library.
+ * @param {import("@playwright/test").Page} page
+ * @param {string} url
+ * @param {"dark" | "light"} theme
+ */
+async function shootModels(page, url, theme) {
+  const save = async (/** @type {string} */ name) => {
+    await page.mouse.move(1270, 790);
+    await page
+      .waitForFunction(() => document.getAnimations().every((a) => a.playState !== "running" || a.effect?.getComputedTiming().iterations === Infinity), undefined, {
+        timeout: 6000,
+      })
+      .catch(() => console.warn("  (some motion was still running; captured anyway)"));
+    await page.waitForTimeout(150);
+    const file = path.join(OUT_DIR, `models-${name}-${theme}.png`);
+    await page.screenshot({ path: file, animations: "disabled" });
+    console.log("Saved", file);
+  };
+  /** A fresh load of the Models screen (a hash-only navigation would keep an open drawer). */
+  const fresh = async (/** @type {string} */ query = "") => {
+    await page.goto(`${url}/${query}#/models`);
+    await page.reload();
+  };
+  /** Opens one model's drawer by searching its file, the way a user would. */
+  const open = async (/** @type {string} */ id, /** @type {string} */ query) => {
+    await fresh();
+    await page.locator(".lib-body > .lib-row").first().waitFor();
+    await page.getByRole("searchbox", { name: "Search models" }).fill(query);
+    await page.locator(`.lib-row[data-model="${id}"] .lib-name__text`).click();
+    await page.locator(".drawer__title").waitFor();
+  };
+  const tab = async (/** @type {string} */ name) => {
+    await page.getByRole("tab", { name }).click();
+    await page.waitForTimeout(250);
+  };
+
+  await open("qwen3-coder-30b-a3b-q4km", "coder 30b q4_k_m");
+  await save("drawer-overview");
+  await tab("Load settings");
+  await save("drawer-load");
+  await page.getByLabel("Context length", { exact: true }).fill("65536");
+  await page.getByLabel("Experts on CPU", { exact: true }).fill("4");
+  await save("drawer-load-custom");
+  await open("qwen3-8b-q5km", "qwen3 8b q5_k_m");
+  await tab("Tweak Studio");
+  await page.getByLabel("KV cache type").selectOption("q8_0");
+  await save("drawer-tweak");
+  await tab("Load settings");
+  await save("drawer-load-tweaked");
+  await tab("Metadata");
+  await save("drawer-metadata");
+  await page.getByRole("button", { name: "Edit qwen3.context_length" }).click();
+  await page.getByLabel("New value for qwen3.context_length").fill("40960");
+  await page.keyboard.press("Enter");
+  await page.getByRole("button", { name: "Write to a copy" }).click();
+  await page.locator(".meta__copy").waitFor();
+  await page.getByRole("button", { name: "Edit general.name" }).click();
+  await page.getByLabel("New value for general.name").fill("Qwen3-8B (renamed)");
+  await page.keyboard.press("Enter");
+  await save("drawer-metadata-copy");
+
+  // This machine not detected: nothing is estimated for it.
+  await page.goto(`${url}/?mock=fail-hw#/models`);
+  await page.reload();
+  await page.locator(".lib-body > .lib-row").first().waitFor();
+  await page.getByRole("searchbox", { name: "Search models" }).fill("qwen3 8b q5_k_m");
+  await page.locator('.lib-row[data-model="qwen3-8b-q5km"] .lib-name__text').click();
+  await page.locator(".drawer__title").waitFor();
+  await tab("Load settings");
+  await save("drawer-load-nohw");
+
+  await fresh();
+  await page.locator(".lib-body > .lib-row").first().waitFor();
+  await page.locator(".lib-toolbar label", { hasText: "Vision" }).click();
+  await page.locator(".lib-body > .lib-row").first().locator(".lib-name__text").click();
+  await page.locator(".drawer__title").waitFor();
+  await save("drawer-vision");
+  await page.keyboard.press("Escape");
+  await page.locator(".lib-toolbar label", { hasText: "Audio" }).click();
+  await page.locator(".lib-body > .lib-row").first().locator(".lib-name__text").click();
+  await page.locator(".drawer__title").waitFor();
+  await save("drawer-audio");
+  await page.keyboard.press("Escape");
+
+  await fresh();
+  await page.locator(".dup-list").waitFor();
+  await page.locator("#disk-title").evaluate((el) => el.scrollIntoView({ block: "start" }));
+  await page.waitForTimeout(400);
+  await save("disk");
+
+  await fresh("?mock=slow-library");
+  await page.locator(".lib-grid--skeleton").waitFor();
+  await page.waitForTimeout(500);
+  await save("loading");
+  await fresh("?mock=empty-library");
+  await page.locator(".lib-empty").waitFor();
+  await save("empty");
+}
+
 async function main() {
   await mkdir(OUT_DIR, { recursive: true });
   const { url, close } = await startServer(0);
@@ -177,6 +278,8 @@ async function main() {
       await page.screenshot({ path: path.join(OUT_DIR, `palette-${theme}.png`), animations: "disabled" });
       console.log("Saved", path.join(OUT_DIR, `palette-${theme}.png`));
       await page.keyboard.press("Escape");
+
+      await shootModels(page, url, theme);
 
       // Collapsed sidebar on the Models screen.
       await page.goto(`${url}/#/models`);

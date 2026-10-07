@@ -28,5 +28,15 @@ export default defineConfig({
     timeout: 20_000,
     env: { PORT: String(PORT) },
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 } } }],
+  projects: [
+    { name: "chromium", testIgnore: /\.perf\.spec\.ts$|-perf\.spec\.ts$/, use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 } } },
+    // Main-thread budgets (no task over 50 ms) are measured after every other test has finished, so
+    // parallel workers competing for the same CPU cannot stretch a task past the budget.
+    {
+      name: "perf",
+      testMatch: /\.perf\.spec\.ts$|-perf\.spec\.ts$/,
+      dependencies: ["chromium"],
+      use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 } },
+    },
+  ],
 });

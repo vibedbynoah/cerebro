@@ -1,6 +1,27 @@
+import { validateGgufEdits } from "../lib/gguf";
+import { draftCandidates, hasErrors, validateLoadParams } from "../lib/load-params";
+import { activeTweakCount, applyTweaks, contextCeiling, EMPTY_TWEAKS, profileNameError, sanitizeTweaks } from "../lib/tweaks";
 import type { CerebroService, Unsubscribe } from "../service/service";
-import type { CatalogModel, GpuInfo, HardwareProfile, LiveStats, ModelSummary, NetworkState, SettingKey, Settings } from "../service/types";
+import type {
+  ActivePatch,
+  CatalogModel,
+  DuplicateGroup,
+  GgufCopy,
+  GpuInfo,
+  HardwareProfile,
+  LibraryModel,
+  LiveStats,
+  LoadedModel,
+  LoadParams,
+  LoadPreset,
+  ModelSummary,
+  NetworkState,
+  PatchProfile,
+  SettingKey,
+  Settings,
+} from "../service/types";
 import { DEFAULT_SETTINGS, MOCK_CATALOG, MOCK_GPU, MOCK_HARDWARE, MOCK_LIVE_BASE, MOCK_MODELS } from "./fixtures";
+import { detailFor, MOCK_LIBRARY, mockDuplicates } from "./library";
 
 export interface MockServiceOptions {
   /** HUD sample interval, ms. Default 1000. */
@@ -17,6 +38,13 @@ export interface MockServiceOptions {
   malformedHardware?: boolean;
   /** listCatalog rejects. */
   failCatalog?: boolean;
+  /** listLibrary resolves with no models (the empty state). */
+  emptyLibrary?: boolean;
+  /** listLibrary rejects. */
+  failLibrary?: boolean;
+  /** Simulated latency in ms (default 0: resolve at once). The app sets realistic values so loading
+   *  states are visible; tests leave them at 0 or ask for `slow-library`. */
+  latency?: { library?: number; load?: number; test?: number; scan?: number };
 }
 
 /** Every failure a web/test build can ask the mock for, by `?mock=` value. */
@@ -25,6 +53,9 @@ const MOCK_FAILURES: Readonly<Record<string, MockServiceOptions>> = {
   "fail-hw-once": { failHardware: 1 },
   "bad-hw": { malformedHardware: true },
   "fail-catalog": { failCatalog: true },
+  "empty-library": { emptyLibrary: true },
+  "fail-library": { failLibrary: true },
+  "slow-library": { latency: { library: 60_000 } },
 };
 
 /**
@@ -54,6 +85,47 @@ function cloneStats(s: LiveStats): LiveStats {
   return { ...s, backend: { ...s.backend } };
 }
 
+/** Resolves with `fn()` after `ms` (at once when 0), or rejects with what it throws. */
+function later<T>(ms: number | undefined, fn: () => T): Promise<T> {
+  const run = (resolve: (v: T) => void, reject: (e: unknown) => void) => {
+    try {
+      resolve(fn());
+    } catch (err) {
+      reject(err);
+    }
+  };
+  if (ms === undefined || !(ms > 0)) return new Promise(run);
+  return new Promise((resolve, reject) => setTimeout(() => run(resolve, reject), ms));
+}
+
+const cloneParams = (p: LoadParams): LoadParams => ({ ...p });
+const cloneLoaded = (l: LoadedModel): LoadedModel => ({ ...l, params: l.params ? cloneParams(l.params) : null });
+const cloneLibrary = (m: LibraryModel): LibraryModel => ({
+  ...m,
+  modalities: [...m.modalities],
+  arch: { ...m.arch },
+  tunedParams: m.tunedParams ? cloneParams(m.tunedParams) : null,
+  projector: m.projector ? { ...m.projector } : null,
+});
+const clonePatch = (p: ActivePatch): ActivePatch => ({
+  tweaks: { ...p.tweaks, stopTokens: [...p.tweaks.stopTokens], rope: p.tweaks.rope ? { ...p.tweaks.rope } : null, sampler: p.tweaks.sampler ? { ...p.tweaks.sampler } : null },
+  fixes: [...p.fixes],
+});
+const cloneProfile = (p: PatchProfile): PatchProfile => ({
+  ...p,
+  tweaks: { ...p.tweaks, stopTokens: [...p.tweaks.stopTokens], rope: p.tweaks.rope ? { ...p.tweaks.rope } : null, sampler: p.tweaks.sampler ? { ...p.tweaks.sampler } : null },
+  fixes: [...p.fixes],
+});
+const clonePreset = (p: LoadPreset): LoadPreset => ({ ...p, params: cloneParams(p.params) });
+const cloneGroup = (g: DuplicateGroup): DuplicateGroup => ({ ...g, copies: g.copies.map((c) => ({ ...c })) });
+/** Copies on the kept copy's drive other than the kept one: the ones a hard link can replace. */
+const linkableCopies = (g: DuplicateGroup, keepPath: string) => {
+  const keep = g.copies.find((c) => c.path === keepPath);
+  return keep ? g.copies.filter((c) => c !== keep && c.volume === keep.volume) : [];
+};
+const FIX_ID = /^[a-z0-9-]{1,48}$/;
+const IMAGE_TYPE = /^image\/(png|jpeg|webp|gif)$/;
+
 /**
  * In-memory CerebroService for web mode and tests. All data is illustrative (see fixtures.ts).
  * The HUD ticker only runs while someone is subscribed, so an idle page schedules no timers.
@@ -68,13 +140,45 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
   const listeners = new Set<(stats: LiveStats) => void>();
   let timer: ReturnType<typeof setInterval> | null = null;
 
+  // ---- Models screen state. Every method checks its arguments the way the Rust side will. ----
+  const latency = options.latency ?? {};
+  const library: readonly LibraryModel[] = options.emptyLibrary ? [] : MOCK_LIBRARY;
+  const byId = new Map(library.map((m) => [m.id, m]));
+  // Matches the HUD's starting sample: the tuned coding model is loaded.
+  const startModel = byId.get("qwen3-coder-30b-a3b-q4km");
+  let loaded: LoadedModel[] = startModel ? [{ id: startModel.id, slot: "llm", params: startModel.tunedParams ? cloneParams(startModel.tunedParams) : null, tuned: true }] : [];
+  if (!startModel) current = { ...current, model: null, tokensPerSecond: null };
+  const presets = new Map<string, LoadPreset[]>();
+  const profiles = new Map<string, PatchProfile[]>();
+  const active = new Map<string, ActivePatch>();
+  const copies = new Map<string, GgufCopy>();
+  let groups: DuplicateGroup[] = mockDuplicates();
+  let nextId = 1;
+  const model = (id: unknown): LibraryModel => {
+    const m = typeof id === "string" ? byId.get(id) : undefined;
+    if (!m) throw new TypeError(`Unknown model: ${String(id)}`);
+    return m;
+  };
+  const isLlm = (m: LibraryModel) => m.kind === "text" || m.kind === "vision";
+  const tweaksFor = (m: LibraryModel) => active.get(m.sha256)?.tweaks ?? EMPTY_TWEAKS;
+  // The same rule as the UI: the context ceiling grows only with the file's active RoPE tweak.
+  const checkParams = (m: LibraryModel, params: unknown) => {
+    const draftIds = new Set(draftCandidates(m, library).map((d) => d.id));
+    if (hasErrors(validateLoadParams(params, { ...m, contextMax: contextCeiling(m, tweaksFor(m)) }, MOCK_HARDWARE, draftIds))) throw new TypeError("Invalid load settings");
+  };
+
   const next = (): LiveStats => {
     const base = MOCK_LIVE_BASE;
     const jitter = (spread: number) => (random() * 2 - 1) * spread;
+    // The HUD names whatever is in the llm slot; its speed is that model's illustrative tuned speed.
+    const inSlot = loaded.find((l) => l.slot === "llm");
+    const m = inSlot ? byId.get(inSlot.id) : undefined;
+    const speed = m ? (m.name === base.model ? base.tokensPerSecond : (m.tuneResult?.decodeTpsDepth ?? 10)) : null;
     current = {
       ...cloneStats(base),
-      tokensPerSecond: base.tokensPerSecond === null ? null : round1(base.tokensPerSecond + jitter(0.6)),
-      vramUsedGiB: round2(Math.min(base.vramTotalGiB, Math.max(0, base.vramUsedGiB + jitter(0.08)))),
+      model: m ? m.name : null,
+      tokensPerSecond: speed === null ? null : round1(speed + jitter(0.6)),
+      vramUsedGiB: m ? round2(Math.min(base.vramTotalGiB, Math.max(0, base.vramUsedGiB + jitter(0.08)))) : 0.4,
     };
     return cloneStats(current);
   };
@@ -138,5 +242,221 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
       settings = { ...settings, [key]: value };
       return Promise.resolve({ ...settings });
     },
+
+    listLibrary: () =>
+      later(latency.library, () => {
+        if (options.failLibrary) throw new Error("Mock: library scan failed");
+        return library.map(cloneLibrary);
+      }),
+
+    getModelDetail: (id) =>
+      later(0, () => {
+        const m = model(id);
+        const copy = copies.get(m.id);
+        const d = detailFor(m);
+        return {
+          ...d,
+          gguf: d.gguf ? d.gguf.map((e) => ({ ...e })) : null,
+          copy: copy ? { path: copy.path, edits: copy.edits.map((e) => ({ ...e })) } : null,
+        };
+      }),
+
+    listLoaded: () => later(0, () => loaded.map(cloneLoaded)),
+
+    loadModel: (id, params) =>
+      later(latency.load, () => {
+        const m = model(id);
+        if (isLlm(m)) {
+          if (params !== null) checkParams(m, params);
+          // null: the tuned settings with this file's active tweaks, the same rule the UI shows.
+          const t = tweaksFor(m);
+          const used = params ?? (m.tunedParams ? applyTweaks(m.tunedParams, t) : null);
+          const untweaked = activeTweakCount(t) === 0 && (active.get(m.sha256)?.fixes.length ?? 0) === 0;
+          const entry: LoadedModel = { id: m.id, slot: "llm", params: used ? cloneParams(used) : null, tuned: params === null && untweaked };
+          loaded = [...loaded.filter((l) => l.slot !== "llm"), entry];
+        } else {
+          if (params !== null) throw new TypeError("This engine takes no load settings");
+          const slot = m.kind === "stt" ? "stt" : m.kind === "tts" ? "tts" : "image";
+          loaded = [...loaded.filter((l) => l.slot !== slot), { id: m.id, slot, params: null, tuned: false }];
+        }
+        return loaded.map(cloneLoaded);
+      }),
+
+    unloadModel: (id) =>
+      later(0, () => {
+        const m = model(id);
+        loaded = loaded.filter((l) => l.id !== m.id);
+        return loaded.map(cloneLoaded);
+      }),
+
+    listPresets: (modelId) => later(0, () => (presets.get(model(modelId).id) ?? []).map(clonePreset)),
+
+    savePreset: (modelId, name, params) =>
+      later(0, () => {
+        const m = model(modelId);
+        const list = presets.get(m.id) ?? [];
+        const err = typeof name === "string" ? profileNameError(name, list.map((p) => p.name)) : "Invalid name";
+        if (err) throw new TypeError(err);
+        checkParams(m, params);
+        const next = [...list, { id: `preset-${nextId++}`, modelId: m.id, name: name.trim(), params: cloneParams(params) }];
+        presets.set(m.id, next);
+        return next.map(clonePreset);
+      }),
+
+    deletePreset: (modelId, presetId) =>
+      later(0, () => {
+        const m = model(modelId);
+        const next = (presets.get(m.id) ?? []).filter((p) => p.id !== presetId);
+        presets.set(m.id, next);
+        return next.map(clonePreset);
+      }),
+
+    getActivePatch: (sha) =>
+      later(0, () => {
+        const m = typeof sha === "string" ? library.find((x) => x.sha256 === sha) : undefined;
+        if (!m) throw new TypeError("Unknown model file");
+        return clonePatch(active.get(m.sha256) ?? { tweaks: EMPTY_TWEAKS, fixes: [] });
+      }),
+
+    setActivePatch: (sha, patch) =>
+      later(0, () => {
+        const m = typeof sha === "string" ? library.find((x) => x.sha256 === sha) : undefined;
+        if (!m) throw new TypeError("Unknown model file");
+        const tweaks = sanitizeTweaks(patch?.tweaks);
+        if (!tweaks) throw new TypeError("Invalid tweaks");
+        // Only fixes the quirks list has for this file can be switched on.
+        const known = new Set(detailFor(m).quirks.map((q) => q.id));
+        if (!Array.isArray(patch.fixes) || patch.fixes.length > 32 || !patch.fixes.every((f) => typeof f === "string" && known.has(f))) throw new TypeError("Invalid fixes");
+        const next: ActivePatch = { tweaks, fixes: [...new Set(patch.fixes)] };
+        active.set(m.sha256, next);
+        return clonePatch(next);
+      }),
+
+    listPatchProfiles: (sha) => later(0, () => (profiles.get(String(sha)) ?? []).map(cloneProfile)),
+
+    savePatchProfile: (profile) =>
+      later(0, () => {
+        const sha: unknown = profile?.modelSha256;
+        if (typeof sha !== "string" || !library.some((m) => m.sha256 === sha)) throw new TypeError("Unknown model file");
+        const list = profiles.get(sha) ?? [];
+        const err = typeof profile.name === "string" ? profileNameError(profile.name, list.map((p) => p.name)) : "Invalid name";
+        if (err) throw new TypeError(err);
+        const tweaks = sanitizeTweaks(profile.tweaks);
+        if (!tweaks) throw new TypeError("Invalid tweaks");
+        if (!Array.isArray(profile.fixes) || profile.fixes.length > 32 || !profile.fixes.every((f) => typeof f === "string" && FIX_ID.test(f))) throw new TypeError("Invalid fixes");
+        const next = [...list, { id: `profile-${nextId++}`, name: profile.name.trim(), modelSha256: sha, tweaks, fixes: [...new Set(profile.fixes)] }];
+        profiles.set(sha, next);
+        return next.map(cloneProfile);
+      }),
+
+    deletePatchProfile: (sha, id) =>
+      later(0, () => {
+        const key = String(sha);
+        const next = (profiles.get(key) ?? []).filter((p) => p.id !== id);
+        profiles.set(key, next);
+        return next.map(cloneProfile);
+      }),
+
+    writeGgufCopy: (id, edits) =>
+      later(latency.test, () => {
+        const m = model(id);
+        const entries = detailFor(m).gguf;
+        if (!entries) throw new TypeError("Not a GGUF file");
+        const err = validateGgufEdits(edits, entries);
+        if (err) throw new TypeError(err);
+        // Merge into the existing copy: newest value per key; a key set back to its original value
+        // leaves the copy. A copy that would equal the original is refused (revert deletes it).
+        const original = new Map(entries.map((e) => [e.key, e.value]));
+        const next = new Map((copies.get(m.id)?.edits ?? []).map((e) => [e.key, e.value]));
+        for (const e of edits) {
+          if (e.value === original.get(e.key)) next.delete(e.key);
+          else next.set(e.key, e.value);
+        }
+        if (next.size === 0) throw new TypeError("The copy would match the original; revert it instead");
+        const copy: GgufCopy = { path: m.path.replace(/(\.gguf)?$/i, ".edited.gguf"), edits: [...next].map(([key, value]) => ({ key, value })) };
+        copies.set(m.id, copy);
+        return { path: copy.path, edits: copy.edits.map((e) => ({ ...e })) };
+      }),
+
+    revertGgufCopy: (id) =>
+      later(0, () => {
+        copies.delete(model(id).id);
+      }),
+
+    scanDisk: () =>
+      later(latency.scan, () => ({
+        provenance: "illustrative" as const,
+        // A believable laptop, not the 500-file scroll-test list: the four featured models, a
+        // sample of up to 26 more that a laptop would keep (20 GiB or less each), and the extra
+        // bytes the duplicate groups still store.
+        totalGiB:
+          library.length === 0
+            ? 0
+            : round1(
+                library.filter((m, i) => i < 4 || (i % 20 === 0 && m.sizeGiB <= 20)).slice(0, 30).reduce((sum, m) => sum + m.sizeGiB, 0) +
+                  // A linked group still stores its copies on other drives (they cannot be hard links).
+                  groups.reduce((sum, g) => sum + g.sizeGiB * (g.copies.length - 1 - (g.state === "linked" && g.kept ? linkableCopies(g, g.kept).length : 0)), 0),
+              ),
+        groups: library.length === 0 ? [] : groups.map(cloneGroup),
+      })),
+
+    deduplicate: (groupId, keepPath) =>
+      later(latency.scan, () => {
+        const g = groups.find((x) => x.id === groupId);
+        if (!g) throw new TypeError("Unknown duplicate group");
+        if (g.state === "linked") throw new TypeError("Already deduplicated");
+        if (typeof keepPath !== "string" || !g.copies.some((c) => c.path === keepPath)) throw new TypeError("Keep one of the group's own copies");
+        const linkable = linkableCopies(g, keepPath).length;
+        if (linkable === 0) throw new TypeError("No copy shares a drive with the kept one");
+        const skipped = g.copies.length - 1 - linkable;
+        const next: DuplicateGroup = { ...cloneGroup(g), state: "linked", kept: keepPath };
+        groups = groups.map((x) => (x.id === g.id ? next : x));
+        return { group: cloneGroup(next), reclaimedGiB: Math.round(g.sizeGiB * linkable * 10) / 10, skipped };
+      }),
+
+    unlink: (groupId) =>
+      later(latency.scan, () => {
+        const g = groups.find((x) => x.id === groupId);
+        if (!g) throw new TypeError("Unknown duplicate group");
+        if (g.state !== "linked" || g.kept === null) throw new TypeError("Not linked");
+        const next: DuplicateGroup = { ...cloneGroup(g), state: "duplicate", kept: null };
+        groups = groups.map((x) => (x.id === g.id ? next : x));
+        return cloneGroup(next);
+      }),
+
+    revealInFolder: (id) =>
+      later(0, () => {
+        model(id);
+        // The browser preview cannot open File Explorer; the desktop bridge will.
+        return false;
+      }),
+
+    describeImage: (id, image) =>
+      later(latency.test, () => {
+        const m = model(id);
+        if (m.kind !== "vision") throw new TypeError("Not a vision model");
+        if (!m.projector) throw new TypeError("No projector paired");
+        if (typeof image?.type !== "string" || !IMAGE_TYPE.test(image.type)) throw new TypeError("Unsupported image type");
+        if (typeof image.bytes !== "number" || !(image.bytes > 0) || image.bytes > 20 * 1024 * 1024) throw new TypeError("Image too large");
+        const name = typeof image.name === "string" ? image.name.slice(0, 120) : "the image";
+        return {
+          text: `A sample description of ${name}: the model would describe the picture here in a sentence or two. The image stayed on this computer.`,
+          provenance: "illustrative" as const,
+        };
+      }),
+
+    transcribeSample: (id, seconds) =>
+      later(latency.test, () => {
+        if (model(id).kind !== "stt") throw new TypeError("Not a speech-to-text model");
+        if (typeof seconds !== "number" || !(seconds > 0) || seconds > 30) throw new TypeError("Recording length out of range");
+        return { text: "This is a sample transcript. Your words would appear here, transcribed on this machine.", provenance: "illustrative" as const };
+      }),
+
+    speakSample: (id, text) =>
+      later(latency.test, () => {
+        if (model(id).kind !== "tts") throw new TypeError("Not a text-to-speech model");
+        if (typeof text !== "string" || text.trim().length === 0 || text.length > 280) throw new TypeError("Sentence must be 1 to 280 characters");
+        return Math.round(Math.max(1, text.trim().split(/\s+/).length * 0.38) * 10) / 10;
+      }),
   };
 }

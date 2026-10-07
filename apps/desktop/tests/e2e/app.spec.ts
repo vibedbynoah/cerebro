@@ -268,11 +268,12 @@ test("at the narrowest window (1040x700) the HUD still names the loaded model, t
   expect(right).toBeLessThanOrEqual(1040);
 });
 
-test("the Models table reports quality beside speed", async ({ page }) => {
+test("the Models library reports quality beside speed", async ({ page }) => {
   await openScreen(page, "models");
   await expect(page.getByRole("columnheader", { name: /Quality/ })).toBeVisible();
-  const first = page.locator("tbody tr").first();
-  await expect(first.locator("td").last()).toContainText("Not measured yet");
+  const first = page.locator(".lib-body > .lib-row").first();
+  // Cells: size, fit, last tune, quality, load.
+  await expect(first.getByRole("gridcell").nth(3)).toContainText("Not measured yet");
 });
 
 test("the maximize control reads Maximize in the browser preview", async ({ page }) => {

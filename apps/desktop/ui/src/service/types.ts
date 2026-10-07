@@ -111,3 +111,250 @@ export interface CatalogModel {
   goodFor: string;
   provenance: Provenance;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Models screen: library, load parameters, tweaks, GGUF metadata, disk space
+// ---------------------------------------------------------------------------------------------
+
+/** What a model can take in or produce. Shown as badges on every model. */
+export type Modality = "text" | "vision" | "audio-in" | "audio-out" | "image-gen";
+
+/**
+ * How a model runs. `text` and `vision` load into llama.cpp's server (one slot: loading another
+ * replaces it); `stt`, `tts` and `image` each load into their own lightweight engine beside it.
+ */
+export type ModelKind = "text" | "vision" | "stt" | "tts" | "image";
+
+/** The folder a model file was found in. Cerebro reads other apps' folders; it never moves files. */
+export type ModelSource = "cerebro" | "lmstudio" | "ollama" | "other";
+
+export type KvCacheType = "f16" | "q8_0" | "q4_0";
+export type FlashAttention = "auto" | "on" | "off";
+export type CpuAffinity = "all" | "performance" | "custom";
+export type SpeculativeMode = "off" | "ngram" | "draft";
+/** The draft-free speculative strategies (docs/CLAIMS.md). */
+export type NgramStrategy = "ngram-simple" | "ngram-map-k" | "ngram-map-k4v" | "ngram-mod" | "ngram-cache";
+
+/** Every llama.cpp load parameter the load panel exposes. Validated by lib/load-params.ts on both
+ *  sides of the service boundary. */
+export interface LoadParams {
+  /** Tokens the model can keep in view at once. */
+  contextLength: number;
+  /** Layers placed on the GPU, 0..arch.layers. */
+  gpuLayers: number;
+  /** MoE only: the expert weights of this many layers stay in system memory. 0 for dense models. */
+  moeCpuLayers: number;
+  kvCacheK: KvCacheType;
+  kvCacheV: KvCacheType;
+  flashAttention: FlashAttention;
+  threads: number;
+  cpuAffinity: CpuAffinity;
+  /** Core list for `custom` affinity, e.g. "0-5,8". Empty otherwise. */
+  cpuCores: string;
+  batchSize: number;
+  ubatchSize: number;
+  mmap: boolean;
+  mlock: boolean;
+  speculative: SpeculativeMode;
+  ngramStrategy: NgramStrategy;
+  /** Library id of the draft model for `draft` speculation, else null. */
+  draftModelId: string | null;
+  draftMax: number;
+}
+
+export interface ModelArch {
+  layers: number;
+  /** Key/value attention heads and the size of each: these set the KV cache's memory per token. */
+  kvHeads: number;
+  headDim: number;
+  embedding: number;
+  /** MoE only: experts per layer and experts used per token. */
+  experts: number | null;
+  activeExperts: number | null;
+}
+
+/**
+ * What a finished tune measured for one file (docs/CLAIMS.md "About measurement"): three numbers,
+ * never one, and every condition they were measured under. A speed is never shown without these.
+ */
+export interface TuneResult {
+  /** Prompt reading (prefill), tok/s. */
+  prefillTps: number;
+  /** Writing (decode) with an empty context, tok/s. */
+  decodeTps0: number;
+  /** Writing (decode) with `depth` tokens already in the context, tok/s. */
+  decodeTpsDepth: number;
+  /** The working context depth `decodeTpsDepth` was measured at, tokens. */
+  depth: number;
+  /** llama.cpp build that produced the numbers, e.g. "b6500". */
+  build: string;
+  /** The graphics card (or "CPU only") it ran on. */
+  gpu: string;
+  /** Sampler settings during the run, e.g. "greedy" or "temp 0.6, top-p 0.95". */
+  sampler: string;
+  /** ISO date of the run. */
+  measuredAt: string;
+  provenance: Provenance;
+}
+
+/** A model file in the library. The single-number `defaultsTps`/`tunedTps` summary is left out on
+ *  purpose: the Models screen only ever shows a speed as a full `TuneResult` with its conditions. */
+export interface LibraryModel extends Omit<ModelSummary, "defaultsTps" | "tunedTps"> {
+  kind: ModelKind;
+  modalities: Modality[];
+  /** Publisher family for grouping and draft-model compatibility, e.g. "Qwen3". */
+  family: string;
+  file: string;
+  /** Full path, display only. */
+  path: string;
+  source: ModelSource;
+  /** SHA-256 of the file, hex. Patch profiles are keyed by it. */
+  sha256: string;
+  arch: ModelArch;
+  /** The fastest safe settings the last tune kept, or null when never tuned. */
+  tunedParams: LoadParams | null;
+  /** ISO date of the last tune, or null. */
+  tunedAt: string | null;
+  /** What the last tune measured with `tunedParams`, or null when never tuned. */
+  tuneResult: TuneResult | null;
+  /** Vision only: the projector (mmproj) file paired with it, or null when none was found. */
+  projector: { file: string; sizeGiB: number } | null;
+}
+
+/** Engine slot a loaded model occupies. */
+export type EngineSlot = "llm" | "stt" | "tts" | "image";
+
+export interface LoadedModel {
+  id: string;
+  slot: EngineSlot;
+  /** The settings it was loaded with; null for engines without load parameters. */
+  params: LoadParams | null;
+  /** True when it was loaded with the tuned settings unchanged. */
+  tuned: boolean;
+}
+
+export interface LoadPreset {
+  id: string;
+  modelId: string;
+  name: string;
+  params: LoadParams;
+}
+
+export interface Sampler {
+  temperature: number;
+  topK: number;
+  topP: number;
+  minP: number;
+  repeatPenalty: number;
+}
+
+export type RopeScaling = "none" | "linear" | "yarn";
+
+/**
+ * Small, reversible tweaks applied when the model loads. The file itself never changes. `null`
+ * means "as the file says".
+ */
+export interface Tweaks {
+  kvQuant: KvCacheType | null;
+  contextOverride: number | null;
+  rope: { scaling: RopeScaling; factor: number; originalContext: number } | null;
+  chatTemplate: string | null;
+  stopTokens: string[];
+  sampler: Sampler | null;
+}
+
+/** The tweaks and switched-on fixes in effect for one exact file: what the next load applies. */
+export interface ActivePatch {
+  tweaks: Tweaks;
+  fixes: string[];
+}
+
+/** A named, shareable set of tweaks and switched-on fixes for one exact file (by SHA-256). */
+export interface PatchProfile {
+  id: string;
+  name: string;
+  modelSha256: string;
+  tweaks: Tweaks;
+  fixes: string[];
+}
+
+/** One entry from the quirks database: a known problem with a model family and its fix. */
+export interface QuirkFix {
+  id: string;
+  title: string;
+  /** What goes wrong without it, in plain words. */
+  problem: string;
+  /** What switching it on changes. */
+  change: string;
+  provenance: Provenance;
+}
+
+export type GgufType = "string" | "uint32" | "int32" | "float32" | "bool" | "array";
+
+export interface GgufEntry {
+  key: string;
+  type: GgufType;
+  /** Arrays are summarised ("151,936 strings"), never sent whole. */
+  value: string | number | boolean;
+  /** False for structural keys: changing them would make the file unreadable. */
+  editable: boolean;
+}
+
+export interface GgufEdit {
+  key: string;
+  value: string | number | boolean;
+}
+
+/** A metadata-edited copy of a model file. The original is never written. */
+export interface GgufCopy {
+  path: string;
+  edits: GgufEdit[];
+}
+
+export interface ModelDetail {
+  id: string;
+  gguf: GgufEntry[] | null;
+  /** The chat template stored in the file, or null when it has none. */
+  chatTemplate: string | null;
+  quirks: QuirkFix[];
+  /** What the model's authors publish for long context and sampling, when they do. */
+  author: { rope: Tweaks["rope"]; sampler: Sampler | null };
+  copy: GgufCopy | null;
+}
+
+export interface DuplicateCopy {
+  path: string;
+  source: ModelSource;
+  /** Drive, as Windows names it, e.g. "C:". Hard links only work within one drive. */
+  volume: string;
+}
+
+export interface DuplicateGroup {
+  id: string;
+  file: string;
+  sizeGiB: number;
+  sha256: string;
+  copies: DuplicateCopy[];
+  state: "duplicate" | "linked";
+  /** Linked only: the path of the copy the others now point to. */
+  kept: string | null;
+}
+
+export interface DiskReport {
+  provenance: Provenance;
+  totalGiB: number;
+  groups: DuplicateGroup[];
+}
+
+export interface DedupeResult {
+  group: DuplicateGroup;
+  reclaimedGiB: number;
+  /** Copies that could not be linked because they sit on another drive. */
+  skipped: number;
+}
+
+/** Output of a "try it" test. The mock's is always illustrative. */
+export interface TestOutput {
+  text: string;
+  provenance: Provenance;
+}
