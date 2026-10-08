@@ -44,3 +44,14 @@ system together with percentages:
   - An "Advanced" escape hatch is visible on every install step, so an experienced user who picked
     Beginner by mistake can switch while the app is still installing, without restarting setup;
     nothing Beginner chose is lost (it becomes the starting values).
+
+## Copy rule: users, not references
+
+- Never describe a Cerebro feature by pointing at another product ("in the style of X", "like X",
+  "inspired by X"). Owner requests that name other tools are internal inspiration, not copy. Say what
+  the user gets: the benefit, the control, the number.
+- Other products appear in public copy only where the user needs the fact: the comparison page (named,
+  measured, with method) and interoperability (e.g. "reads the models you already downloaded with
+  LM Studio or Ollama").
+- Every line is written for the person using it: what it does for them, in plain words, with a number
+  where one exists. No filler, no self-congratulation, no hedging.
