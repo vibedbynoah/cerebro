@@ -23,7 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import local_llm  # noqa: E402
 
 MAX_DIFF_CHARS = 36_000  # ~10k tokens, inside the 12k context with room for the answer
-SKIP_SUFFIXES = (".lock", ".json", ".png", ".jpg", ".svg", ".gguf", ".bin")
+SKIP_SUFFIXES = (".lock", ".json", ".png", ".jpg", ".svg", ".gguf", ".bin",
+                  ".woff", ".woff2", ".ttf", ".otf")
 
 CODE_RUBRIC = """You are a strict senior reviewer giving a FIRST-PASS rating of a code change for Cerebro, a security-focused Windows desktop app (Rust core, llama.cpp backend spawned via argv only, TypeScript UI).
 Rate 0-10. Report only concrete problems you can point to in the diff: compile or logic errors, missing error handling, unwrap/expect/panic outside tests, security issues (shell use, path or argument injection, unchecked input, secrets in code), untested behavior, tests that cannot fail, missing docs on public items, dead code.

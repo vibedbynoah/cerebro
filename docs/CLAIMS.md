@@ -58,6 +58,15 @@ in social copy where the detail "doesn't fit."
 - Cerebro verifies backend integrity before every spawn and never inherits a llama-server default.
   It refuses to run elevated, and every Windows tuning change is a separate consented operation
   carrying its own revert action.
+- Cerebro starts the model-running process inside a Windows Job Object created with
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (`crates/cerebro-supervisor/src/spawn/job.rs`): the moment
+  Cerebro's own handle to that job closes — an explicit stop or Cerebro's own process dying
+  unexpectedly — every process assigned to it, including anything the model process itself spawned,
+  is terminated by the kernel. The child's environment is never inherited: it is rebuilt from a
+  closed allowlist (`env.rs`), so it starts with none of Cerebro's own environment variables or
+  secrets, and its `PATH`/`SystemRoot` are resolved fresh from the OS rather than copied from a
+  value that could be poisoned upstream. Neither mechanism restricts the child's file-system or
+  network access — see "Claims we may not make" below for the wording this rules out.
 - Cerebro reports the maximum context it actually measured on your machine, never a headline number
   your hardware cannot hold.
 - We publish what we do not do: no NPU support, no Mixture-of-Depths, no inference-time
@@ -115,6 +124,17 @@ architecture document and were removed.
   contradicted by our own measurement of a 1-bit 27B emitting whitespace.
 - ❌ Marketing `--moe-expert-cache-size` as an optimization. Our controlled sweep measured it slower
   than no cache at every size on an 8 GB card.
+
+### Sandbox overclaims
+
+- ❌ **"Sandboxed" described as filesystem or network isolation** — "can't read files," "can't use
+  the network," "no network access," "touch hardware beyond what it's explicitly given," or similar.
+  The implementation (`crates/cerebro-supervisor/src/spawn/job.rs`) is a Windows Job Object with
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, which guarantees process-tree cleanup, not I/O restriction —
+  a Job Object with only this limit set does not restrict what the process it contains can open,
+  read, or connect to. Say only what the Job Object (process-tree kill-on-close) and the
+  clean-environment build (`env.rs`, a closed allowlist rebuilt from scratch, never inherited)
+  actually do.
 
 ### Credit we have not earned
 
