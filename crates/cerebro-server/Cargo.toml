@@ -1,0 +1,57 @@
+[package]
+name = "cerebro-server"
+description = "Loopback gateway: supervises one llama-server and exposes an authenticated OpenAI-compatible API on 127.0.0.1"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Settings (effort and verbosity dials, protections, sampler, load defaults), the DPAPI secret
+# store that holds the gateway token, and the per-launch key file llama-server reads.
+cerebro-config = { path = "../cerebro-config" }
+# Preflight, job-contained spawn and the lifecycle driver; the gateway never spawns anything itself.
+cerebro-supervisor = { path = "../cerebro-supervisor" }
+# Tuned or default load flags travel as typed allowlisted flags, never as strings.
+cerebro-flags = { path = "../cerebro-flags" }
+# Free VRAM for /cerebro/status (nvidia-smi located through the system directory).
+cerebro-probe = { path = "../cerebro-probe" }
+# A tuned configuration names its measurement record; serve loads it from a verified store and
+# checks it describes this model, backend build, machine and flags before using it.
+cerebro-store = { path = "../cerebro-store" }
+# The model digest cache, backend manifest digest and machine profile id the record is keyed by,
+# computed exactly as the measurement computed them.
+cerebro-bench = { path = "../cerebro-bench" }
+
+# The HTTP surface. axum 0.7 with no default features: routing, extractors and middleware only;
+# the listener is driven by hyper directly so the header-read timeout can be set.
+axum = { version = "0.7", default-features = false }
+hyper = { version = "1", default-features = false, features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http1", "tokio", "service"] }
+http-body-util = "0.1"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros"] }
+# The gateway token and the per-launch upstream key come from the OS CSPRNG (BCryptGenRandom on
+# Windows); `fill` returns an error instead of panicking when the OS refuses.
+getrandom = "0.4"
+# Constant-time comparison of the presented bearer token.
+subtle = "2.6"
+# Zeroes the raw token bytes once they are hex-encoded; pinned like cerebro-config's copy.
+zeroize = "=1.9.0"
+
+[dev-dependencies]
+# `fixtures` locates the official llama.cpp build and the tiny GGUF for the live test.
+cerebro-probe = { path = "../cerebro-probe", features = ["test-support"] }
+tempfile = "3"
+# The gateway tests drive raw HTTP/1.1 over a loopback socket so every header is exactly as written.
+tokio = { version = "1", features = ["io-util"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
