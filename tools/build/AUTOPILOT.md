@@ -5,8 +5,8 @@
 | Job | Script | Run id | Resume args | Started |
 |---|---|---|---|---|
 | Front ends: design system, then website + desktop app in parallel | tools/build/frontend.workflow.js | wf_21c6a3cb-4d8 | {"skip": [ids of tasks already committed]} | 2026-09-22 23:4x |
-| Engine wave A (worktree cerebro-core, branch core): hardening, config, bench-run, models, hardware-backends, tune, server, hub, cli | tools/build/core.workflow.js | wf_8fbf0255-b05 | {"skip": ["models","hub", ...committed ids]} | 2026-09-23 00:1x |
-| Engine track 2 (worktree cerebro-core2, branch core2): models, hub | tools/build/core.workflow.js | wf_1a63d280-f1b | {"repo":"C:/Users/noahm/Projects/cerebro-core2","branch":"core2","only":["models","hub"]} | 2026-09-24 16:5x |
+| Engine wave A (worktree cerebro-core, branch core): hardening, config, bench-run, models, hardware-backends, tune, server, hub, cli | tools/build/core.workflow.js | wf_2c19383e-139 (cli only; old run wf_8fbf0255-b05 done through server) | {"skip": ["models","hub", ...committed ids]} | 2026-09-23 00:1x |
+| Engine track 2 (worktree cerebro-core2, branch core2): models, hub | tools/build/core.workflow.js | wf_5a89be6c-89e (telemetry, turbo; old run wf_1a63d280-f1b has derailed entries, never resume it) | {"repo":"C:/Users/noahm/Projects/cerebro-core2","branch":"core2","only":["models","hub"]} | 2026-09-24 16:5x |
 | Fresh research (free models, detached python, PID in docs/research/2026-09b/driver.out) | tools/research/run_research.py | - | rerun the script; it skips finished subtasks | 2026-09-23 00:0x |
 
 Worktrees: `C:\Users\noahm\Projects\cerebro` (main, design system), `cerebro-site` (branch site),
@@ -41,3 +41,5 @@ waves implement it section by section in both the engine and the app.
 3. Triage the owner's incoming research and boilerplate against docs/RESTART.md.
 4. Daily auto-research: schedule tools/research/run_research.py-style free-model runs (from the marrow archive) that scan arXiv, Reddit and vendor blogs for new local-inference features and write a dated report for review (owner's research report, 2026-09-22).
 5. Wave B onward: turn FEATURE_CATALOG.md sections into engine + app task batches (image generation, voice, plugins/MCP host, permissions engine, memory, RAG, workflow builder, OS-wide quick actions, Tweak Studio backend), Windows first; then macOS and Linux conversion.
+
+- Never launch or resume workflows in a turn where the owner sent a mid-turn message: agents treat it as their request (2026-10-08 incident).
