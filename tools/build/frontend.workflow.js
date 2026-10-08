@@ -159,7 +159,7 @@ const CRITIC_RESULT = {
 }
 
 const POSITIONING = `\nPOSITIONING (owner, 2026-10-07, binding; full text in C:/Users/noahm/Projects/cerebro/docs/specs/positioning.md, read it): Cerebro WINS, it does not wrap. Never frame it as "llama.cpp with good settings" or "the best of others": it is the CachyOS of local AI, a performance-first harness shipping experimental and beta optimisations (own MoE expert cache, measured speculation, conversation-state reuse, KV streaming, Strata turbo backend) behind Stable/Beta/Experimental channels. Live model + system metrics with percentages (MoE active experts %, expert cache hit %, draft acceptance %, VRAM split, KV fill, decode/prefill, GPU/CPU/RAM/PCIe) are a signature feature. Audience: pros by default (no buzz names for old models, no pre-emptive downloads; show current best quants such as GSQ-RCO, Unsloth UD, imatrix IQ, EXL3, AWQ, MLX with measured quality per GB), with a Beginner experience level that auto-configures and an Advanced escape hatch. Accent colour is now blue on cool slate neutrals (design/tokens.css); never reintroduce amber/orange. Copy: never describe a feature by pointing at another product ("in the style of X", "like X"); say what the user gets. Other products appear only on the comparison page and for interoperability facts.`\n// Tasks whose builder/critic prompts already ran keep their old text so the journal replays them.
-const POS_EXEMPT = ['site-performance']
+const POS_EXEMPT = ['site-performance', 'app-tune']
 const product = (task, always) => PRODUCT + (always || !POS_EXEMPT.includes(task.id) ? POSITIONING : '')
 
 function builderPrompt(task, repo, round, findings, guidance) {
