@@ -10,6 +10,7 @@ members = [
     "crates/cerebro-backends",
     "crates/cerebro-tune",
     "crates/cerebro-server",
+    "crates/cerebro-engine",
 ]
 
 [workspace.package]

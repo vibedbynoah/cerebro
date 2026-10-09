@@ -1,0 +1,22 @@
+[package]
+name = "cerebro-engine"
+description = "Cerebro's own inference engine: GGUF reader, tokenizer, model graphs, quantised kernels, conversation and expert caches."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+memmap2 = "0.9"
+rayon = "1.10"
+fancy-regex = "0.14"
+
+[[bin]]
+name = "cerebro-run"
+path = "src/bin/run.rs"
+
