@@ -1,4 +1,4 @@
-import { createResource, For, Show, type JSX } from "solid-js";
+import { createResource, For, lazy, Show, type JSX } from "solid-js";
 import { CodeBlock } from "../components/CodeBlock";
 import { Comparison, shares, StatTile } from "../components/Figures";
 import { Icon } from "../components/icons";
@@ -9,6 +9,9 @@ import { hrefFor } from "../lib/routes";
 import { useService } from "../service/context";
 import { createLiveStats } from "../service/live";
 import { useAppState } from "../state";
+
+// Quick actions, the daily spotlight, first steps, news and recent activity load after first paint.
+const Discover = lazy(() => import("./home/Discover").then((m) => ({ default: m.Discover })));
 
 export function Home(): JSX.Element {
   const service = useService();
@@ -44,6 +47,7 @@ export function Home(): JSX.Element {
         }
       />
 
+      <Discover tuned={tuned() !== undefined} models={data()?.models.length ?? 0} />
       <Show when={data()}>
         {(d) => (
           <>

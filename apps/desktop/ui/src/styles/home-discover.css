@@ -1,0 +1,162 @@
+/* Home: discovery sections (screens/home/Discover.tsx). Tokens only. */
+
+.quick {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: var(--space-3);
+}
+
+.quick__action {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-1);
+  color: var(--color-text-primary);
+  font-weight: 500;
+  text-decoration: none;
+  transition: border-color var(--duration-fast) var(--ease-standard), transform var(--duration-fast) var(--ease-spring);
+}
+
+.quick__action svg {
+  color: var(--color-accent-text);
+}
+
+.quick__action:hover {
+  border-color: var(--color-accent);
+  transform: translateY(-2px);
+}
+
+.quick__action:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.spotlight {
+  display: flex;
+  gap: var(--space-5);
+  padding: var(--space-5) var(--space-6);
+  background: linear-gradient(135deg, var(--color-accent-muted), var(--color-surface-1) 65%);
+}
+
+.spotlight__icon {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 52px;
+  height: 52px;
+  border-radius: var(--radius-xl);
+  background: var(--color-surface-1);
+  color: var(--color-accent-text);
+  box-shadow: var(--shadow-accent-glow);
+}
+
+.spotlight__body h3 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-title);
+}
+
+.spotlight__body p {
+  margin: 0 0 var(--space-3);
+  max-width: 64ch;
+  color: var(--color-text-secondary);
+}
+
+.spotlight__actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.spotlight .btn--sm,
+.home-columns .btn--sm {
+  min-height: 28px;
+  padding-inline: var(--space-3);
+  font-size: var(--text-small);
+}
+
+.home-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 0 var(--space-6);
+}
+
+.checklist,
+.news,
+.recent {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+  padding: 0;
+  list-style: none;
+}
+
+.checklist__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.checklist__mark {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 1.5px solid var(--color-border-strong);
+  border-radius: var(--radius-pill);
+  color: var(--color-accent-contrast);
+  transition: background-color var(--duration-base) var(--ease-standard), border-color var(--duration-base) var(--ease-standard);
+}
+
+.checklist__item[data-done="true"] .checklist__mark {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  animation: check-pop var(--duration-slow) var(--ease-spring);
+}
+
+.checklist__item[data-done="true"] .checklist__label {
+  color: var(--color-text-muted);
+  text-decoration: line-through;
+}
+
+@keyframes check-pop {
+  0% {
+    transform: scale(0.4);
+  }
+  60% {
+    transform: scale(1.2);
+  }
+}
+
+.news li,
+.recent li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.news__date {
+  flex: none;
+  width: 48px;
+  color: var(--color-text-muted);
+}
+
+.recent__text {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .quick__action,
+  .checklist__mark {
+    transition: none;
+  }
+
+  .checklist__item[data-done="true"] .checklist__mark {
+    animation: none;
+  }
+}
