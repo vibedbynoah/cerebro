@@ -28,7 +28,7 @@ const named = <K extends string>(load: () => Promise<Record<K, (p: never) => JSX
 const About = named(() => import("./screens/About"), "About");
 const Models = named(() => import("./screens/Models"), "Models");
 const Chat = named(() => import("./screens/Chat"), "Chat");
-const Documents = named(() => import("./screens/Placeholders"), "Documents");
+const Documents = named(() => import("./screens/Documents"), "Documents");
 const ImageStudio = named(() => import("./screens/ImageStudio"), "ImageStudio");
 const Plugins = named(() => import("./screens/Plugins"), "Plugins");
 const Tools = named(() => import("./screens/Tools"), "Tools");
