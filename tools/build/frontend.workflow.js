@@ -247,7 +247,27 @@ ${JSON.stringify(guidance || {}, null, 1)}
 Report exact test result lines, what you changed for each finding, and the local review verdict.`
 }
 
+// Owner, 2026-10-08: "finish the whole app and the website as a prototype, then run error passes so
+// I can give feedback". In prototype mode a task is one build round (the builder still runs the tests,
+// screenshots and local Gemma review) and a commit; review moves to one error pass per track at the end.
+// Tasks that already have a review in the journal finish the normal way.
+const PROTO = Boolean(args && args.prototype)
+const REVIEWED = ['site-performance', 'app-tune']
 async function runTask(task, repo, phaseName) {
+  if (PROTO && !REVIEWED.includes(task.id)) {
+    const b = await agent(builderPrompt(task, repo, 1, null, null) + `
+PROTOTYPE MODE: the owner wants the whole product clickable soon. Build every required part fully and working, run the tests and fix what fails, but do not gold-plate: no reviewer follows this round; an error pass over the whole ${phaseName === 'Website' ? 'site' : 'app'} comes at the end.`,
+      { label: `proto:${task.id}`, phase: phaseName, schema: BUILD_RESULT, model: BUILDER, effort: 'high' })
+    if (!b) return { id: task.id, status: 'halted', where: 'proto build' }
+    const commit = await agent(`Commit one finished Cerebro front-end task in ${repo}. Task: ${task.id} (directory ${task.dir}), built in prototype mode (review comes in the end-of-track error pass).
+Run git status. Stage only files under ${task.dir}/ plus root files this task legitimately changed (Cargo.toml, Cargo.lock, .gitignore). Never stage review/ screenshot folders, node_modules, dist, target or secrets. Commit with an imperative first line, a short body, and these two final lines exactly:
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Q4T16r2eHnoWzCJrCw94mq
+Never use --no-verify. Return the commit hash and first line.`,
+      { label: `commit:${task.id}`, phase: phaseName, model: CLERK, effort: 'low' })
+    if (!commit) return { id: task.id, status: 'halted', where: 'commit' }
+    return { id: task.id, status: 'prototype', commit }
+  }
   let last = null
   const rounds = Math.max(1, DONE[task.id] || 0)
   for (let round = 1; round <= rounds; round++) {
@@ -305,8 +325,28 @@ If a merge conflicts, abort it (git merge --abort) and report the conflict. Retu
   { label: 'sync-design-into-tracks', phase: 'Design system', model: CLERK, effort: 'low' })
 if (!synced) return { design, halted: 'sync failed' }
 
+async function errorPass(repo, dir, name, phaseName) {
+  const c = await agent(`ERROR PASS over the whole Cerebro ${name} prototype in ${repo}/${dir}. You are the senior reviewer; the owner will give feedback on the result. Build it, run every test, take screenshots of every page/screen at desktop and mobile widths in both themes, and run the local visual review on them (python C:/Users/noahm/Projects/cerebro/tools/local/local_review.py --images <shots> --focus "${name} error pass"; do not open the PNGs yourself). Click through every route, button, link, form and state (headless only, never a visible window). Find: broken pages, console errors, dead links, failing tests, layout breaks, glued or missing words, copy that breaks C:/Users/noahm/Projects/cerebro/docs/specs/positioning.md (wrapper framing, references to other products, buzz names of old models), accent colours other than the shared blue, unlabelled illustrative numbers, accessibility failures, performance-budget misses, security/CSP violations. Report every finding with severity, file, problem and a concrete fix. Do NOT edit files.`,
+    { label: `errorpass-review:${dir}`, phase: phaseName, schema: CRITIC_RESULT, model: CRITIC, effort: 'high' })
+  if (!c) return { halted: 'error pass review' }
+  const f = await agent(`ERROR PASS FIX for the Cerebro ${name} prototype in ${repo}/${dir}. Fix every critical and major finding below properly; verify each minor and fix the real ones. Then rebuild, run all tests and screenshots, re-run the local visual review, and confirm everything passes.
+${PRODUCT}${POSITIONING}
+${RULES}
+FINDINGS
+${JSON.stringify(c.findings, null, 1)}
+Report exact test result lines and what changed per finding.`,
+    { label: `errorpass-fix:${dir}`, phase: phaseName, schema: BUILD_RESULT, model: BUILDER, effort: 'high' })
+  if (!f) return { halted: 'error pass fix' }
+  const commit = await agent(`Commit the error-pass fixes for the Cerebro ${name} in ${repo}. Stage only files under ${dir}/ (never review/, node_modules, dist, target or secrets). Imperative first line, short body, and these two final lines exactly:
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Q4T16r2eHnoWzCJrCw94mq
+Never use --no-verify. Return the commit hash and first line.`,
+    { label: `errorpass-commit:${dir}`, phase: phaseName, model: CLERK, effort: 'low' })
+  return { findings: c.findings.length, score: c.score, commit }
+}
+
 const [site, app] = await parallel([
-  () => runTrack(SITE_TASKS, SITE, 'Website'),
-  () => runTrack(APP_TASKS, APP, 'Desktop app'),
+  async () => { const r = await runTrack(SITE_TASKS, SITE, 'Website'); return PROTO && !r.some(t => t.status === 'halted') ? { tasks: r, errorPass: await errorPass(SITE, 'site', 'website', 'Website') } : r },
+  async () => { const r = await runTrack(APP_TASKS, APP, 'Desktop app'); return PROTO && !r.some(t => t.status === 'halted') ? { tasks: r, errorPass: await errorPass(APP, 'apps/desktop', 'desktop app', 'Desktop app') } : r },
 ])
 return { design, site, app }
