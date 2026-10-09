@@ -15,7 +15,8 @@
 
 .turbo-profile {
   position: relative;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: var(--space-1);
   padding: var(--space-4);
   cursor: pointer;
@@ -55,7 +56,8 @@
 }
 
 .turbo-profile__speed {
-  margin-top: var(--space-2);
+  margin-top: auto;
+  padding-top: var(--space-2);
   color: var(--color-accent-text);
 }
 

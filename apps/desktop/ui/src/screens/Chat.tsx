@@ -275,7 +275,7 @@ export function Chat(): JSX.Element {
             </select>
           </label>
           <span class="chat-head__live mono" aria-live="off" data-testid="live-readout">
-            <Show when={live()} fallback={<>idle</>}>
+            <Show when={live()}>
               {(l) => (
                 <>
                   {l().tps.toFixed(1)} tok/s · first token {l().ttft} ms
