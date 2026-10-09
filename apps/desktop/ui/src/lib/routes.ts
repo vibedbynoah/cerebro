@@ -11,7 +11,8 @@ export type RouteId =
   | "plugins"
   | "tools"
   | "security"
-  | "settings";
+  | "settings"
+  | "about";
 
 export type RouteGroup = "Run" | "Create" | "Extend" | "System";
 
@@ -38,6 +39,7 @@ export const ROUTES: readonly RouteDef[] = [
   { id: "tools", label: "Tools", icon: "tools", group: "Extend", summary: "Actions a model may take, each behind your permission.", keywords: "functions actions agent" },
   { id: "security", label: "Security", icon: "security", group: "System", summary: "What protects the model process, and what each protection does not do.", keywords: "sandbox integrity protection containment" },
   { id: "settings", label: "Settings", icon: "settings", group: "System", summary: "Theme, protections and network features. You can change all of it.", keywords: "preferences options config theme" },
+  { id: "about", label: "About", icon: "about", group: "System", summary: "What Cerebro does for you, the version on this machine and the documents that come with it.", keywords: "version licence license credits mark logo info help" },
 ];
 
 const IDS: ReadonlySet<string> = new Set(ROUTES.map((r) => r.id));

@@ -6,7 +6,7 @@ import { Term } from "../components/Term";
 import type { LegalDocId } from "../legal/types";
 import type { HardwareProfile, SettingKey } from "../service/types";
 import { useAppState } from "../state";
-import { EngineMark } from "./EngineMark";
+import { BrandHero } from "./BrandHero";
 import { TERMS_VERSION } from "./progress";
 import { pct, type Recommendation } from "./recommend";
 
@@ -52,7 +52,7 @@ export function WelcomeStep(): JSX.Element {
           Your models, measured on this machine.
         </h1>
         <p class="onb-lede">
-          Cerebro measures the fastest safe <Term k="llamacpp" /> configuration for this computer instead of guessing, then serves the model on{" "}
+          Cerebro measures the fastest safe configuration for each model on this computer instead of guessing, runs it with its protections on, and serves it on{" "}
           <Term k="loopback" /> only.
         </p>
         <ol class="onb-plan">
@@ -75,19 +75,9 @@ export function WelcomeStep(): JSX.Element {
         </ol>
       </div>
       <figure class="onb-welcome__art">
-        <EngineMark />
-        <figcaption class="engine-caption">
-          <span class="engine-legend">
-            <span class="engine-legend__item">
-              <span class="engine-legend__swatch engine-legend__swatch--defaults" aria-hidden="true" />
-              llama.cpp defaults
-            </span>
-            <span class="engine-legend__item">
-              <span class="engine-legend__swatch engine-legend__swatch--best" aria-hidden="true" />
-              Fastest safe setting found
-            </span>
-          </span>
-          <span class="engine-caption__text">Cerebro tries configurations and keeps the fastest one that passes its checks. Sometimes that is the defaults.</span>
+        <BrandHero />
+        <figcaption class="brand-hero__caption">
+          Cerebro tries configurations on this machine and keeps the fastest one that passes its checks. Sometimes that is the defaults, and it says so.
         </figcaption>
       </figure>
     </div>

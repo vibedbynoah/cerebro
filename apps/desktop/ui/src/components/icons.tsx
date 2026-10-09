@@ -6,6 +6,20 @@ import type { JSX } from "solid-js";
  * Decorative by default (aria-hidden); the control that holds an icon carries the accessible name.
  */
 const GLYPHS = {
+  /** The mark in one ink (BRAND.md mark-mono), at 20/24 of the grid so it keeps the icons' optical padding. */
+  about: () => (
+    <g fill="currentColor" stroke="none" transform="translate(2 2) scale(0.8333)">
+      <rect width="6" height="6" rx="1.5" />
+      <rect x="9" width="6" height="6" rx="1.5" />
+      <rect x="18" width="6" height="6" rx="1.5" />
+      <rect y="9" width="6" height="6" rx="1.5" />
+      <rect y="18" width="6" height="6" rx="1.5" />
+      <rect x="9" y="18" width="6" height="6" rx="1.5" />
+      <rect x="18" y="18" width="6" height="6" rx="1.5" />
+      <path d="M10.5 5h3v5h-3z" />
+      <circle cx="12" cy="12" r="3" />
+    </g>
+  ),
   home: () => (
     <>
       <path d="M3.5 10.8 12 4l8.5 6.8" />
@@ -280,17 +294,6 @@ export function Icon(props: { name: IconName; class?: string; size?: number }): 
       data-icon={props.name}
     >
       {glyph()}
-    </svg>
-  );
-}
-
-/** Cerebro's mark: an instrument dial (ring, one reading, a hub). Amber via the accent-text role. */
-export function BrandMark(props: { size?: number }): JSX.Element {
-  return (
-    <svg class="brand-mark" viewBox="0 0 24 24" width={props.size ?? 20} height={props.size ?? 20} aria-hidden="true">
-      <circle cx="12" cy="12" r="8.6" fill="none" stroke="currentColor" stroke-width="1.8" />
-      <path d="M12 12 16.6 7.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-      <circle cx="12" cy="12" r="2.2" fill="currentColor" />
     </svg>
   );
 }

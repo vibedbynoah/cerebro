@@ -1,4 +1,5 @@
 import { createMemo, createSignal, For, Match, Show, Switch, type JSX } from "solid-js";
+import { RouteMotif } from "../../components/Brand";
 import { Icon } from "../../components/icons";
 import { IllustrativeFlag } from "../../components/Screen";
 import { Term } from "../../components/Term";
@@ -421,13 +422,14 @@ function Skeleton(): JSX.Element {
 function EmptyLibrary(): JSX.Element {
   return (
     <div class="lib-empty card">
+      <RouteMotif class="lib-empty__motif" />
       <span class="lib-empty__art" aria-hidden="true">
         <Icon name="models" size={28} />
       </span>
       <h3 class="lib-empty__title">No models on this machine yet</h3>
       <p class="lib-empty__text">
-        Cerebro looks for <Term k="gguf" /> files in its own folder and in LM Studio's and Ollama's. Download one from Model Hub; a file saved by either app shows
-        up here on its own.
+        Download one from Model Hub, or keep using the <Term k="gguf" /> files you already downloaded with LM Studio or Ollama: Cerebro reads their folders and
+        lists every file here on its own.
       </p>
       <div class="lib-empty__actions">
         <a class="btn btn--primary" href={hrefFor("hub")} data-press data-sweep>

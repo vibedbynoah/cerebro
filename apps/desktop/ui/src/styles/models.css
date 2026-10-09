@@ -693,6 +693,17 @@
   text-align: center;
   color: var(--color-text-muted);
   animation: pop-in var(--duration-base) var(--ease-emphasized);
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+/* The routing motif behind the empty library (BRAND.md: empty states only, never behind data),
+   strongest at the card's edges and gone behind the text. */
+.lib-empty__motif {
+  z-index: -1;
+  mask-image: radial-gradient(ellipse 60% 70% at 50% 50%, transparent 45%, #000 100%);
+  opacity: 0.8;
 }
 
 .lib-state__title,
@@ -1489,7 +1500,7 @@
   background: var(--color-border-strong);
 }
 
-/* The "tight" line: past 90% of capacity the estimate turns amber. */
+/* The "tight" line: past 90% of capacity the estimate takes the warning colour. */
 .meter::after {
   content: "";
   position: absolute;

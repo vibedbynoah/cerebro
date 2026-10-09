@@ -38,7 +38,7 @@ export function Home(): JSX.Element {
         title="This machine, measured."
         lede={
           <>
-            Cerebro measures the fastest safe <Term k="llamacpp" /> configuration for this computer instead of guessing, then serves it on{" "}
+            The fastest safe configuration for each model, measured on this computer instead of guessed, running with its protections on and served on{" "}
             <Term k="loopback" /> only.
           </>
         }

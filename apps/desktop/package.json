@@ -10,6 +10,7 @@
     "build": "vite build --config ui/vite.config.ts && node scripts/check-bundle.mjs ui/dist",
     "build:desktop": "vite build --config ui/vite.config.ts --mode desktop && node scripts/check-bundle.mjs ui/dist-desktop",
     "preview": "node scripts/serve.mjs",
+    "brand": "node scripts/brand-icons.mjs",
     "check": "tsc --noEmit -p tsconfig.json",
     "test": "npm run check && vitest run --config ui/vite.config.ts && npm run build && playwright test",
     "shoot": "npm run build && node scripts/shoot.mjs",

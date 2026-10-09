@@ -11,7 +11,7 @@
  */
 
 :root {
-  --app-scrim: light-dark(oklch(20% 0.01 75 / 0.32), oklch(0% 0 0 / 0.56));
+  --app-scrim: light-dark(oklch(20% 0.025 265 / 0.32), oklch(0% 0 0 / 0.56));
   --titlebar-h: 44px;
   --statusbar-h: 32px;
   --sidebar-w: 232px;
@@ -172,14 +172,75 @@ body {
   min-width: 0;
 }
 
-.brand-mark {
+/* ---- Brand (components/Brand.tsx; design/brand/BRAND.md) ----
+   Ink for the idle experts and the wordmark, the accent fill for the route only: the accent is the
+   same blue as the website in both themes (design/tokens.css). Never an effect on the mark. */
+
+.brand-mark,
+.brand-lockup {
   flex: none;
-  color: var(--color-accent-text);
+  display: block;
+  overflow: visible;
 }
 
-.titlebar__name {
-  font-weight: var(--weight-semibold);
-  letter-spacing: -0.005em;
+.brand__idle {
+  fill: var(--color-text-primary);
+}
+
+.brand__route {
+  fill: var(--color-accent);
+}
+
+.brand__word {
+  fill: none;
+  stroke: var(--color-text-primary);
+  stroke-width: 2.4;
+}
+
+/* The lockup is a picture inside the drag region, never a target of its own. */
+.titlebar__lockup {
+  pointer-events: none;
+}
+
+/* Routing motif: behind empty states and first-run only, never behind data. Experts at the border
+   colour, routes at the accent at 55%; the routes light once on first view (Brand.tsx). */
+.motif {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.motif pattern rect {
+  fill: var(--color-border);
+}
+
+.motif pattern[id$="-routes"] rect,
+.motif pattern[id$="-routes"] circle {
+  fill: var(--color-accent);
+}
+
+.motif__bus {
+  fill: none;
+  stroke: var(--color-accent);
+  stroke-width: 1.5;
+}
+
+.motif__routes {
+  opacity: 0;
+  transition: opacity var(--duration-slow) var(--ease-standard) 120ms;
+}
+
+.motif.is-lit .motif__routes {
+  opacity: 0.55;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .motif__routes {
+    opacity: 0.55;
+    transition: none;
+  }
 }
 
 .titlebar__center {
@@ -1301,6 +1362,193 @@ body {
   margin: 0;
 }
 
+.about__more {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: var(--space-3);
+}
+
+/* ---- About screen (screens/About.tsx) ---- */
+
+.about-hero {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  display: grid;
+  min-height: 15rem;
+  place-items: center;
+  margin-bottom: var(--space-8);
+}
+
+/* The motif fades out toward the lockup, so the mark always has its clear space. */
+.about-hero__motif {
+  z-index: -1;
+  mask-image: radial-gradient(ellipse 70% 90% at 50% 50%, transparent 30%, #000 85%);
+}
+
+.about-hero__body {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-5);
+  padding: var(--space-10) var(--space-6);
+}
+
+.about-hero__lockup {
+  animation: about-lockup-in var(--duration-slow) var(--ease-emphasized) both;
+}
+
+@keyframes about-lockup-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+}
+
+.about-hero__meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.about-promises {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+}
+
+.about-promise {
+  display: grid;
+  align-content: start;
+  gap: var(--space-2);
+  padding: var(--space-5);
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+}
+
+.about-promise__icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  margin-bottom: var(--space-1);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-2);
+  color: var(--color-text-secondary);
+}
+
+.about-promise__title {
+  font-weight: var(--weight-semibold);
+}
+
+.about-promise__text {
+  color: var(--color-text-secondary);
+  font-size: var(--text-small);
+  line-height: var(--leading-normal);
+}
+
+.mark-anatomy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-8);
+  margin: 0;
+  padding: var(--space-6);
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+}
+
+.mark-anatomy__mark {
+  flex: none;
+  overflow: visible;
+}
+
+/* Assembles once as the section reveals: experts settle in, then the route lights. */
+.mark-anatomy__mark .brand__idle rect,
+.mark-anatomy__mark .brand__route {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.section.is-visible .mark-anatomy__mark .brand__idle rect {
+  animation: anatomy-expert var(--duration-slow) var(--ease-emphasized) both;
+}
+
+.section.is-visible .mark-anatomy__mark .brand__idle rect:nth-child(2) { animation-delay: 40ms; }
+.section.is-visible .mark-anatomy__mark .brand__idle rect:nth-child(3) { animation-delay: 80ms; }
+.section.is-visible .mark-anatomy__mark .brand__idle rect:nth-child(4) { animation-delay: 120ms; }
+.section.is-visible .mark-anatomy__mark .brand__idle rect:nth-child(5) { animation-delay: 160ms; }
+.section.is-visible .mark-anatomy__mark .brand__idle rect:nth-child(6) { animation-delay: 200ms; }
+
+.section.is-visible .mark-anatomy__mark .brand__route {
+  animation: anatomy-route var(--duration-slow) var(--ease-spring) 320ms both;
+}
+
+@keyframes anatomy-expert {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+}
+
+@keyframes anatomy-route {
+  from {
+    opacity: 0;
+    transform: scale(0.85);
+  }
+}
+
+.mark-anatomy__legend {
+  display: grid;
+  gap: var(--space-3);
+  color: var(--color-text-secondary);
+}
+
+.mark-anatomy__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.mark-anatomy__item strong {
+  color: var(--color-text-primary);
+  font-weight: var(--weight-semibold);
+}
+
+.mark-anatomy__swatch {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+}
+
+.mark-anatomy__swatch--idle {
+  background: var(--color-text-primary);
+}
+
+.mark-anatomy__swatch--route {
+  background: var(--color-accent);
+}
+
+.about-docs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+@media (max-width: 1100px) {
+  .about-promises {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* ---------------------------------------------------------------------- */
 /* Command palette                                                          */
 /* ---------------------------------------------------------------------- */
@@ -1724,6 +1972,20 @@ body {
 @media (forced-colors: active) {
   .nav-indicator {
     border: 1px solid CanvasText;
+  }
+
+  /* One ink where the system sets the colours (BRAND.md mark-mono). */
+  .brand__idle,
+  .brand__route {
+    fill: CanvasText;
+  }
+
+  .brand__word {
+    stroke: CanvasText;
+  }
+
+  .motif {
+    display: none;
   }
 
   .status-dot,

@@ -1,12 +1,15 @@
 import { createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
 import type { Platform } from "../platform/platform";
 import { notify } from "../lib/toast";
-import { BrandMark, Icon, type IconName } from "./icons";
+import { BrandLockup } from "./Brand";
+import { Icon, type IconName } from "./icons";
 
 /**
  * Custom title bar (the native frame is off). The bar itself is the drag handle in the desktop
  * shell (`data-tauri-drag-region`; double-click maximizes); controls inside it stay clickable.
  * First-run setup shows it without the palette trigger (there is nothing to search yet).
+ * The brand lockup sits on the left at 24 px (mark height), its clear space kept by the bar's
+ * padding; it passes pointer events through, so the whole corner still drags the window.
  */
 export function TitleBar(props: { platform: Platform; onOpenPalette?: () => void; paletteOpen?: boolean }): JSX.Element {
   // Maximize turns into Restore while the window is maximized, like native Windows controls. The
@@ -51,10 +54,7 @@ export function TitleBar(props: { platform: Platform; onOpenPalette?: () => void
   return (
     <header class="titlebar" data-tauri-drag-region>
       <div class="titlebar__brand" data-tauri-drag-region>
-        <BrandMark size={18} />
-        <span class="titlebar__name" data-tauri-drag-region>
-          Cerebro
-        </span>
+        <BrandLockup height={24} class="titlebar__lockup" />
       </div>
       <div class="titlebar__center" data-tauri-drag-region>
         <Show when={props.onOpenPalette}>

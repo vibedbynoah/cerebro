@@ -5,7 +5,7 @@
 export const GLOSSARY = {
   llamacpp: {
     term: "llama.cpp",
-    text: "llama.cpp is the open-source program that actually runs an AI model on your CPU or GPU. Cerebro configures and drives it; it does not fork or replace it.",
+    text: "An open-source inference engine: the program that runs a model on your CPU or GPU, and one of the backends Cerebro runs models on. Cerebro configures and drives it; it does not fork or replace it.",
   },
   tokps: {
     term: "tok/s",

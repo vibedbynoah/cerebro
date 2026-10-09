@@ -5,6 +5,7 @@ import { SettingSwitch } from "../components/SettingSwitch";
 import { LegalDialog } from "../legal/LegalDialog";
 import { LEGAL_DOCS, type LegalDocId } from "../legal/types";
 import type { Platform } from "../platform/platform";
+import { hrefFor } from "../lib/routes";
 import { SETTINGS_META, type SettingMeta } from "../lib/settings-meta";
 import { THEME_LABELS, type ThemeChoice, type ThemeController } from "../lib/theme";
 import { useAppState } from "../state";
@@ -92,6 +93,10 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
             </For>
           </dd>
         </dl>
+        <a class="text-link about__more" href={hrefFor("about")}>
+          More about Cerebro
+          <Icon name="arrowRight" size={14} />
+        </a>
       </Section>
 
       <Section id="setup" title="First-run setup" description="Walk through the hardware check, a first model, the protections and the terms again. Nothing changes until you choose.">

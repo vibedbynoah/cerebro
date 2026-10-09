@@ -21,7 +21,7 @@ export const NGRAM_LABELS: Readonly<Record<NgramStrategy, string>> = {
 };
 
 /**
- * LM Studio's load panel, for text and vision models: every llama.cpp load parameter, a live memory
+ * The load panel for text and vision models: every llama.cpp load parameter, a live memory
  * fit estimate, named presets, and "reset to tuned". The Load button in the drawer header uses
  * what this panel holds with Tweak Studio's tweaks laid over it (`effective`); a field a tweak
  * decides shows the tweak's value, read-only, and says so.

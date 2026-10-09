@@ -72,6 +72,7 @@ describe("routing", () => {
       "Tools",
       "Security",
       "Settings",
+      "About",
     ]);
     for (const r of ROUTES) {
       expect(ICON_NAMES).toContain(r.icon);

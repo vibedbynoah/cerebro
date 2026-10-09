@@ -124,7 +124,7 @@
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   background-color: var(--color-bg);
-  /* Depth: a warm light from the top-right corner over the dot grid, and a 1px lit top edge. */
+  /* Depth: a soft accent light from the top-right corner over the dot grid, and a 1px lit top edge. */
   background-image:
     radial-gradient(120% 80% at 85% 0%, var(--color-accent-muted), transparent 60%),
     radial-gradient(var(--color-border) 1px, transparent 1px);

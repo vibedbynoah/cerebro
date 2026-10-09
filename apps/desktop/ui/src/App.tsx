@@ -16,6 +16,7 @@ import type { Platform } from "./platform/platform";
 import { ServiceProvider, useService } from "./service/context";
 import type { CerebroService } from "./service/service";
 import { AppStateProvider, useAppState } from "./state";
+import { About } from "./screens/About";
 import { Home } from "./screens/Home";
 import { Models } from "./screens/Models";
 import { Chat, Documents, ImageStudio, ModelHub, Plugins, Tools } from "./screens/Placeholders";
@@ -222,6 +223,9 @@ function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Eleme
           </Match>
           <Match when={router.route() === "settings"}>
             <Settings theme={theme} platform={props.platform} onRunSetup={props.onRunSetup} />
+          </Match>
+          <Match when={router.route() === "about"}>
+            <About platform={props.platform} />
           </Match>
         </Switch>
       </main>

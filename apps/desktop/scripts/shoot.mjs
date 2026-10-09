@@ -20,7 +20,7 @@ import { startServer } from "./serve.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = path.resolve(HERE, "../review/shots");
-const ROUTES = ["home", "hub", "models", "tune", "chat", "images", "documents", "plugins", "tools", "security", "settings"];
+const ROUTES = ["home", "hub", "models", "tune", "chat", "images", "documents", "plugins", "tools", "security", "settings", "about"];
 /** @type {Array<"dark" | "light">} */
 const THEMES = ["dark", "light"];
 /** What a finished setup leaves in local storage. Key and terms version are read from the app's
