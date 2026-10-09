@@ -19,9 +19,13 @@ import type {
   PatchProfile,
   SettingKey,
   Settings,
+  TuneEvent,
+  TuneState,
 } from "../service/types";
 import { DEFAULT_SETTINGS, MOCK_CATALOG, MOCK_GPU, MOCK_HARDWARE, MOCK_LIVE_BASE, MOCK_MODELS } from "./fixtures";
 import { detailFor, MOCK_LIBRARY, mockDuplicates } from "./library";
+import { buildTuneScript, createTunePlayer, type TuneHold, type TuneScript } from "./tune";
+import { applyTuneEvent, emptyTuneView, isTuneProfile } from "../lib/tune";
 
 export interface MockServiceOptions {
   /** HUD sample interval, ms. Default 1000. */
@@ -45,9 +49,15 @@ export interface MockServiceOptions {
   /** Simulated latency in ms (default 0: resolve at once). The app sets realistic values so loading
    *  states are visible; tests leave them at 0 or ask for `slow-library`. */
   latency?: { library?: number; load?: number; test?: number; scan?: number };
+  /** Tune playback speed (1: a whole run in under a minute; Infinity: at once). Default 1. */
+  tuneSpeed?: number;
+  /** Freeze a tune partway (mid-screen, mid-soak) for screenshots of a run in progress. */
+  tuneHold?: TuneHold;
+  /** The tune's model process crashes partway through screening. */
+  failTune?: boolean;
 }
 
-/** Every failure a web/test build can ask the mock for, by `?mock=` value. */
+/** Every failure or test state a web/test build can ask the mock for, by `?mock=` value. */
 const MOCK_FAILURES: Readonly<Record<string, MockServiceOptions>> = {
   "fail-hw": { failHardware: Number.POSITIVE_INFINITY },
   "fail-hw-once": { failHardware: 1 },
@@ -56,6 +66,10 @@ const MOCK_FAILURES: Readonly<Record<string, MockServiceOptions>> = {
   "empty-library": { emptyLibrary: true },
   "fail-library": { failLibrary: true },
   "slow-library": { latency: { library: 60_000 } },
+  "fast-tune": { tuneSpeed: 60 },
+  "tune-hold-screen": { tuneHold: "screen" },
+  "tune-hold-soak": { tuneHold: "soak" },
+  "fail-tune": { failTune: true },
 };
 
 /**
@@ -142,8 +156,11 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
 
   // ---- Models screen state. Every method checks its arguments the way the Rust side will. ----
   const latency = options.latency ?? {};
-  const library: readonly LibraryModel[] = options.emptyLibrary ? [] : MOCK_LIBRARY;
+  // This service's own copies: a finished tune writes its result into them, and other services
+  // (one per test) must not see it.
+  const library: readonly LibraryModel[] = options.emptyLibrary ? [] : MOCK_LIBRARY.map(cloneLibrary);
   const byId = new Map(library.map((m) => [m.id, m]));
+  const summaries: ModelSummary[] = MOCK_MODELS.map((m) => ({ ...m }));
   // Matches the HUD's starting sample: the tuned coding model is loaded.
   const startModel = byId.get("qwen3-coder-30b-a3b-q4km");
   let loaded: LoadedModel[] = startModel ? [{ id: startModel.id, slot: "llm", params: startModel.tunedParams ? cloneParams(startModel.tunedParams) : null, tuned: true }] : [];
@@ -153,7 +170,80 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
   const active = new Map<string, ActivePatch>();
   const copies = new Map<string, GgufCopy>();
   let groups: DuplicateGroup[] = mockDuplicates();
+  const tune = createTunePlayer({ speed: options.tuneSpeed ?? 1, hold: options.tuneHold, fail: options.failTune });
   let nextId = 1;
+
+  // ---- A tune's outcome is the library's truth: the service follows its own run and writes the
+  // model's state (measuring, then tuned or defaults-fastest), its three numbers and its kept
+  // settings back, so Models, Home and the HUD show what the Tune screen just locked in. Every
+  // number copied keeps its "illustrative" provenance. ----
+  let tuneScript: TuneScript | null = null;
+  const followed = emptyTuneView();
+  /** The model's tune state before the current run, restored when the run stops without a result. */
+  let stateBefore: { id: string; tune: TuneState } | null = null;
+  const setTuneState = (id: string, state: TuneState) => {
+    const m = byId.get(id);
+    if (m) m.tune = state;
+    const s = summaries.find((x) => x.id === id);
+    if (s) s.tune = state;
+  };
+  const keepWinner = (e: Extract<TuneEvent, { kind: "winner" }>) => {
+    const run = followed.run;
+    if (!run || !tuneScript || tuneScript.run.runId !== run.runId) return;
+    const m = byId.get(run.modelId);
+    const win = followed.candidates.find((c) => c.id === e.candidateId);
+    const base = followed.candidates.find((c) => c.id === e.baselineId);
+    const params = tuneScript.params[e.candidateId];
+    if (!m || !win?.result || !base?.result || !params) return;
+    const kept = win.candidate.baseline;
+    const today = new Date().toISOString().slice(0, 10);
+    m.tuneResult = {
+      prefillTps: win.result.prefillTps,
+      decodeTps0: win.result.decodeTps0,
+      decodeTpsDepth: win.result.decodeTpsDepth,
+      depth: run.depth,
+      build: run.build,
+      gpu: run.gpu,
+      sampler: run.sampler,
+      measuredAt: today,
+      provenance: "illustrative",
+    };
+    m.tunedParams = cloneParams(params);
+    m.tunedAt = today;
+    // A model running on its tuned settings now runs on the new ones.
+    loaded = loaded.map((l) => (l.id === m.id && l.tuned ? { ...l, params: cloneParams(params) } : l));
+    setTuneState(m.id, kept ? "defaults-fastest" : "tuned");
+    const s = summaries.find((x) => x.id === m.id);
+    if (s) {
+      // Home's summary pair is writing speed with an empty context, as the HUD shows it.
+      s.defaultsTps = base.result.decodeTps0;
+      s.tunedTps = win.result.decodeTps0;
+    }
+    stateBefore = null;
+  };
+  tune.subscribe((events) => {
+    for (const e of events) {
+      applyTuneEvent(followed, e);
+      const run = followed.run;
+      if (!run) continue;
+      switch (e.kind) {
+        case "started":
+          stateBefore = { id: run.modelId, tune: byId.get(run.modelId)?.tune ?? "untuned" };
+          setTuneState(run.modelId, "tuning");
+          break;
+        case "resumed":
+          setTuneState(run.modelId, "tuning");
+          break;
+        case "cancelled":
+        case "failed":
+          if (stateBefore) setTuneState(stateBefore.id, stateBefore.tune);
+          break;
+        case "winner":
+          keepWinner(e);
+          break;
+      }
+    }
+  });
   const model = (id: unknown): LibraryModel => {
     const m = typeof id === "string" ? byId.get(id) : undefined;
     if (!m) throw new TypeError(`Unknown model: ${String(id)}`);
@@ -173,7 +263,8 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
     // The HUD names whatever is in the llm slot; its speed is that model's illustrative tuned speed.
     const inSlot = loaded.find((l) => l.slot === "llm");
     const m = inSlot ? byId.get(inSlot.id) : undefined;
-    const speed = m ? (m.name === base.model ? base.tokensPerSecond : (m.tuneResult?.decodeTpsDepth ?? 10)) : null;
+    // Writing with an empty context (a short chat), from the model's last tune, so a re-tune shows here too.
+    const speed = m ? (m.tuneResult?.decodeTps0 ?? (m.name === base.model ? base.tokensPerSecond : 10)) : null;
     current = {
       ...cloneStats(base),
       model: m ? m.name : null,
@@ -211,7 +302,7 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
       };
     },
 
-    listModels: (): Promise<ModelSummary[]> => Promise.resolve(MOCK_MODELS.map((m) => ({ ...m }))),
+    listModels: (): Promise<ModelSummary[]> => Promise.resolve(summaries.map((m) => ({ ...m }))),
 
     getGpu: (): Promise<GpuInfo> => Promise.resolve({ ...MOCK_GPU }),
 
@@ -458,5 +549,22 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
         if (typeof text !== "string" || text.trim().length === 0 || text.length > 280) throw new TypeError("Sentence must be 1 to 280 characters");
         return Math.round(Math.max(1, text.trim().split(/\s+/).length * 0.38) * 10) / 10;
       }),
+
+    startTune: (modelId, profile) =>
+      later(0, () => {
+        const m = model(modelId);
+        if (!isLlm(m)) throw new TypeError("Only text and vision models can be tuned");
+        if (!isTuneProfile(profile)) throw new TypeError("Unknown workload profile");
+        return tune.start((runId) => {
+          tuneScript = buildTuneScript(m, profile, { runId, integrityCheck: settings.integrityCheck, ...(options.failTune ? { fail: true } : {}) });
+          return tuneScript;
+        });
+      }),
+
+    subscribeTune: (listener) => tune.subscribe(listener),
+
+    cancelTune: (runId) => later(0, () => tune.cancel(runId)),
+
+    resumeTune: (runId) => later(0, () => tune.resume(runId)),
   };
 }

@@ -5,7 +5,8 @@
  * and light at 1280x800, into review/shots/ (gitignored). Each screen is first scrolled through so
  * its scroll reveals and count-ups fire, then returned to the top and captured once nothing is
  * animating. Two extra states per theme: the command palette open, and the collapsed sidebar.
- * Then every first-run setup step (onboarding-*), in a fresh profile that has never finished it,
+ * Then the Models and Tune screens' states (models-*, tune-*), and every first-run setup step
+ * (onboarding-*), in a fresh profile that has never finished it,
  * driven by the keyboard the way a user would.
  *
  * Headless only (nothing appears on screen); every request that leaves the origin is aborted and
@@ -234,6 +235,82 @@ async function shootModels(page, url, theme) {
   await save("empty");
 }
 
+/**
+ * The Tune screen's states (tune-*): a run mid-screen and mid-soak (the mock freezes playback at a
+ * marked event), a finished MoE tune scrolled to its candidates and to the result, llama.cpp's own
+ * settings kept for a small model, a cancelled run and a crashed one.
+ * @param {import("@playwright/test").Page} page
+ * @param {string} url
+ * @param {"dark" | "light"} theme
+ */
+async function shootTune(page, url, theme) {
+  const save = async (/** @type {string} */ name) => {
+    await page.mouse.move(1270, 790);
+    await page
+      .waitForFunction(() => document.getAnimations().every((a) => a.playState !== "running" || a.effect?.getComputedTiming().iterations === Infinity), undefined, {
+        timeout: 6000,
+      })
+      .catch(() => console.warn("  (some motion was still running; captured anyway)"));
+    await page.waitForTimeout(200);
+    const file = path.join(OUT_DIR, `tune-${name}-${theme}.png`);
+    await page.screenshot({ path: file, animations: "disabled" });
+    console.log("Saved", file);
+  };
+  /** Scrolls <main> so `selector` sits near the top, firing the reveals on the way. */
+  const scrollToEl = async (/** @type {string} */ selector) => {
+    await page.locator(selector).first().evaluate((el) => el.scrollIntoView({ block: "start" }));
+    await page.evaluate(() => document.querySelector("main")?.scrollBy({ top: -16 }));
+    await page.waitForTimeout(500);
+  };
+  /** A fresh page with the given mock switches, a model and profile chosen, and the tune started. */
+  const start = async (/** @type {string} */ query, /** @type {string} */ model, /** @type {string} */ profile) => {
+    await page.goto(`${url}/${query}#/tune`);
+    await page.reload();
+    await page.locator(`.pick-card[data-model="${model}"]`).click();
+    await page.locator(`.pick-card[data-profile="${profile}"]`).click();
+    await page.getByRole("button", { name: "Start tune" }).click();
+    await page.locator(".run").waitFor();
+  };
+
+  await start("?mock=fast-tune&mock=tune-hold-screen", "qwen3-coder-30b-a3b-q4km", "chat");
+  await page.locator('.cand[data-candidate="c4"][data-status="screening"]').waitFor();
+  await page.waitForTimeout(600);
+  await scrollToEl("#run-title");
+  await save("screening");
+  await scrollToEl(".tune-card--cands");
+  await save("candidates-live");
+
+  await start("?mock=fast-tune&mock=tune-hold-soak", "qwen3-coder-30b-a3b-q4km", "chat");
+  await page.locator(".soak-item").nth(1).waitFor({ timeout: 15000 });
+  await page.waitForTimeout(600);
+  await scrollToEl(".run__grid--checks");
+  await save("soak");
+
+  await start("?mock=fast-tune", "qwen3-coder-30b-a3b-q4km", "coding");
+  await page.locator(".winner").waitFor({ timeout: 15000 });
+  await scrollToEl(".winner");
+  await save("result");
+  await scrollToEl(".winner__body");
+  await save("result-why");
+
+  await start("?mock=fast-tune", "gemma-4-e4b-q4km", "chat");
+  await page.locator(".winner").waitFor({ timeout: 15000 });
+  await scrollToEl(".winner");
+  await save("defaults-kept");
+
+  await start("?mock=fast-tune&mock=tune-hold-soak", "mistral-small-24b-q4km", "long-docs");
+  await page.locator(".soak-item").first().waitFor({ timeout: 15000 });
+  await page.getByRole("button", { name: "Cancel tune" }).click();
+  await page.getByRole("button", { name: "Resume" }).waitFor();
+  await scrollToEl("#run-title");
+  await save("cancelled");
+
+  await start("?mock=fast-tune&mock=fail-tune", "qwen3-8b-q5km", "coding");
+  await page.locator(".run[data-status='failed']").waitFor({ timeout: 15000 });
+  await scrollToEl("#run-title");
+  await save("failed");
+}
+
 async function main() {
   await mkdir(OUT_DIR, { recursive: true });
   const { url, close } = await startServer(0);
@@ -280,6 +357,7 @@ async function main() {
       await page.keyboard.press("Escape");
 
       await shootModels(page, url, theme);
+      await shootTune(page, url, theme);
 
       // Collapsed sidebar on the Models screen.
       await page.goto(`${url}/#/models`);

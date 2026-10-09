@@ -796,20 +796,6 @@ body {
   margin-top: 2px;
 }
 
-/* Tune opened from a model's drawer: the model it is for, above the command. */
-.tune-picked {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin: 0 0 var(--space-3);
-  color: var(--color-text-secondary);
-}
-
-.tune-picked strong {
-  color: var(--color-text-primary);
-  font-weight: var(--weight-semibold);
-}
-
 .text-link {
   color: var(--color-accent-text);
   text-decoration: underline;
@@ -902,12 +888,6 @@ body {
 .comparison-figure__note strong {
   color: var(--color-text-primary);
   font-weight: var(--weight-semibold);
-}
-
-.outcome-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-4);
 }
 
 /* ---- Chips ---- */
@@ -1063,138 +1043,6 @@ body {
 @media (hover: hover) {
   .table tbody tr:hover > * {
     background: var(--color-surface-2);
-  }
-}
-
-/* ---- Tune pipeline: five stages on one rail that draws across when revealed ---- */
-
-.pipeline {
-  --node: 32px;
-  position: relative;
-  padding: var(--space-6) var(--space-5) var(--space-5);
-  overflow: hidden;
-}
-
-.pipeline__steps {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: var(--space-4);
-}
-
-/* The rail runs from the first node's centre to the last one's. */
-.pipeline__rail {
-  position: absolute;
-  top: calc(var(--space-6) + var(--node) / 2);
-  left: calc(var(--space-5) + var(--node) / 2);
-  right: calc(var(--space-5) + (100% - 2 * var(--space-5) - 4 * var(--space-4)) / 5 - var(--node) / 2);
-  height: 2px;
-  margin-top: -1px;
-  border-radius: var(--radius-pill);
-  background: var(--color-border);
-}
-
-.pipeline__rail-fill {
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background: linear-gradient(90deg, var(--color-accent-muted), var(--color-accent));
-  transform-origin: left center;
-}
-
-.pipeline__step {
-  position: relative;
-  display: grid;
-  align-content: start;
-  gap: var(--space-2);
-  min-width: 0;
-}
-
-.pipeline__node {
-  box-sizing: border-box;
-  display: grid;
-  place-items: center;
-  width: var(--node);
-  height: var(--node);
-  margin-bottom: var(--space-2);
-  border-radius: 50%;
-  border: 1px solid var(--color-border-strong);
-  background: var(--color-surface-1);
-  box-shadow: 0 0 0 4px var(--color-surface-1);
-  font-family: var(--font-family-code);
-  font-size: 0.75rem;
-  font-variant-numeric: tabular-nums;
-  color: var(--color-text-secondary);
-}
-
-.pipeline__step:last-child .pipeline__node {
-  border-color: transparent;
-  background: var(--color-accent);
-  color: var(--color-accent-contrast);
-}
-
-.pipeline__name {
-  font-size: 0.875rem;
-  font-weight: var(--weight-semibold);
-  color: var(--color-text-primary);
-}
-
-.pipeline__desc {
-  font-size: var(--text-small);
-  line-height: var(--leading-relaxed);
-  color: var(--color-text-secondary);
-}
-
-.section.is-visible .pipeline__rail-fill {
-  animation: rail-draw 1100ms var(--ease-emphasized) 150ms both;
-}
-
-.section.is-visible .pipeline__node {
-  animation: node-pop var(--duration-base) var(--ease-spring) both;
-}
-
-.section.is-visible .pipeline__step:nth-child(1) .pipeline__node {
-  animation-delay: 150ms;
-}
-
-.section.is-visible .pipeline__step:nth-child(2) .pipeline__node {
-  animation-delay: 370ms;
-}
-
-.section.is-visible .pipeline__step:nth-child(3) .pipeline__node {
-  animation-delay: 590ms;
-}
-
-.section.is-visible .pipeline__step:nth-child(4) .pipeline__node {
-  animation-delay: 810ms;
-}
-
-.section.is-visible .pipeline__step:nth-child(5) .pipeline__node {
-  animation-delay: 1030ms;
-}
-
-@keyframes rail-draw {
-  from {
-    transform: scaleX(0);
-  }
-}
-
-@keyframes node-pop {
-  from {
-    opacity: 0;
-    transform: scale(0.6);
-  }
-}
-
-@media (max-width: 860px) {
-  .pipeline__steps {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .pipeline__rail {
-    display: none;
   }
 }
 
@@ -1842,11 +1690,7 @@ body {
 
 @media (max-width: 860px) {
   .tile-grid,
-  .outcome-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .palette-trigger__label {
+    .palette-trigger__label {
     display: none;
   }
 
@@ -1872,9 +1716,7 @@ body {
   .screen,
   .palette,
   .palette-backdrop,
-  .tooltip,
-  .pipeline__rail-fill,
-  .pipeline__node {
+  .tooltip {
     animation: none !important;
   }
 }

@@ -358,3 +358,101 @@ export interface TestOutput {
   text: string;
   provenance: Provenance;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Tune screen: a tune run, streamed as events
+// ---------------------------------------------------------------------------------------------
+
+/** What the model will mostly be used for. It sets the working depth and what "fastest" means. */
+export type TuneProfile = "chat" | "coding" | "long-docs";
+
+/** The stages of a tune, in order (docs/CLAIMS.md "About measurement"; lib/tune.ts PHASE_IDS). The
+ *  quality gate runs before the soak, so no long soak is spent on a setting that fails it. */
+export type TunePhase = "probe" | "screen" | "measure" | "quality" | "soak" | "decide";
+
+/** One setting a candidate configuration changes: plain words, plus the llama.cpp flag when it has
+ *  a well-known one (null otherwise, never an invented flag). */
+export interface TuneSetting {
+  name: string;
+  value: string;
+  flag: string | null;
+}
+
+export interface TuneCandidate {
+  id: string;
+  /** Plain-words name, e.g. "Experts of 30 layers on the CPU". */
+  label: string;
+  /** llama.cpp's own automatic settings (its built-in fit): the baseline every candidate must beat. */
+  baseline: boolean;
+  settings: TuneSetting[];
+}
+
+/** Everything a run was started with and is measured under. Rule zero of docs/CLAIMS.md: a speed is
+ *  never shown without the machine, model, quant, build, depth and sampler, so all of them are here.
+ *  "The machine" is the graphics card AND the processor and system memory: expert weights and pinned
+ *  threads run there. "The build" is the exact binary (build number plus commit). The desktop bridge
+ *  must check every one of these is present and well-formed before it forwards a run to the UI. */
+export interface TuneRunInfo {
+  runId: string;
+  modelId: string;
+  modelName: string;
+  quant: string;
+  architecture: "dense" | "moe";
+  sizeGiB: number;
+  profile: TuneProfile;
+  /** Working context depth, tokens: decode is measured with this much already in view. */
+  depth: number;
+  /** Sampler during measurement, as values. */
+  sampler: string;
+  /** llama.cpp build the backend runs, e.g. "b6500". */
+  build: string;
+  /** Commit (or binary hash) of that exact backend build: measurements are keyed to the binary. */
+  backendCommit: string;
+  gpu: string;
+  vramTotalGiB: number;
+  /** The processor, with its core and thread counts: expert weights and pinned threads run here. */
+  cpu: string;
+  /** System memory, GiB: where offloaded layers and expert weights live. */
+  ramTotalGiB: number;
+  /** Length of one soak, seconds of run time. */
+  soakSeconds: number;
+  /** How many candidates will be screened and how many survivors soaked (for overall progress). */
+  plannedCandidates: number;
+  plannedSoaks: number;
+  /** False when the integrity check is switched off in Settings; the probe then says so. */
+  integrityCheck: boolean;
+  provenance: Provenance;
+}
+
+export interface TuneMeasurement {
+  prefillTps: number;
+  decodeTps0: number;
+  decodeTpsDepth: number;
+}
+
+/** Payload of one tune event. `TuneEvent` adds the sequence number and run clock. */
+export type TuneEventBody =
+  | { kind: "started"; run: TuneRunInfo }
+  | { kind: "phase"; phase: TunePhase }
+  | { kind: "probe"; vramFreeGiB: number; integrity: "verified" | "off" }
+  | { kind: "candidate"; candidate: TuneCandidate }
+  | { kind: "screen-start"; candidateId: string }
+  /** One live writing-speed reading. Repetition 1 is warm-up and is always discarded. */
+  | { kind: "sample"; candidateId: string; rep: number; t: number; tps: number }
+  | { kind: "screened"; candidateId: string; tps: number | null; outcome: "advance" | "discard" | "fail"; reason: string }
+  | ({ kind: "measured"; candidateId: string } & TuneMeasurement)
+  | { kind: "soak-start"; candidateId: string }
+  | { kind: "soak-sample"; candidateId: string; t: number; vramFreeGiB: number; tps: number }
+  | { kind: "soak-end"; candidateId: string; passed: boolean; slopeMiBPerMin: number; reason: string }
+  | { kind: "quality"; candidateId: string; metric: string; value: number; gate: number; passed: boolean; reference: string }
+  | { kind: "winner"; candidateId: string; baselineId: string; reasons: string[] }
+  | { kind: "cancelled" }
+  | { kind: "resumed" }
+  | { kind: "failed"; reason: string };
+
+export type TuneEvent = TuneEventBody & {
+  /** Increases by one per event across every run, so a replayed event is recognised. */
+  seq: number;
+  /** Run clock, seconds since the run started (time spent cancelled does not count). */
+  at: number;
+};

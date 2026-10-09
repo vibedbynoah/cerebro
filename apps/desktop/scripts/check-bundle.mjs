@@ -100,7 +100,7 @@ for (const file of files.filter((f) => f.endsWith(".js"))) {
 if (path.basename(dist) === "dist-desktop") {
   for (const file of files.filter((f) => f.endsWith(".js"))) {
     const js = await readFile(file, "utf8");
-    for (const key of ["fail-hw", "fail-catalog", "bad-hw", "empty-library", "fail-library", "slow-library"]) if (js.includes(key)) failures.push(`${rel(file)}: test-only mock switch "${key}" in the desktop build`);
+    for (const key of ["fail-hw", "fail-catalog", "bad-hw", "empty-library", "fail-library", "slow-library", "fast-tune", "tune-hold-screen", "tune-hold-soak", "fail-tune"]) if (js.includes(key)) failures.push(`${rel(file)}: test-only mock switch "${key}" in the desktop build`);
   }
 }
 

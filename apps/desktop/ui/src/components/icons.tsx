@@ -159,6 +159,13 @@ const GLYPHS = {
   chevronRight: () => <path d="m9.5 6 6 6-6 6" />,
   // Run again: an open circle with its arrowhead.
   refresh: () => <path d="M19 12a7 7 0 1 1-2.05-4.95M19 4v3.5h-3.5" />,
+  // Elapsed time: a dial with its hands.
+  clock: () => (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
+    </>
+  ),
   // A graphics card: board, fan, and the bracket edge.
   gpu: () => (
     <>
@@ -236,6 +243,13 @@ const GLYPHS = {
     </>
   ),
   wrench: () => <path d="M14.7 4.2a4.6 4.6 0 0 0-5.4 6.1L4.6 15a1.9 1.9 0 0 0 2.7 2.7l4.7-4.7a4.6 4.6 0 0 0 6.1-5.4l-2.6 2.6-2.5-.4-.4-2.5Z" />,
+  code: () => (
+    <>
+      <path d="m8.5 7.5-4.5 4.5 4.5 4.5" />
+      <path d="m15.5 7.5 4.5 4.5-4.5 4.5" />
+      <path d="m13.4 5.5-2.8 13" />
+    </>
+  ),
   disk: () => (
     <>
       <rect x="3.5" y="5" width="17" height="14" rx="2" />

@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, Match, on, onCleanup, onMount, Show, Switch, type JSX } from "solid-js";
+import { createEffect, createMemo, createSignal, Match, on, onCleanup, onMount, Show, Switch, type Accessor, type JSX } from "solid-js";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import { Sidebar } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
@@ -6,14 +6,14 @@ import { TitleBar } from "./components/TitleBar";
 import { Toasts } from "./components/Toasts";
 import { prefersReducedMotion } from "@design/motion";
 import { createRouter } from "./lib/router";
-import { routeById, ROUTES } from "./lib/routes";
+import { routeById, ROUTES, type RouteId } from "./lib/routes";
 import { readPref, writePref } from "./lib/storage";
 import { createTheme, THEME_LABELS, type ThemeChoice } from "./lib/theme";
 import { notify } from "./lib/toast";
 import { needsOnboarding, readRecord, type OnboardingRecord } from "./onboarding/progress";
 import { Setup } from "./onboarding/SetupShell";
 import type { Platform } from "./platform/platform";
-import { ServiceProvider } from "./service/context";
+import { ServiceProvider, useService } from "./service/context";
 import type { CerebroService } from "./service/service";
 import { AppStateProvider, useAppState } from "./state";
 import { Home } from "./screens/Home";
@@ -226,6 +226,7 @@ function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Eleme
         </Switch>
       </main>
       <StatusBar network={state.network()} offlineMode={state.settings()?.offlineMode ?? false} />
+      <TuneToasts route={router.route} />
       <p class="sr-only" role="status" aria-live="polite">
         {announce()}
       </p>
@@ -237,4 +238,37 @@ function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Eleme
       />
     </div>
   );
+}
+
+/**
+ * A tune keeps running while the Tune screen is closed. When it finishes or stops there, one quiet
+ * toast says so; on the Tune screen itself the run view already shows it. Replayed events (a run
+ * that ended before this subscription) never toast.
+ */
+function TuneToasts(props: { route: Accessor<RouteId> }): JSX.Element {
+  const service = useService();
+  onMount(() => {
+    let labels = new Map<string, string>();
+    let model = "";
+    const off = service.subscribeTune((events, replay) => {
+      for (const e of events) {
+        if (e.kind === "started") {
+          labels = new Map();
+          model = e.run.modelName;
+        } else if (e.kind === "candidate") {
+          labels.set(e.candidate.id, e.candidate.label);
+        } else if (!replay && props.route() !== "tune") {
+          if (e.kind === "winner")
+            notify(
+              "Tune finished",
+              e.candidateId === e.baselineId ? `llama.cpp's automatic settings were fastest for ${model}, so they are kept.` : `${labels.get(e.candidateId) ?? "The fastest settings"} locked in for ${model}.`,
+              "success",
+            );
+          else if (e.kind === "failed") notify("Tune stopped", `${model}: ${e.reason}.`, "error");
+        }
+      }
+    });
+    onCleanup(off);
+  });
+  return null;
 }

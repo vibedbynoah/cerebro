@@ -44,7 +44,7 @@ export const MOCK_MODELS: readonly ModelSummary[] = [
     architecture: "dense",
     sizeGiB: 13.3,
     contextMax: 16384,
-    tune: "tuning",
+    tune: "untuned",
     defaultsTps: null,
     tunedTps: null,
     provenance: "illustrative",
@@ -72,6 +72,9 @@ export const MOCK_LIVE_BASE: LiveStats = {
   vramTotalGiB: MOCK_GPU.vramTotalGiB,
   backend: { state: "running", address: "127.0.0.1:8181", build: "b6500" },
 };
+
+/** Commit of the example backend build. Illustrative, like the build number beside it. */
+export const MOCK_BACKEND_COMMIT = "3f1e9c2";
 
 /** First-run hardware scan. A generic example machine, not anyone's real computer. */
 export const MOCK_HARDWARE: HardwareProfile = {

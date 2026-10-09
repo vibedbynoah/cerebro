@@ -20,6 +20,9 @@ import type {
   SettingKey,
   Settings,
   TestOutput,
+  TuneEvent,
+  TuneProfile,
+  TuneRunInfo,
 } from "./types";
 
 export type Unsubscribe = () => void;
@@ -89,4 +92,17 @@ export interface CerebroService {
   transcribeSample(id: string, seconds: number): Promise<TestOutput>;
   /** Resolves with the length of the spoken audio, in seconds. */
   speakSample(id: string, text: string): Promise<number>;
+
+  // ---- Tune screen. One tune at a time: it uses the GPU fully. ----
+
+  /** Starts measuring `modelId` (a text or vision library model) for `profile`. Rejects while
+   *  another tune is running; a finished, failed or cancelled run is replaced. */
+  startTune(modelId: string, profile: TuneProfile): Promise<TuneRunInfo>;
+  /** Delivers the current run's events from its first (`replay` true, one batch), then every new
+   *  one as it happens, until unsubscribed. A new run begins with a `started` event. */
+  subscribeTune(listener: (events: TuneEvent[], replay: boolean) => void): Unsubscribe;
+  /** Stops the running tune. Every finished step is kept. */
+  cancelTune(runId: string): Promise<void>;
+  /** Continues a cancelled run: finished steps are kept and the interrupted one starts over. */
+  resumeTune(runId: string): Promise<void>;
 }

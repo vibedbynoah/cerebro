@@ -156,7 +156,7 @@ test.describe("drawer", () => {
     const r = TUNED_MOE.tuneResult;
     expect(r).not.toBeNull();
     const conditions = dialog.locator(".ov-conditions");
-    for (const part of [r?.gpu ?? "", `llama.cpp ${r?.build ?? ""}`, TUNED_MOE.quant, "8,192-token depth", `${r?.sampler ?? ""} sampler`]) await expect(conditions).toContainText(part);
+    for (const part of [r?.gpu ?? "", `llama.cpp ${r?.build ?? ""}`, TUNED_MOE.quant, "8,192-token depth", `sampler ${r?.sampler ?? ""}`]) await expect(conditions).toContainText(part);
     await expect(dialog).not.toContainText("× defaults");
     await expect(dialog.locator(".ov-tune .stat-tile__flag")).toBeVisible();
     await expect(dialog.getByRole("link", { name: "Tune" })).toHaveAttribute("href", `#/tune?model=${TUNED_MOE.id}`);
@@ -170,7 +170,8 @@ test.describe("drawer", () => {
     await openModel(page, UNTUNED);
     await page.getByRole("dialog").getByRole("link", { name: "Tune" }).click();
     await expect(page).toHaveURL(new RegExp(`#/tune\\?model=${UNTUNED.id}$`));
-    await expect(page.locator(".tune-picked")).toContainText(UNTUNED.name);
+    await expect(page.locator(`.pick-card[data-model="${UNTUNED.id}"] input`)).toBeChecked();
+    await expect(page.locator(`.pick-card[data-model="${UNTUNED.id}"]`)).toContainText(UNTUNED.name);
     await expect(page.locator(".code-block").last()).toContainText(`cerebro tune ${UNTUNED.id}`);
 
     await openModel(page, UNTUNED);
@@ -183,8 +184,13 @@ test.describe("drawer", () => {
   test("a hand-made Tune link to an unknown model is ignored", async ({ page }) => {
     await page.goto("/#/tune?model=not-a-model");
     await expect(page.locator("main h1")).toBeVisible();
-    await expect(page.locator(".code-block").last()).toContainText("cerebro tune qwen3-8b-q5km");
-    await expect(page.locator(".tune-picked")).toHaveCount(0);
+    await expect(page.locator('.pick-card[data-model="not-a-model"]')).toHaveCount(0);
+    // The first model on offer is chosen instead, and the command line follows the choice.
+    const checked = page.locator(".pick__grid--models .pick-card:has(input:checked)");
+    await expect(checked).toHaveCount(1);
+    const id = await checked.getAttribute("data-model");
+    await expect(page.locator(".code-block").last()).toContainText(`cerebro tune ${id}`);
+    expect(await page.locator(".code-block").last().textContent()).not.toContain("not-a-model");
   });
 
   test("tabs follow the arrow keys", async ({ page }) => {

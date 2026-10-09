@@ -155,6 +155,26 @@ export const GLOSSARY = {
     term: "GGUF metadata",
     text: "Named settings stored inside a GGUF file, such as its context length or chat template. llama.cpp reads them when it loads the model.",
   },
+  soak: {
+    term: "soak test",
+    text: "A long, steady run under real load. Short bursts can look faster than a model really runs, and some settings only run out of memory after minutes, so Cerebro confirms the winner this way before keeping it.",
+  },
+  autofit: {
+    term: "automatic settings",
+    text: "What llama.cpp does on its own: its built-in fit puts as much of the model on the graphics card as memory allows. The most that fits is often not the fastest, which is why Cerebro measures against it.",
+  },
+  klDiv: {
+    term: "KL divergence",
+    text: "A measure of how far a setting moves the model's next-word probabilities away from a reference run. 0 means no change; the quality gate rejects anything above its stated limit.",
+  },
+  noiseMargin: {
+    term: "noise margin",
+    text: "No two runs of the same settings measure exactly alike. A candidate must beat llama.cpp's automatic settings by more than this (3%) to replace them, so a lucky run never changes your settings.",
+  },
+  depth: {
+    term: "working depth",
+    text: "How much text is already in the model's view while it writes, in tokens. Writing slows as this grows, so Cerebro measures at the depth your kind of work actually reaches.",
+  },
 } as const;
 
 export type GlossaryKey = keyof typeof GLOSSARY;

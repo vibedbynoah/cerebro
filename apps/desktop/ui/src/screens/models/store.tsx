@@ -1,4 +1,5 @@
-import { createContext, createMemo, createResource, createSignal, onMount, useContext, type Accessor, type JSX, type Resource } from "solid-js";
+import { createContext, createEffect, createMemo, createResource, createSignal, onCleanup, onMount, useContext, type Accessor, type JSX, type Resource } from "solid-js";
+import { hrefFor, modelFromHash } from "../../lib/routes";
 import { notify } from "../../lib/toast";
 import { EMPTY_TWEAKS } from "../../lib/tweaks";
 import { useService } from "../../service/context";
@@ -77,6 +78,25 @@ export function ModelsProvider(props: { children: JSX.Element }): JSX.Element {
     });
   const putPatch = (sha: string, p: ActivePatch) => setPatches((prev) => new Map(prev).set(sha, p));
 
+  // A link to one model (`#/models?model=<id>`, e.g. from a finished tune) opens its drawer once the
+  // library confirms the id. An unknown or malformed id is ignored. Closing the drawer drops the
+  // query, so a reload does not reopen it.
+  const [linked, setLinked] = createSignal(modelFromHash(window.location.hash));
+  const onHash = () => setLinked(modelFromHash(window.location.hash));
+  window.addEventListener("hashchange", onHash);
+  onCleanup(() => window.removeEventListener("hashchange", onHash));
+  createEffect(() => {
+    const id = linked();
+    if (id && byId().has(id)) {
+      setSelected(id);
+      setLinked(null);
+    }
+  });
+  const open = (id: string | null) => {
+    setSelected(id);
+    if (id === null && modelFromHash(window.location.hash) !== null) history.replaceState(history.state, "", hrefFor("models"));
+  };
+
   const store: ModelsStore = {
     library,
     refetchLibrary: () => void refetch(),
@@ -115,7 +135,7 @@ export function ModelsProvider(props: { children: JSX.Element }): JSX.Element {
       }
     },
     selected,
-    open: setSelected,
+    open,
     patch: (sha) => patches().get(sha),
     ensurePatch(sha) {
       const have = patches().get(sha);
