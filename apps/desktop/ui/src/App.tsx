@@ -29,7 +29,7 @@ const About = named(() => import("./screens/About"), "About");
 const Models = named(() => import("./screens/Models"), "Models");
 const Chat = named(() => import("./screens/Chat"), "Chat");
 const Documents = named(() => import("./screens/Placeholders"), "Documents");
-const ImageStudio = named(() => import("./screens/Placeholders"), "ImageStudio");
+const ImageStudio = named(() => import("./screens/ImageStudio"), "ImageStudio");
 const Plugins = named(() => import("./screens/Placeholders"), "Plugins");
 const Tools = named(() => import("./screens/Tools"), "Tools");
 const ModelHub = named(() => import("./screens/Hub"), "ModelHub");
