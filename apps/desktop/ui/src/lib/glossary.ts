@@ -175,6 +175,34 @@ export const GLOSSARY = {
     term: "working depth",
     text: "How much text is already in the model's view while it writes, in tokens. Writing slows as this grows, so Cerebro measures at the depth your kind of work actually reaches.",
   },
+  pcie: {
+    term: "PCIe",
+    text: "The link between the processor and the graphics card. When parts of a model live in system memory, their data crosses this link, so its traffic shows how much the card waits on the rest of the computer.",
+  },
+  expertCache: {
+    term: "expert cache",
+    text: "For a mixture-of-experts model whose experts mostly live in system memory: a set of the most-used experts kept in spare video memory. The hit rate is the share of expert lookups it answered.",
+  },
+  acceptance: {
+    term: "draft acceptance",
+    text: "The share of guessed tokens the model confirmed during speculative decoding. Each confirmed token is one the model did not have to write on its own.",
+  },
+  conversationCache: {
+    term: "conversation cache",
+    text: "Keeps the model's state for recent conversations, so a follow-up message only reads what is new instead of the whole history again. Agents that resend long histories benefit most.",
+  },
+  firstToken: {
+    term: "first token",
+    text: "Time to first token: from the moment a request arrives until the first word of the reply appears. It includes waiting in the queue and reading the prompt.",
+  },
+  throttling: {
+    term: "thermal throttling",
+    text: "When a graphics card gets too hot, its driver lowers the clock speed to protect it. The model keeps running, only slower, until the card cools.",
+  },
+  channel: {
+    term: "release channel",
+    text: "Stable features are on for everyone. Beta and Experimental features are newer optimisations you can switch on or off per feature; Experimental ones may change between versions.",
+  },
 } as const;
 
 export type GlossaryKey = keyof typeof GLOSSARY;

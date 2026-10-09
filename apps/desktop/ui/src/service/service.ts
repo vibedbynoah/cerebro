@@ -25,6 +25,8 @@ import type {
   TuneRunInfo,
 } from "./types";
 
+import type { HistoryRange, MetricsSeries, MetricsSnapshot, RequestDetail } from "./monitor-types";
+
 export type Unsubscribe = () => void;
 
 /**
@@ -105,4 +107,15 @@ export interface CerebroService {
   cancelTune(runId: string): Promise<void>;
   /** Continues a cancelled run: finished steps are kept and the interrupted one starts over. */
   resumeTune(runId: string): Promise<void>;
+
+  // ---- Monitor. The app polls getMetrics once a second; history and request bodies on demand. ----
+
+  /** The engine's live snapshot: state, hardware, model, the last 60 s, totals, recent requests. */
+  getMetrics(): Promise<MetricsSnapshot>;
+  /** Longer history, averaged into the range's step (1 min: 1 s, 15 min: 5 s, 1 h: 15 s, 24 h:
+   *  5 min). Rejects an unknown range. */
+  getMetricsHistory(range: HistoryRange): Promise<MetricsSeries>;
+  /** One kept request with its captured bodies (each cut at 256K characters). Rejects a malformed
+   *  or unknown id. */
+  getRequest(id: string): Promise<RequestDetail>;
 }

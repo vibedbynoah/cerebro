@@ -1,7 +1,7 @@
 import { test as base, expect, type Page } from "@playwright/test";
 import { ONBOARDING_KEY, TERMS_VERSION } from "../../ui/src/onboarding/progress";
 
-export const ROUTE_IDS = ["home", "hub", "models", "tune", "chat", "images", "documents", "plugins", "tools", "security", "settings", "about"] as const;
+export const ROUTE_IDS = ["home", "hub", "models", "tune", "monitor", "chat", "images", "documents", "plugins", "tools", "security", "settings", "about"] as const;
 export type RouteIdE2E = (typeof ROUTE_IDS)[number];
 
 /** What a finished first-run setup leaves in local storage, from the app's own constants, so a

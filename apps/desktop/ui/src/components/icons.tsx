@@ -271,6 +271,21 @@ const GLYPHS = {
       <circle cx="16.5" cy="16.8" r="0.9" class="icon-dot" />
     </>
   ),
+  /** The Monitor: a trace with one beat. */
+  activity: () => <path d="M3.5 12.5h3.8l2.3-6 4.4 11.5 2.4-5.5h4.1" />,
+  download: () => (
+    <>
+      <path d="M12 4v10.2" />
+      <path d="m7.8 10.2 4.2 4.2 4.2-4.2" />
+      <path d="M5 19.5h14" />
+    </>
+  ),
+  thermometer: () => (
+    <>
+      <path d="M10 13.6V5.5a2 2 0 0 1 4 0v8.1a4 4 0 1 1-4 0Z" />
+      <path d="M12 9.5v6" />
+    </>
+  ),
 } satisfies Record<string, () => JSX.Element>;
 
 export type IconName = keyof typeof GLYPHS;

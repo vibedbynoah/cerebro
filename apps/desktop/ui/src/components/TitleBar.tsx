@@ -11,7 +11,7 @@ import { Icon, type IconName } from "./icons";
  * The brand lockup sits on the left at 24 px (mark height), its clear space kept by the bar's
  * padding; it passes pointer events through, so the whole corner still drags the window.
  */
-export function TitleBar(props: { platform: Platform; onOpenPalette?: () => void; paletteOpen?: boolean }): JSX.Element {
+export function TitleBar(props: { platform: Platform; onOpenPalette?: () => void; paletteOpen?: boolean; status?: JSX.Element }): JSX.Element {
   // Maximize turns into Restore while the window is maximized, like native Windows controls. The
   // webview resizes whenever the window does (button, double-click on the bar, Win+Up, snapping),
   // so one resize listener, coalesced to a frame, catches every way the state can change.
@@ -75,23 +75,28 @@ export function TitleBar(props: { platform: Platform; onOpenPalette?: () => void
           )}
         </Show>
       </div>
-      <div class="window-controls" role="group" aria-label="Window">
-        {control(
-          () => "minimize",
-          () => "Minimize",
-          () => props.platform.minimize(),
-        )}
-        {control(
-          () => (maximized() ? "restore" : "maximize"),
-          () => (maximized() ? "Restore" : "Maximize"),
-          () => props.platform.toggleMaximize().finally(refreshMaximized),
-        )}
-        {control(
-          () => "close",
-          () => "Close",
-          () => props.platform.close(),
-          "window-control--close",
-        )}
+      <div class="titlebar__end" data-tauri-drag-region>
+        <Show when={props.status}>
+          <div class="titlebar__status">{props.status}</div>
+        </Show>
+        <div class="window-controls" role="group" aria-label="Window">
+          {control(
+            () => "minimize",
+            () => "Minimize",
+            () => props.platform.minimize(),
+          )}
+          {control(
+            () => (maximized() ? "restore" : "maximize"),
+            () => (maximized() ? "Restore" : "Maximize"),
+            () => props.platform.toggleMaximize().finally(refreshMaximized),
+          )}
+          {control(
+            () => "close",
+            () => "Close",
+            () => props.platform.close(),
+            "window-control--close",
+          )}
+        </div>
       </div>
     </header>
   );

@@ -5,7 +5,7 @@
  * and light at 1280x800, into review/shots/ (gitignored). Each screen is first scrolled through so
  * its scroll reveals and count-ups fire, then returned to the top and captured once nothing is
  * animating. Two extra states per theme: the command palette open, and the collapsed sidebar.
- * Then the Models and Tune screens' states (models-*, tune-*), and every first-run setup step
+ * Then the Models, Tune and Monitor screens' states (models-*, tune-*, monitor-*), and every first-run setup step
  * (onboarding-*), in a fresh profile that has never finished it,
  * driven by the keyboard the way a user would.
  *
@@ -20,7 +20,7 @@ import { startServer } from "./serve.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = path.resolve(HERE, "../review/shots");
-const ROUTES = ["home", "hub", "models", "tune", "chat", "images", "documents", "plugins", "tools", "security", "settings", "about"];
+const ROUTES = ["home", "hub", "models", "tune", "monitor", "chat", "images", "documents", "plugins", "tools", "security", "settings", "about"];
 /** @type {Array<"dark" | "light">} */
 const THEMES = ["dark", "light"];
 /** What a finished setup leaves in local storage. Key and terms version are read from the app's
@@ -323,6 +323,69 @@ async function shootTune(page, url, theme) {
   await save("failed");
 }
 
+/**
+ * The Monitor's states: the live view at the top, the metric cards, alerts firing (thermal, VRAM
+ * pressure, speed below baseline), a request open in the inspector, a two-GPU machine, the 24 h
+ * range, and an engine that stopped answering.
+ * @param {import("@playwright/test").Page} page
+ * @param {string} url
+ * @param {"dark" | "light"} theme
+ */
+async function shootMonitor(page, url, theme) {
+  const save = async (/** @type {string} */ name) => {
+    await page.mouse.move(1270, 790);
+    await page.waitForTimeout(700);
+    const file = path.join(OUT_DIR, `monitor-${name}-${theme}.png`);
+    await page.screenshot({ path: file, animations: "disabled" });
+    console.log("Saved", file);
+  };
+  const scrollToEl = async (/** @type {string} */ selector) => {
+    await page.locator(selector).first().evaluate((el) => el.scrollIntoView({ block: "start" }));
+    await page.evaluate(() => document.querySelector("main")?.scrollBy({ top: -16 }));
+    await page.waitForTimeout(600);
+  };
+  const open = async (/** @type {string} */ query) => {
+    await page.goto(`${url}/${query}#/monitor`);
+    await page.reload();
+    await page.locator(".mon-grid .mon-card").first().waitFor();
+    await settle(page);
+  };
+
+  await open("");
+  await page.waitForTimeout(2500);
+  await save("top");
+  await scrollToEl("#mon-live-title");
+  await save("metrics");
+  await scrollToEl(".mon-pair-row");
+  await save("cache");
+  await scrollToEl("#mon-requests-title");
+  await page.locator(".mon-tag[data-state='completed']").first().click();
+  await page.getByRole("tab", { name: "Output" }).waitFor();
+  await page.waitForTimeout(400);
+  await save("inspector");
+
+  await open("?mock=monitor-alerts");
+  await page.locator(".mon-alert[data-kind='regression']").waitFor({ timeout: 20000 });
+  await page.evaluate(() => document.querySelector("main")?.scrollTo({ top: 0 }));
+  await save("alerts");
+
+  await open("?mock=monitor-multi-gpu");
+  await scrollToEl("#mon-live-title");
+  await save("multi-gpu");
+
+  await open("");
+  await page.locator(".mon-range label", { hasText: "24 h" }).click();
+  await page.waitForTimeout(800);
+  await scrollToEl("#mon-live-title");
+  await save("24h");
+  await page.locator(".mon-range label", { hasText: "1 min" }).click();
+
+  await page.goto(`${url}/?mock=fail-metrics#/monitor`);
+  await page.reload();
+  await page.locator(".engine-pill[data-tone='offline']").waitFor({ timeout: 10000 });
+  await save("unreachable");
+}
+
 async function main() {
   await mkdir(OUT_DIR, { recursive: true });
   const { url, close } = await startServer(0);
@@ -346,6 +409,15 @@ async function main() {
       page.on("console", (m) => (m.type() === "error" || m.type() === "warning") && problems.push(`${theme}: ${m.text()}`));
       page.on("pageerror", (e) => problems.push(`${theme}: ${e.message}`));
 
+      if (process.env["SHOOT_ONLY"] === "monitor") {
+        await page.goto(`${url}/#/monitor`);
+        await page.locator("main h1").waitFor();
+        await settle(page);
+        await page.screenshot({ path: path.join(OUT_DIR, `monitor-${theme}.png`), animations: "disabled" });
+        await shootMonitor(page, url, theme);
+        await context.close();
+        continue;
+      }
       for (const id of ROUTES) {
         await page.goto(`${url}/#/${id}`);
         await page.locator("main h1").waitFor();
@@ -384,6 +456,7 @@ async function main() {
 
       await shootModels(page, url, theme);
       await shootTune(page, url, theme);
+      await shootMonitor(page, url, theme);
 
       // Collapsed sidebar on the Models screen.
       await page.goto(`${url}/#/models`);

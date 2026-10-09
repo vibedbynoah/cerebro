@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createSignal, Match, on, onCleanup, onMount, Show, Switch, type Accessor, type JSX } from "solid-js";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import { Sidebar } from "./components/Sidebar";
+import { StatusPill } from "./components/StatusPill";
 import { StatusBar } from "./components/StatusBar";
 import { TitleBar } from "./components/TitleBar";
 import { Toasts } from "./components/Toasts";
@@ -14,6 +15,7 @@ import { needsOnboarding, readRecord, type OnboardingRecord } from "./onboarding
 import { Setup } from "./onboarding/SetupShell";
 import type { Platform } from "./platform/platform";
 import { ServiceProvider, useService } from "./service/context";
+import { MetricsProvider } from "./service/metrics";
 import type { CerebroService } from "./service/service";
 import { AppStateProvider, useAppState } from "./state";
 import { About } from "./screens/About";
@@ -21,6 +23,7 @@ import { Home } from "./screens/Home";
 import { Models } from "./screens/Models";
 import { Chat, Documents, ImageStudio, Plugins, Tools } from "./screens/Placeholders";
 import { ModelHub } from "./screens/Hub";
+import { Monitor } from "./screens/Monitor";
 import { Security } from "./screens/Security";
 import { Settings } from "./screens/Settings";
 import { Tune } from "./screens/Tune";
@@ -184,64 +187,69 @@ function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Eleme
   );
 
   return (
-    <div class="app" classList={{ "is-collapsed": collapsed() }}>
-      <a class="skip-link" href="#main" onClick={(e) => { e.preventDefault(); main?.focus(); }}>
-        Skip to content
-      </a>
-      <TitleBar platform={props.platform} onOpenPalette={openPalette} paletteOpen={paletteOpen()} />
-      <Sidebar route={router.route()} collapsed={collapsed()} onToggle={toggleSidebar} />
-      <main id="main" class="main" tabindex="-1" ref={main}>
-        <Switch>
-          <Match when={router.route() === "home"}>
-            <Home />
-          </Match>
-          <Match when={router.route() === "hub"}>
-            <ModelHub />
-          </Match>
-          <Match when={router.route() === "models"}>
-            <Models />
-          </Match>
-          <Match when={router.route() === "tune"}>
-            <Tune />
-          </Match>
-          <Match when={router.route() === "chat"}>
-            <Chat />
-          </Match>
-          <Match when={router.route() === "images"}>
-            <ImageStudio />
-          </Match>
-          <Match when={router.route() === "documents"}>
-            <Documents />
-          </Match>
-          <Match when={router.route() === "plugins"}>
-            <Plugins />
-          </Match>
-          <Match when={router.route() === "tools"}>
-            <Tools />
-          </Match>
-          <Match when={router.route() === "security"}>
-            <Security />
-          </Match>
-          <Match when={router.route() === "settings"}>
-            <Settings theme={theme} platform={props.platform} onRunSetup={props.onRunSetup} />
-          </Match>
-          <Match when={router.route() === "about"}>
-            <About platform={props.platform} />
-          </Match>
-        </Switch>
-      </main>
-      <StatusBar network={state.network()} offlineMode={state.settings()?.offlineMode ?? false} />
-      <TuneToasts route={router.route} />
-      <p class="sr-only" role="status" aria-live="polite">
-        {announce()}
-      </p>
-      <CommandPalette
-        open={paletteOpen()}
-        onOpenChange={setPaletteOpen}
-        commands={commands()}
-        returnFocus={() => (focusMainNext ? (main ?? null) : opener)}
-      />
-    </div>
+    <MetricsProvider>
+      <div class="app" classList={{ "is-collapsed": collapsed() }}>
+        <a class="skip-link" href="#main" onClick={(e) => { e.preventDefault(); main?.focus(); }}>
+          Skip to content
+        </a>
+        <TitleBar platform={props.platform} onOpenPalette={openPalette} paletteOpen={paletteOpen()} status={<StatusPill />} />
+        <Sidebar route={router.route()} collapsed={collapsed()} onToggle={toggleSidebar} />
+        <main id="main" class="main" tabindex="-1" ref={main}>
+          <Switch>
+            <Match when={router.route() === "home"}>
+              <Home />
+            </Match>
+            <Match when={router.route() === "hub"}>
+              <ModelHub />
+            </Match>
+            <Match when={router.route() === "models"}>
+              <Models />
+            </Match>
+            <Match when={router.route() === "tune"}>
+              <Tune />
+            </Match>
+            <Match when={router.route() === "monitor"}>
+              <Monitor />
+            </Match>
+            <Match when={router.route() === "chat"}>
+              <Chat />
+            </Match>
+            <Match when={router.route() === "images"}>
+              <ImageStudio />
+            </Match>
+            <Match when={router.route() === "documents"}>
+              <Documents />
+            </Match>
+            <Match when={router.route() === "plugins"}>
+              <Plugins />
+            </Match>
+            <Match when={router.route() === "tools"}>
+              <Tools />
+            </Match>
+            <Match when={router.route() === "security"}>
+              <Security />
+            </Match>
+            <Match when={router.route() === "settings"}>
+              <Settings theme={theme} platform={props.platform} onRunSetup={props.onRunSetup} />
+            </Match>
+            <Match when={router.route() === "about"}>
+              <About platform={props.platform} />
+            </Match>
+          </Switch>
+        </main>
+        <StatusBar network={state.network()} offlineMode={state.settings()?.offlineMode ?? false} />
+        <TuneToasts route={router.route} />
+        <p class="sr-only" role="status" aria-live="polite">
+          {announce()}
+        </p>
+        <CommandPalette
+          open={paletteOpen()}
+          onOpenChange={setPaletteOpen}
+          commands={commands()}
+          returnFocus={() => (focusMainNext ? (main ?? null) : opener)}
+        />
+      </div>
+    </MetricsProvider>
   );
 }
 

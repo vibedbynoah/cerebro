@@ -26,6 +26,10 @@ import { DEFAULT_SETTINGS, MOCK_CATALOG, MOCK_GPU, MOCK_HARDWARE, MOCK_LIVE_BASE
 import { detailFor, MOCK_LIBRARY, mockDuplicates } from "./library";
 import { buildTuneScript, createTunePlayer, type TuneHold, type TuneScript } from "./tune";
 import { applyTuneEvent, emptyTuneView, isTuneProfile } from "../lib/tune";
+import { estimateFit } from "../lib/fit";
+import { isHistoryRange } from "../lib/monitor";
+import type { MetricsSeries, MetricsSnapshot, RequestDetail } from "../service/monitor-types";
+import { createMonitorSim, type MonitorScenario, type SimModel } from "./monitor";
 
 export interface MockServiceOptions {
   /** HUD sample interval, ms. Default 1000. */
@@ -55,6 +59,14 @@ export interface MockServiceOptions {
   tuneHold?: TuneHold;
   /** The tune's model process crashes partway through screening. */
   failTune?: boolean;
+  /** Monitor: what the simulated engine is doing (default: serving a working session). */
+  monitorScenario?: MonitorScenario;
+  /** Monitor: a machine with two graphics cards instead of one laptop GPU. */
+  multiGpu?: boolean;
+  /** Monitor: getMetrics rejects, as an engine that stopped answering would. */
+  failMetrics?: boolean;
+  /** Clock for the Monitor's simulation (epoch ms). Default Date.now. */
+  now?: () => number;
 }
 
 /** Every failure or test state a web/test build can ask the mock for, by `?mock=` value. */
@@ -70,6 +82,10 @@ const MOCK_FAILURES: Readonly<Record<string, MockServiceOptions>> = {
   "tune-hold-screen": { tuneHold: "screen" },
   "tune-hold-soak": { tuneHold: "soak" },
   "fail-tune": { failTune: true },
+  "monitor-alerts": { monitorScenario: "alerts" },
+  "monitor-idle": { monitorScenario: "idle" },
+  "monitor-multi-gpu": { multiGpu: true },
+  "fail-metrics": { failMetrics: true },
 };
 
 /**
@@ -138,6 +154,63 @@ const linkableCopies = (g: DuplicateGroup, keepPath: string) => {
   return keep ? g.copies.filter((c) => c !== keep && c.volume === keep.volume) : [];
 };
 const FIX_ID = /^[a-z0-9-]{1,48}$/;
+const REQUEST_ID = /^req_\d{1,8}$/;
+
+/** Plain labels for the draft-free strategies, as the Models screen names them. */
+const NGRAM_PLAIN: Readonly<Record<LoadParams["ngramStrategy"], string>> = {
+  "ngram-simple": "Repeat recent text",
+  "ngram-map-k": "Match the last few tokens",
+  "ngram-map-k4v": "Longer 4-token matches",
+  "ngram-mod": "Hash of recent text",
+  "ngram-cache": "Cache of past replies",
+};
+
+/** Two example workstation cards for the multi-GPU Monitor view. */
+const MULTI_GPUS = [
+  { name: "Example workstation GPU", vramGiB: 24, powerLimitW: 350 },
+  { name: "Example workstation GPU", vramGiB: 24, powerLimitW: 350 },
+];
+
+/** The loaded model as the Monitor's simulation needs it: placement and memory from the fit
+ *  estimate of its tuned settings, speeds from its (illustrative) tune result. */
+function simModelFor(m: LibraryModel, loadedParams: LoadParams | null, vramGiB: number): SimModel | null {
+  const p = loadedParams ?? m.tunedParams;
+  if (!p) return null;
+  // With room for the whole model (two big cards), everything goes to the GPUs.
+  let params: LoadParams = vramGiB > MOCK_GPU.vramTotalGiB ? { ...p, gpuLayers: m.arch.layers, moeCpuLayers: 0 } : p;
+  const hw = { gpu: { name: MOCK_GPU.name, vramTotalGiB: vramGiB }, ramTotalGiB: MOCK_HARDWARE.ramTotalGiB };
+  // A MoE model with experts on the CPU gives up about 1.5 GiB of resident expert weights to the
+  // expert cache, which keeps the most-used experts on the card instead of a fixed set.
+  if (m.architecture === "moe" && params.moeCpuLayers > 0) {
+    const before = estimateFit(m, params, hw).vram.weights;
+    for (let n = params.moeCpuLayers; n <= params.gpuLayers; n++) {
+      params = { ...params, moeCpuLayers: n };
+      if (estimateFit(m, params, hw).vram.weights <= before - 1.5) break;
+    }
+  }
+  const fit = estimateFit(m, params, hw);
+  const r = m.tuneResult;
+  return {
+    id: m.id,
+    name: m.name,
+    quant: m.quant,
+    params: m.params,
+    architecture: m.architecture,
+    contextMax: params.contextLength,
+    kvType: params.kvCacheK === params.kvCacheV ? params.kvCacheK : `${params.kvCacheK} / ${params.kvCacheV}`,
+    layers: m.arch.layers,
+    gpuLayers: params.gpuLayers,
+    expertLayersOnCpu: m.architecture === "moe" ? params.moeCpuLayers : 0,
+    expertsTotal: m.arch.experts,
+    expertsPerToken: m.arch.activeExperts,
+    vram: { weights: fit.vram.weights, kv: fit.vram.kv, scratch: round2(fit.vram.compute + fit.vram.extra) },
+    ramWeights: fit.ram.weights,
+    sizeGiB: m.sizeGiB,
+    decode0: r?.decodeTps0 ?? 10,
+    baseline: r ? { decodeTps: r.decodeTpsDepth, prefillTps: r.prefillTps, depth: r.depth, measuredAt: r.measuredAt } : null,
+    speculation: params.speculative === "ngram" ? NGRAM_PLAIN[params.ngramStrategy] : params.speculative === "draft" ? "Draft model" : null,
+  };
+}
 const IMAGE_TYPE = /^image\/(png|jpeg|webp|gif)$/;
 
 /**
@@ -172,6 +245,23 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
   let groups: DuplicateGroup[] = mockDuplicates();
   const tune = createTunePlayer({ speed: options.tuneSpeed ?? 1, hold: options.tuneHold, fail: options.failTune });
   let nextId = 1;
+  const multiGpu = options.multiGpu === true;
+  const monitor = createMonitorSim({
+    random,
+    ...(options.now ? { now: options.now } : {}),
+    scenario: options.monitorScenario ?? "default",
+    gpus: multiGpu ? MULTI_GPUS : [{ name: MOCK_GPU.name, vramGiB: MOCK_GPU.vramTotalGiB, powerLimitW: 115 }],
+    cpu: MOCK_HARDWARE.cpu,
+    ramTotalGiB: MOCK_HARDWARE.ramTotalGiB,
+    build: MOCK_LIVE_BASE.backend.build,
+    address: MOCK_LIVE_BASE.backend.address ?? "127.0.0.1:8181",
+  });
+  /** The text or vision model in the llm slot, as the Monitor sees it. */
+  const servedModel = (): SimModel | null => {
+    const inSlot = loaded.find((l) => l.slot === "llm");
+    const m = inSlot ? byId.get(inSlot.id) : undefined;
+    return m ? simModelFor(m, inSlot?.params ?? null, multiGpu ? 48 : MOCK_GPU.vramTotalGiB) : null;
+  };
 
   // ---- A tune's outcome is the library's truth: the service follows its own run and writes the
   // model's state (measuring, then tuned or defaults-fastest), its three numbers and its kept
@@ -265,11 +355,14 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
     const m = inSlot ? byId.get(inSlot.id) : undefined;
     // Writing with an empty context (a short chat), from the model's last tune, so a re-tune shows here too.
     const speed = m ? (m.tuneResult?.decodeTps0 ?? (m.name === base.model ? base.tokensPerSecond : 10)) : null;
+    // The status bar reads the same simulated engine as the Monitor, so the two never disagree; a
+    // model the simulation cannot describe (no settings) falls back to its tuned speed.
+    const sim = m && !multiGpu ? monitor.hud(servedModel()) : null;
     current = {
       ...cloneStats(base),
       model: m ? m.name : null,
-      tokensPerSecond: speed === null ? null : round1(speed + jitter(0.6)),
-      vramUsedGiB: m ? round2(Math.min(base.vramTotalGiB, Math.max(0, base.vramUsedGiB + jitter(0.08)))) : 0.4,
+      tokensPerSecond: speed === null ? null : (sim?.decodeTps ?? round1(speed + jitter(0.6))),
+      vramUsedGiB: m ? round2(Math.min(base.vramTotalGiB, Math.max(0, sim?.vramUsedGiB ?? base.vramUsedGiB + jitter(0.08)))) : 0.4,
     };
     return cloneStats(current);
   };
@@ -566,5 +659,22 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
     cancelTune: (runId) => later(0, () => tune.cancel(runId)),
 
     resumeTune: (runId) => later(0, () => tune.resume(runId)),
+
+    getMetrics: (): Promise<MetricsSnapshot> =>
+      options.failMetrics ? Promise.reject(new Error("Mock: engine not answering")) : later(0, () => monitor.snapshot(servedModel())),
+
+    getMetricsHistory: (range): Promise<MetricsSeries> =>
+      later(0, () => {
+        if (!isHistoryRange(range)) throw new TypeError("Unknown history range");
+        return monitor.history(range, servedModel());
+      }),
+
+    getRequest: (id): Promise<RequestDetail> =>
+      later(0, () => {
+        if (typeof id !== "string" || !REQUEST_ID.test(id)) throw new TypeError("Malformed request id");
+        const d = monitor.request(id);
+        if (!d) throw new Error("Request no longer kept");
+        return d;
+      }),
   };
 }

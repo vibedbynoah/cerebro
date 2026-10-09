@@ -59,12 +59,13 @@ describe("routing", () => {
     expect(parseHash("#/settings/")).toBe("settings");
   });
 
-  it("has the eleven screens the brief names, each with a real icon and a plain summary", () => {
+  it("has every screen the briefs name, each with a real icon and a plain summary", () => {
     expect(ROUTES.map((r) => r.label)).toEqual([
       "Home",
       "Model Hub",
       "Models",
       "Tune",
+      "Monitor",
       "Chat",
       "Image Studio",
       "Documents",

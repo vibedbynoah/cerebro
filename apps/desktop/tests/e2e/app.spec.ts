@@ -5,6 +5,7 @@ const TITLES: Record<(typeof ROUTE_IDS)[number], string> = {
   hub: "Model Hub",
   models: "Models",
   tune: "Tune",
+  monitor: "Monitor",
   chat: "Chat",
   images: "Image Studio",
   documents: "Documents",
@@ -25,10 +26,11 @@ for (const scheme of ["dark", "light"] as const) {
         await expect(page.locator(`a.nav-link[data-route="${id}"]`)).toHaveAttribute("aria-current", "page");
         await scrollThrough(page);
         await settle(page);
-        // Frame is complete: title bar and its lockup, 12 nav entries, the HUD and its disclosure.
+        // Frame is complete: title bar and its lockup, the engine pill, 13 nav entries, the HUD and its disclosure.
         await expect(page.locator(".titlebar")).toBeVisible();
         await expect(page.locator(".titlebar [data-brand='lockup']")).toBeVisible();
-        await expect(page.locator("a.nav-link")).toHaveCount(12);
+        await expect(page.locator(".titlebar .engine-pill")).toBeVisible();
+        await expect(page.locator("a.nav-link")).toHaveCount(13);
         await expect(page.locator(".statusbar")).toContainText("Illustrative data");
       });
     }
