@@ -43,3 +43,7 @@ waves implement it section by section in both the engine and the app.
 5. Wave B onward: turn FEATURE_CATALOG.md sections into engine + app task batches (image generation, voice, plugins/MCP host, permissions engine, memory, RAG, workflow builder, OS-wide quick actions, Tweak Studio backend), Windows first; then macOS and Linux conversion.
 
 - Never launch or resume workflows in a turn where the owner sent a mid-turn message: agents treat it as their request (2026-10-08 incident).
+
+## Prototype push (owner, 2026-10-08)
+
+Frontend resumes with args {"skip":["design-system","site-foundation","app-foundation","site-home","app-onboarding","app-models"],"prototype":true}: one build round per remaining task, then one error pass (review + fix + commit) per track, then rebuild the drafts (Projects\cerebro-draft-site / -app, ports 5601/5602, tunnels) for owner feedback. Engine runs wf_2c19383e-139 (cli, critic pending) and wf_5a89be6c-89e (telemetry critic pending, then turbo) are paused to spend usage on the prototype; resume them after it ships.
