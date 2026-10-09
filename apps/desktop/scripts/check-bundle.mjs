@@ -6,13 +6,16 @@
  *      - 150 KB for everything loaded before first paint: theme-init.js, the entry module and every
  *        chunk index.html modulepreloads. This is what every launch pays;
  *      - 50 KB for any one chunk loaded on demand (a screen opened later, setup, the licence text);
- *      - 260 KB for all JavaScript together.
+ *      - 600 KB for all JavaScript together.
  *    Screens that only some sessions open (Models, setup, Licenses) load as their own chunks from
  *    local disk, so they are held to a per-chunk cap instead of the first-paint budget.
  *    Why the total moved from the old single 150 KB gate to 260 KB: that gate counted every chunk
  *    as if it loaded at launch. The launch cost is still held to the same 150 KB (first paint);
  *    the extra room is only for on-demand chunks, each capped at 50 KB, so no one screen can grow
- *    unnoticed and nothing new reaches first paint;
+ *    unnoticed and nothing new reaches first paint. Raised to 600 KB (2026-10-09) when every screen
+ *    except Home became an on-demand chunk: the full app has ~20 screens, each under the 50 KB cap,
+ *    read from local disk only when opened, so the total is a ceiling against runaway growth, not a
+ *    launch cost;
  *  - index.html has an inline script, an inline event handler, a style attribute, or loads anything
  *    from another origin;
  *  - CSS pulls anything from another origin (@import or url());
@@ -26,7 +29,7 @@ import { gzipSync } from "node:zlib";
 
 const INITIAL_BUDGET = 150 * 1024;
 const LAZY_CHUNK_BUDGET = 50 * 1024;
-const TOTAL_BUDGET = 260 * 1024;
+const TOTAL_BUDGET = 600 * 1024;
 const dist = path.resolve(process.argv[2] ?? "ui/dist");
 
 /** @param {string} dir @returns {Promise<string[]>} */

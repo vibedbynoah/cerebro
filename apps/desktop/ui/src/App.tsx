@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, Match, on, onCleanup, onMount, Show, Switch, type Accessor, type JSX } from "solid-js";
+import { createEffect, createMemo, createSignal, lazy, Match, on, onCleanup, onMount, Show, Suspense, Switch, type Accessor, type JSX } from "solid-js";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import { Sidebar } from "./components/Sidebar";
 import { StatusPill } from "./components/StatusPill";
@@ -18,15 +18,25 @@ import { ServiceProvider, useService } from "./service/context";
 import { MetricsProvider } from "./service/metrics";
 import type { CerebroService } from "./service/service";
 import { AppStateProvider, useAppState } from "./state";
-import { About } from "./screens/About";
 import { Home } from "./screens/Home";
-import { Models } from "./screens/Models";
-import { Chat, Documents, ImageStudio, Plugins, Tools } from "./screens/Placeholders";
-import { ModelHub } from "./screens/Hub";
-import { Monitor } from "./screens/Monitor";
-import { Security } from "./screens/Security";
-import { Settings } from "./screens/Settings";
-import { Tune } from "./screens/Tune";
+
+// Every screen except Home loads on demand, so first paint carries only the frame and Home; each
+// screen is its own chunk under check-bundle's per-chunk cap.
+const named = <K extends string>(load: () => Promise<Record<K, (p: never) => JSX.Element>>, key: K) =>
+  lazy(() => load().then((m) => ({ default: m[key] as (p: any) => JSX.Element })));
+const About = named(() => import("./screens/About"), "About");
+const Models = named(() => import("./screens/Models"), "Models");
+const Chat = named(() => import("./screens/Placeholders"), "Chat");
+const Documents = named(() => import("./screens/Placeholders"), "Documents");
+const ImageStudio = named(() => import("./screens/Placeholders"), "ImageStudio");
+const Plugins = named(() => import("./screens/Placeholders"), "Plugins");
+const Tools = named(() => import("./screens/Placeholders"), "Tools");
+const ModelHub = named(() => import("./screens/Hub"), "ModelHub");
+const Monitor = named(() => import("./screens/Monitor"), "Monitor");
+const Security = named(() => import("./screens/Security"), "Security");
+const Settings = named(() => import("./screens/Settings"), "Settings");
+const Tune = named(() => import("./screens/Tune"), "Tune");
+const Turbo = named(() => import("./screens/Turbo"), "Turbo");
 
 const SIDEBAR_KEY = "cerebro-sidebar";
 
@@ -195,6 +205,7 @@ function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Eleme
         <TitleBar platform={props.platform} onOpenPalette={openPalette} paletteOpen={paletteOpen()} status={<StatusPill />} />
         <Sidebar route={router.route()} collapsed={collapsed()} onToggle={toggleSidebar} />
         <main id="main" class="main" tabindex="-1" ref={main}>
+          <Suspense fallback={<div class="screen" aria-busy="true" />}>
           <Switch>
             <Match when={router.route() === "home"}>
               <Home />
@@ -210,6 +221,9 @@ function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Eleme
             </Match>
             <Match when={router.route() === "monitor"}>
               <Monitor />
+            </Match>
+            <Match when={router.route() === "turbo"}>
+              <Turbo />
             </Match>
             <Match when={router.route() === "chat"}>
               <Chat />
@@ -236,6 +250,7 @@ function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Eleme
               <About platform={props.platform} />
             </Match>
           </Switch>
+          </Suspense>
         </main>
         <StatusBar network={state.network()} offlineMode={state.settings()?.offlineMode ?? false} />
         <TuneToasts route={router.route} />

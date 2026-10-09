@@ -66,6 +66,7 @@ describe("routing", () => {
       "Models",
       "Tune",
       "Monitor",
+      "Turbo",
       "Chat",
       "Image Studio",
       "Documents",
