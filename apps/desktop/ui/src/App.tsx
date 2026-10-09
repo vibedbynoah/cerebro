@@ -27,11 +27,11 @@ const named = <K extends string>(load: () => Promise<Record<K, (p: never) => JSX
   lazy(() => load().then((m) => ({ default: m[key] as (p: any) => JSX.Element })));
 const About = named(() => import("./screens/About"), "About");
 const Models = named(() => import("./screens/Models"), "Models");
-const Chat = named(() => import("./screens/Placeholders"), "Chat");
+const Chat = named(() => import("./screens/Chat"), "Chat");
 const Documents = named(() => import("./screens/Placeholders"), "Documents");
 const ImageStudio = named(() => import("./screens/Placeholders"), "ImageStudio");
 const Plugins = named(() => import("./screens/Placeholders"), "Plugins");
-const Tools = named(() => import("./screens/Placeholders"), "Tools");
+const Tools = named(() => import("./screens/Tools"), "Tools");
 const ModelHub = named(() => import("./screens/Hub"), "ModelHub");
 const Monitor = named(() => import("./screens/Monitor"), "Monitor");
 const Security = named(() => import("./screens/Security"), "Security");

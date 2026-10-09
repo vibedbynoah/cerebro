@@ -1,0 +1,92 @@
+/* Settings screen additions (search, reply settings, configuration file). Tokens only. */
+
+.settings-search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.settings-search input,
+.settings-field select,
+.settings-field input,
+.settings-field textarea {
+  min-height: 34px;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+  color: var(--color-text-primary);
+  font: inherit;
+}
+
+.settings-search input {
+  width: min(360px, 100%);
+}
+
+.settings-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3) var(--space-5);
+  margin-block: var(--space-3);
+}
+
+.settings-field {
+  display: grid;
+  gap: var(--space-1);
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.settings-field > span {
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.settings-field--wide {
+  margin-block: var(--space-3);
+}
+
+.settings-field--wide textarea {
+  width: 100%;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.effort-levels {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.effort-level {
+  padding: var(--space-3) var(--space-4);
+}
+
+.effort-level summary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  cursor: pointer;
+}
+
+.effort-level summary:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+.effort-level__name {
+  min-width: 72px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.settings label.btn {
+  cursor: pointer;
+}
+
+.settings label.btn:focus-within {
+  box-shadow: var(--focus-ring);
+}

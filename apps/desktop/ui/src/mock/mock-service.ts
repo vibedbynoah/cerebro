@@ -2,6 +2,7 @@ import { validateGgufEdits } from "../lib/gguf";
 import { draftCandidates, hasErrors, validateLoadParams } from "../lib/load-params";
 import { activeTweakCount, applyTweaks, contextCeiling, EMPTY_TWEAKS, profileNameError, sanitizeTweaks } from "../lib/tweaks";
 import type { CerebroService, Unsubscribe } from "../service/service";
+import { createMockChat } from "./chat";
 import type {
   ActivePatch,
   CatalogModel,
@@ -65,6 +66,8 @@ export interface MockServiceOptions {
   multiGpu?: boolean;
   /** Monitor: getMetrics rejects, as an engine that stopped answering would. */
   failMetrics?: boolean;
+  /** Chat playback speed multiplier (tests use 20). */
+  chatSpeed?: number;
   /** Clock for the Monitor's simulation (epoch ms). Default Date.now. */
   now?: () => number;
 }
@@ -86,6 +89,7 @@ const MOCK_FAILURES: Readonly<Record<string, MockServiceOptions>> = {
   "monitor-idle": { monitorScenario: "idle" },
   "monitor-multi-gpu": { multiGpu: true },
   "fail-metrics": { failMetrics: true },
+  "fast-chat": { chatSpeed: 20 },
 };
 
 /**
@@ -218,6 +222,7 @@ const IMAGE_TYPE = /^image\/(png|jpeg|webp|gif)$/;
  * The HUD ticker only runs while someone is subscribed, so an idle page schedules no timers.
  */
 export function createMockService(options: MockServiceOptions = {}): CerebroService {
+  const chatEngine = createMockChat(options.chatSpeed !== undefined ? { speed: options.chatSpeed } : {});
   const tickMs = options.tickMs !== undefined && Number.isFinite(options.tickMs) && options.tickMs > 0 ? options.tickMs : 1000;
   const random = options.random ?? Math.random;
   const network: NetworkState = options.network ?? "offline";
@@ -676,5 +681,9 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
         if (!d) throw new Error("Request no longer kept");
         return d;
       }),
+
+    chat: (request, onEvent, signal) => chatEngine.chat(request, onEvent, signal),
+
+    transcribe: (seconds) => chatEngine.transcribe(seconds),
   };
 }

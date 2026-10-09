@@ -25,6 +25,7 @@ import type {
   TuneRunInfo,
 } from "./types";
 
+import type { ChatEvent, ChatRequest } from "./chat-types";
 import type { HistoryRange, MetricsSeries, MetricsSnapshot, RequestDetail } from "./monitor-types";
 
 export type Unsubscribe = () => void;
@@ -118,4 +119,13 @@ export interface CerebroService {
   /** One kept request with its captured bodies (each cut at 256K characters). Rejects a malformed
    *  or unknown id. */
   getRequest(id: string): Promise<RequestDetail>;
+
+  // ---- Chat. One reply streams at a time per conversation. ----
+
+  /** Streams a reply: `start`, optional `thinking`, `token`s, optional `check` passes, then `done`
+   *  (or `error`). Aborting the signal stops generation; `done` still arrives with `stopped: true`
+   *  and the text so far is kept. Rejects a malformed request before streaming. */
+  chat(request: ChatRequest, onEvent: (e: ChatEvent) => void, signal: AbortSignal): Promise<void>;
+  /** Transcribes a push-to-talk recording on this machine. */
+  transcribe(seconds: number): Promise<string>;
 }

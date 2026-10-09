@@ -1,4 +1,7 @@
-import { createResource, createSignal, For, Show, type JSX } from "solid-js";
+import "../styles/settings.css";
+import { createEffect, createResource, createSignal, For, Show, type JSX } from "solid-js";
+import { ChatSettings } from "./settings/ChatSettings";
+import { exportConfig, importConfig } from "../lib/config-file";
 import { Icon, type IconName } from "../components/icons";
 import { ScreenHeader, Section } from "../components/Screen";
 import { SettingSwitch } from "../components/SettingSwitch";
@@ -47,9 +50,51 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
     </div>
   );
 
+  // Search across every section: sections whose text does not match are hidden.
+  const [query, setQuery] = createSignal("");
+  const [matches, setMatches] = createSignal(0);
+  let root!: HTMLDivElement;
+  createEffect(() => {
+    const q = query().toLowerCase().trim();
+    let shown = 0;
+    root.querySelectorAll<HTMLElement>(":scope > section.section").forEach((sec) => {
+      const hit = !q || (sec.textContent ?? "").toLowerCase().includes(q);
+      sec.style.display = hit ? "" : "none";
+      if (hit) shown++;
+    });
+    setMatches(shown);
+  });
+
+  const doExport = () => {
+    const text = exportConfig(settings(), level(), channel());
+    const a = document.createElement("a");
+    a.href = `data:application/json;charset=utf-8,${encodeURIComponent(text)}`;
+    a.download = "cerebro-config.json";
+    a.click();
+    notify("Configuration exported", "cerebro-config.json: edit it in any text editor and import it here.", "success");
+  };
+  const doImport = async (file: File) => {
+    try {
+      if (file.size > 1_000_000) throw new Error("File over 1 MB");
+      const r = importConfig(await file.text());
+      for (const [k, v] of Object.entries(r.settings)) await setSetting(k as keyof typeof r.settings, v as boolean, "");
+      if (r.level) setLevel(r.level);
+      if (r.channel) setChannel(r.channel);
+      notify("Configuration imported", r.ignored.length ? `Ignored: ${r.ignored.join(", ")}` : "Every value was applied.", r.ignored.length ? "warning" : "success");
+    } catch (e) {
+      notify("Not imported", e instanceof Error ? e.message : "The file could not be read.", "error");
+    }
+  };
+
   return (
-    <div class="screen">
+    <div class="screen settings" ref={root}>
       <ScreenHeader route="settings" />
+      <div class="settings-search">
+        <input type="search" placeholder="Search settings" aria-label="Search settings" value={query()} onInput={(e) => setQuery(e.currentTarget.value)} />
+        <span class="hint" aria-live="polite">
+          {query().trim() ? `${matches()} section${matches() === 1 ? "" : "s"} match` : ""}
+        </span>
+      </div>
 
       <Section id="appearance" title="Appearance">
         <fieldset class="segmented" aria-describedby="theme-note">
@@ -152,6 +197,8 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
         </div>
       </Section>
 
+      <ChatSettings />
+
       <Section id="protections" title="Protections" description="On by default. You can turn any of them off; nothing else changes when you do.">
         {group("protections")}
       </Section>
@@ -187,6 +234,20 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
           More about Cerebro
           <Icon name="arrowRight" size={14} />
         </a>
+      </Section>
+
+      <Section id="config-file" title="Configuration file" description="Every setting above as one JSON file you can edit, back up or copy to another computer. Conversations, memories and keys are not included.">
+        <div class="settings-row">
+          <button type="button" class="btn btn--secondary" data-press onClick={doExport}>
+            <Icon name="download" size={16} />
+            Export
+          </button>
+          <label class="btn btn--secondary" data-press>
+            <Icon name="upload" size={16} />
+            Import
+            <input class="sr-only" type="file" accept="application/json,.json" onChange={(e) => e.currentTarget.files?.[0] && void doImport(e.currentTarget.files[0])} />
+          </label>
+        </div>
       </Section>
 
       <Section id="setup" title="First-run setup" description="Walk through the experience level, the hardware check, a first model and its load settings, the protections and the terms again. Nothing changes until you choose.">
