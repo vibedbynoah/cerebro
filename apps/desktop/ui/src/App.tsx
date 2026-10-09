@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, lazy, Match, on, onCleanup, onMount, Show, Suspense, Switch, type Accessor, type JSX } from "solid-js";
+import { createEffect, createMemo, createSignal, lazy, Match, on, onCleanup, onMount, Show, Switch, type Accessor, type JSX } from "solid-js";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import { Sidebar } from "./components/Sidebar";
 import { StatusPill } from "./components/StatusPill";
@@ -21,7 +21,8 @@ import { AppStateProvider, useAppState } from "./state";
 import { Home } from "./screens/Home";
 
 // Every screen except Home loads on demand, so first paint carries only the frame and Home; each
-// screen is its own chunk under check-bundle's per-chunk cap.
+// screen is its own chunk under check-bundle's per-chunk cap. No <Suspense> around the screens: it
+// would also catch each screen's own data loading and hold back its UI (the Models drawer link).
 const named = <K extends string>(load: () => Promise<Record<K, (p: never) => JSX.Element>>, key: K) =>
   lazy(() => load().then((m) => ({ default: m[key] as (p: any) => JSX.Element })));
 const About = named(() => import("./screens/About"), "About");
@@ -205,7 +206,6 @@ function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Eleme
         <TitleBar platform={props.platform} onOpenPalette={openPalette} paletteOpen={paletteOpen()} status={<StatusPill />} />
         <Sidebar route={router.route()} collapsed={collapsed()} onToggle={toggleSidebar} />
         <main id="main" class="main" tabindex="-1" ref={main}>
-          <Suspense fallback={<div class="screen" aria-busy="true" />}>
           <Switch>
             <Match when={router.route() === "home"}>
               <Home />
@@ -250,7 +250,6 @@ function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Eleme
               <About platform={props.platform} />
             </Match>
           </Switch>
-          </Suspense>
         </main>
         <StatusBar network={state.network()} offlineMode={state.settings()?.offlineMode ?? false} />
         <TuneToasts route={router.route} />
