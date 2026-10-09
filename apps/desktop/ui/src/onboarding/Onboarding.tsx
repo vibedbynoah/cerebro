@@ -1,5 +1,5 @@
 import "../styles/onboarding.css";
-import { createEffect, createMemo, createResource, createSignal, For, Match, on, onCleanup, onMount, Show, Switch, type JSX } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, Match, on, onCleanup, onMount, Show, Switch, untrack, type JSX } from "solid-js";
 import { prefersReducedMotion } from "@design/motion";
 import { Icon } from "../components/icons";
 import { TitleBar } from "../components/TitleBar";
@@ -11,6 +11,11 @@ import { firstStep, STEPS, TERMS_STEP, TERMS_VERSION, termsAccepted, writeRecord
 import type { CatalogModel, HardwareProfile } from "../service/types";
 import { rankModels, unranked } from "./recommend";
 import { FinishStep, HardwareStep, ModelStep, PrivacyStep, TermsStep, WelcomeStep, type ScanState } from "./Steps";
+import { ConfigureStep, LevelStep } from "./ExperienceSteps";
+import { eyebrowFor } from "./StepHeader";
+import { autoConfig, changedFrom, readConfig, runnableQuants, sanitize, writeConfig, type SetupConfig } from "./autoconfig";
+import { useAppState } from "../state";
+import { LEVEL_LABELS, otherLevel, type Channel, type ExperienceLevel } from "../lib/experience";
 
 /** Rows the hardware step reveals, in order. */
 export const SCAN_ROWS = 4;
@@ -18,17 +23,22 @@ export const SCAN_ROWS = 4;
 const SCAN_STEP_MS = 520;
 
 /**
- * First-run setup: six short steps in one keyboard-driven flow.
+ * First-run setup: eight short steps in one keyboard-driven flow.
  *
  * Keys (ignored while focus is on a control, which keeps its own keys, or a dialog is open):
  *   Enter or Right: continue.  Left: back.  Escape: skip to the terms (the one step setup keeps).
  * Accepting the terms is only ever a deliberate press of its button, never a stray Enter.
+ *
+ * The experience level (Beginner or Advanced) is chosen on step 2 and can be switched on every step
+ * from the footer, without leaving the step: both views show the same SetupConfig, so Beginner's
+ * automatic values become Advanced's starting values and Advanced edits survive a switch back.
  *
  * Nothing here blocks the app for good: Skip goes straight to the terms, and a finished setup is
  * remembered (progress.ts) so it never shows again unless the terms change or the user reruns it.
  */
 export function Onboarding(props: { platform: Platform; record: OnboardingRecord | null; onComplete: (record: OnboardingRecord) => void }): JSX.Element {
   const service = useService();
+  const app = useAppState();
   const termsChanged = props.record?.completed === true && !termsAccepted(props.record);
 
   const [step, setStep] = createSignal(firstStep(props.record));
@@ -115,6 +125,75 @@ export function Onboarding(props: { platform: Platform; record: OnboardingRecord
     setModel(hwUnknown() ? null : (ids[0] ?? ""));
   });
 
+  // ---- Load settings for the chosen model -------------------------------------------------------
+  const chosenModel = createMemo(() => {
+    const id = model();
+    return id ? catalogData()?.find((m) => m.id === id) : undefined;
+  });
+  /** The automatic plan for the chosen model on this machine (null without a model). */
+  const auto = createMemo(() => {
+    const m = chosenModel();
+    return m ? autoConfig(m, hwData(), app.channel()) : null;
+  });
+  // A plan saved by an earlier setup run is the starting point when it is for the same model.
+  const stored = readConfig();
+  const [config, setConfig] = createSignal<SetupConfig | null>(null);
+  // The plan follows the model: a new model gets its automatic plan (the stored one when it matches).
+  // Edits stay while the model stays.
+  createEffect(
+    on(chosenModel, (m) => {
+      if (!m) {
+        setConfig(null);
+        return;
+      }
+      if (untrack(config)?.modelId === m.id) return;
+      setConfig(stored?.modelId === m.id ? sanitize(m, stored) : untrack(auto));
+    }),
+  );
+  // The hardware answer can arrive after the model is known (a rescan): an untouched plan follows it.
+  createEffect(
+    on(
+      auto,
+      (next, prev) => {
+        const cur = untrack(config);
+        if (next && prev && cur && cur.modelId === next.modelId && changedFrom(prev, cur).length === 0) setConfig(next);
+      },
+      { defer: true },
+    ),
+  );
+  // A channel change can take away the chosen file (GSQ-RCO needs Experimental): fall back to the
+  // automatic file for the new channel, keeping every other value.
+  createEffect(
+    on(
+      () => app.channel(),
+      (ch) => {
+        const m = chosenModel();
+        const cur = untrack(config);
+        if (!m || !cur) return;
+        if (runnableQuants(m, ch).some((q) => q.id === cur.quantId)) return;
+        const fresh = autoConfig(m, hwData(), ch);
+        if (fresh) setConfig({ ...cur, quantId: fresh.quantId });
+      },
+      { defer: true },
+    ),
+  );
+  const editConfig = (next: SetupConfig) => {
+    const m = chosenModel();
+    if (m) setConfig(sanitize(m, next));
+  };
+  const resetConfig = () => {
+    setConfig(auto());
+    setAnnounce("Load settings back to the automatic plan.");
+  };
+
+  // ---- Experience level: the escape hatch ----------------------------------------------------
+  const switchLevel = (to: ExperienceLevel) => {
+    if (to === app.level()) return;
+    app.setLevel(to);
+    setAnnounce(`${LEVEL_LABELS[to]} view. Every value is kept.`);
+  };
+  const setChannel = (c: Channel) => app.setChannel(c);
+
   // ---- Navigation ----------------------------------------------------------------------------
   const go = (to: number) => {
     if (to < 0 || to >= STEPS.length || to === step()) return;
@@ -135,6 +214,9 @@ export function Onboarding(props: { platform: Platform; record: OnboardingRecord
     const keep = chosen !== null && chosen !== "" && (!checkable || selectable().includes(chosen));
     const record: OnboardingRecord = { v: 1, completed: true, termsVersion: TERMS_VERSION, model: keep ? chosen : null };
     writeRecord(record);
+    // The load plan is remembered with the model it belongs to; no model, no plan.
+    const cfg = config();
+    if (keep && cfg && cfg.modelId === chosen) writeConfig(cfg);
     props.onComplete(record);
   };
 
@@ -304,6 +386,11 @@ export function Onboarding(props: { platform: Platform; record: OnboardingRecord
                   <WelcomeStep />
                 </Frame>
               </Match>
+              <Match when={stepId() === "level"}>
+                <Frame dir={dir()}>
+                  <LevelStep eyebrow={eyebrowFor("level")} level={app.level()} onSelect={switchLevel} />
+                </Frame>
+              </Match>
               <Match when={stepId() === "hardware"}>
                 <Frame dir={dir()}>
                   <HardwareStep hw={hwData()} state={scanState()} scanned={scanned()} onRescan={rescan} />
@@ -322,6 +409,22 @@ export function Onboarding(props: { platform: Platform; record: OnboardingRecord
                   />
                 </Frame>
               </Match>
+              <Match when={stepId() === "configure"}>
+                <Frame dir={dir()}>
+                  <ConfigureStep
+                    eyebrow={eyebrowFor("configure")}
+                    level={app.level()}
+                    model={chosenModel()}
+                    hw={hwData()}
+                    config={config()}
+                    auto={auto()}
+                    channel={app.channel()}
+                    onChange={editConfig}
+                    onReset={resetConfig}
+                    onChannel={setChannel}
+                  />
+                </Frame>
+              </Match>
               <Match when={stepId() === "privacy"}>
                 <Frame dir={dir()}>
                   <PrivacyStep />
@@ -334,7 +437,7 @@ export function Onboarding(props: { platform: Platform; record: OnboardingRecord
               </Match>
               <Match when={stepId() === "finish"}>
                 <Frame dir={dir()}>
-                  <FinishStep hw={hwData()} recs={recs()} model={model()} onOpen={setLegal} />
+                  <FinishStep hw={hwData()} recs={recs()} model={model()} level={app.level()} config={config()} onOpen={setLegal} />
                 </Frame>
               </Match>
             </Switch>
@@ -347,6 +450,21 @@ export function Onboarding(props: { platform: Platform; record: OnboardingRecord
                   Skip setup
                 </button>
               </Show>
+              {/* The escape hatch: on every step, switches the view in place. */}
+              <button
+                type="button"
+                class="btn btn--tertiary onb-level-switch"
+                data-press
+                data-level={app.level()}
+                aria-describedby="onb-level-now"
+                onClick={() => switchLevel(otherLevel(app.level()))}
+              >
+                <Icon name={app.level() === "beginner" ? "sliders" : "bolt"} size={16} />
+                Switch to {LEVEL_LABELS[otherLevel(app.level())]}
+              </button>
+              <span class="sr-only" id="onb-level-now">
+                {`Now ${LEVEL_LABELS[app.level()]}. Nothing you chose is lost.`}
+              </span>
             </div>
             <span class="onb-progress" data-at={step()} aria-hidden="true">
               <span class="onb-progress__fill" />

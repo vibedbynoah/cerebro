@@ -320,7 +320,7 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
     },
 
     listCatalog: (): Promise<CatalogModel[]> =>
-      options.failCatalog ? Promise.reject(new Error("Mock: catalog unavailable")) : Promise.resolve(MOCK_CATALOG.map((m) => ({ ...m }))),
+      options.failCatalog ? Promise.reject(new Error("Mock: catalog unavailable")) : Promise.resolve(MOCK_CATALOG.map((m) => structuredClone(m))),
 
     getNetwork: () => Promise.resolve(network),
 

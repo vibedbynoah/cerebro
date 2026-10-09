@@ -32,7 +32,7 @@ const constant = (/** @type {string} */ name) => {
   return m[1];
 };
 const ONBOARDING_KEY = constant("ONBOARDING_KEY");
-const DONE_RECORD = JSON.stringify({ v: 1, completed: true, termsVersion: constant("TERMS_VERSION"), model: "qwen3-8b-q5km" });
+const DONE_RECORD = JSON.stringify({ v: 1, completed: true, termsVersion: constant("TERMS_VERSION"), model: "gemma-4-12b-it" });
 
 /** @param {import("@playwright/test").Page} page */
 async function settle(page) {
@@ -100,11 +100,21 @@ async function shootOnboarding(browser, origin, url, theme, offOrigin, problems)
   await page.goto(`${url}/`);
   await page.locator('.onb[data-step="welcome"]').waitFor();
   await shot("welcome");
+  await next("level");
+  await shot("level");
   await next("hardware");
   await page.locator('.scan-panel[data-state="done"]').waitFor({ timeout: 8000 });
   await shot("hardware");
   await next("model");
   await shot("model");
+  await next("configure");
+  await shot("configure-advanced");
+  // The escape hatch: the same values in the Beginner view, then back.
+  await page.locator(".onb-level-switch").click();
+  await page.locator(".plan").waitFor();
+  await shot("configure-beginner");
+  await page.locator(".onb-level-switch").click();
+  await page.locator(".adv").waitFor();
   await next("privacy");
   await shot("privacy");
   await next("terms");
@@ -121,6 +131,7 @@ async function shootOnboarding(browser, origin, url, theme, offOrigin, problems)
   // model step unranked because of it, and the fallback shown if setup itself breaks.
   await page.goto(`${url}/?mock=fail-hw`);
   await page.locator('.onb[data-step="welcome"]').waitFor();
+  await next("level");
   await next("hardware");
   await page.locator('.scan-panel[data-state="error"]').waitFor();
   await shot("hardware-error");
@@ -128,6 +139,7 @@ async function shootOnboarding(browser, origin, url, theme, offOrigin, problems)
   await shot("model-unranked");
   await page.goto(`${url}/?mock=bad-hw`);
   await page.locator('.onb[data-step="welcome"]').waitFor();
+  await next("level");
   await page.locator("[data-primary]").click();
   await page.locator(".setup-fallback").waitFor();
   await shot("fallback");
@@ -343,6 +355,20 @@ async function main() {
         await page.screenshot({ path: file, animations: "disabled" });
         console.log("Saved", file);
       }
+
+      // Beginner view of the screens the experience level changes, then back to Advanced.
+      await page.evaluate(() => window.localStorage.setItem("cerebro-experience", "beginner"));
+      for (const id of ["hub", "settings"]) {
+        await page.goto(`${url}/#/${id}`);
+        await page.reload();
+        await page.locator("main h1").waitFor();
+        await page.locator(".statusbar [data-hud='speed']").waitFor();
+        await settle(page);
+        const file = path.join(OUT_DIR, `${id}-beginner-${theme}.png`);
+        await page.screenshot({ path: file, animations: "disabled" });
+        console.log("Saved", file);
+      }
+      await page.evaluate(() => window.localStorage.removeItem("cerebro-experience"));
 
       // Command palette open, with a query typed.
       await page.goto(`${url}/#/home`);

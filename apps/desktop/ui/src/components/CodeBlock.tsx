@@ -6,7 +6,14 @@ import { Icon } from "./icons";
  * plain text only. Clipboard access can be refused (permissions, headless browsers): the status line
  * then says so instead of pretending.
  */
-export function CodeBlock(props: { title?: string; lines: readonly string[]; label?: string; large?: boolean }): JSX.Element {
+export function CodeBlock(props: {
+  title?: string;
+  lines: readonly string[];
+  label?: string;
+  large?: boolean;
+  /** The lines are one command wrapped for reading: one prompt, and Copy gives a single line. */
+  oneCommand?: boolean;
+}): JSX.Element {
   const [status, setStatus] = createSignal("");
   const [done, setDone] = createSignal(false);
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -15,7 +22,7 @@ export function CodeBlock(props: { title?: string; lines: readonly string[]; lab
   const copy = async () => {
     clearTimeout(timer);
     try {
-      await navigator.clipboard.writeText(props.lines.join("\n"));
+      await navigator.clipboard.writeText(props.oneCommand ? props.lines.map((l) => l.trim()).join(" ") : props.lines.join("\n"));
       setDone(true);
       setStatus("Copied");
     } catch {
@@ -53,7 +60,7 @@ export function CodeBlock(props: { title?: string; lines: readonly string[]; lab
             {(line, i) => (
               <>
                 <span class="code-block__prompt" aria-hidden="true">
-                  {"> "}
+                  {props.oneCommand && i() > 0 ? "  " : "> "}
                 </span>
                 {line}
                 {i() < props.lines.length - 1 ? "\n" : ""}

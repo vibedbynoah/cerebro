@@ -162,7 +162,8 @@ describe("copy keeps BRAND.md's voice", () => {
   });
 
   it("other products appear only where the user needs the interoperability fact", () => {
-    const allowed = new Set(["service/service.ts", "screens/models/Library.tsx", "screens/models/ModelsScreen.tsx", "screens/models/DiskPanel.tsx", "screens/models/parts.tsx"]);
+    // The setup model step says models already downloaded with those apps are read in place.
+    const allowed = new Set(["service/service.ts", "screens/models/Library.tsx", "screens/models/ModelsScreen.tsx", "screens/models/DiskPanel.tsx", "screens/models/parts.tsx", "onboarding/Steps.tsx"]);
     for (const file of ui) {
       const rel = path.relative(SRC, file).split(path.sep).join("/");
       if (/LM Studio|Ollama/.test(read(file))) expect(allowed, rel).toContain(rel);

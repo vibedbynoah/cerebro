@@ -214,7 +214,7 @@ test("window controls explain themselves in the browser preview", async ({ page 
 
 test("Model Hub degrades gracefully offline", async ({ page }) => {
   await openScreen(page, "hub");
-  await expect(page.locator(".notice")).toContainText("Everything else in Cerebro works offline");
+  await expect(page.locator(".notice")).toContainText("downloading a file needs a connection");
 });
 
 test("the HUD shows mock live data and updates it", async ({ page }) => {

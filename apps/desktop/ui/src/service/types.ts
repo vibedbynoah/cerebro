@@ -110,6 +110,52 @@ export interface CatalogModel {
   /** One short phrase, e.g. "Coding agent". */
   goodFor: string;
   provenance: Provenance;
+  /** Transformer blocks, for offload arithmetic (as published). */
+  layers: number;
+  /** Longest context the model was trained for, tokens (as published). */
+  contextMax: number;
+  /** The publisher's recommended sampler values, Beginner's starting point. */
+  sampler: CatalogSampler;
+  /** Every quantised file Cerebro lists for this model, best formats first. `quant`/`sizeGiB` above
+   *  name the general-purpose one setup ranks by. */
+  quants: CatalogQuant[];
+}
+
+export interface CatalogSampler {
+  temperature: number;
+  topP: number;
+  topK: number;
+  minP: number;
+}
+
+/** Quantisation families the catalogue lists. Each is a different way to store fewer bits per weight. */
+export type QuantFormat = "gsq-rco" | "unsloth-ud" | "imatrix-iq" | "k-quant" | "exl3" | "awq" | "mlx";
+
+/** The engine a file needs. Only `llama.cpp` and `strata` files run in this build. */
+export type QuantBackend = "llama.cpp" | "strata" | "exllamav3" | "vllm" | "mlx";
+
+/**
+ * One downloadable file of a model. Quality is measured against the unquantised (BF16) weights:
+ * KL divergence of the next-token distribution and the perplexity increase. Speed is decode tok/s on
+ * this machine, null where the file cannot run here. All three carry `provenance`.
+ */
+export interface CatalogQuant {
+  id: string;
+  /** File label as published, e.g. "UD-Q4_K_XL". */
+  label: string;
+  format: QuantFormat;
+  backend: QuantBackend;
+  bitsPerWeight: number;
+  sizeGiB: number;
+  /** Mean KL divergence against BF16. 0 is no change. */
+  klDiv: number;
+  /** Perplexity increase against BF16, percent. */
+  pplDeltaPct: number;
+  /** Decode tok/s on this machine with Cerebro's starting settings, or null when it cannot run here. */
+  decodeTps: number | null;
+  /** Why it cannot run here, when `decodeTps` is null. */
+  unavailable: string | null;
+  provenance: Provenance;
 }
 
 // ---------------------------------------------------------------------------------------------

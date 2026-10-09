@@ -371,7 +371,7 @@
   min-width: 11rem;
 }
 
-/* Progress: a hairline that fills one sixth per step. Scale only (transform), so it never lays out. */
+/* Progress: a hairline that fills one eighth per step. Scale only (transform), so it never lays out. */
 .onb-progress {
   position: relative;
   overflow: hidden;
@@ -387,15 +387,17 @@
   border-radius: inherit;
   background: var(--color-accent);
   transform-origin: left center;
-  transform: scaleX(var(--onb-progress, 0.1667));
+  transform: scaleX(var(--onb-progress, 0.125));
   transition: transform var(--duration-slow) var(--ease-emphasized);
 }
 
-.onb-progress[data-at="1"] { --onb-progress: 0.3333; }
-.onb-progress[data-at="2"] { --onb-progress: 0.5; }
-.onb-progress[data-at="3"] { --onb-progress: 0.6667; }
-.onb-progress[data-at="4"] { --onb-progress: 0.8333; }
-.onb-progress[data-at="5"] { --onb-progress: 1; }
+.onb-progress[data-at="1"] { --onb-progress: 0.25; }
+.onb-progress[data-at="2"] { --onb-progress: 0.375; }
+.onb-progress[data-at="3"] { --onb-progress: 0.5; }
+.onb-progress[data-at="4"] { --onb-progress: 0.625; }
+.onb-progress[data-at="5"] { --onb-progress: 0.75; }
+.onb-progress[data-at="6"] { --onb-progress: 0.875; }
+.onb-progress[data-at="7"] { --onb-progress: 1; }
 
 /* ---------------------------------------------------------------------- */
 /* 1. Welcome                                                              */
@@ -1363,6 +1365,11 @@
   margin: 0;
 }
 
+/* An odd last item takes the full row instead of leaving a hole. */
+.summary__item:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+
 .summary__item {
   display: grid;
   align-content: start;
@@ -1682,6 +1689,344 @@
   }
 
   .rec.is-selected {
+    outline: 2px solid Highlight;
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+/* Experience level: the escape hatch, the level step, load settings       */
+/* ---------------------------------------------------------------------- */
+
+.onb-foot__start {
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* Present on every step. Quiet (tertiary) so it never competes with Continue, but always there. */
+.onb-level-switch .icon {
+  transition: transform var(--duration-base) var(--ease-spring);
+}
+
+@media (hover: hover) {
+  .onb-level-switch:hover .icon {
+    transform: rotate(-12deg) scale(1.08);
+  }
+}
+
+.level-pick {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.level-card {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 20px;
+  align-content: start;
+  column-gap: var(--space-3);
+  row-gap: var(--space-2);
+  padding: var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface-1);
+  cursor: pointer;
+  transition:
+    border-color var(--duration-fast) var(--ease-standard),
+    background-color var(--duration-fast) var(--ease-standard),
+    transform var(--duration-instant) var(--ease-spring);
+  animation: onb-rise var(--duration-slow) var(--ease-emphasized) both;
+}
+
+.level-card + .level-card {
+  animation-delay: 70ms;
+}
+
+@media (hover: hover) {
+  .level-card:hover {
+    border-color: var(--color-border-strong);
+    background-color: var(--color-surface-2);
+  }
+}
+
+.level-card:active {
+  transform: scale(0.994);
+}
+
+.level-card.is-selected {
+  border-color: var(--color-accent);
+  background:
+    linear-gradient(var(--color-accent-muted), var(--color-accent-muted)),
+    var(--color-surface-1);
+}
+
+.level-card:has(.level-card__input:focus-visible) {
+  box-shadow: var(--focus-ring);
+}
+
+.level-card__input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: inherit;
+  z-index: -1;
+}
+
+.level-card__icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-3);
+  color: var(--color-accent-text);
+  transition: transform var(--duration-base) var(--ease-spring);
+}
+
+.level-card.is-selected .level-card__icon {
+  transform: scale(1.06);
+}
+
+.level-card__name {
+  align-self: center;
+  font-size: 1.125rem;
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.level-card__radio {
+  grid-column: 3;
+  grid-row: 1;
+  align-self: center;
+  position: relative;
+  width: 18px;
+  height: 18px;
+  border: 1.5px solid var(--color-border-strong);
+  border-radius: var(--radius-pill);
+}
+
+.level-card__radio::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: inherit;
+  background: var(--color-accent);
+  opacity: 0;
+  transform: scale(0.3);
+  transition:
+    opacity var(--duration-fast) var(--ease-standard),
+    transform var(--duration-base) var(--ease-spring);
+}
+
+.level-card.is-selected .level-card__radio {
+  border-color: var(--color-accent);
+}
+
+.level-card.is-selected .level-card__radio::after {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.level-card__lede {
+  grid-column: 1 / -1;
+  color: var(--color-text-secondary);
+  line-height: var(--leading-normal);
+}
+
+.level-card__points {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.level-card__points li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.level-card__points .icon {
+  flex: none;
+  margin-top: 3px;
+  color: var(--color-accent-text);
+}
+
+/* Beginner's plan: one row per decision, the value in mono, the reason in plain words. */
+.plan {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plan__item {
+  display: grid;
+  grid-template-columns: 36px minmax(10rem, 0.8fr) minmax(0, 1fr);
+  grid-template-areas:
+    "icon label value"
+    "icon text text";
+  column-gap: var(--space-4);
+  row-gap: var(--space-1);
+  align-items: baseline;
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface-1);
+  animation: onb-rise var(--duration-slow) var(--ease-emphasized) both;
+}
+
+.plan__item:nth-child(2) { animation-delay: 50ms; }
+.plan__item:nth-child(3) { animation-delay: 100ms; }
+.plan__item:nth-child(4) { animation-delay: 150ms; }
+.plan__item:nth-child(5) { animation-delay: 200ms; }
+
+.plan__item[data-changed="true"] {
+  border-color: color-mix(in oklch, var(--color-accent) 55%, var(--color-border));
+}
+
+.plan__icon {
+  grid-area: icon;
+  align-self: start;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-2);
+  color: var(--color-accent-text);
+}
+
+.plan__label {
+  grid-area: label;
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.plan__value {
+  grid-area: value;
+  justify-self: end;
+  font-size: var(--text-small);
+  color: var(--color-text-primary);
+  text-align: right;
+}
+
+.plan__text {
+  grid-area: text;
+  font-size: var(--text-small);
+  line-height: var(--leading-normal);
+  color: var(--color-text-secondary);
+}
+
+.config-changed {
+  align-items: center;
+}
+
+.config-changed .btn {
+  margin-inline-start: auto;
+  flex: none;
+}
+
+/* Advanced: the same plan as editable fields. */
+.adv {
+  display: grid;
+  gap: var(--space-6);
+}
+
+.adv__block {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+  animation: onb-rise var(--duration-slow) var(--ease-emphasized) both;
+}
+
+.adv__block:nth-child(2) { animation-delay: 60ms; }
+.adv__block:nth-child(3) { animation-delay: 120ms; }
+.adv__block:nth-child(4) { animation-delay: 180ms; }
+
+.adv__title {
+  margin: 0;
+  font-size: var(--text-body);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.adv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  gap: var(--space-4);
+}
+
+.adv-field {
+  min-width: 0;
+}
+
+.adv-field .field__label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.adv-field__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--color-accent);
+}
+
+.adv-field[data-changed="true"] .input {
+  border-color: color-mix(in oklch, var(--color-accent) 70%, var(--color-border-strong));
+}
+
+@media (max-width: 900px) {
+  .level-pick {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .plan__item {
+    grid-template-columns: 36px minmax(0, 1fr);
+    grid-template-areas:
+      "icon label"
+      "icon value"
+      "icon text";
+  }
+
+  .plan__value {
+    justify-self: start;
+    text-align: left;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .level-card,
+  .plan__item,
+  .adv__block {
+    animation: none !important;
+  }
+
+  .level-card:active {
+    transform: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .level-card__radio {
+    forced-color-adjust: none;
+  }
+
+  .level-card.is-selected {
     outline: 2px solid Highlight;
   }
 }

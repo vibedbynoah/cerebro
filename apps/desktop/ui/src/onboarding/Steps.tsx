@@ -8,6 +8,9 @@ import type { HardwareProfile, SettingKey } from "../service/types";
 import { useAppState } from "../state";
 import { BrandHero } from "./BrandHero";
 import { TERMS_VERSION } from "./progress";
+import { eyebrowFor, StepHeader } from "./StepHeader";
+import { contextLabel, type SetupConfig } from "./autoconfig";
+import { LEVEL_LABELS, type ExperienceLevel } from "../lib/experience";
 import { pct, type Recommendation } from "./recommend";
 
 /**
@@ -17,21 +20,6 @@ import { pct, type Recommendation } from "./recommend";
  */
 
 const gib = (n: number): string => (Math.round(n * 10) / 10).toFixed(1);
-
-function StepHeader(props: { eyebrow: string; icon: IconName; title: string; lede: JSX.Element; wide?: boolean }): JSX.Element {
-  return (
-    <header class="onb-head" classList={{ "onb-head--wide": props.wide ?? false }}>
-      <p class="eyebrow">
-        <Icon name={props.icon} size={14} />
-        {props.eyebrow}
-      </p>
-      <h1 class="onb-title" id="onb-step-title" tabindex="-1" aria-describedby="onb-step-count">
-        {props.title}
-      </h1>
-      <p class="onb-lede">{props.lede}</p>
-    </header>
-  );
-}
 
 // ---- 1. Welcome ---------------------------------------------------------------------------------
 
@@ -133,7 +121,7 @@ export function HardwareStep(props: { hw: HardwareProfile | undefined; state: Sc
   return (
     <div class="onb-page">
       <StepHeader
-        eyebrow="Step 2 · This machine"
+        eyebrow={eyebrowFor("hardware")}
         icon="chip"
         title="First, what this computer has."
         lede="Cerebro sizes models from four readings. They stay on this computer."
@@ -268,13 +256,13 @@ export function ModelStep(props: {
   return (
     <div class="onb-page onb-page--dense">
       <StepHeader
-        eyebrow="Step 3 · A first model"
+        eyebrow={eyebrowFor("model")}
         icon="models"
         title={ranked() ? "Models that suit this machine." : "Pick a first model."}
         lede={
           ranked()
-            ? "Ranked by how each fits this computer's memory. Nothing downloads now; change it any time in Model Hub."
-            : "Choose any model below, or decide later. Nothing downloads now, and you can change it any time in Model Hub."
+            ? "Ranked by how each fits this computer's memory. Nothing downloads now. Models you already have in LM Studio or Ollama appear in Models as they are."
+            : "Choose any model below, or decide later. Nothing downloads now. Models you already have in LM Studio or Ollama appear in Models as they are."
         }
       />
       <Show when={!props.loading} fallback={<p class="hint">Reading the catalog…</p>}>
@@ -459,7 +447,7 @@ export function PrivacyStep(): JSX.Element {
   return (
     <div class="onb-page">
       <StepHeader
-        eyebrow="Step 4 · Privacy and protection"
+        eyebrow={eyebrowFor("privacy")}
         icon="security"
         title="What stays on this machine."
         lede="No accounts and no telemetry. These protections are on from the first start, and each one says exactly what it does."
@@ -511,7 +499,7 @@ export function TermsStep(props: { accepted: boolean; changed: boolean; onOpen: 
   ];
   return (
     <div class="onb-page">
-      <StepHeader eyebrow="Step 5 · Terms" icon="documents" title="The terms, in plain words." lede="One screen. The full versions are bundled with the app and open without a network." />
+      <StepHeader eyebrow={eyebrowFor("terms")} icon="documents" title="The terms, in plain words." lede="One screen. The full versions are bundled with the app and open without a network." />
       <Show when={props.changed}>
         <p class="notice onb-changed" role="note">
           <Icon name="info" size={18} />
@@ -566,7 +554,14 @@ export function TermsStep(props: { accepted: boolean; changed: boolean; onOpen: 
 
 // ---- 6. Finish ----------------------------------------------------------------------------------
 
-export function FinishStep(props: { hw: HardwareProfile | undefined; recs: readonly Recommendation[]; model: string | null; onOpen: (doc: LegalDocId) => void }): JSX.Element {
+export function FinishStep(props: {
+  hw: HardwareProfile | undefined;
+  recs: readonly Recommendation[];
+  model: string | null;
+  level: ExperienceLevel;
+  config: SetupConfig | null;
+  onOpen: (doc: LegalDocId) => void;
+}): JSX.Element {
   const { settings } = useAppState();
   const PROTECTIONS: SettingKey[] = ["processContainment", "cleanEnvironment", "integrityCheck", "permissionPrompts", "loopbackOnly"];
   const onCount = () => {
@@ -584,7 +579,7 @@ export function FinishStep(props: { hw: HardwareProfile | undefined; recs: reado
             <path class="finish-mark__check" d="M20 33.5 28.5 42 45 24" pathLength="1" />
           </svg>
         </div>
-        <StepHeader eyebrow="Step 6 · Ready" icon="check" title="Cerebro is ready." lede="Here is what setup found and chose. All of it can be changed later." />
+        <StepHeader eyebrow={eyebrowFor("finish")} icon="check" title="Cerebro is ready." lede="Here is what setup found and chose. All of it can be changed later." />
       </div>
       {/* The one line that matters: what to do next with what was chosen. */}
       <p class="finish-payoff">
@@ -637,6 +632,27 @@ export function FinishStep(props: { hw: HardwareProfile | undefined; recs: reado
                 </>
               )}
             </Show>
+          </dd>
+        </div>
+        <div class="summary__item">
+          <dt>
+            <Icon name={props.level === "beginner" ? "bolt" : "sliders"} size={16} />
+            Experience
+          </dt>
+          <dd>
+            <span class="summary__value">{LEVEL_LABELS[props.level]}</span>
+            <span class="summary__meta">
+              <Show when={picked() && props.config ? { r: picked() as Recommendation, c: props.config } : undefined} fallback="Change it any time in Settings.">
+                {(v) => {
+                  const q = () => v().r.model.quants.find((x) => x.id === v().c.quantId);
+                  return (
+                    <>
+                      <span class="mono">{q()?.label ?? v().r.model.quant}</span>, <span class="mono">{contextLabel(v().c.contextLength)}</span> context. Change it any time in Settings.
+                    </>
+                  );
+                }}
+              </Show>
+            </span>
           </dd>
         </div>
         <div class="summary__item">

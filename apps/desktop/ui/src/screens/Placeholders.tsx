@@ -41,44 +41,6 @@ export function Chat(): JSX.Element {
   );
 }
 
-export function ModelHub(): JSX.Element {
-  const { settings, network } = useAppState();
-  const offline = () => settings()?.offlineMode === true || network() !== "online";
-  const downloadsOff = () => settings()?.allowModelDownloads === false;
-  return (
-    <div class="screen">
-      <ScreenHeader route="hub" />
-      <Show when={offline() || downloadsOff()}>
-        <div class="notice reveal" data-reveal role="status">
-          <Icon name="offline" size={18} />
-          <p>
-            <Show when={downloadsOff()} fallback={<>No network right now. Everything else in Cerebro works offline; this screen lists downloads when a connection is available.</>}>
-              Model downloads are switched off. <SettingsLink>Change this in Settings</SettingsLink>.
-            </Show>
-          </p>
-        </div>
-      </Show>
-      <Preview
-        art="catalog"
-        title="Models that fit this machine, first"
-        lede={
-          <>
-            Browse by size and by how much of this card's <Term k="vram" /> a model needs, then download the <Term k="quant" /> level you choose.
-          </>
-        }
-        features={[
-          { icon: "chip", title: "Fit before download", text: "See whether a model fits in video memory before spending the bandwidth." },
-          { icon: "security", title: "Checked files", text: "Each download is checked against its published fingerprint before first use." },
-          { icon: "offline", title: "Optional network", text: "The only screen that uses a network. Models already on disk never need one." },
-        ]}
-      />
-      <Section id="today" title="Works today" description="Lists the models already on this machine, with their file paths.">
-        <CodeBlock lines={["cerebro models"]} label="Copy command" />
-      </Section>
-    </div>
-  );
-}
-
 export function ImageStudio(): JSX.Element {
   return (
     <div class="screen">

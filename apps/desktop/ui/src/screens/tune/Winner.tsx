@@ -7,6 +7,7 @@ import { hrefWithModel } from "../../lib/routes";
 import { answerSeconds, depthLabel, formatClock, markTerms, objectiveScore, type CandidateView, type TuneView } from "../../lib/tune";
 import type { TuneMeasurement } from "../../service/types";
 import { fmt, Num, SettingName, TermLine } from "./bits";
+import { useAppState } from "../../state";
 
 interface Metric {
   key: keyof TuneMeasurement;
@@ -33,6 +34,7 @@ interface Headline {
  * appears at once, with no entrance and no count-up.
  */
 export function WinnerCard(props: { view: TuneView; animate: boolean }): JSX.Element {
+  const app = useAppState();
   const run = () => props.view.run!;
   const byId = (id: string) => props.view.candidates.find((c) => c.id === id);
   const winner = () => byId(props.view.winner!.candidateId)!;
@@ -256,7 +258,8 @@ export function WinnerCard(props: { view: TuneView; animate: boolean }): JSX.Ele
                   </dt>
                   <dd>
                     {s.value}
-                    <Show when={s.flag}>
+                    {/* Raw flags are Advanced only (lib/experience.ts). */}
+                    <Show when={app.level() === "advanced" && s.flag}>
                       <code class="mono">{s.flag}</code>
                     </Show>
                   </dd>

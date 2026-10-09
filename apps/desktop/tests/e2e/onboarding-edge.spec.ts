@@ -42,6 +42,7 @@ async function toTermsAndFinish(page: Page): Promise<void> {
 test("hardware detection fails: setup still runs, says so, and lists every model unranked to pick by hand", async ({ page }) => {
   await open(page, "?mock=fail-hw");
   await primary(page).click();
+  await primary(page).click();
   await expect(step(page, "hardware")).toBeVisible();
   await expect(page.locator(".scan-panel")).toHaveAttribute("data-state", "error");
   await expect(page.getByRole("alert")).toContainText("The hardware check did not finish");
@@ -53,23 +54,28 @@ test("hardware detection fails: setup still runs, says so, and lists every model
   await expect(page.locator(".rec-legend")).toContainText("listed unranked");
   // The whole catalog, in catalog order, nothing ruled out, nothing preselected, no "best".
   const radios = page.getByRole("radio");
-  await expect(radios).toHaveCount(6);
-  await expect(page.locator(".rec__name").first()).toHaveText("Qwen3-8B");
-  await expect(page.locator(".rec").nth(4)).toContainText("Llama-3.3-70B-Instruct");
+  await expect(radios).toHaveCount(8);
+  await expect(page.locator(".rec__name").first()).toHaveText("Gemma-4-12B-it");
+  await expect(page.locator(".rec").nth(6)).toContainText("Mistral-Medium-3.5-128B");
   await expect(page.locator(".rec[data-rank='1']")).toHaveCount(0);
   await expect(page.locator(".rec-skip")).toHaveCount(0);
   await expect(page.getByText("No model in the catalog fits")).toHaveCount(0);
-  for (let i = 0; i < 6; i++) await expect(radios.nth(i)).not.toBeChecked();
+  for (let i = 0; i < 8; i++) await expect(radios.nth(i)).not.toBeChecked();
   expect(await axe(page), "model step, unranked").toEqual([]);
 
   await page.locator(".rec").nth(2).click();
   await expect(radios.nth(2)).toBeChecked();
   const chosen = await radios.nth(2).getAttribute("value");
   await primary(page).click();
+  // Without a hardware reading the load settings still have a plan (sized from the file alone).
+  await expect(step(page, "configure")).toBeVisible();
+  await expect(page.locator(".adv")).toBeVisible();
+  expect(await axe(page), "configure, no hardware").toEqual([]);
+  await primary(page).click();
   await expect(step(page, "privacy")).toBeVisible();
   await toTermsAndFinish(page);
   await expect(page.locator(".summary")).toContainText("Not checked");
-  await expect(page.locator(".finish-payoff")).toContainText("Qwen3-Coder-30B-A3B-Instruct");
+  await expect(page.locator(".finish-payoff")).toContainText("gpt-oss-20b");
   await primary(page).click();
   await expect(page.locator("main h1")).toHaveText("This machine, measured.");
   expect((await stored(page))?.model).toBe(chosen);
@@ -78,6 +84,7 @@ test("hardware detection fails: setup still runs, says so, and lists every model
 test("Scan again after a failed check reads the machine and finishes the scan", async ({ page }) => {
   await open(page, "?mock=fail-hw-once");
   await primary(page).click();
+  await primary(page).click();
   await expect(page.locator(".scan-panel")).toHaveAttribute("data-state", "error");
   await page.getByRole("button", { name: "Scan again" }).click();
   await expect(page.locator(".scan-panel")).toHaveAttribute("data-state", "done", { timeout: 8000 });
@@ -85,18 +92,22 @@ test("Scan again after a failed check reads the machine and finishes the scan", 
   await expect(page.getByRole("alert")).toHaveCount(0);
   // Ranked again, with the best fit preselected.
   await primary(page).click();
-  await expect(page.locator(".rec[data-rank='1']")).toContainText("Qwen3-8B");
+  await expect(page.locator(".rec[data-rank='1']")).toContainText("Gemma-4-12B-it");
   await expect(page.getByRole("radio").first()).toBeChecked();
 });
 
 test("the model list fails: setup says so plainly and still finishes, with no model remembered", async ({ page }) => {
   await open(page, "?mock=fail-catalog");
   await primary(page).click();
+  await primary(page).click();
   await expect(page.locator(".scan-panel")).toHaveAttribute("data-state", "done", { timeout: 8000 });
   await primary(page).click();
   await expect(step(page, "model")).toBeVisible();
   await expect(page.locator(".rec-notice")).toContainText("The model list could not be read");
   await expect(page.getByRole("radio")).toHaveCount(0);
+  await primary(page).click();
+  await expect(step(page, "configure")).toBeVisible();
+  await expect(page.locator(".rec-notice")).toContainText("No first model chosen");
   await primary(page).click();
   await expect(step(page, "privacy")).toBeVisible();
   await toTermsAndFinish(page);
@@ -109,6 +120,7 @@ test("the model list fails: setup says so plainly and still finishes, with no mo
 test("if setup itself breaks, a fallback still offers the terms and Accept, and the app opens", async ({ page }) => {
   // A malformed hardware answer makes the hardware step throw while rendering.
   await open(page, "?mock=bad-hw");
+  await primary(page).click();
   await primary(page).click();
   await expect(page.locator(".setup-fallback")).toBeVisible();
   await expect(page.locator("h1")).toHaveText("Setup could not finish.");
@@ -128,6 +140,7 @@ test("on the model step, Down then Enter picks the second model and continues", 
   await open(page);
   await primary(page).click();
   await primary(page).click();
+  await primary(page).click();
   await expect(step(page, "model")).toBeVisible();
   const radios = page.getByRole("radio");
   await radios.first().focus();
@@ -135,7 +148,7 @@ test("on the model step, Down then Enter picks the second model and continues", 
   await expect(radios.nth(1)).toBeChecked();
   const chosen = await radios.nth(1).getAttribute("value");
   await page.keyboard.press("Enter");
-  await expect(step(page, "privacy")).toBeVisible();
+  await expect(step(page, "configure")).toBeVisible();
   await page.keyboard.press("Escape"); // skip to the terms
   await expect(step(page, "terms")).toBeVisible();
   await page.getByRole("button", { name: "Accept and continue" }).click();
@@ -148,9 +161,11 @@ test("each radio is named by model and fit only, and described by its reason and
   await open(page);
   await primary(page).click();
   await primary(page).click();
+  await primary(page).click();
+  await expect(step(page, "model")).toBeVisible();
   const first = page.getByRole("radio").first();
-  await expect(first).toHaveAccessibleName("Qwen3-8B Best fit Fits in video memory");
-  await expect(first).toHaveAccessibleDescription(/^Fits entirely in your .* 5\.4 GiB$/);
+  await expect(first).toHaveAccessibleName("Gemma-4-12B-it Best fit Fits in video memory");
+  await expect(first).toHaveAccessibleDescription(/^Fits entirely in your .* 6\.9 GiB$/);
 });
 
 test("a stored model that no longer loads is never written back; Decide later stores none", async ({ page }) => {
@@ -172,10 +187,15 @@ test("a stored model that no longer loads is never written back; Decide later st
   await expect(step(page, "welcome")).toBeVisible();
   await primary(page).click();
   await primary(page).click();
+  await primary(page).click();
+  await expect(step(page, "model")).toBeVisible();
   await expect(page.getByRole("radio").first()).toBeChecked();
   await page.locator(".rec--later").click();
   await expect(page.getByRole("radio", { name: "Decide later" })).toBeChecked();
   await primary(page).click();
+  await expect(step(page, "configure")).toBeVisible();
+  await primary(page).click();
+  await expect(step(page, "privacy")).toBeVisible();
   await toTermsAndFinish(page);
   await expect(page.locator(".finish-payoff")).toContainText("No first model yet");
   await primary(page).click();
@@ -188,13 +208,13 @@ test("steps are announced once (heading focus, with the count as its description
   await expect(page.locator("#onb-step-title")).toHaveAttribute("aria-describedby", "onb-step-count");
   await primary(page).click();
   await expect(page.locator("#onb-step-title")).toBeFocused();
-  await expect(page.locator("#onb-step-title")).toHaveAccessibleDescription("Step 2 of 6");
+  await expect(page.locator("#onb-step-title")).toHaveAccessibleDescription("Step 2 of 8");
   // The live region stays quiet on a plain step change (the scan's own result may speak later).
   await expect(page.locator(".onb > [role='status']")).not.toContainText("Step 2");
   const rail = page.locator(".onb-rail");
   // (Chromium inserts a space before the visually hidden state; screen readers read it the same.)
   await expect(rail.getByRole("button", { name: /^Welcome\s?, completed$/ })).toBeVisible();
-  await expect(rail.locator("[aria-current='step']")).toContainText(/This machine\s?, current step/);
+  await expect(rail.locator("[aria-current='step']")).toContainText(/Experience\s?, current step/);
   // Skipping still explains itself.
   await page.keyboard.press("Escape");
   await expect(page.locator(".onb > [role='status']")).toHaveText("Setup skipped. One step left: the terms.");
@@ -210,7 +230,7 @@ for (const size of [
     const rail = page.locator(".onb-rail");
     if (size.width <= 900) await expect(rail).toBeHidden();
     else await expect(rail).toBeVisible();
-    for (const id of ["welcome", "hardware", "model", "privacy", "terms", "finish"]) {
+    for (const id of ["welcome", "level", "hardware", "model", "configure", "privacy", "terms", "finish"]) {
       await expect(step(page, id)).toBeVisible();
       if (id === "hardware") await expect(page.locator(".scan-panel")).toHaveAttribute("data-state", "done", { timeout: 8000 });
       // Measured at rest: a step's entry slide is a transform inside an overflow-hidden stage.

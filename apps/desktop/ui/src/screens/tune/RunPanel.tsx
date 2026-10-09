@@ -21,6 +21,7 @@ import { Spark, SpeedChart, VramChart } from "./charts";
 import type { TuneSession } from "./session";
 import { fmt, Num, ProgressBar, SettingName } from "./bits";
 import { WinnerCard } from "./Winner";
+import { useAppState } from "../../state";
 
 // ---- Phases -------------------------------------------------------------------------------------
 
@@ -275,14 +276,19 @@ function CandidateRow(props: { c: CandidateView; index: number; view: TuneView; 
   const id = createUniqueId();
   const c = () => props.c;
   const state = () => rowState(c(), props.view.status === "done");
+  // Beginner hides raw backend flags (lib/experience.ts): the row reads in plain words instead.
+  const app = useAppState();
+  const showFlags = () => app.level() === "advanced";
   const flags = () =>
-    c()
-      .candidate.settings.map((s) => s.flag)
-      .filter((f): f is string => f !== null)
-      .join(" ");
+    showFlags()
+      ? c()
+          .candidate.settings.map((s) => s.flag)
+          .filter((f): f is string => f !== null)
+          .join(" ")
+      : "";
   const plain = () =>
     c()
-      .candidate.settings.filter((s) => s.flag === null)
+      .candidate.settings.filter((s) => !showFlags() || s.flag === null)
       .map((s) => s.value)
       .join(" · ");
   const lastTps = () => c().samples.at(-1)?.tps ?? null;
@@ -367,7 +373,7 @@ function CandidateRow(props: { c: CandidateView; index: number; view: TuneView; 
                 </dt>
                 <dd>
                   {s.value}
-                  <Show when={s.flag}>
+                  <Show when={showFlags() && s.flag}>
                     <code class="mono">{s.flag}</code>
                   </Show>
                 </dd>

@@ -10,7 +10,7 @@ import { firstStep, needsOnboarding, parseRecord, STEPS, TERMS_STEP, TERMS_VERSI
 import { fitFor, pct, rankModels, unranked, usableMemory } from "../../ui/src/onboarding/recommend";
 import type { CatalogModel, HardwareProfile } from "../../ui/src/service/types";
 
-const done: OnboardingRecord = { v: 1, completed: true, termsVersion: TERMS_VERSION, model: "qwen3-8b-q5km" };
+const done: OnboardingRecord = { v: 1, completed: true, termsVersion: TERMS_VERSION, model: "gemma-4-12b-it" };
 
 describe("onboarding record", () => {
   it("round-trips a valid record", () => {
@@ -60,7 +60,7 @@ describe("onboarding record", () => {
     expect(firstStep(null)).toBe(0);
     expect(firstStep({ ...done, completed: false, termsVersion: null })).toBe(0);
     expect(STEPS[TERMS_STEP]?.id).toBe("terms");
-    expect(STEPS.map((s) => s.id)).toEqual(["welcome", "hardware", "model", "privacy", "terms", "finish"]);
+    expect(STEPS.map((s) => s.id)).toEqual(["welcome", "level", "hardware", "model", "configure", "privacy", "terms", "finish"]);
   });
 });
 
@@ -68,11 +68,13 @@ describe("model recommendation", () => {
   it("ranks the mock catalog by fit on the mock machine", () => {
     const recs = rankModels(MOCK_CATALOG, MOCK_HARDWARE);
     expect(recs.map((r) => [r.model.id, r.fit, r.rank])).toEqual([
-      ["qwen3-8b-q5km", "gpu", 1],
-      ["gemma-4-e4b-q4km", "gpu", 2],
-      ["qwen3-coder-30b-a3b-q4km", "moe-offload", 3],
-      ["mistral-small-24b-q4km", "split", 4],
-      ["llama-3.3-70b-q4km", "too-large", 5],
+      ["gemma-4-12b-it", "gpu", 1],
+      ["gemma-4-e4b-it", "gpu", 2],
+      ["gpt-oss-20b", "moe-offload", 3],
+      ["gemma-4-26b-a4b-it", "moe-offload", 4],
+      ["laguna-xs-2.1", "moe-offload", 5],
+      ["qwen3.8-27b", "split", 6],
+      ["mistral-medium-3.5-128b", "too-large", 7],
     ]);
     for (const r of recs) {
       expect(r.why.length).toBeGreaterThan(40);
@@ -113,7 +115,7 @@ describe("model recommendation", () => {
     expect(usableMemory(cpuOnly)).toEqual({ vramGiB: 0, ramGiB: 10, totalGiB: 10 });
     const recs = rankModels(MOCK_CATALOG, cpuOnly);
     expect(recs.some((r) => r.fit === "gpu")).toBe(false);
-    const small = recs.find((r) => r.model.id === "gemma-4-e4b-q4km");
+    const small = recs.find((r) => r.model.id === "gemma-4-e4b-it");
     expect(small?.fit).toBe("split");
     expect(small?.why).toMatch(/processor/);
   });

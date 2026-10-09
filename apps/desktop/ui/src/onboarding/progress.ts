@@ -15,8 +15,10 @@ export const TERMS_VERSION = "2026-09-30";
 
 export const STEPS = [
   { id: "welcome", label: "Welcome" },
+  { id: "level", label: "Experience" },
   { id: "hardware", label: "This machine" },
   { id: "model", label: "A first model" },
+  { id: "configure", label: "Load settings" },
   { id: "privacy", label: "Privacy and protection" },
   { id: "terms", label: "Terms" },
   { id: "finish", label: "Ready" },

@@ -1994,3 +1994,117 @@ body {
     forced-color-adjust: none;
   }
 }
+
+/* ---- Settings: experience level and optimisation channel ---- */
+
+.channel-card {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  padding: var(--space-5);
+}
+
+.channel-card__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.channel-card__title {
+  margin: 0;
+  font-size: var(--text-body);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.channel-card__locked {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.channel-card > .hint {
+  margin: 0;
+}
+
+.opt-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.opt-list__item {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  grid-template-areas:
+    "mark name channel"
+    ". note note";
+  align-items: center;
+  column-gap: var(--space-3);
+  row-gap: 2px;
+  padding: var(--space-3) 0;
+}
+
+.opt-list__item + .opt-list__item {
+  border-top: 1px solid var(--color-border);
+}
+
+.opt-list__mark {
+  grid-area: mark;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--color-surface-2);
+  color: var(--color-text-muted);
+  transition:
+    background-color var(--duration-base) var(--ease-standard),
+    transform var(--duration-base) var(--ease-spring);
+}
+
+.opt-list__item[data-on="true"] .opt-list__mark {
+  background: var(--color-accent-muted);
+  color: var(--color-accent-text);
+  transform: scale(1.06);
+}
+
+.opt-list__name {
+  grid-area: name;
+  font-weight: var(--weight-medium);
+  color: var(--color-text-primary);
+}
+
+.opt-list__item[data-on="false"] .opt-list__name {
+  color: var(--color-text-secondary);
+}
+
+.opt-list__channel {
+  grid-area: channel;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-2);
+  font-size: 0.6875rem;
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+}
+
+.opt-list__note {
+  grid-area: note;
+  font-size: var(--text-small);
+  line-height: var(--leading-snug);
+  color: var(--color-text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .opt-list__mark {
+    transition: none;
+  }
+
+  .opt-list__item[data-on="true"] .opt-list__mark {
+    transform: none;
+  }
+}

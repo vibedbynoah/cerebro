@@ -1,0 +1,219 @@
+/* ---------------------------------------------------------------------- */
+/* Quantised files side by side (components/QuantTable.tsx)                */
+/* Used by Advanced setup and Model Hub. Tokens only; transform/opacity    */
+/* motion only.                                                            */
+/* ---------------------------------------------------------------------- */
+
+.qtable-wrap {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.qtable-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-1);
+}
+
+.qtable {
+  width: 100%;
+  min-width: 46rem;
+  border-collapse: collapse;
+  font-size: var(--text-small);
+}
+
+.qtable th,
+.qtable td {
+  padding: var(--space-2) var(--space-3);
+  text-align: start;
+  vertical-align: middle;
+}
+
+.qtable thead th {
+  padding-block: var(--space-3) var(--space-2);
+  font-size: 0.6875rem;
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+
+.qtable thead abbr {
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  cursor: help;
+}
+
+.qtable tbody tr + tr > * {
+  border-top: 1px solid var(--color-border);
+}
+
+.qtable .num {
+  text-align: end;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.qtable .unit {
+  margin-inline-start: var(--gap-value-unit, 0.25em);
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+}
+
+.qrow {
+  transition: background-color var(--duration-fast) var(--ease-standard);
+}
+
+@media (hover: hover) {
+  .qtable--pick .qrow[data-avail="runs"]:hover > * {
+    background: var(--color-surface-2);
+  }
+}
+
+.qrow.is-selected > * {
+  background: var(--color-accent-muted);
+}
+
+.qrow[data-avail="elsewhere"] > *,
+.qrow[data-avail="channel"] > * {
+  color: var(--color-text-muted);
+}
+
+.qrow__pick {
+  width: 2.25rem;
+}
+
+.qrow__radio {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+.qrow__radio:disabled {
+  cursor: not-allowed;
+}
+
+.qrow__radio:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.qrow__file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  font-weight: var(--weight-regular);
+  min-width: 13rem;
+}
+
+.qrow__label {
+  color: var(--color-text-primary);
+  font-weight: var(--weight-medium);
+}
+
+.qtable--pick .qrow[data-avail="runs"] .qrow__label {
+  cursor: pointer;
+}
+
+.qrow[data-avail="elsewhere"] .qrow__label,
+.qrow[data-avail="channel"] .qrow__label {
+  color: var(--color-text-secondary);
+}
+
+.qrow__format,
+.qrow__best {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-pill);
+  font-size: 0.6875rem;
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+
+.qrow__format {
+  background: var(--color-surface-2);
+  color: var(--color-text-secondary);
+}
+
+.qrow__best {
+  background: var(--color-accent-muted);
+  color: var(--color-accent-text);
+}
+
+.qrow__engine {
+  white-space: nowrap;
+}
+
+.qrow__qpg {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 8rem;
+}
+
+.qbar {
+  flex: 1 1 auto;
+  height: 6px;
+  min-width: 3rem;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-3);
+  overflow: hidden;
+}
+
+.qbar__fill {
+  background: var(--color-accent);
+}
+
+.qrow[data-avail="elsewhere"] .qbar__fill,
+.qrow[data-avail="channel"] .qbar__fill {
+  background: var(--color-text-muted);
+}
+
+.qrow__qpg-num {
+  min-width: 4ch;
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
+
+.qrow__why {
+  display: inline-block;
+  max-width: 14rem;
+  white-space: normal;
+  text-align: end;
+  font-size: 0.75rem;
+  line-height: var(--leading-snug);
+}
+
+.qtable__foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: var(--leading-relaxed);
+  color: var(--color-text-muted);
+}
+
+.qtable__foot > span {
+  flex: 1 1 24rem;
+}
+
+@media (forced-colors: active) {
+  .qrow.is-selected > * {
+    outline: 1px solid Highlight;
+  }
+
+  .qbar__fill {
+    forced-color-adjust: none;
+    background: Highlight;
+  }
+}

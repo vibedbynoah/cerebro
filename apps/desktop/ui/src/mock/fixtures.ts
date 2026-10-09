@@ -1,4 +1,4 @@
-import type { CatalogModel, GpuInfo, HardwareProfile, LiveStats, ModelSummary, Settings } from "../service/types";
+import type { GpuInfo, HardwareProfile, LiveStats, ModelSummary, Settings } from "../service/types";
 
 /**
  * ILLUSTRATIVE DATA, NOT MEASUREMENTS. Every number below is a placeholder for layout and testing.
@@ -84,15 +84,9 @@ export const MOCK_HARDWARE: HardwareProfile = {
   ramTotalGiB: 32,
 };
 
-/** Models first-run setup can recommend. Names and parameter counts are as published; file sizes
- *  are rounded placeholders. */
-export const MOCK_CATALOG: readonly CatalogModel[] = [
-  { id: "qwen3-8b-q5km", name: "Qwen3-8B", params: "8B", activeParams: null, architecture: "dense", quant: "Q5_K_M", sizeGiB: 5.4, goodFor: "Everyday chat and writing", provenance: "illustrative" },
-  { id: "gemma-4-e4b-q4km", name: "Gemma-4-E4B-it", params: "E4B", activeParams: null, architecture: "dense", quant: "Q4_K_M", sizeGiB: 5.0, goodFor: "Quick answers, low memory", provenance: "illustrative" },
-  { id: "qwen3-coder-30b-a3b-q4km", name: "Qwen3-Coder-30B-A3B-Instruct", params: "30B-A3B", activeParams: "3B", architecture: "moe", quant: "Q4_K_M", sizeGiB: 17.3, goodFor: "Coding agent", provenance: "illustrative" },
-  { id: "mistral-small-24b-q4km", name: "Mistral-Small-3.2-24B-Instruct", params: "24B", activeParams: null, architecture: "dense", quant: "Q4_K_M", sizeGiB: 13.3, goodFor: "Long documents", provenance: "illustrative" },
-  { id: "llama-3.3-70b-q4km", name: "Llama-3.3-70B-Instruct", params: "70B", activeParams: null, architecture: "dense", quant: "Q4_K_M", sizeGiB: 39.6, goodFor: "Hardest reasoning", provenance: "illustrative" },
-];
+/** Models setup and Model Hub list (mock/catalog.ts): current releases only, every quality and
+ *  speed figure illustrative. */
+export { MOCK_CATALOG } from "./catalog";
 
 /** Safe by default: every protection on, every network feature allowed but optional. */
 export const DEFAULT_SETTINGS: Settings = {

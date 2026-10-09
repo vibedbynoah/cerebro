@@ -24,6 +24,10 @@ test("a fresh profile walks the whole setup by keyboard and lands in the app, re
   await expect(page.locator(".palette-trigger")).toHaveCount(0);
 
   await page.keyboard.press("Enter");
+  // Experience level: Advanced (pros by default) is preselected; Enter keeps it.
+  await expect(step(page, "level")).toBeVisible();
+  await expect(page.getByRole("radio", { name: /Advanced/ })).toBeChecked();
+  await page.keyboard.press("Enter");
   await expect(step(page, "hardware")).toBeVisible();
   await expect(page.locator("#onb-step-title")).toBeFocused();
   await expect(page.locator(".scan-panel")).toHaveAttribute("data-state", "done", { timeout: 8000 });
@@ -34,21 +38,27 @@ test("a fresh profile walks the whole setup by keyboard and lands in the app, re
   await expect(step(page, "model")).toBeVisible();
   // Ranked for this machine, best loadable fit preselected, every card explains why.
   const radios = page.getByRole("radio");
-  // Four that load here, plus "Decide later".
-  await expect(radios).toHaveCount(5);
+  // Six that load here, plus "Decide later".
+  await expect(radios).toHaveCount(7);
   await expect(radios.last()).toHaveAccessibleName("Decide later");
   await expect(radios.first()).toBeChecked();
-  await expect(page.locator(".rec").first()).toContainText("Qwen3-8B");
+  await expect(page.locator(".rec").first()).toContainText("Gemma-4-12B-it");
   await expect(page.locator(".rec").first()).toContainText("Best fit");
   await expect(page.locator(".rec-legend")).toContainText("not speed");
   for (const why of await page.locator(".rec__why").allTextContents()) expect(why.length).toBeGreaterThan(40);
-  await expect(page.locator(".rec-skip")).toContainText("Llama-3.3-70B-Instruct");
+  await expect(page.locator(".rec-skip")).toContainText("Mistral-Medium-3.5-128B");
   // Arrow keys move the choice like any radio group.
   await radios.first().focus();
   await page.keyboard.press("ArrowDown");
   await expect(radios.nth(1)).toBeChecked();
   const chosen = await radios.nth(1).getAttribute("value");
 
+  await page.locator("#onb-step-title").focus();
+  await page.keyboard.press("Enter");
+  // Load settings, Advanced view: the automatic plan as editable fields and the backend flags.
+  await expect(step(page, "configure")).toBeVisible();
+  await expect(page.locator(".adv")).toBeVisible();
+  await expect(page.locator(".adv pre").first()).toContainText("--host 127.0.0.1");
   await page.locator("#onb-step-title").focus();
   await page.keyboard.press("Enter");
   await expect(step(page, "privacy")).toBeVisible();
@@ -84,6 +94,7 @@ test("a fresh profile walks the whole setup by keyboard and lands in the app, re
 test("hardware readings appear one at a time while the scan runs", async ({ page }) => {
   await openSetup(page);
   await primary(page).click();
+  await primary(page).click();
   const rows = page.locator(".scan__row");
   await expect(rows).toHaveCount(4);
   // Mid-scan: something is being read while the last row still waits.
@@ -114,6 +125,7 @@ test("with reduced motion the scan shows every reading at once", async ({ page }
   await page.emulateMedia({ reducedMotion: "reduce" });
   await openSetup(page);
   await primary(page).click();
+  await primary(page).click();
   await expect(page.locator(".scan-panel")).toHaveAttribute("data-state", "done", { timeout: 1500 });
   await expect(page.locator(".scan__row[data-state='done']")).toHaveCount(4);
 });
@@ -132,7 +144,7 @@ test("Escape skips to the terms; Back and the step rail move around; finishing i
   await page.keyboard.press("ArrowLeft");
   await expect(step(page, "privacy")).toBeVisible();
   await page.getByRole("button", { name: "Back" }).click();
-  await expect(step(page, "model")).toBeVisible();
+  await expect(step(page, "configure")).toBeVisible();
   await page.locator(".onb-rail").getByRole("button", { name: "Welcome" }).click();
   await expect(step(page, "welcome")).toBeVisible();
 
@@ -238,11 +250,20 @@ for (const scheme of ["dark", "light"] as const) {
     test.setTimeout(90_000);
     await page.emulateMedia({ colorScheme: scheme });
     await openSetup(page);
-    for (const id of ["welcome", "hardware", "model", "privacy", "terms", "finish"]) {
+    for (const id of ["welcome", "level", "hardware", "model", "configure", "privacy", "terms", "finish"]) {
       await expect(step(page, id)).toBeVisible();
       if (id === "hardware") await expect(page.locator(".scan-panel")).toHaveAttribute("data-state", "done", { timeout: 8000 });
       await settle(page).catch(() => undefined);
       expect(await scan(page), `step ${id}`).toEqual([]);
+      if (id === "configure") {
+        // Both views of the load settings.
+        await page.getByRole("button", { name: "Switch to Beginner" }).click();
+        await expect(page.locator(".plan")).toBeVisible();
+        await settle(page).catch(() => undefined);
+        expect(await scan(page), "configure, Beginner").toEqual([]);
+        await page.getByRole("button", { name: "Switch to Advanced" }).click();
+        await expect(page.locator(".adv")).toBeVisible();
+      }
       if (id === "terms") {
         await page.getByRole("button", { name: "Licenses" }).click();
         await expect(page.locator(".legal__license").first()).toBeVisible();
