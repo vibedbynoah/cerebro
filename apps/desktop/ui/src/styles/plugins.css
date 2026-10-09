@@ -1,0 +1,397 @@
+/* Plugins screen (screens/Plugins.tsx). Built only from design-system tokens. */
+
+.plugins .btn--sm {
+  min-height: 28px;
+  padding-inline: var(--space-3);
+  font-size: var(--text-small);
+}
+
+.plug-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-bottom: var(--space-5);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.plug-tabs__list {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.plug-tabs [role="tab"] {
+  padding: var(--space-2) var(--space-4);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--color-text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.plug-tabs [role="tab"][aria-selected="true"] {
+  border-bottom-color: var(--color-accent);
+  color: var(--color-text-primary);
+}
+
+.plug-tabs [role="tab"]:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.plug-file {
+  margin-left: auto;
+  margin-bottom: var(--space-2);
+  cursor: pointer;
+}
+
+.plug-file:focus-within {
+  box-shadow: var(--focus-ring);
+}
+
+.plug-h {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-title);
+}
+
+.plug-h3 {
+  margin: var(--space-3) 0 var(--space-1);
+  font-size: var(--text-body);
+}
+
+/* Category tints: one hue per category, same lightness and chroma, so the set reads as one family. */
+.plug-glyph {
+  --h: 235;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-lg);
+  background: oklch(from var(--color-accent) l c var(--h) / 0.16);
+  color: oklch(from var(--color-accent-text) l c var(--h));
+}
+
+.plug-glyph[data-large="true"] {
+  width: 56px;
+  height: 56px;
+  border-radius: var(--radius-xl);
+}
+
+[data-cat="images"] { --h: 320; }
+[data-cat="search"] { --h: 235; }
+[data-cat="files"] { --h: 200; }
+[data-cat="git"] { --h: 30; }
+[data-cat="email"] { --h: 260; }
+[data-cat="calendar"] { --h: 150; }
+[data-cat="databases"] { --h: 180; }
+[data-cat="browser"] { --h: 280; }
+[data-cat="voice"] { --h: 350; }
+
+.carousel {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-6);
+}
+
+.carousel__btn {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-1);
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.carousel__btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.carousel__track {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(260px, 1fr);
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+}
+
+.carousel__item {
+  scroll-snap-align: start;
+}
+
+.carousel__item button {
+  display: grid;
+  gap: var(--space-2);
+  width: 100%;
+  height: 100%;
+  padding: var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  background: linear-gradient(140deg, oklch(from var(--color-accent) l c var(--h) / 0.14), var(--color-surface-1) 70%);
+  color: var(--color-text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: transform var(--duration-fast) var(--ease-spring), border-color var(--duration-fast) var(--ease-standard);
+}
+
+.carousel__item button:hover {
+  border-color: var(--color-border-strong);
+  transform: translateY(-2px);
+}
+
+.carousel__item button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.carousel__name {
+  font-weight: 600;
+  font-size: var(--text-title);
+}
+
+.carousel__pitch {
+  color: var(--color-text-secondary);
+}
+
+.plug-filters {
+  display: grid;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.plug-filters input {
+  width: min(360px, 100%);
+  min-height: 34px;
+  padding-inline: var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+  color: var(--color-text-primary);
+  font: inherit;
+}
+
+.plug-cats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.plug-cats button {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: var(--text-small);
+  cursor: pointer;
+}
+
+.plug-cats button[aria-pressed="true"] {
+  border-color: var(--color-accent);
+  background: var(--color-accent-muted);
+  color: var(--color-text-primary);
+}
+
+.plug-cats button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.plug-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plug-card {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  padding: 0;
+  overflow: hidden;
+}
+
+.plug-card__open {
+  display: grid;
+  align-content: start;
+  gap: var(--space-1);
+  padding: var(--space-4) var(--space-4) var(--space-2);
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.plug-card__open:focus-visible {
+  outline: none;
+  box-shadow: inset var(--focus-ring);
+}
+
+.plug-card__open .plug-glyph {
+  margin-bottom: var(--space-2);
+}
+
+.plug-card__name {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.plug-card__meta {
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+}
+
+.plug-card__summary {
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.plug-card__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-4) var(--space-4);
+}
+
+.plug-install {
+  position: relative;
+  min-width: 96px;
+  overflow: hidden;
+}
+
+.plug-install__bar {
+  position: absolute;
+  inset: 0;
+  background: oklch(100% 0 0 / 0.25);
+  transform-origin: left;
+}
+
+.plug-install__label {
+  position: relative;
+}
+
+.plug-enabled {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-small);
+  font-weight: 600;
+  color: var(--color-success);
+  animation: plug-pop var(--duration-base) var(--ease-spring);
+}
+
+@keyframes plug-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.85);
+  }
+}
+
+.plug-installed {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plug-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+}
+
+.plug-row__text {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+
+.plug-row__name {
+  font-weight: 600;
+  text-align: left;
+}
+
+.plug-row .setting {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.plug-detail {
+  position: fixed;
+  top: 72px;
+  right: var(--space-5);
+  bottom: 48px;
+  z-index: 20;
+  width: min(420px, calc(100vw - 2 * var(--space-5)));
+  padding: var(--space-5);
+  overflow-y: auto;
+  box-shadow: var(--shadow-3);
+}
+
+.plug-detail__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.plug-detail__head h2 {
+  margin: 0;
+  font-size: var(--text-title);
+}
+
+.plug-detail ul {
+  margin: 0 0 var(--space-2);
+  padding-left: var(--space-5);
+}
+
+.plug-x {
+  margin-left: auto;
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.plug-x:hover {
+  background: var(--color-surface-2);
+}
+
+.plug-x:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plug-enabled {
+    animation: none;
+  }
+
+  .carousel__item button {
+    transition: none;
+  }
+}

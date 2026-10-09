@@ -90,6 +90,7 @@ const MOCK_FAILURES: Readonly<Record<string, MockServiceOptions>> = {
   "monitor-multi-gpu": { multiGpu: true },
   "fail-metrics": { failMetrics: true },
   "fast-chat": { chatSpeed: 20 },
+  online: { network: "online" },
 };
 
 /**
