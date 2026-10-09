@@ -53,3 +53,17 @@ model and machine after the first few messages at each level.
   what each level costs them.
 - Everything is editable: users can rewrite any level's instruction, budget and passes, or add
   their own levels, in Settings.
+
+## Reasoning source: Cerebro prompts, native, both or neither (owner, 2026-10-08)
+
+Effort has two independent parts, each its own switch, per message and as a default:
+
+- **Native reasoning effort:** the model's own control only (reasoning_effort low/medium/high,
+  thinking on/off, thinking budget tokens), passed straight to the backend. No text is added to the
+  system prompt. This is the default for models that have a native control.
+- **Cerebro verification prompts:** the level instructions above, appended to the system prompt,
+  plus the review passes.
+
+Modes: Native only (default where supported) / Cerebro prompts only / Both / Neither (raw model, no
+added prompt, no passes). The system prompt is always visible and fully editable, and "no added
+prompt" is a first-class option, never a hidden setting.

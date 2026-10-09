@@ -55,3 +55,13 @@ system together with percentages:
   LM Studio or Ollama").
 - Every line is written for the person using it: what it does for them, in plain words, with a number
   where one exists. No filler, no self-congratulation, no hedging.
+
+## Options everywhere, protections optional (owner, 2026-10-08)
+
+- Turbo layer (docs/specs/turbo-system.md): optimised builds, schedulers, CPU/GPU profiles and a
+  profiler, CachyOS-style. This, not settings presets, is what separates Cerebro.
+- Every safety setting is enabled by default and optional, sandbox included. No feature is blocked
+  behind a protection the user turned off.
+- Reasoning: native model effort without any added prompt, Cerebro verification prompts, both, or
+  neither (docs/specs/effort-levels.md). Options, options, options: anything a pro would want to tune
+  is tunable, and Beginner mode hides it.
