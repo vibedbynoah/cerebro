@@ -89,6 +89,7 @@ struct Funcs {
     router_b: CudaFunction,
     scatter_add: CudaFunction,
     add_inplace: CudaFunction,
+    attn_tiled: CudaFunction,
 }
 
 /// GPU-side block size of a K-quant format (Q6_K padded to 224 bytes for aligned loads) and its GGML
@@ -171,6 +172,13 @@ struct MoeGpu {
     baxd: CudaSlice<f32>,
     beo: CudaSlice<f32>,
     bcpu: CudaSlice<f32>,
+    /// Streaming of uncached experts for prompt processing: a second stream copies expert weights
+    /// from pinned host slots into a small VRAM ring while the compute stream works on the previous
+    /// ones (the GPU computes a batch of tokens far faster than the CPU can).
+    copy: Arc<CudaStream>,
+    ring_dev: CudaSlice<u8>,
+    ring_host: Vec<PinnedHostSlice<u8>>,
+    ring_done: Vec<Option<cudarc::driver::CudaEvent>>,
     qa: QAct,
     scratch: MoeScratch,
     cpu_out: Vec<f32>,
@@ -253,8 +261,14 @@ impl MoeGpu {
     }
 }
 
+/// VRAM ring slots for streaming uncached experts during prompt processing.
+const RING: usize = 6;
+/// Uncached experts with at least this many tokens in a prompt chunk are streamed to the GPU; fewer
+/// are computed on the CPU (a 3 MB copy costs about as much as four CPU expert-token products).
+const STREAM_MIN_TOKENS: usize = 4;
+
 /// Prefill scratch: up to `CHUNK` tokens per batched pass.
-const CHUNK: usize = 256;
+const CHUNK: usize = 512;
 /// Positions per split-K attention block.
 const SPLIT: usize = 256;
 
@@ -393,6 +407,7 @@ impl GpuState {
             router_b: lf("router_topk_batch")?,
             scatter_add: lf("scatter_add")?,
             add_inplace: lf("add_inplace")?,
+            attn_tiled: lf("attn_prefill_tiled")?,
         };
         let c = &model.cfg;
         if c.head_dim > 256 || c.head_dim % 64 != 0 || c.dim > 8192 {
@@ -541,6 +556,7 @@ impl GpuState {
             budget = budget.min(mb << 20);
         }
         let slot_bytes = kinds.iter().flatten().map(|k| k.iter().map(|m| m.bytes).sum::<usize>()).max().unwrap_or(0).div_ceil(256).max(1) * 256;
+        let budget = budget.saturating_sub(RING * slot_bytes);
         let n_slots = (budget / slot_bytes).min(cacheable);
         let pool = stream.alloc_zeros::<u8>((n_slots * slot_bytes).max(256)).map_err(gerr)?;
         let profile = std::path::PathBuf::from(format!("{}.experts", model.path.display()));
@@ -591,6 +607,10 @@ impl GpuState {
             baxd: z(CHUNK * eff / 32)?,
             beo: z(CHUNK * dim)?,
             bcpu: z(CHUNK * dim)?,
+            copy: ctx.new_stream().map_err(gerr)?,
+            ring_dev: stream.alloc_zeros::<u8>(RING * slot_bytes).map_err(gerr)?,
+            ring_host: (0..RING).map(|_| unsafe { ctx.alloc_pinned::<u8>(slot_bytes) }).collect::<Result<Vec<_>, _>>().map_err(gerr)?,
+            ring_done: (0..RING).map(|_| None).collect(),
             qa: QAct::new(dim),
             scratch: MoeScratch::new(c),
             cpu_out: vec![0.0; dim],
@@ -688,6 +708,25 @@ impl GpuState {
         if let Some(m) = &self.moe {
             m.save_profile();
         }
+    }
+
+    /// Causal attention for a batch of t tokens at positions *pos0.. : the tiled kernel for head size
+    /// 128 (K/V tiles shared by all query heads of a KV head), the simple one otherwise.
+    #[allow(clippy::too_many_arguments)]
+    fn attn_batch(s: &CudaStream, f: &Funcs, sh: &Shape, qkv: &CudaSlice<f32>, kc: &CudaSlice<u16>, vc: &CudaSlice<u16>, att: &mut CudaSlice<f32>, pos0: &CudaSlice<i32>, t: usize) -> Result<(), Error> {
+        let (n_head, n_kv, hd) = (sh.n_head as i32, sh.n_kv as i32, sh.hd as i32);
+        let group = (sh.n_head / sh.n_kv) as i32;
+        let scale = 1.0f32 / (sh.hd as f32).sqrt();
+        if sh.hd == 128 && sh.n_head / sh.n_kv <= 64 {
+            let qt = (64 / (sh.n_head / sh.n_kv)).max(1);
+            let (ti, qti) = (t as i32, qt as i32);
+            let cfg = LaunchConfig { grid_dim: (sh.n_kv as u32, t.div_ceil(qt) as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+            unsafe { s.launch_builder(&f.attn_tiled).arg(qkv).arg(kc).arg(vc).arg(att).arg(&n_head).arg(&n_kv).arg(pos0).arg(&group).arg(&scale).arg(&ti).arg(&qti).launch(cfg) }.map_err(gerr)?;
+        } else {
+            let cfg = LaunchConfig { grid_dim: (sh.n_head as u32, t as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+            unsafe { s.launch_builder(&f.attn_pre).arg(qkv).arg(kc).arg(vc).arg(att).arg(&n_head).arg(&n_kv).arg(&hd).arg(pos0).arg(&group).arg(&scale).launch(cfg) }.map_err(gerr)?;
+        }
+        Ok(())
     }
 
     fn matvec(s: &CudaStream, f: &Funcs, m: &GMat, xq: &CudaSlice<i8>, xd: &CudaSlice<f32>, y: &mut CudaSlice<f32>, add: bool) -> Result<(), Error> {
@@ -943,8 +982,6 @@ impl GpuState {
         let (eps, base) = (sh.eps, sh.base);
         let ti = t as i32;
         let has_norm = sh.qk_norm as i32;
-        let group = (sh.n_head / sh.n_kv) as i32;
-        let scale = 1.0f32 / (sh.hd as f32).sqrt();
         let null_f: u64 = 0;
         let null_i: u64 = 0;
         let b = &mut self.b;
@@ -1006,8 +1043,7 @@ impl GpuState {
                         .launch(cfg)
                 }
                 .map_err(gerr)?;
-                let cfg = LaunchConfig { grid_dim: (sh.n_head as u32, t as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
-                unsafe { s.launch_builder(&f.attn_pre).arg(&b.qkv).arg(&l.kc).arg(&l.vc).arg(&mut b.att).arg(&n_head).arg(&n_kv).arg(&hd).arg(&b.pos0).arg(&group).arg(&scale).launch(cfg) }.map_err(gerr)?;
+                Self::attn_batch(s, f, sh, &b.qkv, &l.kc, &l.vc, &mut b.att, &b.pos0, t)?;
             }
             let qn_total = (t * qd) as i32;
             unsafe { s.launch_builder(&f.quant).arg(&b.att).arg(&mut b.xq).arg(&mut b.xd).arg(&qn_total).launch(LaunchConfig { grid_dim: ((qn_total as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
@@ -1037,24 +1073,30 @@ impl GpuState {
                 }
             }
             let mut gpu_groups: Vec<(usize, i32)> = Vec::new();
+            let mut stream_groups: Vec<usize> = Vec::new();
             let mut cpu_groups: Vec<(usize, Vec<(usize, f32)>)> = Vec::new();
+            let can_stream = mo.kinds[li].is_some();
             for e in 0..mo.ne {
                 if by_expert[e].is_empty() {
                     continue;
                 }
                 if slot_of_e[e] >= 0 {
                     gpu_groups.push((e, slot_of_e[e]));
+                } else if can_stream && by_expert[e].len() >= STREAM_MIN_TOKENS {
+                    stream_groups.push(e);
                 } else {
                     cpu_groups.push((e, std::mem::take(&mut by_expert[e])));
                 }
             }
             // Cached experts on the GPU, one expert at a time over its tokens.
-            if let (Some([kg, ku, kd]), false) = (mo.kinds[li], gpu_groups.is_empty()) {
+            if let (Some([kg, ku, kd]), false) = (mo.kinds[li], gpu_groups.is_empty() && stream_groups.is_empty()) {
                 let mut idx: Vec<i32> = Vec::new();
                 let mut wv: Vec<f32> = Vec::new();
+                // (offset, tokens, cache slot or -1 - ring index for streamed experts, expert)
                 let mut spans = Vec::new();
-                for &(e, slot) in &gpu_groups {
-                    spans.push((idx.len(), by_expert[e].len(), slot));
+                let streamed = stream_groups.iter().enumerate().map(|(i, &e)| (e, -1 - i as i32));
+                for (e, slot) in gpu_groups.iter().copied().chain(streamed) {
+                    spans.push((idx.len(), by_expert[e].len(), slot, e));
                     for &(tt, w) in &by_expert[e] {
                         idx.push(tt as i32);
                         wv.push(w);
@@ -1063,12 +1105,63 @@ impl GpuState {
                 s.memcpy_htod(&idx, &mut mo.bidx.slice_mut(0..idx.len())).map_err(gerr)?;
                 s.memcpy_htod(&wv, &mut mo.bw.slice_mut(0..wv.len())).map_err(gerr)?;
                 let eff = mo.eff;
-                for &(o, n, slot) in &spans {
-                    let base = slot as usize * mo.slot_bytes;
+                let sb = mo.slot_bytes;
+                for &(o, n, slot, e) in &spans {
+                    // Streamed expert: copy it into the next ring slot (host side, then DMA on the
+                    // copy stream once the slot's previous expert has been computed).
+                    let ring = (slot < 0).then(|| (-1 - slot) as usize % RING);
+                    if let Some(r) = ring {
+                        {
+                            // Parallel copy into the pinned slot (one thread copies ~10 GB/s; the
+                            // memory bus allows several times that).
+                            let host = mo.ring_host[r].as_mut_slice().map_err(gerr)?;
+                            struct H(*mut u8);
+                            // SAFETY: items write disjoint byte ranges of the slot.
+                            unsafe impl Sync for H {}
+                            impl H {
+                                fn at(&self, i: usize) -> *mut u8 {
+                                    self.0.wrapping_add(i)
+                                }
+                            }
+                            let dst = H(host.as_mut_ptr());
+                            let parts = MoeGpu::expert_bytes(model, li, e);
+                            let mut items = Vec::new();
+                            let mut off = 0;
+                            for (pi, (dt, src)) in parts.iter().enumerate() {
+                                // Q6_K is re-laid out block by block; other formats copy in 64 KB pieces.
+                                let (sbb, dbb) = if *dt == DType::Q6K { (210, 224) } else { (65536, 65536) };
+                                let nblk = src.len().div_ceil(sbb);
+                                let per = nblk.div_ceil(8).max(1);
+                                for b0 in (0..nblk).step_by(per) {
+                                    items.push((pi, off, b0, (b0 + per).min(nblk), sbb, dbb));
+                                }
+                                off += if *dt == DType::Q6K { nblk * dbb } else { src.len() };
+                            }
+                            crate::pool::global().run(items.len(), &|ii| {
+                                let (pi, off, b0, b1, sbb, dbb) = items[ii];
+                                let src = parts[pi].1;
+                                for bi in b0..b1 {
+                                    let n = sbb.min(src.len() - bi * sbb);
+                                    // SAFETY: block bi of part pi maps to its own destination range.
+                                    unsafe { std::ptr::copy_nonoverlapping(src.as_ptr().add(bi * sbb), dst.at(off + bi * dbb), n) };
+                                }
+                            });
+                        }
+                        if let Some(ev) = &mo.ring_done[r] {
+                            mo.copy.wait(ev).map_err(gerr)?;
+                        }
+                        mo.copy.memcpy_htod(&mo.ring_host[r], &mut mo.ring_dev.slice_mut(r * sb..(r + 1) * sb)).map_err(gerr)?;
+                        let arrived = mo.copy.record_event(None).map_err(gerr)?;
+                        s.wait(&arrived).map_err(gerr)?;
+                    }
+                    let (pool, base) = match ring {
+                        Some(r) => (&mo.ring_dev, r * sb),
+                        None => (&mo.pool, slot as usize * sb),
+                    };
                     let iv = mo.bidx.slice(o..o + n);
-                    let gw = mo.pool.slice(base..base + kg.bytes);
-                    let uw = mo.pool.slice(base + kg.bytes..base + kg.bytes + ku.bytes);
-                    let dw = mo.pool.slice(base + kg.bytes + ku.bytes..base + kg.bytes + ku.bytes + kd.bytes);
+                    let gw = pool.slice(base..base + kg.bytes);
+                    let uw = pool.slice(base + kg.bytes..base + kg.bytes + ku.bytes);
+                    let dw = pool.slice(base + kg.bytes + ku.bytes..base + kg.bytes + ku.bytes + kd.bytes);
                     kmm(&gw, kg.dtype, kg.bb, &b.xq, &b.xd, Some(&iv), n, &mut mo.bgu.slice_mut(0..n * eff), eff, eff, kg.cols, false)?;
                     kmm(&uw, ku.dtype, ku.bb, &b.xq, &b.xd, Some(&iv), n, &mut mo.bgu.slice_mut(n * eff..2 * n * eff), eff, eff, ku.cols, false)?;
                     let (effi, ni) = (eff as i32, n as i32);
@@ -1078,6 +1171,9 @@ impl GpuState {
                     let wvv = mo.bw.slice(o..o + n);
                     let cfg = LaunchConfig { grid_dim: ((sh.dim as u32).div_ceil(256), n as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
                     unsafe { s.launch_builder(&f.scatter_add).arg(&mut b.x).arg(&mo.beo).arg(&iv).arg(&wvv).arg(&ni).arg(&dim).launch(cfg) }.map_err(gerr)?;
+                    if let Some(r) = ring {
+                        mo.ring_done[r] = Some(s.record_event(None).map_err(gerr)?);
+                    }
                 }
             }
             // The rest on the CPU at the same time.
@@ -1123,8 +1219,6 @@ impl GpuState {
         let (eps, base) = (sh.eps, sh.base);
         let ti = t as i32;
         let has_norm = sh.qk_norm as i32;
-        let group = (sh.n_head / sh.n_kv) as i32;
-        let scale = 1.0f32 / (sh.hd as f32).sqrt();
         let rows_cfg = |rows: usize| LaunchConfig { grid_dim: ((rows as u32).div_ceil(8), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
         let b = &mut self.b;
         {
@@ -1166,8 +1260,7 @@ impl GpuState {
                 .map_err(gerr)?;
             }
             {
-                let cfg = LaunchConfig { grid_dim: (sh.n_head as u32, t as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
-                unsafe { s.launch_builder(&f.attn_pre).arg(&b.qkv).arg(&l.kc).arg(&l.vc).arg(&mut b.att).arg(&n_head).arg(&n_kv).arg(&hd).arg(&b.pos0).arg(&group).arg(&scale).launch(cfg) }.map_err(gerr)?;
+                Self::attn_batch(s, f, sh, &b.qkv, &l.kc, &l.vc, &mut b.att, &b.pos0, t)?;
             }
             let qn_total = (t * sh.n_head * sh.hd) as i32;
             unsafe { s.launch_builder(&f.quant).arg(&b.att).arg(&mut b.xq).arg(&mut b.xd).arg(&qn_total).launch(LaunchConfig { grid_dim: ((qn_total as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;

@@ -653,3 +653,104 @@ extern "C" __global__ void add_inplace(float* __restrict__ x, const float* __res
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) x[i] += y[i];
 }
+
+// Tiled causal attention for prompt processing (head_dim 128). A block takes one KV head and a tile
+// of tokens, i.e. every query head sharing that KV head (GQA) for those tokens: 64 query vectors, 8
+// per warp. K and V are read from the cache 32 positions at a time into shared memory and reused by
+// all 64 queries, instead of each query streaming the whole cache from global memory.
+#define AQ 8      // query vectors per warp
+#define AK 32     // keys per tile
+#define AHD 128
+extern "C" __global__ void attn_prefill_tiled(const float* __restrict__ qkv, const __half* __restrict__ kc,
+                                              const __half* __restrict__ vc, float* __restrict__ out,
+                                              int n_head, int n_kv, const int* __restrict__ posp, int group,
+                                              float scale, int T, int qt) {
+    __shared__ __half ks[AK][AHD + 2];
+    __shared__ __half vs[AK][AHD];
+    __shared__ __half qs[8][AQ][AHD];
+    int kvh = blockIdx.x, t0 = blockIdx.y * qt;
+    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    int pos0 = *posp;
+    int row = n_head * AHD + 2 * n_kv * AHD;
+    int kvd = n_kv * AHD;
+    // This warp's query vectors: index qi -> token t0 + qi / group, head kvh*group + qi % group.
+    int tok[AQ];
+    bool live[AQ];
+    for (int j = 0; j < AQ; ++j) {
+        int qi = warp * AQ + j;
+        int t = t0 + qi / group;
+        live[j] = qi < qt * group && t < T;
+        tok[j] = t;
+        int h = kvh * group + qi % group;
+        for (int d = lane; d < AHD; d += 32)
+            qs[warp][j][d] = __float2half(live[j] ? qkv[(size_t)t * row + h * AHD + d] * scale : 0.f);
+    }
+    float m[AQ], l[AQ], acc[AQ][4];
+    for (int j = 0; j < AQ; ++j) { m[j] = -1e30f; l[j] = 0.f; for (int c = 0; c < 4; ++c) acc[j][c] = 0.f; }
+    int t_last = min(T, t0 + qt) - 1;
+    int nkeys = pos0 + t_last + 1;
+    for (int k0 = 0; k0 < nkeys; k0 += AK) {
+        __syncthreads();
+        for (int i = threadIdx.x; i < AK * AHD; i += blockDim.x) {
+            int kk = i / AHD, d = i - kk * AHD;
+            int p = k0 + kk;
+            __half kv = __float2half(0.f), vv = __float2half(0.f);
+            if (p < nkeys) {
+                kv = kc[(size_t)p * kvd + kvh * AHD + d];
+                vv = vc[(size_t)p * kvd + kvh * AHD + d];
+            }
+            ks[kk][d] = kv;
+            vs[kk][d] = vv;
+        }
+        __syncthreads();
+        // Lane = key k0 + lane: scores for this warp's queries.
+        int p = k0 + lane;
+        float sc[AQ];
+        for (int j = 0; j < AQ; ++j) sc[j] = 0.f;
+        for (int d = 0; d < AHD; d += 2) {
+            float2 kf = __half22float2(*reinterpret_cast<const __half2*>(&ks[lane][d]));
+            #pragma unroll
+            for (int j = 0; j < AQ; ++j) {
+                float2 qf = __half22float2(*reinterpret_cast<const __half2*>(&qs[warp][j][d]));
+                sc[j] += qf.x * kf.x + qf.y * kf.y;
+            }
+        }
+        #pragma unroll
+        for (int j = 0; j < AQ; ++j) {
+            bool ok = live[j] && p <= pos0 + tok[j];
+            float s = ok ? sc[j] : -1e30f;
+            float mx = warp_max(s);
+            float mn = fmaxf(m[j], mx);
+            float pr = ok ? __expf(s - mn) : 0.f;
+            float c = __expf(m[j] - mn);
+            l[j] = l[j] * c + warp_sum(pr);
+            for (int cc = 0; cc < 4; ++cc) acc[j][cc] *= c;
+            m[j] = mn;
+            sc[j] = pr;
+        }
+        // Accumulate V: lane owns dims lane*4 .. lane*4+3.
+        for (int kk = 0; kk < AK; ++kk) {
+            float2 v01 = __half22float2(*reinterpret_cast<const __half2*>(&vs[kk][lane * 4]));
+            float2 v23 = __half22float2(*reinterpret_cast<const __half2*>(&vs[kk][lane * 4 + 2]));
+            #pragma unroll
+            for (int j = 0; j < AQ; ++j) {
+                float pj = __shfl_sync(0xffffffff, sc[j], kk);
+                acc[j][0] += pj * v01.x;
+                acc[j][1] += pj * v01.y;
+                acc[j][2] += pj * v23.x;
+                acc[j][3] += pj * v23.y;
+            }
+        }
+    }
+    for (int j = 0; j < AQ; ++j) {
+        if (!live[j]) continue;
+        int qi = warp * AQ + j;
+        int h = kvh * group + qi % group;
+        float inv = l[j] > 0.f ? 1.f / l[j] : 0.f;
+        float* o = out + (size_t)tok[j] * n_head * AHD + h * AHD + lane * 4;
+        o[0] = acc[j][0] * inv;
+        o[1] = acc[j][1] * inv;
+        o[2] = acc[j][2] * inv;
+        o[3] = acc[j][3] * inv;
+    }
+}
