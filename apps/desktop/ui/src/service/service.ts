@@ -23,6 +23,9 @@ import type {
   TuneEvent,
   TuneProfile,
   TuneRunInfo,
+  HubDownloadEvent,
+  HubFile,
+  HubRepo,
 } from "./types";
 
 import type { ChatEvent, ChatRequest } from "./chat-types";
@@ -128,4 +131,15 @@ export interface CerebroService {
   chat(request: ChatRequest, onEvent: (e: ChatEvent) => void, signal: AbortSignal): Promise<void>;
   /** Transcribes a push-to-talk recording on this machine. */
   transcribe(seconds: number): Promise<string>;
+
+  // ---- Model Hub (desktop: live Hugging Face). Absent in the web preview. ----
+
+  /** Repositories with GGUF files matching the query, most downloaded first. */
+  hubSearch?(query: string): Promise<HubRepo[]>;
+  /** A repository's GGUF files with their real sizes. */
+  hubFiles?(repo: string): Promise<HubFile[]>;
+  /** Downloads one file into Cerebro's model folder; resolves with its path when complete. */
+  hubDownload?(repo: string, file: HubFile, onEvent: (e: HubDownloadEvent) => void): Promise<string>;
+  /** Stops a download; the partial file resumes next time. */
+  hubCancel?(repo: string, path: string): Promise<void>;
 }

@@ -502,3 +502,29 @@ export type TuneEvent = TuneEventBody & {
   /** Run clock, seconds since the run started (time spent cancelled does not count). */
   at: number;
 };
+
+/** A Hugging Face repository with GGUF files (Model Hub search result). */
+export interface HubRepo {
+  id: string;
+  author: string;
+  downloads: number;
+  likes: number;
+  /** ISO date of the last change. */
+  updated: string;
+  tags: string[];
+}
+
+/** One downloadable GGUF file; a split model is one entry with all its parts. */
+export interface HubFile {
+  path: string;
+  /** Bytes, all parts together. */
+  size: number;
+  parts: string[];
+  quant: string;
+  downloaded: boolean;
+}
+
+export type HubDownloadEvent =
+  | { type: "progress"; done: number; total: number; bytesPerSec: number }
+  | { type: "done"; path: string }
+  | { type: "error"; message: string };

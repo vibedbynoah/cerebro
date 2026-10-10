@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-model-load"
+description = "Enables the model_load command without any pre-configured scope."
+commands.allow = ["model_load"]
+
+[[permission]]
+identifier = "deny-model-load"
+description = "Denies the model_load command without any pre-configured scope."
+commands.deny = ["model_load"]

@@ -26,6 +26,12 @@ tauri-build = { version = "=2.7.0", default-features = false, features = ["confi
 # No `dynamic-acl`: capabilities are fixed at build time and cannot be widened at runtime.
 tauri = { version = "=2.12.0", default-features = false, features = ["wry", "compression", "common-controls-v6", "isolation", "x11", "dbus"] }
 serde = { workspace = true }
+serde_json = { workspace = true }
+# Cerebro's own inference engine (CUDA kernels built with nvcc; needs the MSVC environment).
+cerebro-engine = { path = "../../../../cerebro-engine/crates/cerebro-engine" }
+cerebro-probe = { path = "../../../crates/cerebro-probe" }
+# Model Hub only: HTTPS to huggingface.co (rustls, no OpenSSL).
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
 # 256-bit secrets from the OS CSPRNG and constant-time comparison (src/secret.rs). Vetted crates only;
 # nothing here is hand-rolled.
 getrandom = "=0.3.4"
@@ -39,6 +45,8 @@ ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std
 [features]
 # Set by `tauri build` for release bundles: serve the UI from the embedded assets, not the dev server.
 custom-protocol = ["tauri/custom-protocol"]
+# End-to-end test builds only: opens a WebView2 debugging port for scripts/e2e-real.mjs.
+e2e = []
 
 [lints.rust]
 unsafe_code = "forbid"

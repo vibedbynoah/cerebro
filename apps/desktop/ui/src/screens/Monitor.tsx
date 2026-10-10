@@ -9,7 +9,11 @@ import { ScreenHeader } from "../components/Screen";
  */
 export function Monitor(): JSX.Element {
   return (
-    <ErrorBoundary fallback={(_err, reset) => <MonitorFallback onRetry={reset} />}>
+    <ErrorBoundary fallback={(err, reset) => {
+        // Kept in the console so a failure can be diagnosed; the screen shows a plain sentence.
+        console.error(err);
+        return <MonitorFallback onRetry={reset} />;
+      }}>
       <MonitorLoader />
     </ErrorBoundary>
   );

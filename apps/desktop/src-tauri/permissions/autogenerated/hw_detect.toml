@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-hw-detect"
+description = "Enables the hw_detect command without any pre-configured scope."
+commands.allow = ["hw_detect"]
+
+[[permission]]
+identifier = "deny-hw-detect"
+description = "Denies the hw_detect command without any pre-configured scope."
+commands.deny = ["hw_detect"]

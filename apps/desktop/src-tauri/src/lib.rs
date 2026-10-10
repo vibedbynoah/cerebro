@@ -15,6 +15,8 @@
 #![forbid(unsafe_code)]
 
 mod commands;
+mod engine;
+mod hub;
 pub mod navigation;
 pub mod secret;
 pub mod update_sig;
@@ -37,7 +39,22 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::window_is_maximized,
             commands::window_close,
             commands::app_info,
+            commands::hw_detect,
+            commands::library_list,
+            commands::model_load,
+            commands::model_unload,
+            commands::models_loaded,
+            commands::chat_send,
+            commands::chat_stop,
+            commands::live_stats,
+            commands::metrics,
+            commands::hub_search,
+            commands::hub_files,
+            commands::hub_download,
+            commands::hub_cancel,
         ])
+        .manage(engine::Engine::start())
+        .manage(hub::Downloads::default())
         .setup(|app| {
             // Declared in tauri.conf.json with `create: false` and built here, so the navigation and
             // new-window guards are attached before the window loads anything.
@@ -49,7 +66,12 @@ pub fn run() -> Result<(), tauri::Error> {
                 .find(|w| w.label == MAIN_WINDOW)
                 .cloned()
                 .ok_or("tauri.conf.json has no window labelled \"main\"")?;
-            WebviewWindowBuilder::from_config(app.handle(), &config)?
+            let builder = WebviewWindowBuilder::from_config(app.handle(), &config)?;
+            // Test builds only (`--features e2e`, never in a release bundle): WebView2 remote
+            // debugging so scripts/e2e-real.mjs can drive the real app.
+            #[cfg(feature = "e2e")]
+            let builder = builder.additional_browser_args("--remote-debugging-port=9333 --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection");
+            builder
                 .on_navigation(navigation::is_app_url)
                 .on_new_window(|_url, _features| NewWindowResponse::Deny)
                 .build()?;

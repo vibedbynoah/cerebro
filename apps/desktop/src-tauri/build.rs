@@ -7,7 +7,26 @@
 
 /// Must match `tauri::generate_handler!` in src/lib.rs, the grants in capabilities/main-window.json
 /// and the isolation allowlist in ../isolation/index.js (tests/unit/tauri-config.test.ts checks all four).
-const COMMANDS: &[&str] = &["window_minimize", "window_toggle_maximize", "window_is_maximized", "window_close", "app_info"];
+const COMMANDS: &[&str] = &[
+    "window_minimize",
+    "window_toggle_maximize",
+    "window_is_maximized",
+    "window_close",
+    "app_info",
+    "hw_detect",
+    "library_list",
+    "model_load",
+    "model_unload",
+    "models_loaded",
+    "chat_send",
+    "chat_stop",
+    "live_stats",
+    "metrics",
+    "hub_search",
+    "hub_files",
+    "hub_download",
+    "hub_cancel",
+];
 
 fn main() {
     let attributes = tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(COMMANDS));

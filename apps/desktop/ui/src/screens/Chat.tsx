@@ -283,7 +283,10 @@ export function Chat(): JSX.Element {
               )}
             </Show>
           </span>
-          <IllustrativeFlag />
+          {/* The web preview runs on example data; the desktop app's figures are measured. */}
+          <Show when={!__DESKTOP__}>
+            <IllustrativeFlag />
+          </Show>
           <SamplerMenu sampler={sampler()} onChange={setSampler} />
           <button class="icon-btn" type="button" aria-label="Memory" aria-pressed={panel() === "memory"} onClick={() => setPanel(panel() === "memory" ? "none" : "memory")}>
             <Icon name="memory" size={18} />

@@ -74,3 +74,241 @@ pub fn app_info<R: Runtime>(app: tauri::AppHandle<R>) -> AppInfo {
     let info = app.package_info();
     AppInfo { name: info.name.clone(), version: info.version.to_string(), mode: "desktop" }
 }
+
+// ---- Engine commands. Arguments from the webview are validated here (and by type in the isolation
+// hook); errors are plain sentences without paths or internals. ----
+
+use crate::engine::{self, ChatEvent, ChatRequest, Engine, HardwareProfile, LibraryModel};
+use tauri::ipc::Channel;
+use tauri::State;
+
+/// Processor, graphics card and memory, read from the OS and the GPU driver.
+#[tauri::command]
+pub async fn hw_detect() -> HardwareProfile {
+    tauri::async_runtime::spawn_blocking(engine::hardware).await.unwrap_or_else(|_| engine::hardware())
+}
+
+/// Scans the model folders (Cerebro's, LM Studio's, C:\models) and remembers the result.
+#[tauri::command]
+pub async fn library_list(engine: State<'_, Engine>) -> Result<Vec<LibraryModel>, String> {
+    let list = tauri::async_runtime::spawn_blocking(engine::scan_library).await.map_err(|_| "The model scan failed.".to_owned())?;
+    *engine.library.lock().unwrap_or_else(|e| e.into_inner()) = list.clone();
+    Ok(list)
+}
+
+fn find_model(engine: &Engine, id: &str) -> Result<LibraryModel, String> {
+    if id.len() > 64 || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err("That is not a model id.".to_owned());
+    }
+    engine.library.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|m| m.id == id).cloned().ok_or_else(|| "That model is not in the library.".to_owned())
+}
+
+/// Loads a library model into the engine (replacing the one loaded). `context` in tokens.
+#[tauri::command]
+pub async fn model_load(engine: State<'_, Engine>, id: String, context: Option<u32>) -> Result<serde_json::Value, String> {
+    let model = find_model(&engine, &id)?;
+    let ctx = context.unwrap_or(8192).clamp(512, 1 << 20) as usize;
+    // The load runs on the engine thread; a blocking task waits for it.
+    let eng = engine.inner().handle();
+    tauri::async_runtime::spawn_blocking(move || eng.load(model, ctx)).await.map_err(|_| "The load failed.".to_owned())??;
+    Ok(loaded_json(&engine))
+}
+
+#[tauri::command]
+pub async fn model_unload(engine: State<'_, Engine>) -> Result<serde_json::Value, String> {
+    let eng = engine.inner().handle();
+    tauri::async_runtime::spawn_blocking(move || eng.unload()).await.map_err(|_| "The unload failed.".to_owned())??;
+    Ok(loaded_json(&engine))
+}
+
+#[tauri::command]
+pub fn models_loaded(engine: State<'_, Engine>) -> serde_json::Value {
+    loaded_json(&engine)
+}
+
+fn loaded_json(engine: &Engine) -> serde_json::Value {
+    let s = engine.status.lock().unwrap_or_else(|e| e.into_inner());
+    match &s.loaded {
+        Some(l) => serde_json::json!([{ "id": l.model.id, "slot": "llm", "params": null, "tuned": false }]),
+        None => serde_json::json!([]),
+    }
+}
+
+/// Streams a reply through `on_event`; resolves when it is finished or stopped.
+#[tauri::command]
+pub async fn chat_send(engine: State<'_, Engine>, request: ChatRequest, on_event: Channel<ChatEvent>) -> Result<(), String> {
+    if request.turns.is_empty() || request.turns.len() > 10_000 {
+        return Err("A chat needs at least one message.".to_owned());
+    }
+    find_model(&engine, &request.model_id)?;
+    let eng = engine.inner().handle();
+    tauri::async_runtime::spawn_blocking(move || eng.chat(request, on_event)).await.map_err(|_| "The reply failed.".to_owned())?
+}
+
+/// Stops the reply being written.
+#[tauri::command]
+pub fn chat_stop(engine: State<'_, Engine>) {
+    engine.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The status bar's sample.
+#[tauri::command]
+pub fn live_stats(engine: State<'_, Engine>) -> serde_json::Value {
+    let s = engine.status.lock().unwrap_or_else(|e| e.into_inner());
+    let gpu = cerebro_engine::hw::gpus();
+    let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+    serde_json::json!({
+        "provenance": "measured",
+        "model": s.loaded.as_ref().map(|l| l.model.name.clone()),
+        "tokensPerSecond": s.live_decode_tps.or(s.last_decode_tps),
+        "vramUsedGiB": gpu.first().map_or(0.0, |g| gib(g.vram_total - g.vram_free)),
+        "vramTotalGiB": gpu.first().map_or(0.0, |g| gib(g.vram_total)),
+        "backend": { "state": if s.loaded.is_some() { "running" } else { "stopped" }, "address": null, "build": concat!("cerebro-engine ", env!("CARGO_PKG_VERSION")) },
+    })
+}
+
+/// The Monitor's snapshot (camelCase, matching ui/src/service/monitor-types.ts). Values the engine
+/// cannot read yet are null and show as a dash.
+#[tauri::command]
+pub fn metrics(engine: State<'_, Engine>) -> serde_json::Value {
+    let hw = cerebro_engine::hw::machine();
+    let s = engine.status.lock().unwrap_or_else(|e| e.into_inner());
+    let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    let g0 = hw.gpus.first();
+    let model = s.loaded.as_ref().map(|l| {
+        serde_json::json!({
+            "id": l.model.id, "name": l.model.name, "quant": l.model.quant, "params": l.model.params,
+            "architecture": l.model.architecture, "contextMax": l.ctx, "contextUsed": l.context_used,
+            "kvType": if l.on_gpu { "f16" } else { "f32" }, "layers": l.model.arch.layers,
+            "gpuLayers": if l.on_gpu { l.model.arch.layers } else { 0 }, "expertLayersOnCpu": 0,
+        })
+    });
+    let moe = s.loaded.as_ref().and_then(|l| {
+        let (cached, total, hit) = l.experts?;
+        Some(serde_json::json!({
+            "expertsPerToken": l.model.arch.active_experts.unwrap_or(0), "expertsTotal": total,
+            "cacheSlots": cached, "cacheHitPct": hit * 100.0, "channel": "stable",
+        }))
+    });
+    let n = s.history.len().min(60);
+    let tail: Vec<[Option<f64>; 5]> = s.history.iter().skip(s.history.len() - n).copied().collect();
+    let col = |i: usize| -> Vec<Option<f64>> {
+        let mut v: Vec<Option<f64>> = vec![None; 60 - n];
+        v.extend(tail.iter().map(|x| x[i]));
+        v
+    };
+    let nulls: Vec<Option<f64>> = vec![None; 60];
+    let reqs: Vec<serde_json::Value> = s
+        .requests
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id, "startedAt": r.started_at, "method": "POST", "path": "/chat", "model": r.model,
+                "state": r.state, "stream": true, "httpStatus": null, "wallS": r.wall_s, "loadS": null,
+                "queueS": null, "firstTokenS": r.first_token_s, "promptTokens": r.prompt_tokens,
+                "reusedTokens": r.reused_tokens, "outputTokens": r.output_tokens, "reasoningTokens": 0,
+                "decodeTps": r.decode_tps, "prefillTps": r.prefill_tps, "responseFormat": "text",
+                "session": "chat", "tool": null,
+            })
+        })
+        .collect();
+    let activity = s.activity;
+    let running = s.requests.front().filter(|_| activity != "idle").map(|r| r.id.clone());
+    serde_json::json!({
+        "provenance": "measured",
+        "at": now,
+        "live": {
+            "state": activity, "queued": 0, "requestId": running,
+            "promptRead": s.live_prompt, "promptTotal": s.live_prompt, "promptReused": s.live_reused,
+            "generated": s.live_generated, "maxTokens": 0,
+            "decodeTps": if activity == "generating" { s.live_decode_tps } else { None },
+            "prefillTps": null, "firstTokenS": null,
+            "phase": if activity == "generating" { Some("answer") } else { None },
+        },
+        "hardware": {
+            "gpuUtil": null,
+            "vramUsedGiB": g0.map(|g| gib(g.vram_total - g.vram_free)),
+            "vramTotalGiB": g0.map_or(0.0, |g| gib(g.vram_total)),
+            "vram": null, "gpuTempC": null, "gpuPowerW": null, "gpuPowerLimitW": null,
+            "pcieRxMBs": null, "pcieTxMBs": null, "pcieGen": null, "pcieGenMax": null, "pcieWidth": null,
+            "cpu": null,
+            "ramUsedGiB": gib(hw.ram_total - hw.ram_available), "ramTotalGiB": gib(hw.ram_total),
+            "ramPinnedGiB": null, "diskReadMBs": null, "diskWriteMBs": null, "throttle": [],
+            "gpus": hw.gpus.iter().enumerate().map(|(i, g)| serde_json::json!({
+                "index": i, "name": g.name, "util": null, "memUsedGiB": gib(g.vram_total - g.vram_free),
+                "memTotalGiB": gib(g.vram_total), "tempC": null, "powerW": null, "powerLimitW": null, "pcieRxMBs": null,
+            })).collect::<Vec<_>>(),
+        },
+        "hardwareStatic": {
+            "gpuName": g0.map(|g| g.name.clone()), "gpuCount": hw.gpus.len(), "driver": null,
+            "cpuName": hw.cpu_name, "cores": hw.cpu_threads, "threads": hw.cpu_threads,
+            "ramTotalGiB": gib(hw.ram_total), "gpuThrottleTempC": null,
+        },
+        "engine": {
+            "version": env!("CARGO_PKG_VERSION"), "backend": "cerebro", "build": "cerebro-engine",
+            "address": "in-process", "model": model, "moe": moe, "speculation": null, "baseline": null,
+        },
+        "history": {
+            "stepS": 1, "end": now,
+            "series": {
+                "decodeTps": col(0), "prefillTps": col(1), "gpuUtil": nulls, "vramUsedGiB": col(3),
+                "gpuTempC": nulls, "gpuPowerW": nulls, "pcieRxMBs": nulls, "cpu": nulls,
+                "ramUsedGiB": col(4), "diskReadMBs": nulls, "expertHitPct": col(2), "draftAcceptPct": nulls,
+            },
+        },
+        "totals": s.totals,
+        "requests": reqs,
+        "requestsKept": 100,
+        "conversationCache": {
+            "enabled": false, "slots": 1, "parked": 0, "budgetGiB": 0, "usedGiB": 0,
+            "requests": s.totals.requests, "requestsReused": 0, "promptTokens": s.totals.prompt_tokens,
+            "reusedTokens": s.totals.reused_tokens, "parks": 0, "restores": 0, "evictions": 0, "lastEvent": null,
+        },
+    })
+}
+
+// ---- Model Hub (network: huggingface.co only) ----
+
+use crate::hub::{self, DownloadEvent, Downloads, HubFile, HubRepo};
+
+/// Searches Hugging Face for repositories with GGUF files.
+#[tauri::command]
+pub async fn hub_search(query: String) -> Result<Vec<HubRepo>, String> {
+    tauri::async_runtime::spawn_blocking(move || hub::search(&query)).await.map_err(|_| "The search failed.".to_owned())?
+}
+
+/// The GGUF files of one repository, with sizes.
+#[tauri::command]
+pub async fn hub_files(repo: String) -> Result<Vec<HubFile>, String> {
+    tauri::async_runtime::spawn_blocking(move || hub::files(&repo)).await.map_err(|_| "Listing the files failed.".to_owned())?
+}
+
+/// Downloads one model file (all its parts) into Cerebro's model folder, streaming progress.
+#[tauri::command]
+pub async fn hub_download(downloads: State<'_, Downloads>, repo: String, file: String, parts: Vec<String>, total: u64, on_event: Channel<DownloadEvent>) -> Result<String, String> {
+    let key = format!("{repo}/{file}");
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut map = downloads.cancel.lock().unwrap_or_else(|e| e.into_inner());
+        if map.contains_key(&key) {
+            return Err("That file is already downloading.".into());
+        }
+        map.insert(key.clone(), flag.clone());
+    }
+    let ev = on_event.clone();
+    let r = tauri::async_runtime::spawn_blocking(move || hub::download(&repo, &file, &parts, total, &ev, &flag)).await.map_err(|_| "The download failed.".to_owned())?;
+    downloads.cancel.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+    if let Err(e) = &r {
+        let _ = on_event.send(DownloadEvent::Error { message: e.clone() });
+    }
+    r
+}
+
+/// Stops a running download (the partial file is kept and resumed next time).
+#[tauri::command]
+pub fn hub_cancel(downloads: State<'_, Downloads>, repo: String, file: String) {
+    if let Some(f) = downloads.cancel.lock().unwrap_or_else(|e| e.into_inner()).get(&format!("{repo}/{file}")) {
+        f.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}

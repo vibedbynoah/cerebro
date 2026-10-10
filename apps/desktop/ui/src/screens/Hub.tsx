@@ -13,6 +13,7 @@ import { rankModels, unranked, type Recommendation } from "../onboarding/recomme
 import { useService } from "../service/context";
 import type { HardwareProfile } from "../service/types";
 import { useAppState } from "../state";
+import { LiveHub } from "./hub/LiveHub";
 
 /**
  * Model Hub: the catalogue of current models, each with every quantised file side by side by
@@ -22,6 +23,8 @@ import { useAppState } from "../state";
  * full table one click away. Every figure carries its provenance (docs/CLAIMS.md).
  */
 export function ModelHub(): JSX.Element {
+  // The desktop app searches Hugging Face live; the web preview shows the bundled catalogue.
+  if (__DESKTOP__) return <LiveHub />;
   const service = useService();
   const app = useAppState();
   const [catalog] = createResource(() => service.listCatalog());

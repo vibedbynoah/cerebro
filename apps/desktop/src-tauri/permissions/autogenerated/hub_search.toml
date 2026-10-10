@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-hub-search"
+description = "Enables the hub_search command without any pre-configured scope."
+commands.allow = ["hub_search"]
+
+[[permission]]
+identifier = "deny-hub-search"
+description = "Denies the hub_search command without any pre-configured scope."
+commands.deny = ["hub_search"]

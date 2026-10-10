@@ -151,3 +151,30 @@
     animation: none;
   }
 }
+
+/* ---- Live Hub (desktop) ---- */
+.livehub__search { display: flex; gap: 12px; align-items: center; max-width: 880px; margin-top: 8px; }
+.livehub__search .input { flex: 1; }
+.livehub__note, .livehub__muted { color: var(--color-text-muted, #5b6474); font-size: 0.9rem; }
+.livehub__panes { display: grid; grid-template-columns: minmax(280px, 1fr) 2fr; gap: 24px; margin-top: 16px; }
+.livehub__results ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 70vh; overflow: auto; }
+.livehub__repo { width: 100%; text-align: left; display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--color-border, #d9dee7); background: var(--color-surface, #fff); cursor: pointer; }
+.livehub__repo[aria-pressed="true"] { border-color: var(--color-accent, #1f6feb); box-shadow: 0 0 0 1px var(--color-accent, #1f6feb); }
+.livehub__repo-name { font-weight: 600; overflow-wrap: anywhere; }
+.livehub__title { font-size: 1.1rem; margin: 0 0 12px; overflow-wrap: anywhere; }
+.livehub__table { width: 100%; border-collapse: collapse; }
+.livehub__table th { text-align: left; font-size: 0.8rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--color-text-muted, #5b6474); padding: 8px; }
+.livehub__table td { padding: 10px 8px; border-top: 1px solid var(--color-border, #e3e7ee); vertical-align: middle; }
+.livehub__quant { font-family: var(--font-mono, monospace); font-weight: 600; display: block; }
+.livehub__file { font-size: 0.8rem; color: var(--color-text-muted, #5b6474); overflow-wrap: anywhere; }
+.livehub__fit { font-size: 0.85rem; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.livehub__fit--good { background: #e3f4e8; color: #17663a; }
+.livehub__fit--ok { background: #e6effc; color: #1d4f9c; }
+.livehub__fit--slow { background: #fbf1dc; color: #7a5410; }
+.livehub__fit--no { background: #f6e2e2; color: #8a2424; }
+.livehub__action { display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+.livehub__progress { width: 140px; height: 6px; border-radius: 3px; background: var(--color-border, #e3e7ee); overflow: hidden; }
+.livehub__progress > div { height: 100%; background: var(--color-accent, #1f6feb); }
+.livehub__ok { color: #17663a; display: inline-flex; gap: 4px; align-items: center; }
+.livehub__err { color: #8a2424; font-size: 0.85rem; }
+@media (max-width: 1100px) { .livehub__panes { grid-template-columns: 1fr; } }
