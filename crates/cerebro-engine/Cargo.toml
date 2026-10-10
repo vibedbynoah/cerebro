@@ -15,8 +15,13 @@ serde_json.workspace = true
 memmap2 = "0.9"
 rayon = "1.10"
 fancy-regex = "0.14"
+cudarc = { version = "0.19", default-features = false, features = ["std", "driver", "nvrtc", "dynamic-loading", "cuda-12080"], optional = true }
 
 [[bin]]
 name = "cerebro-run"
 path = "src/bin/run.rs"
 
+
+[features]
+default = ["cuda"]
+cuda = ["dep:cudarc"]

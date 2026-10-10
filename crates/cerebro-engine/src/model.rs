@@ -46,18 +46,18 @@ impl Mat {
     }
 }
 
-struct Layer {
-    attn_norm: Vec<f32>,
-    q: Mat,
-    k: Mat,
-    v: Mat,
-    o: Mat,
-    q_norm: Option<Vec<f32>>,
-    k_norm: Option<Vec<f32>>,
-    ffn_norm: Vec<f32>,
-    gate: Mat,
-    up: Mat,
-    down: Mat,
+pub struct Layer {
+    pub attn_norm: Vec<f32>,
+    pub q: Mat,
+    pub k: Mat,
+    pub v: Mat,
+    pub o: Mat,
+    pub q_norm: Option<Vec<f32>>,
+    pub k_norm: Option<Vec<f32>>,
+    pub ffn_norm: Vec<f32>,
+    pub gate: Mat,
+    pub up: Mat,
+    pub down: Mat,
 }
 
 pub struct Model {
@@ -132,6 +132,22 @@ impl Model {
 
     pub fn gguf(&self) -> &Gguf {
         &self.gguf
+    }
+
+    pub fn layers(&self) -> &[Layer] {
+        &self.layers
+    }
+
+    pub fn output_mat(&self) -> &Mat {
+        &self.output
+    }
+
+    pub fn out_norm(&self) -> &[f32] {
+        &self.out_norm
+    }
+
+    pub fn embed_into(&self, token: u32, out: &mut [f32]) {
+        self.embed_row(token, out);
     }
 
     fn row<'a>(&'a self, m: &Mat, r: usize) -> &'a [u8] {
@@ -267,6 +283,9 @@ pub struct Session {
     qa_ffn: QAct,
     pub logits: Vec<f32>,
     pub stats: Stats,
+    /// When set, every step runs on the GPU and the CPU buffers above stay idle.
+    #[cfg(feature = "cuda")]
+    pub gpu: Option<crate::gpu::GpuState>,
 }
 
 impl Session {
@@ -292,6 +311,8 @@ impl Session {
             qa_ffn: QAct::new(c.ffn),
             logits: vec![0.0; c.vocab],
             stats: Stats::default(),
+            #[cfg(feature = "cuda")]
+            gpu: None,
         }
     }
 
@@ -319,7 +340,25 @@ impl Session {
     }
 
     /// Appends one token: runs the full forward pass and writes logits.
+    /// A session whose whole forward pass runs on the first CUDA GPU.
+    #[cfg(feature = "cuda")]
+    pub fn new_gpu(m: &Model, max_ctx: usize) -> Result<Self, Error> {
+        let mut s = Self::new(m, 1);
+        s.max_ctx = max_ctx;
+        s.gpu = Some(crate::gpu::GpuState::load(m, max_ctx)?);
+        Ok(s)
+    }
+
     pub fn step(&mut self, m: &Model, token: u32) {
+        #[cfg(feature = "cuda")]
+        if let Some(g) = self.gpu.as_mut() {
+            let pos = self.tokens.len();
+            if let Err(e) = g.step(m, token, pos, &mut self.logits) {
+                panic!("GPU step failed: {e}");
+            }
+            self.tokens.push(token);
+            return;
+        }
         let c = &m.cfg;
         let pos = self.tokens.len();
         let hd = c.head_dim;

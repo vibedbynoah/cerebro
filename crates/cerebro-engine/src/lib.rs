@@ -3,6 +3,8 @@
 //! conversation cache are all implemented here.
 
 pub mod gguf;
+#[cfg(feature = "cuda")]
+pub mod gpu;
 pub mod model;
 pub mod quant;
 pub mod sample;

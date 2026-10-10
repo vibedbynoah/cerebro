@@ -47,7 +47,22 @@ fn main() {
         t0.elapsed().as_secs_f64(),
         rayon::current_num_threads()
     );
-    let mut session = Session::new(&model, ctx);
+    let use_gpu = !args.iter().any(|a| a == "--cpu");
+    let mut session = if use_gpu {
+        let t = Instant::now();
+        match Session::new_gpu(&model, ctx) {
+            Ok(s) => {
+                eprintln!("GPU: weights and KV cache on the GPU ({:.0} MB) in {:.2}s", s.gpu.as_ref().map_or(0, |g| g.vram_bytes) as f64 / 1e6, t.elapsed().as_secs_f64());
+                s
+            }
+            Err(e) => {
+                eprintln!("GPU unavailable ({e}); running on the CPU");
+                Session::new(&model, ctx)
+            }
+        }
+    } else {
+        Session::new(&model, ctx)
+    };
     let mut sampler = Sampler::new(SamplerConfig { temperature: temp, ..Default::default() });
 
     let mut history: Vec<(String, String)> = Vec::new();
