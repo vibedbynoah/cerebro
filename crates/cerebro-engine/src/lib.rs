@@ -7,9 +7,11 @@ pub mod gguf;
 #[cfg(feature = "cuda")]
 pub mod gpu;
 pub mod hw;
+mod iq_tables;
 pub mod model;
 pub mod pool;
 pub mod quant;
+mod quant_more;
 pub mod sample;
 pub mod tokenizer;
 

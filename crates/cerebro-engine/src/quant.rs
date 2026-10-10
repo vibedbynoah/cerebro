@@ -11,6 +11,22 @@ pub enum DType {
     Q4K,
     Q5K,
     Q6K,
+    // Formats read through quant_more (dequantise-and-dot on the CPU, repacked for the GPU).
+    Q4_0,
+    Q4_1,
+    Q5_0,
+    Q5_1,
+    Q2K,
+    Q3K,
+    IQ2XXS,
+    IQ2XS,
+    IQ2S,
+    IQ3XXS,
+    IQ3S,
+    IQ1S,
+    IQ1M,
+    IQ4NL,
+    IQ4XS,
 }
 
 impl DType {
@@ -23,14 +39,29 @@ impl DType {
             13 => DType::Q5K,
             14 => DType::Q6K,
             30 => DType::BF16,
+            2 => DType::Q4_0,
+            3 => DType::Q4_1,
+            6 => DType::Q5_0,
+            7 => DType::Q5_1,
+            10 => DType::Q2K,
+            11 => DType::Q3K,
+            16 => DType::IQ2XXS,
+            17 => DType::IQ2XS,
+            18 => DType::IQ3XXS,
+            19 => DType::IQ1S,
+            20 => DType::IQ4NL,
+            21 => DType::IQ3S,
+            22 => DType::IQ2S,
+            23 => DType::IQ4XS,
+            29 => DType::IQ1M,
             _ => return None,
         })
     }
     pub fn block_elems(self) -> usize {
         match self {
             DType::F32 | DType::F16 | DType::BF16 => 1,
-            DType::Q8_0 => 32,
-            DType::Q4K | DType::Q5K | DType::Q6K => 256,
+            DType::Q8_0 | DType::Q4_0 | DType::Q4_1 | DType::Q5_0 | DType::Q5_1 | DType::IQ4NL => 32,
+            _ => 256,
         }
     }
     pub fn block_bytes(self) -> usize {
@@ -41,6 +72,21 @@ impl DType {
             DType::Q4K => 144,
             DType::Q5K => 176,
             DType::Q6K => 210,
+            DType::Q4_0 => 18,
+            DType::Q4_1 => 20,
+            DType::Q5_0 => 22,
+            DType::Q5_1 => 24,
+            DType::Q2K => 84,
+            DType::Q3K => 110,
+            DType::IQ2XXS => 66,
+            DType::IQ2XS => 74,
+            DType::IQ2S => 82,
+            DType::IQ3XXS => 98,
+            DType::IQ3S => 110,
+            DType::IQ1S => 50,
+            DType::IQ1M => 56,
+            DType::IQ4NL => 18,
+            DType::IQ4XS => 136,
         }
     }
     pub fn row_bytes(self, cols: usize) -> usize {
@@ -167,6 +213,7 @@ pub fn dequant_block(t: DType, b: &[u8], out: &mut [f32]) {
                 }
             }
         }
+        _ => crate::quant_more::dequant_block(t, b, out),
     }
 }
 
