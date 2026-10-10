@@ -15,6 +15,7 @@ fn main() {
     let mut out = vec![0f32; c.dim];
     let Ffn::Moe(e) = &m.layers()[0].ffn else { panic!("not MoE") };
     let per_expert = (e.gate.rows * e.gate.row_bytes + e.up.rows * e.up.row_bytes + e.down.rows * e.down.row_bytes) / c.n_expert;
+    let gap_us: u64 = std::env::var("MOEBENCH_GAP_US").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     for round in 0..3 {
         let t = Instant::now();
         let mut n = 0;
@@ -23,9 +24,16 @@ fn main() {
                 let ex: Vec<(usize, f32)> = (0..k).map(|j| ((step * 7 + li * 13 + j * 17) % c.n_expert, 1.0 / k as f32)).collect();
                 m.moe_cpu(li, &h, &qa, &ex, &mut s, &mut out);
                 n += k;
+                if gap_us > 0 {
+                    // Stand-in for the GPU's share of a layer: the main thread waits, workers idle.
+                    let t = Instant::now();
+                    while t.elapsed().as_micros() < gap_us as u128 {
+                        std::hint::spin_loop();
+                    }
+                }
             }
         }
-        let secs = t.elapsed().as_secs_f64();
+        let secs = t.elapsed().as_secs_f64() - (20 * c.n_layer) as f64 * gap_us as f64 * 1e-6;
         println!("round {round}: {:.1} us per layer call, {:.1} GB/s ({} threads)", secs / (20 * c.n_layer) as f64 * 1e6, (n * per_expert) as f64 / secs / 1e9, cerebro_engine::pool::global().threads());
     }
 }

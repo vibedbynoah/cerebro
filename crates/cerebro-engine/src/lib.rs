@@ -2,9 +2,11 @@
 //! used: GGUF parsing, tokenisation, the model graph, quantised kernels, sampling and the
 //! conversation cache are all implemented here.
 
+pub mod chat;
 pub mod gguf;
 #[cfg(feature = "cuda")]
 pub mod gpu;
+pub mod hw;
 pub mod model;
 pub mod pool;
 pub mod quant;

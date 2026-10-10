@@ -85,7 +85,10 @@ fn main() {
                 if !tok.eot.contains(&first) {
                     out.push(first);
                     let pos = session.tokens.len();
-                    g.generate_greedy(&model, first, pos, n.saturating_sub(1), &tok.eot, |t| out.push(t)).unwrap_or_else(|e| die(e.to_string()));
+                    g.generate_greedy(&model, first, pos, n.saturating_sub(1), &tok.eot, |t| {
+                        out.push(t);
+                        true
+                    }).unwrap_or_else(|e| die(e.to_string()));
                 }
                 let secs = td.elapsed().as_secs_f64();
                 println!("{}", tok.decode(&out));

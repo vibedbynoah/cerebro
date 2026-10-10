@@ -904,8 +904,8 @@ impl GpuState {
         if let Some(m) = self.moe.as_mut() {
             // Hybrid decoding syncs with the CPU every layer, so it is not captured as a graph.
             m.steps += 1;
-            if m.steps % 32 == 0 {
-                m.rebalance(&self.stream, model, 16)?;
+            if m.steps % 8 == 0 {
+                m.rebalance(&self.stream, model, 8)?;
             }
             return self.enqueue(model);
         }
@@ -964,7 +964,7 @@ impl GpuState {
             // Prompt-aware placement: move the experts this prompt used most into VRAM before
             // generation starts (bounded so a short prompt does not pay for a large reshuffle).
             let mo = self.moe.as_mut().expect("MoE state");
-            let max = (mo.owner.len() / 4).min(toks.len() * 2);
+            let max = (mo.owner.len() / 4).min(toks.len() * 8);
             mo.rebalance(&self.stream, model, max)?;
             return Ok(last);
         }
@@ -1302,17 +1302,18 @@ impl GpuState {
 
     /// Greedy decoding entirely on the GPU: each replay feeds its own pick into the next, with only a
     /// 4-byte read per token so generation can stop at an end-of-turn token.
-    pub fn generate_greedy(&mut self, model: &Model, first: u32, pos: usize, max_new: usize, stop: &[u32], mut emit: impl FnMut(u32)) -> Result<usize, Error> {
+    /// Returns the number of decode steps run; step i fed `first` (i = 0) or the token emitted before
+    /// it. `emit` returning false stops generation.
+    pub fn generate_greedy(&mut self, model: &Model, first: u32, pos: usize, max_new: usize, stop: &[u32], mut emit: impl FnMut(u32) -> bool) -> Result<usize, Error> {
         if self.moe.is_some() {
             let mut t = first;
             let mut n = 0;
             while n < max_new && pos + n < self.max_ctx {
                 t = self.step(model, t, pos + n, None)?;
                 n += 1;
-                if stop.contains(&t) {
+                if stop.contains(&t) || !emit(t) {
                     break;
                 }
-                emit(t);
             }
             return Ok(n);
         }
@@ -1325,10 +1326,9 @@ impl GpuState {
             self.stream.memcpy_dtoh(&self.next, &mut next).map_err(gerr)?;
             n += 1;
             let t = next[0] as u32;
-            if stop.contains(&t) {
+            if stop.contains(&t) || !emit(t) {
                 break;
             }
-            emit(t);
         }
         Ok(n)
     }
