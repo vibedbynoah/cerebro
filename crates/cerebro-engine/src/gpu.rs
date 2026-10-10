@@ -949,13 +949,23 @@ impl GpuState {
         if toks.is_empty() || pos0 + toks.len() > self.max_ctx {
             return Err(Error::Request("prefill outside the context".into()));
         }
-        if self.moe.is_some() {
+        if let Some(mo) = self.moe.as_mut() {
+            // Older history counts half as much once a new prompt arrives: the prompt's own routing
+            // is the best predictor of the experts its answer will use.
+            for c in mo.counts.iter_mut() {
+                *c *= 0.5;
+            }
             let mut out = out;
             let mut last = 0u32;
             for (ci, chunk) in toks.chunks(CHUNK).enumerate() {
                 let is_last = (ci + 1) * CHUNK >= toks.len();
                 last = self.prefill_moe_chunk(model, chunk, pos0 + ci * CHUNK, if is_last { out.as_deref_mut() } else { None })?;
             }
+            // Prompt-aware placement: move the experts this prompt used most into VRAM before
+            // generation starts (bounded so a short prompt does not pay for a large reshuffle).
+            let mo = self.moe.as_mut().expect("MoE state");
+            let max = (mo.owner.len() / 4).min(toks.len() * 2);
+            mo.rebalance(&self.stream, model, max)?;
             return Ok(last);
         }
         let mut last = 0u32;
