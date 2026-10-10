@@ -10,7 +10,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use rayon::prelude::*;
 
 use crate::gguf::{Gguf, TensorInfo};
 use crate::quant::{dequant_row, dot_k_q8, dot_q8_0_q8, dot_row, DType, QAct};
@@ -108,6 +107,11 @@ fn vec_f32(g: &Gguf, name: &str) -> Result<Vec<f32>, Error> {
 impl Model {
     pub fn load(path: &Path) -> Result<Self, Error> {
         let g = Arc::new(Gguf::open(path)?);
+        if std::env::var_os("CEREBRO_PREFAULT").is_some() {
+            let t = Instant::now();
+            let n = g.prefault();
+            eprintln!("prefaulted {:.1} GB in {:.2}s", n as f64 / 1e9, t.elapsed().as_secs_f64());
+        }
         let arch = g.str("general.architecture").unwrap_or("").to_owned();
         if !matches!(arch.as_str(), "qwen3" | "qwen3moe" | "qwen2" | "llama") {
             return Err(Error::Unsupported(format!("architecture {arch}")));
@@ -197,22 +201,10 @@ impl Model {
         &all[r * m.row_bytes..(r + 1) * m.row_bytes]
     }
 
-    /// out = M x, parallel over output rows. Q8_0 weights take the integer path with `qa`, the
-    /// activations quantised once for every matrix that reads them.
+    /// out = M x, parallel over output rows. Integer kernels use `qa`, the activations quantised once
+    /// for every matrix that reads them.
     fn matvec(&self, m: &Mat, x: &[f32], qa: &QAct, out: &mut [f32]) {
-        let g: &Gguf = &self.gguf;
-        let all = g.bytes_at(m.offset, m.rows * m.row_bytes);
-        let rb = m.row_bytes;
-        let dt = m.dtype;
-        // Enough chunks to balance performance and efficiency cores, few enough to keep overhead low.
-        let chunk = (m.rows / (rayon::current_num_threads() * 4)).clamp(16, 512);
-        out.par_chunks_mut(chunk).enumerate().for_each(|(ci, ch)| {
-            for (j, o) in ch.iter_mut().enumerate() {
-                let r = ci * chunk + j;
-                let row = &all[r * rb..(r + 1) * rb];
-                *o = dot_any(dt, row, x, qa);
-            }
-        });
+        self.matvec_multi(&mut [(m, x, qa, out)]);
     }
 
     /// Several matrix-vector products that read the same input, in one parallel region: one dispatch
@@ -226,7 +218,11 @@ impl Model {
     fn matvec_multi(&self, jobs: &mut [(&Mat, &[f32], &QAct, &mut [f32])]) {
         let g: &Gguf = &self.gguf;
         let total: usize = jobs.iter().map(|j| j.0.rows).sum();
-        let chunk = (total / (rayon::current_num_threads() * 4)).clamp(16, 512);
+        let pool = crate::pool::global();
+        // Small items keep the slowest core (an E-core) from holding up the end of each job.
+        static DIV: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        let div = *DIV.get_or_init(|| std::env::var("CEREBRO_CHUNK_DIV").ok().and_then(|v| v.parse().ok()).unwrap_or(4));
+        let chunk = (total / (pool.threads() * div)).clamp(4, 512);
         // Each work item is (job index, first row, row count); outputs are disjoint slices.
         let mut items = Vec::with_capacity(total / chunk + jobs.len());
         for (ji, j) in jobs.iter().enumerate() {
@@ -243,7 +239,8 @@ impl Model {
         unsafe impl Send for Out {}
         let outs: Vec<Out> = jobs.iter_mut().map(|j| Out(j.3.as_mut_ptr())).collect();
         let ins: Vec<(&Mat, &[f32], &QAct)> = jobs.iter().map(|j| (j.0, j.1, j.2)).collect();
-        items.par_iter().for_each(|&(ji, r0, n)| {
+        pool.run(items.len(), &|ii| {
+            let (ji, r0, n) = items[ii];
             let (m, x, qa) = ins[ji];
             let all = g.bytes_at(m.offset, m.rows * m.row_bytes);
             let rb = m.row_bytes;
@@ -551,7 +548,17 @@ impl Session {
             self.k[li][pos * kvd..(pos + 1) * kvd].copy_from_slice(&self.kb);
             self.v[li][pos * kvd..(pos + 1) * kvd].copy_from_slice(&self.vb);
             let (kc, vc, q) = (&self.k[li], &self.v[li], &self.q);
-            self.att.par_chunks_mut(hd).enumerate().for_each(|(hh, out)| {
+            struct Ptr(*mut f32);
+            // SAFETY: each head writes only its own hd-long slice of att.
+            unsafe impl Sync for Ptr {}
+            impl Ptr {
+                fn at(&self, i: usize) -> *mut f32 {
+                    self.0.wrapping_add(i)
+                }
+            }
+            let att = Ptr(self.att.as_mut_ptr());
+            crate::pool::global().run(c.n_head, &|hh| {
+                let out = unsafe { std::slice::from_raw_parts_mut(att.at(hh * hd), hd) };
                 let qh = &q[hh * hd..(hh + 1) * hd];
                 let kvh = hh / group;
                 let mut scores = vec![0f32; pos + 1];

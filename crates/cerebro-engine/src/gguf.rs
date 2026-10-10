@@ -243,6 +243,57 @@ impl Gguf {
     }
 
     /// A byte range already validated when the tensor table was parsed.
+    /// Touches every page of the file in parallel so later reads hit mapped memory instead of taking
+    /// a page fault per 4 KB (reads it from disk if it is not in the OS file cache). Returns bytes.
+    pub fn prefault(&self) -> usize {
+        use rayon::prelude::*;
+        let m: &[u8] = &self.mmap;
+        m.par_chunks(1 << 22).map(|c| c.iter().step_by(4096).fold(0u8, |a, &b| a ^ unsafe { std::ptr::read_volatile(&b) }) as usize).sum::<usize>();
+        m.len()
+    }
+
+    /// Tells the OS these file bytes will not be read soon (e.g. experts now served from VRAM): their
+    /// pages leave this process's working set and become the first candidates for eviction, so RAM
+    /// goes to the weights the CPU still reads. The file stays mapped; a later read pages them back.
+    pub fn release(&self, offset: usize, len: usize) {
+        #[cfg(windows)]
+        {
+            let (start, end) = self.page_range(offset, len);
+            // SAFETY: the range lies inside our mapping. VirtualUnlock on pages that are not locked
+            // fails with ERROR_NOT_LOCKED but still removes them from the working set (documented).
+            unsafe { win::VirtualUnlock(start as *mut _, end - start) };
+        }
+        let _ = (offset, len);
+    }
+
+    /// Asks the OS to read these file ranges into memory ahead of use (asynchronous, best effort):
+    /// experts the CPU will compute, so a decode step does not stall on a page fault from disk.
+    pub fn prefetch(&self, ranges: &[(usize, usize)]) {
+        #[cfg(windows)]
+        {
+            let entries: Vec<win::MemoryRange> = ranges
+                .iter()
+                .map(|&(o, l)| {
+                    let (a, b) = self.page_range(o, l);
+                    win::MemoryRange { va: a as *mut _, bytes: b - a }
+                })
+                .collect();
+            if !entries.is_empty() {
+                // SAFETY: every range lies inside our mapping; the call only hints the memory manager.
+                unsafe { win::PrefetchVirtualMemory(win::GetCurrentProcess(), entries.len(), entries.as_ptr(), 0) };
+            }
+        }
+        let _ = ranges;
+    }
+
+    #[cfg(windows)]
+    fn page_range(&self, offset: usize, len: usize) -> (usize, usize) {
+        let base = self.mmap.as_ptr() as usize;
+        let start = (base + offset) & !4095;
+        let end = (base + offset + len + 4095) & !4095;
+        (start, end.min(base + self.mmap.len()).max(start))
+    }
+
     pub fn bytes_at(&self, offset: usize, len: usize) -> &[u8] {
         &self.mmap[offset..offset + len]
     }
@@ -261,5 +312,23 @@ impl Gguf {
 
     pub fn str(&self, key: &str) -> Option<&str> {
         self.meta.get(key).and_then(Value::as_str)
+    }
+}
+
+#[cfg(windows)]
+mod win {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    pub struct MemoryRange {
+        pub va: *mut c_void,
+        pub bytes: usize,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn VirtualUnlock(addr: *mut c_void, size: usize) -> i32;
+        pub fn PrefetchVirtualMemory(process: *mut c_void, n: usize, entries: *const MemoryRange, flags: u32) -> i32;
+        pub fn GetCurrentProcess() -> *mut c_void;
     }
 }

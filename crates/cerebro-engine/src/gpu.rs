@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
-use cudarc::driver::{CudaContext, CudaFunction, CudaGraph, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaContext, CudaFunction, CudaGraph, CudaSlice, CudaStream, LaunchConfig, PinnedHostSlice, PushKernelArg};
 use cudarc::nvrtc::Ptx;
 
 use crate::gguf::Gguf;
@@ -25,11 +25,27 @@ use crate::Error;
 
 const PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
 
-struct GMat {
-    qs: CudaSlice<i8>,
-    ds: CudaSlice<f32>,
+/// A weight matrix on the GPU: repacked to int8 (`Q8`), or kept in its K-quant format as row-stacked
+/// parts (`K`; fused Q/K/V can mix formats, e.g. Q4_K and Q6_K).
+enum GMat {
+    Q8 { qs: CudaSlice<i8>, ds: CudaSlice<f32>, rows: usize, cols: usize },
+    K { parts: Vec<KPart>, cols: usize },
+}
+
+struct KPart {
+    w: CudaSlice<u8>,
+    dtype: i32,
+    bb: i32,
     rows: usize,
-    cols: usize,
+}
+
+impl GMat {
+    fn q8(&self) -> (&CudaSlice<i8>, &CudaSlice<f32>, usize, usize) {
+        match self {
+            GMat::Q8 { qs, ds, rows, cols } => (qs, ds, *rows, *cols),
+            GMat::K { .. } => panic!("batched kernels need the int8 layout"),
+        }
+    }
 }
 
 struct GLayer {
@@ -68,6 +84,7 @@ struct Funcs {
     router_topk: CudaFunction,
     moe_silu: CudaFunction,
     moe_combine: CudaFunction,
+    matvec_k: CudaFunction,
 }
 
 /// GPU-side block size of a K-quant format (Q6_K padded to 224 bytes for aligned loads) and its GGML
@@ -112,7 +129,6 @@ struct MoeGpu {
     /// layer's experts cannot be cached on the GPU.
     kinds: Vec<Option<[ExpMat; 3]>>,
     pool: CudaSlice<u8>,
-    pool_ptr: u64,
     slot_bytes: usize,
     /// slot_of[layer * ne + expert] = cache slot; owner[slot] = layer * ne + expert.
     slot_of: Vec<Option<u32>>,
@@ -122,21 +138,24 @@ struct MoeGpu {
     profile: std::path::PathBuf,
     pub hits: u64,
     pub lookups: u64,
+    /// Seconds spent waiting for the GPU's routing result, and computing CPU experts.
+    pub wait_s: f64,
+    pub cpu_s: f64,
     steps: u64,
-    // Device scratch.
+    /// Device copy of slot_of (-1 = not cached), read by the router kernel.
+    slot_tab: CudaSlice<i32>,
+    // Device scratch. sel = [ids k | weights k | slots k].
     h: CudaSlice<f32>,
-    ids: CudaSlice<i32>,
-    wts: CudaSlice<f32>,
-    ptrs: CudaSlice<u64>,
-    wg: CudaSlice<f32>,
+    sel: CudaSlice<i32>,
     gu: CudaSlice<f32>,
     axq: CudaSlice<i8>,
     axd: CudaSlice<f32>,
     eo: CudaSlice<f32>,
     cpu: CudaSlice<f32>,
-    // Host scratch.
-    ids_h: Vec<i32>,
-    wts_h: Vec<f32>,
+    // Host scratch; pinned so the per-layer copies are asynchronous.
+    sel_h: PinnedHostSlice<i32>,
+    h_pin: PinnedHostSlice<f32>,
+    cpu_pin: PinnedHostSlice<f32>,
     h_h: Vec<f32>,
     qa: QAct,
     scratch: MoeScratch,
@@ -155,11 +174,25 @@ impl MoeGpu {
         [one(&m.gate), one(&m.up), one(&m.down)]
     }
 
+    /// The file byte ranges of one expert (gate, up, down).
+    fn expert_ranges(model: &Model, li: usize, e: usize) -> [(usize, usize); 3] {
+        let Ffn::Moe(m) = &model.layers()[li].ffn else { unreachable!() };
+        let ne = model.cfg.n_expert;
+        let r = |mat: &Mat| {
+            let p = mat.part(e, ne);
+            (p.offset, p.rows * p.row_bytes)
+        };
+        [r(&m.gate), r(&m.up), r(&m.down)]
+    }
+
     fn upload(&mut self, stream: &Arc<CudaStream>, model: &Model, slot: usize, key: usize) -> Result<(), Error> {
         let (li, e) = (key / self.ne, key % self.ne);
         if let Some(&old) = self.owner.get(slot) {
             if old != usize::MAX {
                 self.slot_of[old] = None;
+                // The evicted expert is computed on the CPU from now on: start reading it into RAM.
+                model.gguf().prefetch(&Self::expert_ranges(model, old / self.ne, old % self.ne));
+                stream.memcpy_htod(&[-1i32], &mut self.slot_tab.slice_mut(old..old + 1)).map_err(gerr)?;
             }
         }
         let mut off = slot * self.slot_bytes;
@@ -171,6 +204,11 @@ impl MoeGpu {
         }
         self.owner[slot] = key;
         self.slot_of[key] = Some(slot as u32);
+        // Served from VRAM now: its RAM copy can make way for experts the CPU reads.
+        for (o, l) in Self::expert_ranges(model, li, e) {
+            model.gguf().release(o, l);
+        }
+        stream.memcpy_htod(&[slot as i32], &mut self.slot_tab.slice_mut(key..key + 1)).map_err(gerr)?;
         Ok(())
     }
 
@@ -239,6 +277,8 @@ pub struct GpuState {
     out_norm: CudaSlice<f32>,
     output: GMat,
     embed: Option<GMat>,
+    /// MoE models look embeddings up on the CPU (the table stays out of VRAM); the row is uploaded.
+    host_embed: Option<Vec<f32>>,
     x: CudaSlice<f32>,
     qkv: CudaSlice<f32>,
     att: CudaSlice<f32>,
@@ -334,6 +374,7 @@ impl GpuState {
             router_topk: lf("router_topk")?,
             moe_silu: lf("moe_silu_quant")?,
             moe_combine: lf("moe_combine")?,
+            matvec_k: lf("matvec_k")?,
         };
         let c = &model.cfg;
         if c.head_dim > 256 || c.head_dim % 64 != 0 || c.dim > 8192 {
@@ -341,10 +382,24 @@ impl GpuState {
         }
         let g = model.gguf();
         let mut vram = 0usize;
+        // MoE models keep K-quant weights native on the GPU (about half the bytes of the int8
+        // layout), leaving the VRAM to the expert cache; dense models use int8 everywhere so that
+        // the batched prefill kernels apply.
+        let native = c.n_expert > 0;
         let mut up = |mats: &[&Mat]| -> Result<GMat, Error> {
+            if native && mats.iter().all(|m| gpu_block(m.dtype).is_some() && m.cols % 256 == 0) {
+                let mut parts = Vec::with_capacity(mats.len());
+                for m in mats {
+                    let (bb, dtype) = gpu_block(m.dtype).unwrap();
+                    let bytes = to_gpu_layout(m.dtype, g.bytes_at(m.offset, m.rows * m.row_bytes));
+                    vram += bytes.len();
+                    parts.push(KPart { w: stream.clone_htod(&bytes).map_err(gerr)?, dtype, bb: bb as i32, rows: m.rows });
+                }
+                return Ok(GMat::K { parts, cols: mats[0].cols });
+            }
             let (qs, ds, rows, cols) = repack(g, mats);
             vram += qs.len() + ds.len() * 4;
-            Ok(GMat { qs: stream.clone_htod(&qs).map_err(gerr)?, ds: stream.clone_htod(&ds).map_err(gerr)?, rows, cols })
+            Ok(GMat::Q8 { qs: stream.clone_htod(&qs).map_err(gerr)?, ds: stream.clone_htod(&ds).map_err(gerr)?, rows, cols })
         };
         let kvd = c.n_kv * c.head_dim;
         let mut layers = Vec::with_capacity(c.n_layer);
@@ -369,7 +424,8 @@ impl GpuState {
         }
         let output = up(&[model.output_mat()])?;
         // Tied embeddings reuse the output matrix on the GPU; otherwise upload the table too.
-        let embed = if model.tied() { None } else { Some(up(&[model.embed_mat()])?) };
+        let host_embed = native.then(|| vec![0f32; c.dim]);
+        let embed = if model.tied() || native { None } else { Some(up(&[model.embed_mat()])?) };
         vram += c.n_layer * 2 * max_ctx * kvd * 2;
         let z = |n: usize| stream.alloc_zeros::<f32>(n).map_err(gerr);
         let qd = c.n_head * c.head_dim;
@@ -386,6 +442,24 @@ impl GpuState {
             toks: stream.alloc_zeros::<i32>(CHUNK).map_err(gerr)?,
             pos0: stream.alloc_zeros::<i32>(1).map_err(gerr)?,
         };
+        // Everything uploaded so far is read from VRAM only; free its RAM for the CPU-side weights.
+        {
+            let rel = |m: &Mat| g.release(m.offset, m.rows * m.row_bytes);
+            for l in model.layers() {
+                for m in [&l.q, &l.k, &l.v, &l.o] {
+                    rel(m);
+                }
+                if let Ffn::Dense { gate, up, down } = &l.ffn {
+                    for m in [gate, up, down] {
+                        rel(m);
+                    }
+                }
+            }
+            rel(model.output_mat());
+            if !native {
+                rel(model.embed_mat());
+            }
+        }
         let moe = if c.n_expert > 0 { Some(Self::load_moe(&ctx, &stream, model)?) } else { None };
         if let Some(m) = &moe {
             vram += m.owner.len() * m.slot_bytes;
@@ -395,6 +469,7 @@ impl GpuState {
             out_norm: stream.clone_htod(model.out_norm()).map_err(gerr)?,
             output,
             embed,
+            host_embed,
             x: z(c.dim)?,
             qkv: z(qd + 2 * kvd)?,
             att: z(qd)?,
@@ -450,10 +525,6 @@ impl GpuState {
         let slot_bytes = kinds.iter().flatten().map(|k| k.iter().map(|m| m.bytes).sum::<usize>()).max().unwrap_or(0).div_ceil(256).max(1) * 256;
         let n_slots = (budget / slot_bytes).min(cacheable);
         let pool = stream.alloc_zeros::<u8>((n_slots * slot_bytes).max(256)).map_err(gerr)?;
-        let pool_ptr = {
-            use cudarc::driver::DevicePtr;
-            pool.device_ptr(stream).0
-        };
         let profile = std::path::PathBuf::from(format!("{}.experts", model.path.display()));
         let mut counts = vec![0f32; total];
         if let Ok(t) = std::fs::read_to_string(&profile) {
@@ -470,7 +541,6 @@ impl GpuState {
             eff,
             kinds,
             pool,
-            pool_ptr,
             slot_bytes,
             slot_of: vec![None; total],
             owner: vec![usize::MAX; n_slots],
@@ -478,19 +548,21 @@ impl GpuState {
             profile,
             hits: 0,
             lookups: 0,
+            wait_s: 0.0,
+            cpu_s: 0.0,
             steps: 0,
+            slot_tab: stream.clone_htod(&vec![-1i32; total]).map_err(gerr)?,
             h: z(dim)?,
-            ids: stream.alloc_zeros::<i32>(k).map_err(gerr)?,
-            wts: z(k)?,
-            ptrs: stream.alloc_zeros::<u64>(3 * k).map_err(gerr)?,
-            wg: z(k)?,
+            sel: stream.alloc_zeros::<i32>(3 * k).map_err(gerr)?,
             gu: z(2 * k * eff)?,
             axq: stream.alloc_zeros::<i8>(k * eff).map_err(gerr)?,
             axd: z(k * eff / 32)?,
             eo: z(k * dim)?,
             cpu: z(dim)?,
-            ids_h: vec![0; k],
-            wts_h: vec![0.0; k],
+            // SAFETY: plain host buffers, read only after their copies complete (as_slice syncs).
+            sel_h: unsafe { ctx.alloc_pinned::<i32>(3 * k) }.map_err(gerr)?,
+            h_pin: unsafe { ctx.alloc_pinned::<f32>(dim) }.map_err(gerr)?,
+            cpu_pin: unsafe { ctx.alloc_pinned::<f32>(dim) }.map_err(gerr)?,
             h_h: vec![0.0; dim],
             qa: QAct::new(dim),
             scratch: MoeScratch::new(c),
@@ -502,6 +574,9 @@ impl GpuState {
         for (slot, &key) in order.iter().take(n_slots).enumerate() {
             mg.upload(stream, model, slot, key)?;
         }
+        // Bring the experts the CPU will compute into RAM ahead of the first tokens.
+        let cpu_side: Vec<(usize, usize)> = (0..total).filter(|&k| mg.slot_of[k].is_none()).flat_map(|k| MoeGpu::expert_ranges(model, k / c.n_expert, k % c.n_expert)).collect();
+        model.gguf().prefetch(&cpu_side);
         Ok(mg)
     }
 
@@ -532,31 +607,37 @@ impl GpuState {
             let scale = b.iter().fold(0f32, |m, v| m.max(v.abs())).max(1e-6);
             a.iter().zip(b).fold(0f32, |m, (x, y)| m.max((x - y).abs())) / scale
         };
-        let base = mo.pool_ptr + (mo.owner.iter().position(|&k| k == key).unwrap() * mo.slot_bytes) as u64;
-        let run = |mo: &mut MoeGpu, x: &[f32], ptr: u64, em: ExpMat| -> Result<Vec<f32>, Error> {
+        let slot = mo.owner.iter().position(|&k| k == key).unwrap() as i32;
+        let run = |mo: &mut MoeGpu, x: &[f32], off: i64, em: ExpMat| -> Result<Vec<f32>, Error> {
             let n = x.len() as i32;
-            let mut xd = s.clone_htod(x).map_err(gerr)?;
+            let xd = s.clone_htod(x).map_err(gerr)?;
             let cfg = LaunchConfig { grid_dim: ((x.len() as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
             unsafe { s.launch_builder(&f.quant).arg(&xd).arg(&mut mo.axq).arg(&mut mo.axd).arg(&n).launch(cfg) }.map_err(gerr)?;
-            s.memcpy_htod(&[ptr], &mut mo.ptrs.slice_mut(0..1)).map_err(gerr)?;
-            let (rows, cols, zero) = (em.rows as i32, em.cols as i32, 0i32);
-            let cfg = LaunchConfig { grid_dim: ((em.rows as u32).div_ceil(8), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
-            unsafe { s.launch_builder(&f.moe_matvec).arg(&mo.ptrs).arg(&em.dtype).arg(&em.bb).arg(&mo.axq).arg(&mo.axd).arg(&zero).arg(&mut mo.eo).arg(&rows).arg(&cols).launch(cfg) }.map_err(gerr)?;
+            // Only choice 0 is "cached" (the slot under test); the rest are skipped.
+            let mut sel = vec![-1i32; 3 * mo.k];
+            sel[2 * mo.k] = slot;
+            s.memcpy_htod(&sel, &mut mo.sel).map_err(gerr)?;
+            let (rows, cols, zero, sb) = (em.rows as i32, em.cols as i32, 0i32, mo.slot_bytes as i64);
+            let cfg = LaunchConfig { grid_dim: ((em.rows as u32).div_ceil(8), mo.k as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+            unsafe { s.launch_builder(&f.moe_matvec).arg(&mo.pool).arg(&sb).arg(&off).arg(&mo.sel).arg(&em.dtype).arg(&em.bb).arg(&mo.axq).arg(&mo.axd).arg(&zero).arg(&mut mo.eo).arg(&rows).arg(&cols).launch(cfg) }.map_err(gerr)?;
             let mut out = vec![0f32; mo.eo.len()];
             s.memcpy_dtoh(&mo.eo, &mut out).map_err(gerr)?;
             out.truncate(em.rows);
-            xd = s.alloc_zeros::<f32>(1).map_err(gerr)?;
-            drop(xd);
             Ok(out)
         };
         let [gate, up, down] = mo.kinds[li].expect("cached");
         let xh: Vec<f32> = (0..gate.cols).map(|i| ((i as f32) * 0.37).sin()).collect();
-        let gg = run(mo, &xh, base, gate)?;
+        let gg = run(mo, &xh, 0, gate)?;
         let gc = cpu_rows(&m.gate, &xh);
         let xa: Vec<f32> = (0..down.cols).map(|i| ((i as f32) * 0.11).cos()).collect();
-        let dg = run(mo, &xa, base + (gate.bytes + up.bytes) as u64, down)?;
+        let dg = run(mo, &xa, (gate.bytes + up.bytes) as i64, down)?;
         let dc = cpu_rows(&m.down, &xa);
         Ok(Some((err(&gg, &gc), err(&dg, &dc))))
+    }
+
+    /// (seconds waiting for the GPU's routing, seconds computing CPU experts) so far.
+    pub fn moe_times(&self) -> Option<(f64, f64)> {
+        self.moe.as_ref().map(|m| (m.wait_s, m.cpu_s))
     }
 
     /// Saves the expert-use profile next to the model (MoE models only).
@@ -566,10 +647,25 @@ impl GpuState {
         }
     }
 
-    fn matvec(s: &CudaStream, f: &CudaFunction, m: &GMat, xq: &CudaSlice<i8>, xd: &CudaSlice<f32>, y: &mut CudaSlice<f32>, add: bool) -> Result<(), Error> {
-        let (rows, cols, add) = (m.rows as i32, m.cols as i32, add as i32);
-        let cfg = LaunchConfig { grid_dim: ((m.rows as u32).div_ceil(8), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
-        unsafe { s.launch_builder(f).arg(&m.qs).arg(&m.ds).arg(xq).arg(xd).arg(y).arg(&rows).arg(&cols).arg(&add).launch(cfg) }.map_err(gerr)?;
+    fn matvec(s: &CudaStream, f: &Funcs, m: &GMat, xq: &CudaSlice<i8>, xd: &CudaSlice<f32>, y: &mut CudaSlice<f32>, add: bool) -> Result<(), Error> {
+        let addi = add as i32;
+        let cfg = |rows: usize| LaunchConfig { grid_dim: ((rows as u32).div_ceil(8), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+        match m {
+            GMat::Q8 { qs, ds, rows, cols } => {
+                let (r, c) = (*rows as i32, *cols as i32);
+                unsafe { s.launch_builder(&f.matvec).arg(qs).arg(ds).arg(xq).arg(xd).arg(y).arg(&r).arg(&c).arg(&addi).launch(cfg(*rows)) }.map_err(gerr)?;
+            }
+            GMat::K { parts, cols } => {
+                let c = *cols as i32;
+                let mut r0 = 0;
+                for p in parts {
+                    let mut yv = y.slice_mut(r0..r0 + p.rows);
+                    let r = p.rows as i32;
+                    unsafe { s.launch_builder(&f.matvec_k).arg(&p.w).arg(&p.dtype).arg(&p.bb).arg(xq).arg(xd).arg(&mut yv).arg(&r).arg(&c).arg(&addi).launch(cfg(p.rows)) }.map_err(gerr)?;
+                    r0 += p.rows;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -584,16 +680,18 @@ impl GpuState {
         let (n_head, n_kv) = (sh.n_head as i32, sh.n_kv as i32);
         let (eps, base) = (sh.eps, sh.base);
         let null_f: u64 = 0;
-        {
-            let e = self.embed.as_ref().unwrap_or(&self.output);
-            unsafe { s.launch_builder(&f.embed).arg(&e.qs).arg(&e.ds).arg(&self.tok).arg(&mut self.x).arg(&dim).launch(blocks(sh.dim)) }.map_err(gerr)?;
+        if let Some(row) = &self.host_embed {
+            s.memcpy_htod(row, &mut self.x).map_err(gerr)?;
+        } else {
+            let (qs, ds, _, _) = self.embed.as_ref().unwrap_or(&self.output).q8();
+            unsafe { s.launch_builder(&f.embed).arg(qs).arg(ds).arg(&self.tok).arg(&mut self.x).arg(&dim).launch(blocks(sh.dim)) }.map_err(gerr)?;
         }
         let has_norm = sh.qk_norm as i32;
         let group = (sh.n_head / sh.n_kv) as i32;
         let scale = 1.0f32 / (sh.hd as f32).sqrt();
         for (li, l) in self.layers.iter_mut().enumerate() {
             unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&l.attn_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
-            Self::matvec(s, &f.matvec, &l.qkv, &self.xq, &self.xd, &mut self.qkv, false)?;
+            Self::matvec(s, f, &l.qkv, &self.xq, &self.xd, &mut self.qkv, false)?;
             {
                 let qn = l.q_norm.as_ref().unwrap_or(&l.attn_norm);
                 let kn = l.k_norm.as_ref().unwrap_or(&l.attn_norm);
@@ -642,12 +740,12 @@ impl GpuState {
             }
             let qd = (sh.n_head * sh.hd) as i32;
             unsafe { s.launch_builder(&f.quant).arg(&self.att).arg(&mut self.xq).arg(&mut self.xd).arg(&qd).launch(blocks(sh.n_head * sh.hd)) }.map_err(gerr)?;
-            Self::matvec(s, &f.matvec, &l.o, &self.xq, &self.xd, &mut self.x, true)?;
+            Self::matvec(s, f, &l.o, &self.xq, &self.xd, &mut self.x, true)?;
             if let (Some(gu), Some(down)) = (&l.gu, &l.down) {
                 unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&l.ffn_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
-                Self::matvec(s, &f.matvec, gu, &self.xq, &self.xd, &mut self.gu, false)?;
+                Self::matvec(s, f, gu, &self.xq, &self.xd, &mut self.gu, false)?;
                 unsafe { s.launch_builder(&f.silu_mul_quant).arg(&self.gu).arg(&mut self.xq).arg(&mut self.xd).arg(&ffn).launch(blocks(sh.ffn)) }.map_err(gerr)?;
-                Self::matvec(s, &f.matvec, down, &self.xq, &self.xd, &mut self.x, true)?;
+                Self::matvec(s, f, down, &self.xq, &self.xd, &mut self.x, true)?;
                 continue;
             }
             // Mixture of experts: route on the GPU, then cached experts on the GPU and the rest on the
@@ -656,84 +754,64 @@ impl GpuState {
             let router = l.router.as_ref().expect("router");
             unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&l.ffn_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&mut mo.h).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
             let (ne, k) = (mo.ne as i32, mo.k as i32);
-            unsafe { s.launch_builder(&f.router_topk).arg(router).arg(&mo.h).arg(&dim).arg(&ne).arg(&k).arg(&mut mo.ids).arg(&mut mo.wts).launch(one) }.map_err(gerr)?;
-            s.memcpy_dtoh(&mo.ids, &mut mo.ids_h).map_err(gerr)?;
-            s.memcpy_dtoh(&mo.wts, &mut mo.wts_h).map_err(gerr)?;
-            let mut on_gpu: Vec<(u32, f32)> = Vec::with_capacity(mo.k);
-            let mut on_cpu: Vec<(usize, f32)> = Vec::with_capacity(mo.k);
-            for (&e, &w) in mo.ids_h.iter().zip(&mo.wts_h) {
-                let key = li * mo.ne + e as usize;
-                mo.counts[key] += 1.0;
-                mo.lookups += 1;
-                match mo.slot_of[key] {
-                    Some(slot) => {
-                        mo.hits += 1;
-                        on_gpu.push((slot, w));
-                    }
-                    None => on_cpu.push((e as usize, w)),
-                }
+            {
+                let tab = mo.slot_tab.slice(li * mo.ne..(li + 1) * mo.ne);
+                unsafe { s.launch_builder(&f.router_topk).arg(router).arg(&mo.h).arg(&dim).arg(&ne).arg(&k).arg(&tab).arg(&mut mo.sel).launch(one) }.map_err(gerr)?;
             }
-            let ng = on_gpu.len();
-            if ng > 0 {
-                let [kg, ku, kd] = mo.kinds[li].expect("cached experts imply a supported layer");
-                let mut ptrs = vec![0u64; 3 * ng];
-                for (i, &(slot, _)) in on_gpu.iter().enumerate() {
-                    let base = mo.pool_ptr + (slot as usize * mo.slot_bytes) as u64;
-                    ptrs[i] = base;
-                    ptrs[ng + i] = base + kg.bytes as u64;
-                    ptrs[2 * ng + i] = base + (kg.bytes + ku.bytes) as u64;
-                }
-                let wg: Vec<f32> = on_gpu.iter().map(|g| g.1).collect();
-                s.memcpy_htod(&ptrs, &mut mo.ptrs.slice_mut(0..3 * ng)).map_err(gerr)?;
-                s.memcpy_htod(&wg, &mut mo.wg.slice_mut(0..ng)).map_err(gerr)?;
+            // Asynchronous copies of the choice and the normed input for the CPU; the cached experts
+            // are queued straight away, since the GPU needs nothing from the host to run them.
+            s.memcpy_dtoh(&mo.sel, &mut mo.sel_h).map_err(gerr)?;
+            s.memcpy_dtoh(&mo.h, &mut mo.h_pin).map_err(gerr)?;
+            // Event tracking is off (single stream), so the copies are waited on explicitly.
+            let copied = s.record_event(None).map_err(gerr)?;
+            if let Some([kg, ku, kd]) = mo.kinds[li] {
                 let eff = mo.eff;
-                let launch_mv = |w: &cudarc::driver::CudaView<u64>, em: &ExpMat, xq: &CudaSlice<i8>, xd: &CudaSlice<f32>, xstride: i32, y: &mut cudarc::driver::CudaViewMut<f32>| -> Result<(), Error> {
+                let sb = mo.slot_bytes as i64;
+                let kk = mo.k;
+                let launch_mv = |off: i64, em: &ExpMat, xq: &CudaSlice<i8>, xd: &CudaSlice<f32>, xstride: i32, y: &mut cudarc::driver::CudaViewMut<f32>, pool: &CudaSlice<u8>, sel: &CudaSlice<i32>| -> Result<(), Error> {
                     let (rows, cols) = (em.rows as i32, em.cols as i32);
-                    let cfg = LaunchConfig { grid_dim: ((em.rows as u32).div_ceil(8), ng as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
-                    unsafe { s.launch_builder(&f.moe_matvec).arg(w).arg(&em.dtype).arg(&em.bb).arg(xq).arg(xd).arg(&xstride).arg(y).arg(&rows).arg(&cols).launch(cfg) }.map_err(gerr)?;
+                    let cfg = LaunchConfig { grid_dim: ((em.rows as u32).div_ceil(8), kk as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+                    unsafe { s.launch_builder(&f.moe_matvec).arg(pool).arg(&sb).arg(&off).arg(sel).arg(&em.dtype).arg(&em.bb).arg(xq).arg(xd).arg(&xstride).arg(y).arg(&rows).arg(&cols).launch(cfg) }.map_err(gerr)?;
                     Ok(())
                 };
-                launch_mv(&mo.ptrs.slice(0..ng), &kg, &self.xq, &self.xd, 0, &mut mo.gu.slice_mut(0..ng * eff))?;
-                launch_mv(&mo.ptrs.slice(ng..2 * ng), &ku, &self.xq, &self.xd, 0, &mut mo.gu.slice_mut(ng * eff..2 * ng * eff))?;
-                let (effi, ngi) = (eff as i32, ng as i32);
-                unsafe { s.launch_builder(&f.moe_silu).arg(&mo.gu).arg(&mut mo.axq).arg(&mut mo.axd).arg(&effi).arg(&ngi).launch(blocks(ng * eff)) }.map_err(gerr)?;
-                launch_mv(&mo.ptrs.slice(2 * ng..3 * ng), &kd, &mo.axq, &mo.axd, effi, &mut mo.eo.slice_mut(0..ng * sh.dim))?;
+                launch_mv(0, &kg, &self.xq, &self.xd, 0, &mut mo.gu.slice_mut(0..kk * eff), &mo.pool, &mo.sel)?;
+                launch_mv(kg.bytes as i64, &ku, &self.xq, &self.xd, 0, &mut mo.gu.slice_mut(kk * eff..2 * kk * eff), &mo.pool, &mo.sel)?;
+                let (effi, ki) = (eff as i32, kk as i32);
+                unsafe { s.launch_builder(&f.moe_silu).arg(&mo.gu).arg(&mut mo.axq).arg(&mut mo.axd).arg(&effi).arg(&ki).launch(blocks(kk * eff)) }.map_err(gerr)?;
+                launch_mv((kg.bytes + ku.bytes) as i64, &kd, &mo.axq, &mo.axd, effi, &mut mo.eo.slice_mut(0..kk * sh.dim), &mo.pool, &mo.sel)?;
             }
-            // CPU experts while the GPU works on its share.
+            // CPU experts while the GPU runs its share. The cpu_pin upload of the previous layer is
+            // complete too: it was queued before this layer's copies.
+            let tw = std::time::Instant::now();
+            copied.synchronize().map_err(gerr)?;
+            mo.wait_s += tw.elapsed().as_secs_f64();
+            let tc = std::time::Instant::now();
+            let sel = mo.sel_h.as_slice().map_err(gerr)?.to_vec();
+            let mut on_cpu: Vec<(usize, f32)> = Vec::with_capacity(mo.k);
+            for t in 0..mo.k {
+                let (e, w, slot) = (sel[t] as usize, f32::from_bits(sel[mo.k + t] as u32), sel[2 * mo.k + t]);
+                mo.counts[li * mo.ne + e] += 1.0;
+                mo.lookups += 1;
+                if slot >= 0 {
+                    mo.hits += 1;
+                } else {
+                    on_cpu.push((e, w));
+                }
+            }
             if on_cpu.is_empty() {
                 mo.cpu_out.fill(0.0);
             } else {
-                s.memcpy_dtoh(&mo.h, &mut mo.h_h).map_err(gerr)?;
+                mo.h_h.copy_from_slice(mo.h_pin.as_slice().map_err(gerr)?);
                 mo.qa.quantize(&mo.h_h);
                 model.moe_cpu(li, &mo.h_h, &mo.qa, &on_cpu, &mut mo.scratch, &mut mo.cpu_out);
             }
-            s.memcpy_htod(&mo.cpu_out, &mut mo.cpu).map_err(gerr)?;
-            if std::env::var_os("CEREBRO_MOE_DEBUG").is_some() && ng > 0 {
-                // Compare the GPU experts' outputs with the CPU computing the same experts.
-                let mut eo = vec![0f32; ng * sh.dim];
-                s.memcpy_dtoh(&mo.eo.slice(0..ng * sh.dim), &mut eo).map_err(gerr)?;
-                s.memcpy_dtoh(&mo.h, &mut mo.h_h).map_err(gerr)?;
-                mo.qa.quantize(&mo.h_h);
-                let mut gq = vec![0i8; 1];
-                let _ = &mut gq;
-                let ids: Vec<usize> = on_gpu.iter().map(|&(slot, _)| mo.owner[slot as usize] % mo.ne).collect();
-                let mut want = vec![0f32; sh.dim];
-                let mut worst = 0f32;
-                for (i, &e) in ids.iter().enumerate() {
-                    model.moe_cpu(li, &mo.h_h, &mo.qa, &[(e, 1.0)], &mut mo.scratch, &mut want);
-                    let got = &eo[i * sh.dim..(i + 1) * sh.dim];
-                    let sc = want.iter().fold(0f32, |m, v| m.max(v.abs())).max(1e-6);
-                    let d = got.iter().zip(&want).fold(0f32, |m, (a, b)| m.max((a - b).abs())) / sc;
-                    worst = worst.max(if d.is_nan() { f32::INFINITY } else { d });
-                }
-                let hn = mo.h_h.iter().any(|v| !v.is_finite());
-                eprintln!("layer {li}: {ng} GPU experts {ids:?}, worst rel err {worst:.2e}, h finite {}", !hn);
-            }
-            let ngi = ng as i32;
-            unsafe { s.launch_builder(&f.moe_combine).arg(&mut self.x).arg(&mo.eo).arg(&mo.wg).arg(&ngi).arg(&mo.cpu).arg(&dim).launch(blocks(sh.dim)) }.map_err(gerr)?;
+            mo.cpu_s += tc.elapsed().as_secs_f64();
+            mo.cpu_pin.as_mut_slice().map_err(gerr)?.copy_from_slice(&mo.cpu_out);
+            s.memcpy_htod(&mo.cpu_pin, &mut mo.cpu).map_err(gerr)?;
+            unsafe { s.launch_builder(&f.moe_combine).arg(&mut self.x).arg(&mo.eo).arg(&mo.sel).arg(&k).arg(&mo.cpu).arg(&dim).launch(blocks(sh.dim)) }.map_err(gerr)?;
         }
         unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&self.out_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
-        Self::matvec(s, &f.matvec, &self.output, &self.xq, &self.xd, &mut self.logits, false)?;
+        Self::matvec(s, f, &self.output, &self.xq, &self.xd, &mut self.logits, false)?;
         let vocab = sh.vocab as i32;
         unsafe { s.launch_builder(&f.argmax).arg(&self.logits).arg(&vocab).arg(&mut self.next).arg(&mut self.tok).arg(&mut self.pos).launch(one) }.map_err(gerr)?;
         Ok(())
@@ -770,6 +848,9 @@ impl GpuState {
         }
         self.stream.memcpy_htod(&[token as i32], &mut self.tok).map_err(gerr)?;
         self.stream.memcpy_htod(&[pos as i32], &mut self.pos).map_err(gerr)?;
+        if let Some(row) = self.host_embed.as_mut() {
+            model.embed_into(token, row);
+        }
         self.run(model)?;
         if let Some(o) = out {
             self.stream.memcpy_dtoh(&self.logits, o).map_err(gerr)?;
@@ -824,14 +905,15 @@ impl GpuState {
         let rows_cfg = |rows: usize| LaunchConfig { grid_dim: ((rows as u32).div_ceil(8), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
         let b = &mut self.b;
         {
-            let e = self.embed.as_ref().unwrap_or(&self.output);
+            let (qs, ds, _, _) = self.embed.as_ref().unwrap_or(&self.output).q8();
             let cfg = LaunchConfig { grid_dim: ((sh.dim as u32).div_ceil(256), t as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
-            unsafe { s.launch_builder(&f.embed_b).arg(&e.qs).arg(&e.ds).arg(&b.toks).arg(&mut b.x).arg(&dim).launch(cfg) }.map_err(gerr)?;
+            unsafe { s.launch_builder(&f.embed_b).arg(qs).arg(ds).arg(&b.toks).arg(&mut b.x).arg(&dim).launch(cfg) }.map_err(gerr)?;
         }
         let norm_cfg = LaunchConfig { grid_dim: (t as u32, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
         let mm = |m: &GMat, xq: &CudaSlice<i8>, xd: &CudaSlice<f32>, y: &mut CudaSlice<f32>, add: bool| -> Result<(), Error> {
-            let (rows, cols, add) = (m.rows as i32, m.cols as i32, add as i32);
-            unsafe { s.launch_builder(&f.matmul_b).arg(&m.qs).arg(&m.ds).arg(xq).arg(xd).arg(y).arg(&rows).arg(&cols).arg(&ti).arg(&add).launch(rows_cfg(m.rows)) }.map_err(gerr)?;
+            let (qs, ds, mrows, mcols) = m.q8();
+            let (rows, cols, add) = (mrows as i32, mcols as i32, add as i32);
+            unsafe { s.launch_builder(&f.matmul_b).arg(qs).arg(ds).arg(xq).arg(xd).arg(y).arg(&rows).arg(&cols).arg(&ti).arg(&add).launch(rows_cfg(mrows)) }.map_err(gerr)?;
             Ok(())
         };
         for l in &mut self.layers {
@@ -879,7 +961,7 @@ impl GpuState {
             let null_f: u64 = 0;
             unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&last).arg(&self.out_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
         }
-        Self::matvec(s, &f.matvec, &self.output, &self.xq, &self.xd, &mut self.logits, false)?;
+        Self::matvec(s, f, &self.output, &self.xq, &self.xd, &mut self.logits, false)?;
         let vocab = sh.vocab as i32;
         let one = LaunchConfig { grid_dim: (1, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
         // argmax_next also bumps pos/tok, which decode overwrites before it runs, so this is harmless.

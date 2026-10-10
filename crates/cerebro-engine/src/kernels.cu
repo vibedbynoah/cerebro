@@ -451,18 +451,22 @@ __device__ __forceinline__ float unit_dot(int dtype, const unsigned char* blk, i
     }
 }
 
-// Batched expert matvec: gridDim.y matrices (one per resident expert); matrix k's weights start at
-// wptr[k], its input at xq + k*xstride, its output at y + k*rows. One warp per row.
-extern "C" __global__ void moe_matvec(const unsigned long long* __restrict__ wptr, int dtype, int bb,
+// Batched expert matvec over the k chosen experts (gridDim.y = k). sel holds [ids k | weights k |
+// cache slots k]; experts not cached (slot < 0) are skipped here and computed on the CPU. Expert j's
+// matrix starts at pool + slot*slot_bytes + off; its input at xq + j*xstride; output at y + j*rows.
+extern "C" __global__ void moe_matvec(const unsigned char* __restrict__ pool, long long slot_bytes, long long off,
+                                      const int* __restrict__ sel, int dtype, int bb,
                                       const signed char* __restrict__ xq, const float* __restrict__ xd, int xstride,
                                       float* __restrict__ y, int rows, int cols) {
+    int k = blockIdx.y;
+    int slot = sel[2 * gridDim.y + k];
+    if (slot < 0) return;
     int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     int row = blockIdx.x * (blockDim.x >> 5) + warp;
     if (row >= rows) return;
-    int k = blockIdx.y;
     int nb = cols >> 8;
     int upb = dtype == 14 ? 16 : 8;
-    const unsigned char* w = reinterpret_cast<const unsigned char*>(wptr[k]) + (size_t)row * nb * bb;
+    const unsigned char* w = pool + slot * slot_bytes + off + (size_t)row * nb * bb;
     const signed char* x = xq + (size_t)k * xstride;
     const float* d = xd + (size_t)k * (xstride >> 5);
     float sum = 0.f;
@@ -477,7 +481,9 @@ extern "C" __global__ void moe_matvec(const unsigned long long* __restrict__ wpt
 // Router: scores for n_expert experts (f32 weights), softmax, top-k, renormalised weights. One block of
 // 1024 threads (32 warps); writes k expert ids and weights.
 extern "C" __global__ void router_topk(const float* __restrict__ wr, const float* __restrict__ h, int dim,
-                                       int n_expert, int k, int* __restrict__ ids, float* __restrict__ wts) {
+                                       int n_expert, int k, const int* __restrict__ slot_tab, int* __restrict__ sel) {
+    int* ids = sel;
+    float* wts = reinterpret_cast<float*>(sel + k);
     __shared__ float sc[512];
     int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     for (int e = warp; e < n_expert; e += 32) {
@@ -502,7 +508,10 @@ extern "C" __global__ void router_topk(const float* __restrict__ wr, const float
             tot += bv;
             sc[best] = -2.f;
         }
-        for (int t = 0; t < k; ++t) wts[t] /= tot;
+        for (int t = 0; t < k; ++t) {
+            wts[t] /= tot;
+            sel[2 * k + t] = slot_tab[ids[t]];
+        }
     }
 }
 
@@ -515,12 +524,33 @@ extern "C" __global__ void moe_silu_quant(const float* __restrict__ gu, signed c
     quant32(g / (1.f + __expf(-g)) * u, xq, xd, i, threadIdx.x & 31);
 }
 
-// x += sum_k w[k] * eo[k] + cpu (the CPU experts' weighted sum, already scaled).
-extern "C" __global__ void moe_combine(float* __restrict__ x, const float* __restrict__ eo, const float* __restrict__ w,
-                                       int n, const float* __restrict__ cpu, int dim) {
+// x += sum over cached experts of weight * eo[j] + cpu (the CPU experts' weighted sum).
+extern "C" __global__ void moe_combine(float* __restrict__ x, const float* __restrict__ eo, const int* __restrict__ sel,
+                                       int k, const float* __restrict__ cpu, int dim) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= dim) return;
+    const float* w = reinterpret_cast<const float*>(sel + k);
     float s = cpu[i];
-    for (int k = 0; k < n; ++k) s += w[k] * eo[(size_t)k * dim + i];
+    for (int j = 0; j < k; ++j) if (sel[2 * k + j] >= 0) s += w[j] * eo[(size_t)j * dim + i];
     x[i] += s;
+}
+
+// Dense matvec on K-quant weights in their stored format (MoE models keep attention and output this
+// way to leave more VRAM for experts). One warp per row; `add` accumulates into y.
+extern "C" __global__ void matvec_k(const unsigned char* __restrict__ w, int dtype, int bb,
+                                    const signed char* __restrict__ xq, const float* __restrict__ xd,
+                                    float* __restrict__ y, int rows, int cols, int add) {
+    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    int row = blockIdx.x * (blockDim.x >> 5) + warp;
+    if (row >= rows) return;
+    int nb = cols >> 8;
+    int upb = dtype == 14 ? 16 : 8;
+    const unsigned char* wr = w + (size_t)row * nb * bb;
+    float sum = 0.f;
+    for (int u = lane; u < nb * upb; u += 32) {
+        int b = u / upb;
+        sum += unit_dot(dtype, wr + (size_t)b * bb, u - b * upb, xq + b * 256, xd + b * 8);
+    }
+    sum = warp_sum(sum);
+    if (lane == 0) y[row] = add ? y[row] + sum : sum;
 }

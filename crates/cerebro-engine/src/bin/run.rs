@@ -131,6 +131,9 @@ fn main() {
     if let Some(g) = session.gpu.as_ref() {
         if let Some((cached, total, hit)) = g.expert_cache() {
             eprintln!("experts: {cached} of {total} cached in VRAM, {:.0}% of expert uses served from VRAM", hit * 100.0);
+            if let Some((w, c)) = g.moe_times() {
+                eprintln!("time waiting for GPU routing {w:.2}s, CPU experts {c:.2}s");
+            }
             g.save_expert_profile();
         }
     }
