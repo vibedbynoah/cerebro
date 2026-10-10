@@ -270,7 +270,7 @@ impl Model {
         for (k, q) in s.qa.iter_mut().enumerate().take(parts.len()) {
             let (g, u) = (&mut s.g[k * eff..(k + 1) * eff], &s.u[k * eff..(k + 1) * eff]);
             for i in 0..eff {
-                g[i] = g[i] / (1.0 + (-g[i]).exp()) * u[i];
+                g[i] = g[i] / (1.0 + crate::quant::exp_fast(-g[i])) * u[i];
             }
             q.quantize(g);
         }
@@ -357,7 +357,7 @@ impl Model {
         for (p, q) in aq.iter_mut().enumerate() {
             let (gr, ur) = (&mut gbuf[p * eff..(p + 1) * eff], &ubuf[p * eff..(p + 1) * eff]);
             for i in 0..eff {
-                gr[i] = gr[i] / (1.0 + (-gr[i]).exp()) * ur[i];
+                gr[i] = gr[i] / (1.0 + crate::quant::exp_fast(-gr[i])) * ur[i];
             }
             q.quantize(gr);
         }
@@ -427,17 +427,35 @@ impl MoeScratch {
     }
 }
 
+/// Positions per CPU attention work item.
+const ATT_SPAN: usize = 256;
+
 /// Router: softmax over every expert's score, keep the top `k`, renormalise their weights to sum to 1
 /// (Qwen3 MoE). Writes (expert, weight) pairs into `chosen`.
 pub(crate) fn route(router: &[f32], h: &[f32], k: usize, scores: &mut [f32], chosen: &mut Vec<(usize, f32)>) {
     let dim = h.len();
-    let mut mx = f32::NEG_INFINITY;
-    for (e, s) in scores.iter_mut().enumerate() {
-        *s = router[e * dim..(e + 1) * dim].iter().zip(h).map(|(a, b)| a * b).sum();
-        mx = mx.max(*s);
+    // Scores in parallel (the router is n_expert x dim f32: 1 MB a layer for Qwen3-30B-A3B, which
+    // single-threaded took 12 ms of every token).
+    struct P(*mut f32);
+    // SAFETY: each expert's score is written by one item.
+    unsafe impl Sync for P {}
+    impl P {
+        fn at(&self, i: usize) -> *mut f32 {
+            self.0.wrapping_add(i)
+        }
     }
+    let sp = P(scores.as_mut_ptr());
+    let ne = scores.len();
+    let per = 8;
+    crate::pool::global().run(ne.div_ceil(per), &|i| {
+        for e in i * per..((i + 1) * per).min(ne) {
+            // SAFETY: e < ne, unique to this item.
+            unsafe { *sp.at(e) = crate::quant::dot_f32(&router[e * dim..(e + 1) * dim], h) };
+        }
+    });
+    let mx = scores.iter().fold(f32::NEG_INFINITY, |m, &v| m.max(v));
     for s in scores.iter_mut() {
-        *s = (*s - mx).exp();
+        *s = crate::quant::exp_fast(*s - mx);
     }
     chosen.clear();
     for _ in 0..k {
@@ -473,11 +491,10 @@ fn rmsnorm_inplace(x: &mut [f32], w: &[f32], eps: f32) {
     }
 }
 
-fn rope(x: &mut [f32], pos: usize, inv_freq: &[f32]) {
-    let half = inv_freq.len();
-    for i in 0..half {
-        let a = pos as f32 * inv_freq[i];
-        let (s, c) = a.sin_cos();
+/// NeoX RoPE with the position's (cos, sin) table, computed once per token for every head and layer.
+fn rope(x: &mut [f32], cs: &[(f32, f32)]) {
+    let half = cs.len();
+    for (i, &(c, s)) in cs.iter().enumerate() {
         let (x0, x1) = (x[i], x[i + half]);
         x[i] = x0 * c - x1 * s;
         x[i + half] = x0 * s + x1 * c;
@@ -530,6 +547,10 @@ pub struct Session {
     /// How often each expert of each layer was chosen (layer * n_expert + expert): the profile
     /// behind expert placement, and Monitor's expert telemetry.
     pub expert_counts: Vec<u32>,
+    /// Attention partials: per (head, span) the weighted values, max and sum.
+    att_part: Vec<f32>,
+    /// Seconds per phase of CPU decoding: [q/k/v, rope+cache, attention, o, router, ffn/experts, output].
+    pub prof: [f64; 7],
     pub logits: Vec<f32>,
     pub stats: Stats,
     /// When set, every step runs on the GPU and the CPU buffers above stay idle.
@@ -542,8 +563,14 @@ impl Session {
     /// (see `Gguf::touch`); `CEREBRO_PREFAULT=0` turns that off.
     pub fn new(m: &Model, max_ctx: usize) -> Self {
         let g = m.gguf();
-        if std::env::var("CEREBRO_PREFAULT").as_deref() != Ok("0") && (g.len() as f64) < crate::gguf::available_ram() as f64 * 0.9 {
-            g.touch(&[(0, g.len())]);
+        if std::env::var("CEREBRO_PREFAULT").as_deref() != Ok("0") {
+            // As much of the file as available RAM holds (all of it when it fits).
+            let room = (crate::gguf::available_ram() as f64 * 0.9) as usize;
+            let t = Instant::now();
+            g.touch(&[(0, g.len().min(room))]);
+            if std::env::var_os("CEREBRO_PROFILE").is_some() {
+                eprintln!("touched {:.1} of {:.1} GB in {:.2}s", g.len().min(room) as f64 / 1e9, g.len() as f64 / 1e9, t.elapsed().as_secs_f64());
+            }
         }
         Self::empty(m, max_ctx)
     }
@@ -572,6 +599,8 @@ impl Session {
             chosen: Vec::with_capacity(c.n_used),
             moe: MoeScratch::new(c),
             expert_counts: vec![0; c.n_layer * c.n_expert],
+            prof: [0.0; 7],
+            att_part: Vec::new(),
             logits: vec![0.0; c.vocab],
             stats: Stats::default(),
             #[cfg(feature = "cuda")]
@@ -637,63 +666,125 @@ impl Session {
         let group = c.n_head / c.n_kv;
         let scale = 1.0 / (hd as f32).sqrt();
         m.embed_row(token, &mut self.x);
+        let cs: Vec<(f32, f32)> = m.inv_freq.iter().map(|f| (pos as f32 * f).sin_cos()).map(|(s, c)| (c, s)).collect();
         for (li, l) in m.layers.iter().enumerate() {
             rmsnorm(&self.x, &l.attn_norm, c.eps, &mut self.h);
             self.qa_dim.quantize(&self.h);
+            let mut tp = Instant::now();
+            let mut lap = |i: usize, prof: &mut [f64; 7]| {
+                let n = Instant::now();
+                prof[i] += (n - tp).as_secs_f64();
+                tp = n;
+            };
             m.matvec_many(&mut [(&l.q, &mut self.q[..]), (&l.k, &mut self.kb[..]), (&l.v, &mut self.vb[..])], &self.h, &self.qa_dim);
+            lap(0, &mut self.prof);
             for hh in 0..c.n_head {
                 let qh = &mut self.q[hh * hd..(hh + 1) * hd];
                 if let Some(w) = &l.q_norm {
                     rmsnorm_inplace(qh, w, c.eps);
                 }
-                rope(qh, pos, &m.inv_freq);
+                rope(qh, &cs);
             }
             for kh in 0..c.n_kv {
                 let kk = &mut self.kb[kh * hd..(kh + 1) * hd];
                 if let Some(w) = &l.k_norm {
                     rmsnorm_inplace(kk, w, c.eps);
                 }
-                rope(kk, pos, &m.inv_freq);
+                rope(kk, &cs);
             }
             self.k[li][pos * kvd..(pos + 1) * kvd].copy_from_slice(&self.kb);
             self.v[li][pos * kvd..(pos + 1) * kvd].copy_from_slice(&self.vb);
+            // Attention, one work item per (KV head, span of up to 256 positions): every query head
+            // of the group is computed from one read of each key and value (GQA shares them), and
+            // long contexts split across threads; partial softmaxes are merged per head after.
             let (kc, vc, q) = (&self.k[li], &self.v[li], &self.q);
+            let len = pos + 1;
+            let spans = len.div_ceil(ATT_SPAN);
+            let part = hd + 2;
             struct Ptr(*mut f32);
-            // SAFETY: each head writes only its own hd-long slice of att.
+            // SAFETY: each item writes only its own (head, span) partial.
             unsafe impl Sync for Ptr {}
             impl Ptr {
                 fn at(&self, i: usize) -> *mut f32 {
                     self.0.wrapping_add(i)
                 }
             }
-            let att = Ptr(self.att.as_mut_ptr());
-            crate::pool::global().run(c.n_head, &|hh| {
-                let out = unsafe { std::slice::from_raw_parts_mut(att.at(hh * hd), hd) };
-                let qh = &q[hh * hd..(hh + 1) * hd];
-                let kvh = hh / group;
-                let mut scores = vec![0f32; pos + 1];
-                let mut mx = f32::NEG_INFINITY;
-                for (t, s) in scores.iter_mut().enumerate() {
-                    let kt = &kc[t * kvd + kvh * hd..t * kvd + (kvh + 1) * hd];
-                    *s = qh.iter().zip(kt).map(|(a, b)| a * b).sum::<f32>() * scale;
-                    mx = mx.max(*s);
-                }
-                let mut sum = 0.0;
-                for s in scores.iter_mut() {
-                    *s = (*s - mx).exp();
-                    sum += *s;
-                }
+            if self.att_part.len() < c.n_head * spans * part {
+                self.att_part.resize(c.n_head * spans * part, 0.0);
+            }
+            let parts = Ptr(self.att_part.as_mut_ptr());
+            // Split each group's heads across items too when there are fewer (KV head, span) pairs
+            // than threads (short contexts would otherwise use n_kv threads).
+            let hsplit = (crate::pool::global().threads() / (c.n_kv * spans)).clamp(1, group);
+            let hsplit = (1..=hsplit).rev().find(|d| group % d == 0).unwrap_or(1);
+            let gper = group / hsplit;
+            lap(1, &mut self.prof);
+            crate::pool::global().run(c.n_kv * spans * hsplit, &|item| {
+                let (hs, item) = (item % hsplit, item / hsplit);
+                let (kvh, sp) = (item / spans, item % spans);
+                let gr = hs * gper..(hs + 1) * gper;
+                let (t0, t1) = (sp * ATT_SPAN, ((sp + 1) * ATT_SPAN).min(len));
+                let n = t1 - t0;
+                thread_local!(static SC: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) });
+                SC.with(|sc| {
+                    let mut sc = sc.borrow_mut();
+                    sc.resize(group * ATT_SPAN, 0.0);
+                    // Scores for every head of the group, key-major so each key is read once.
+                    for t in t0..t1 {
+                        let kt = &kc[t * kvd + kvh * hd..t * kvd + (kvh + 1) * hd];
+                        for g in gr.clone() {
+                            let hh = kvh * group + g;
+                            sc[g * ATT_SPAN + (t - t0)] = crate::quant::dot_f32(&q[hh * hd..(hh + 1) * hd], kt) * scale;
+                        }
+                    }
+                    for g in gr.clone() {
+                        let row = &mut sc[g * ATT_SPAN..g * ATT_SPAN + n];
+                        let mx = row.iter().fold(f32::NEG_INFINITY, |m, &v| m.max(v));
+                        let mut l = 0.0;
+                        for v in row.iter_mut() {
+                            *v = crate::quant::exp_fast(*v - mx);
+                            l += *v;
+                        }
+                        let hh = kvh * group + g;
+                        // SAFETY: (hh, sp) is unique to this item; the buffer holds n_head * spans parts.
+                        let o = unsafe { std::slice::from_raw_parts_mut(parts.at((hh * spans + sp) * part), part) };
+                        o[hd] = mx;
+                        o[hd + 1] = l;
+                        o[..hd].fill(0.0);
+                    }
+                    for t in t0..t1 {
+                        let vt = &vc[t * kvd + kvh * hd..t * kvd + (kvh + 1) * hd];
+                        for g in gr.clone() {
+                            let hh = kvh * group + g;
+                            let p = sc[g * ATT_SPAN + (t - t0)];
+                            // SAFETY: as above.
+                            let o = unsafe { std::slice::from_raw_parts_mut(parts.at((hh * spans + sp) * part), hd) };
+                            crate::quant::axpy(o, p, vt);
+                        }
+                    }
+                });
+            });
+            for hh in 0..c.n_head {
+                let ps = &self.att_part[hh * spans * part..(hh + 1) * spans * part];
+                let m_all = (0..spans).fold(f32::NEG_INFINITY, |m, s| m.max(ps[s * part + hd]));
+                let out = &mut self.att[hh * hd..(hh + 1) * hd];
                 out.fill(0.0);
-                for (t, s) in scores.iter().enumerate() {
-                    let p = s / sum;
-                    let vt = &vc[t * kvd + kvh * hd..t * kvd + (kvh + 1) * hd];
+                let mut l_all = 0.0;
+                for s in 0..spans {
+                    let w = crate::quant::exp_fast(ps[s * part + hd] - m_all);
+                    l_all += w * ps[s * part + hd + 1];
                     for i in 0..hd {
-                        out[i] += p * vt[i];
+                        out[i] += w * ps[s * part + i];
                     }
                 }
-            });
+                for v in out.iter_mut() {
+                    *v /= l_all;
+                }
+            }
             self.qa_att.quantize(&self.att);
+            lap(2, &mut self.prof);
             m.matvec(&l.o, &self.att, &self.qa_att, &mut self.tmp[..c.dim]);
+            lap(3, &mut self.prof);
             for i in 0..c.dim {
                 self.x[i] += self.tmp[i];
             }
@@ -704,7 +795,7 @@ impl Session {
                     m.matvec_many(&mut [(gate, &mut self.g[..c.ffn]), (up, &mut self.u[..c.ffn])], &self.h, &self.qa_dim);
                     for i in 0..c.ffn {
                         let gv = self.g[i];
-                        self.g[i] = gv / (1.0 + (-gv).exp()) * self.u[i];
+                        self.g[i] = gv / (1.0 + crate::quant::exp_fast(-gv)) * self.u[i];
                     }
                     self.qa_ffn.quantize(&self.g[..c.ffn]);
                     m.matvec(down, &self.g[..c.ffn], &self.qa_ffn, &mut self.tmp[..c.dim]);
@@ -714,6 +805,7 @@ impl Session {
                 }
                 Ffn::Moe(e) => {
                     route(&e.router, &self.h, c.n_used, &mut self.router, &mut self.chosen);
+                    lap(4, &mut self.prof);
                     for &(ex, _) in &self.chosen {
                         self.expert_counts[li * c.n_expert + ex] += 1;
                     }
@@ -723,10 +815,13 @@ impl Session {
                     }
                 }
             }
+            lap(5, &mut self.prof);
         }
+        let to = Instant::now();
         rmsnorm_inplace(&mut self.x, &m.out_norm, c.eps);
         self.qa_dim.quantize(&self.x);
         m.matvec(&m.output, &self.x, &self.qa_dim, &mut self.logits);
+        self.prof[6] += to.elapsed().as_secs_f64();
         self.tokens.push(token);
     }
 }

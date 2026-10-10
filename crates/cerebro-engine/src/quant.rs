@@ -180,7 +180,14 @@ pub fn dequant_row(t: DType, row: &[u8], out: &mut [f32]) {
 }
 
 #[inline]
-fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
+pub(crate) fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if a.len() % 16 == 0 && std::arch::is_x86_feature_detected!("fma") {
+            // SAFETY: FMA (and AVX) support checked at run time; lengths are equal multiples of 16.
+            return unsafe { dot_f32_fma(a, b) };
+        }
+    }
     // Eight independent accumulators so the compiler vectorises and pipelines the loop.
     let mut acc = [0f32; 8];
     let chunks = a.len() / 8;
@@ -194,6 +201,51 @@ fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
         s += a[i] * b[i];
     }
     s
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_f32_fma(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+    let (mut s0, mut s1) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+    let n = a.len().min(b.len());
+    let mut i = 0;
+    while i < n {
+        s0 = _mm256_fmadd_ps(_mm256_loadu_ps(a.as_ptr().add(i)), _mm256_loadu_ps(b.as_ptr().add(i)), s0);
+        s1 = _mm256_fmadd_ps(_mm256_loadu_ps(a.as_ptr().add(i + 8)), _mm256_loadu_ps(b.as_ptr().add(i + 8)), s1);
+        i += 16;
+    }
+    hsum_ps(_mm256_add_ps(s0, s1))
+}
+
+/// y += a * x.
+#[inline]
+pub(crate) fn axpy(y: &mut [f32], a: f32, x: &[f32]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if y.len() % 8 == 0 && std::arch::is_x86_feature_detected!("fma") {
+            // SAFETY: FMA support checked at run time; lengths are equal multiples of 8.
+            unsafe { axpy_fma(y, a, x) };
+            return;
+        }
+    }
+    for (o, v) in y.iter_mut().zip(x) {
+        *o += a * v;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn axpy_fma(y: &mut [f32], a: f32, x: &[f32]) {
+    use std::arch::x86_64::*;
+    let av = _mm256_set1_ps(a);
+    let n = y.len().min(x.len());
+    let mut i = 0;
+    while i < n {
+        let p = y.as_mut_ptr().add(i);
+        _mm256_storeu_ps(p, _mm256_fmadd_ps(av, _mm256_loadu_ps(x.as_ptr().add(i)), _mm256_loadu_ps(p)));
+        i += 8;
+    }
 }
 
 /// Dot product of one quantised row with an f32 vector.
@@ -236,6 +288,25 @@ pub fn dot_row(t: DType, row: &[u8], x: &[f32]) -> f32 {
     }
 }
 
+/// Round half away from zero to i8 (|x| <= 127.5). f32::round is a library call on the baseline
+/// x86-64 target (no SSE4.1), which made activation quantisation a measurable share of each token.
+#[inline(always)]
+fn round_i8(x: f32) -> i8 {
+    (x + 0.5f32.copysign(x)) as i8
+}
+
+/// e^x to about 2e-7 relative error, branch-free so loops over it vectorise (f32::exp is a library
+/// call per element; softmax, SiLU and routing call it hundreds of thousands of times per token).
+#[inline(always)]
+pub(crate) fn exp_fast(x: f32) -> f32 {
+    let x = x.clamp(-87.0, 88.0);
+    let n = (x * std::f32::consts::LOG2_E + 0.5f32.copysign(x)) as i32 as f32;
+    let r = x - n * 0.693_145_75 - n * 1.428_606_8e-6;
+    // Taylor/minimax polynomial for e^r, |r| <= ln2/2.
+    let p = 1.0 + r * (1.0 + r * (0.5 + r * (0.166_666_67 + r * (0.041_666_668 + r * (0.008_333_334 + r * 0.001_388_889)))));
+    f32::from_bits(((n as i32 + 127) as u32) << 23) * p
+}
+
 /// Activations quantised to 8 bits in blocks of 32 (one f32 scale per block), so Q8_0 weights can be
 /// multiplied with integer instructions. Built once per step and shared by every matrix that reads it.
 pub struct QAct {
@@ -265,7 +336,7 @@ impl QAct {
             self.d[bi] = d;
             let mut sum = 0i32;
             for (i, v) in xb.iter().enumerate() {
-                let q = (v * id).round() as i8;
+                let q = round_i8(v * id);
                 self.q[bi * 32 + i] = q;
                 sum += q as i32;
             }
@@ -280,7 +351,7 @@ impl QAct {
                 for (gi, g) in xb.chunks_exact(16).enumerate() {
                     let mut sum = 0i32;
                     for (i, v) in g.iter().enumerate() {
-                        let q = (v * id).round() as i8;
+                        let q = round_i8(v * id);
                         self.kq[bi * 256 + gi * 16 + i] = q;
                         sum += q as i32;
                     }
@@ -715,6 +786,21 @@ mod kq_tests {
             let want_k = dot_row(t, &row, &xk);
             let got_k = dot_k_q8(t, &row, &qk);
             assert!((got_k - want_k).abs() <= want_k.abs() * 1e-3 + 1e-3, "{t:?} k8 {got_k} vs {want_k}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod exp_tests {
+    use super::*;
+
+    #[test]
+    fn fast_exp_matches_libm() {
+        let mut x = -80.0f32;
+        while x < 80.0 {
+            let (a, b) = (exp_fast(x), x.exp());
+            assert!(((a - b) / b).abs() < 1e-6, "{x}: {a} vs {b}");
+            x += 0.137;
         }
     }
 }

@@ -250,7 +250,10 @@ impl Gguf {
     pub fn touch(&self, ranges: &[(usize, usize)]) {
         use rayon::prelude::*;
         let m: &[u8] = &self.mmap;
-        ranges.par_iter().for_each(|&(o, l)| {
+        // Large ranges are split so every thread takes part.
+        const PIECE: usize = 32 << 20;
+        let pieces: Vec<(usize, usize)> = ranges.iter().flat_map(|&(o, l)| (0..l.div_ceil(PIECE)).map(move |i| (o + i * PIECE, PIECE.min(l - i * PIECE)))).collect();
+        pieces.par_iter().for_each(|&(o, l)| {
             let end = (o + l).min(m.len());
             let mut acc = 0u8;
             for i in (o..end).step_by(4096) {

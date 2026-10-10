@@ -127,6 +127,11 @@ fn main() {
         );
         history.push((p, tok.decode(&out)));
     }
+    if std::env::var_os("CEREBRO_PROFILE").is_some() {
+        let names = ["q/k/v", "rope+cache", "attention", "o", "router", "ffn/experts", "output"];
+        let parts: Vec<String> = names.iter().zip(session.prof).map(|(n, t)| format!("{n} {t:.2}s")).collect();
+        eprintln!("CPU phases: {}", parts.join(", "));
+    }
     #[cfg(feature = "cuda")]
     if let Some(g) = session.gpu.as_ref() {
         if let Some((cached, total, hit)) = g.expert_cache() {
