@@ -85,7 +85,7 @@ fn main() {
                 if !tok.eot.contains(&first) {
                     out.push(first);
                     let pos = session.tokens.len();
-                    g.generate_greedy(first, pos, n.saturating_sub(1), &tok.eot, |t| out.push(t)).unwrap_or_else(|e| die(e.to_string()));
+                    g.generate_greedy(&model, first, pos, n.saturating_sub(1), &tok.eot, |t| out.push(t)).unwrap_or_else(|e| die(e.to_string()));
                 }
                 let secs = td.elapsed().as_secs_f64();
                 println!("{}", tok.decode(&out));
@@ -126,5 +126,12 @@ fn main() {
             out.len() as f64 / secs
         );
         history.push((p, tok.decode(&out)));
+    }
+    #[cfg(feature = "cuda")]
+    if let Some(g) = session.gpu.as_ref() {
+        if let Some((cached, total, hit)) = g.expert_cache() {
+            eprintln!("experts: {cached} of {total} cached in VRAM, {:.0}% of expert uses served from VRAM", hit * 100.0);
+            g.save_expert_profile();
+        }
     }
 }

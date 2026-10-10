@@ -4,6 +4,13 @@
 //! into one matrix each. The token id and position live in device memory, so a whole decode step is
 //! captured once as a CUDA graph and replayed per token: no per-kernel launch cost, no logits copy for
 //! greedy decoding (the next token is picked on the GPU).
+//!
+//! Mixture-of-experts models run hybrid: attention, router, embeddings and output on the GPU; the
+//! experts live in RAM and the hottest ones are also cached in VRAM in their native K-quant format.
+//! Per layer the GPU picks the experts, cached ones run on the GPU while the CPU computes the rest
+//! at the same time, and the results are summed on the GPU. Expert use is counted, the cache is
+//! rebalanced towards the most-used experts as generation runs, and the counts are saved next to the
+//! model so the next session starts with the right experts resident.
 
 use std::sync::Arc;
 
@@ -12,8 +19,8 @@ use cudarc::driver::{CudaContext, CudaFunction, CudaGraph, CudaSlice, CudaStream
 use cudarc::nvrtc::Ptx;
 
 use crate::gguf::Gguf;
-use crate::model::{Mat, Model};
-use crate::quant::{dequant_row, f16_to_f32, DType};
+use crate::model::{Ffn, Mat, Model, MoeScratch};
+use crate::quant::{dequant_row, f16_to_f32, DType, QAct};
 use crate::Error;
 
 const PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
@@ -32,8 +39,11 @@ struct GLayer {
     q_norm: Option<CudaSlice<f32>>,
     k_norm: Option<CudaSlice<f32>>,
     ffn_norm: CudaSlice<f32>,
-    gu: GMat,
-    down: GMat,
+    /// Dense feed-forward (None for MoE layers).
+    gu: Option<GMat>,
+    down: Option<GMat>,
+    /// MoE router weights (n_expert x dim, f32).
+    router: Option<CudaSlice<f32>>,
     /// f16 KV cache, max_ctx positions.
     kc: CudaSlice<u16>,
     vc: CudaSlice<u16>,
@@ -54,6 +64,141 @@ struct Funcs {
     matmul_b: CudaFunction,
     silu_b: CudaFunction,
     attn_pre: CudaFunction,
+    moe_matvec: CudaFunction,
+    router_topk: CudaFunction,
+    moe_silu: CudaFunction,
+    moe_combine: CudaFunction,
+}
+
+/// GPU-side block size of a K-quant format (Q6_K padded to 224 bytes for aligned loads) and its GGML
+/// type id, or None if experts in this format cannot be cached on the GPU.
+fn gpu_block(dt: DType) -> Option<(usize, i32)> {
+    match dt {
+        DType::Q4K => Some((144, 12)),
+        DType::Q5K => Some((176, 13)),
+        DType::Q6K => Some((224, 14)),
+        _ => None,
+    }
+}
+
+fn to_gpu_layout(dt: DType, src: &[u8]) -> Vec<u8> {
+    if dt != DType::Q6K {
+        return src.to_vec();
+    }
+    let mut out = vec![0u8; src.len() / 210 * 224];
+    for (i, b) in src.chunks_exact(210).enumerate() {
+        out[i * 224..i * 224 + 210].copy_from_slice(b);
+    }
+    out
+}
+
+/// One matrix kind (gate, up or down) of the stacked experts.
+#[derive(Clone, Copy)]
+struct ExpMat {
+    dtype: i32,
+    bb: i32,
+    rows: usize,
+    cols: usize,
+    /// Bytes of one expert on the GPU.
+    bytes: usize,
+}
+
+/// VRAM expert cache and per-layer MoE scratch for hybrid decoding.
+struct MoeGpu {
+    ne: usize,
+    k: usize,
+    eff: usize,
+    /// Per layer: the gate, up and down formats (files mix formats across layers), or None when that
+    /// layer's experts cannot be cached on the GPU.
+    kinds: Vec<Option<[ExpMat; 3]>>,
+    pool: CudaSlice<u8>,
+    pool_ptr: u64,
+    slot_bytes: usize,
+    /// slot_of[layer * ne + expert] = cache slot; owner[slot] = layer * ne + expert.
+    slot_of: Vec<Option<u32>>,
+    owner: Vec<usize>,
+    /// Use counts per (layer, expert), loaded from and saved to the model's profile.
+    counts: Vec<f32>,
+    profile: std::path::PathBuf,
+    pub hits: u64,
+    pub lookups: u64,
+    steps: u64,
+    // Device scratch.
+    h: CudaSlice<f32>,
+    ids: CudaSlice<i32>,
+    wts: CudaSlice<f32>,
+    ptrs: CudaSlice<u64>,
+    wg: CudaSlice<f32>,
+    gu: CudaSlice<f32>,
+    axq: CudaSlice<i8>,
+    axd: CudaSlice<f32>,
+    eo: CudaSlice<f32>,
+    cpu: CudaSlice<f32>,
+    // Host scratch.
+    ids_h: Vec<i32>,
+    wts_h: Vec<f32>,
+    h_h: Vec<f32>,
+    qa: QAct,
+    scratch: MoeScratch,
+    cpu_out: Vec<f32>,
+}
+
+impl MoeGpu {
+    fn expert_bytes<'a>(model: &'a Model, li: usize, e: usize) -> [(DType, &'a [u8]); 3] {
+        let Ffn::Moe(m) = &model.layers()[li].ffn else { unreachable!() };
+        let ne = model.cfg.n_expert;
+        let g = model.gguf();
+        let one = |mat: &Mat| {
+            let p = mat.part(e, ne);
+            (p.dtype, g.bytes_at(p.offset, p.rows * p.row_bytes))
+        };
+        [one(&m.gate), one(&m.up), one(&m.down)]
+    }
+
+    fn upload(&mut self, stream: &Arc<CudaStream>, model: &Model, slot: usize, key: usize) -> Result<(), Error> {
+        let (li, e) = (key / self.ne, key % self.ne);
+        if let Some(&old) = self.owner.get(slot) {
+            if old != usize::MAX {
+                self.slot_of[old] = None;
+            }
+        }
+        let mut off = slot * self.slot_bytes;
+        for (dt, src) in Self::expert_bytes(model, li, e) {
+            let bytes = to_gpu_layout(dt, src);
+            let mut view = self.pool.slice_mut(off..off + bytes.len());
+            stream.memcpy_htod(&bytes, &mut view).map_err(gerr)?;
+            off += bytes.len();
+        }
+        self.owner[slot] = key;
+        self.slot_of[key] = Some(slot as u32);
+        Ok(())
+    }
+
+    /// Swaps up to `max` cold cached experts for hotter uncached ones.
+    fn rebalance(&mut self, stream: &Arc<CudaStream>, model: &Model, max: usize) -> Result<usize, Error> {
+        if self.owner.is_empty() {
+            return Ok(0);
+        }
+        let mut cold: Vec<usize> = (0..self.owner.len()).collect();
+        let ne = self.ne;
+        cold.sort_by(|&a, &b| self.counts[self.owner[a]].total_cmp(&self.counts[self.owner[b]]));
+        let mut hot: Vec<usize> = (0..self.slot_of.len()).filter(|&k| self.slot_of[k].is_none() && self.kinds[k / ne].is_some()).collect();
+        hot.sort_by(|&a, &b| self.counts[b].total_cmp(&self.counts[a]));
+        let mut n = 0;
+        for (slot, key) in cold.into_iter().zip(hot) {
+            if n >= max || self.counts[key] <= self.counts[self.owner[slot]] + 1.0 {
+                break;
+            }
+            self.upload(stream, model, slot, key)?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    fn save_profile(&self) {
+        let text: Vec<String> = self.counts.iter().map(|c| (c.round() as u64).to_string()).collect();
+        let _ = std::fs::write(&self.profile, text.join(" "));
+    }
 }
 
 /// Prefill scratch: up to `CHUNK` tokens per batched pass.
@@ -109,6 +254,7 @@ pub struct GpuState {
     pacc: CudaSlice<f32>,
     splits: usize,
     b: Batch,
+    moe: Option<MoeGpu>,
     graph: Option<CudaGraph>,
     pub max_ctx: usize,
     pub vram_bytes: usize,
@@ -184,6 +330,10 @@ impl GpuState {
             matmul_b: lf("matmul_q8_batch")?,
             silu_b: lf("silu_mul_quant_batch")?,
             attn_pre: lf("attn_prefill")?,
+            moe_matvec: lf("moe_matvec")?,
+            router_topk: lf("router_topk")?,
+            moe_silu: lf("moe_silu_quant")?,
+            moe_combine: lf("moe_combine")?,
         };
         let c = &model.cfg;
         if c.head_dim > 256 || c.head_dim % 64 != 0 || c.dim > 8192 {
@@ -199,6 +349,10 @@ impl GpuState {
         let kvd = c.n_kv * c.head_dim;
         let mut layers = Vec::with_capacity(c.n_layer);
         for l in model.layers() {
+            let (gu, down, router) = match &l.ffn {
+                Ffn::Dense { gate, up: upm, down } => (Some(up(&[gate, upm])?), Some(up(&[down])?), None),
+                Ffn::Moe(m) => (None, None, Some(stream.clone_htod(&m.router).map_err(gerr)?)),
+            };
             layers.push(GLayer {
                 attn_norm: stream.clone_htod(&l.attn_norm).map_err(gerr)?,
                 qkv: up(&[&l.q, &l.k, &l.v])?,
@@ -206,8 +360,9 @@ impl GpuState {
                 q_norm: l.q_norm.as_deref().map(|v| stream.clone_htod(v)).transpose().map_err(gerr)?,
                 k_norm: l.k_norm.as_deref().map(|v| stream.clone_htod(v)).transpose().map_err(gerr)?,
                 ffn_norm: stream.clone_htod(&l.ffn_norm).map_err(gerr)?,
-                gu: up(&[&l.gate, &l.up])?,
-                down: up(&[&l.down])?,
+                gu,
+                down,
+                router,
                 kc: stream.alloc_zeros::<u16>(max_ctx * kvd).map_err(gerr)?,
                 vc: stream.alloc_zeros::<u16>(max_ctx * kvd).map_err(gerr)?,
             });
@@ -231,6 +386,10 @@ impl GpuState {
             toks: stream.alloc_zeros::<i32>(CHUNK).map_err(gerr)?,
             pos0: stream.alloc_zeros::<i32>(1).map_err(gerr)?,
         };
+        let moe = if c.n_expert > 0 { Some(Self::load_moe(&ctx, &stream, model)?) } else { None };
+        if let Some(m) = &moe {
+            vram += m.owner.len() * m.slot_bytes;
+        }
         let sh = Shape { dim: c.dim, ffn: c.ffn, n_head: c.n_head, n_kv: c.n_kv, hd: c.head_dim, vocab: c.vocab, eps: c.eps, base: c.rope_base, qk_norm: c.qk_norm };
         Ok(Self {
             out_norm: stream.clone_htod(model.out_norm()).map_err(gerr)?,
@@ -251,6 +410,7 @@ impl GpuState {
             pacc: z(c.n_head * splits * c.head_dim)?,
             splits,
             b,
+            moe,
             graph: None,
             layers,
             f,
@@ -262,6 +422,150 @@ impl GpuState {
         })
     }
 
+    /// Sets up the VRAM expert cache in the memory left after the dense weights and KV cache (minus a
+    /// safety margin; `CEREBRO_EXPERT_VRAM_MB` caps it for placement experiments) and fills it from the
+    /// saved expert profile, or evenly across layers when there is none.
+    fn load_moe(ctx: &Arc<CudaContext>, stream: &Arc<CudaStream>, model: &Model) -> Result<MoeGpu, Error> {
+        let c = &model.cfg;
+        let em = |mat: &Mat| -> Option<ExpMat> {
+            let (bb, dtype) = gpu_block(mat.dtype)?;
+            let rows = mat.rows / c.n_expert;
+            (mat.cols % 256 == 0).then_some(ExpMat { dtype, bb: bb as i32, rows, cols: mat.cols, bytes: rows * mat.cols / 256 * bb })
+        };
+        let kinds: Vec<Option<[ExpMat; 3]>> = model
+            .layers()
+            .iter()
+            .map(|l| match &l.ffn {
+                Ffn::Moe(m) => Some([em(&m.gate)?, em(&m.up)?, em(&m.down)?]),
+                Ffn::Dense { .. } => None,
+            })
+            .collect();
+        let cacheable = kinds.iter().filter(|k| k.is_some()).count() * c.n_expert;
+        let total = c.n_layer * c.n_expert;
+        let (free, _) = ctx.mem_get_info().map_err(gerr)?;
+        let mut budget = free.saturating_sub(600 << 20);
+        if let Some(mb) = std::env::var("CEREBRO_EXPERT_VRAM_MB").ok().and_then(|v| v.parse::<usize>().ok()) {
+            budget = budget.min(mb << 20);
+        }
+        let slot_bytes = kinds.iter().flatten().map(|k| k.iter().map(|m| m.bytes).sum::<usize>()).max().unwrap_or(0).div_ceil(256).max(1) * 256;
+        let n_slots = (budget / slot_bytes).min(cacheable);
+        let pool = stream.alloc_zeros::<u8>((n_slots * slot_bytes).max(256)).map_err(gerr)?;
+        let pool_ptr = {
+            use cudarc::driver::DevicePtr;
+            pool.device_ptr(stream).0
+        };
+        let profile = std::path::PathBuf::from(format!("{}.experts", model.path.display()));
+        let mut counts = vec![0f32; total];
+        if let Ok(t) = std::fs::read_to_string(&profile) {
+            let v: Vec<f32> = t.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+            if v.len() == total {
+                counts = v;
+            }
+        }
+        let (k, eff, dim) = (c.n_used, c.expert_ffn, c.dim);
+        let z = |n: usize| stream.alloc_zeros::<f32>(n).map_err(gerr);
+        let mut mg = MoeGpu {
+            ne: c.n_expert,
+            k,
+            eff,
+            kinds,
+            pool,
+            pool_ptr,
+            slot_bytes,
+            slot_of: vec![None; total],
+            owner: vec![usize::MAX; n_slots],
+            counts,
+            profile,
+            hits: 0,
+            lookups: 0,
+            steps: 0,
+            h: z(dim)?,
+            ids: stream.alloc_zeros::<i32>(k).map_err(gerr)?,
+            wts: z(k)?,
+            ptrs: stream.alloc_zeros::<u64>(3 * k).map_err(gerr)?,
+            wg: z(k)?,
+            gu: z(2 * k * eff)?,
+            axq: stream.alloc_zeros::<i8>(k * eff).map_err(gerr)?,
+            axd: z(k * eff / 32)?,
+            eo: z(k * dim)?,
+            cpu: z(dim)?,
+            ids_h: vec![0; k],
+            wts_h: vec![0.0; k],
+            h_h: vec![0.0; dim],
+            qa: QAct::new(dim),
+            scratch: MoeScratch::new(c),
+            cpu_out: vec![0.0; dim],
+        };
+        // Initial fill: most-used experts first; with no profile, the same number per layer.
+        let mut order: Vec<usize> = (0..total).map(|i| (i % c.n_layer) * c.n_expert + i / c.n_layer).filter(|&k| mg.kinds[k / c.n_expert].is_some()).collect();
+        order.sort_by(|&a, &b| mg.counts[b].total_cmp(&mg.counts[a]));
+        for (slot, &key) in order.iter().take(n_slots).enumerate() {
+            mg.upload(stream, model, slot, key)?;
+        }
+        Ok(mg)
+    }
+
+    /// (experts cached in VRAM, experts in the model, share of expert uses served from VRAM so far).
+    pub fn expert_cache(&self) -> Option<(usize, usize, f64)> {
+        self.moe.as_ref().map(|m| (m.owner.len(), m.slot_of.len(), if m.lookups > 0 { m.hits as f64 / m.lookups as f64 } else { 0.0 }))
+    }
+
+    /// Self-test of the GPU expert kernels: runs the gate and down matrices of the expert in cache slot
+    /// 0 on the GPU and on the CPU with the same quantised inputs; returns the largest relative error
+    /// of each. None when no expert is cached.
+    pub fn check_expert_kernels(&mut self, model: &Model) -> Result<Option<(f32, f32)>, Error> {
+        let s = &self.stream;
+        let f = &self.f;
+        let Some(mo) = self.moe.as_mut() else { return Ok(None) };
+        let Some(&key) = mo.owner.first().filter(|&&k| k != usize::MAX) else { return Ok(None) };
+        let (li, e, ne) = (key / mo.ne, key % mo.ne, mo.ne);
+        let Ffn::Moe(m) = &model.layers()[li].ffn else { return Ok(None) };
+        let g = model.gguf();
+        let cpu_rows = |mat: &Mat, x: &[f32]| -> Vec<f32> {
+            let p = mat.part(e, ne);
+            let mut qa = QAct::new(x.len());
+            qa.quantize(x);
+            let all = g.bytes_at(p.offset, p.rows * p.row_bytes);
+            (0..p.rows).map(|r| crate::model::dot_any(p.dtype, &all[r * p.row_bytes..(r + 1) * p.row_bytes], x, &qa)).collect()
+        };
+        let err = |a: &[f32], b: &[f32]| {
+            let scale = b.iter().fold(0f32, |m, v| m.max(v.abs())).max(1e-6);
+            a.iter().zip(b).fold(0f32, |m, (x, y)| m.max((x - y).abs())) / scale
+        };
+        let base = mo.pool_ptr + (mo.owner.iter().position(|&k| k == key).unwrap() * mo.slot_bytes) as u64;
+        let run = |mo: &mut MoeGpu, x: &[f32], ptr: u64, em: ExpMat| -> Result<Vec<f32>, Error> {
+            let n = x.len() as i32;
+            let mut xd = s.clone_htod(x).map_err(gerr)?;
+            let cfg = LaunchConfig { grid_dim: ((x.len() as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+            unsafe { s.launch_builder(&f.quant).arg(&xd).arg(&mut mo.axq).arg(&mut mo.axd).arg(&n).launch(cfg) }.map_err(gerr)?;
+            s.memcpy_htod(&[ptr], &mut mo.ptrs.slice_mut(0..1)).map_err(gerr)?;
+            let (rows, cols, zero) = (em.rows as i32, em.cols as i32, 0i32);
+            let cfg = LaunchConfig { grid_dim: ((em.rows as u32).div_ceil(8), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+            unsafe { s.launch_builder(&f.moe_matvec).arg(&mo.ptrs).arg(&em.dtype).arg(&em.bb).arg(&mo.axq).arg(&mo.axd).arg(&zero).arg(&mut mo.eo).arg(&rows).arg(&cols).launch(cfg) }.map_err(gerr)?;
+            let mut out = vec![0f32; mo.eo.len()];
+            s.memcpy_dtoh(&mo.eo, &mut out).map_err(gerr)?;
+            out.truncate(em.rows);
+            xd = s.alloc_zeros::<f32>(1).map_err(gerr)?;
+            drop(xd);
+            Ok(out)
+        };
+        let [gate, up, down] = mo.kinds[li].expect("cached");
+        let xh: Vec<f32> = (0..gate.cols).map(|i| ((i as f32) * 0.37).sin()).collect();
+        let gg = run(mo, &xh, base, gate)?;
+        let gc = cpu_rows(&m.gate, &xh);
+        let xa: Vec<f32> = (0..down.cols).map(|i| ((i as f32) * 0.11).cos()).collect();
+        let dg = run(mo, &xa, base + (gate.bytes + up.bytes) as u64, down)?;
+        let dc = cpu_rows(&m.down, &xa);
+        Ok(Some((err(&gg, &gc), err(&dg, &dc))))
+    }
+
+    /// Saves the expert-use profile next to the model (MoE models only).
+    pub fn save_expert_profile(&self) {
+        if let Some(m) = &self.moe {
+            m.save_profile();
+        }
+    }
+
     fn matvec(s: &CudaStream, f: &CudaFunction, m: &GMat, xq: &CudaSlice<i8>, xd: &CudaSlice<f32>, y: &mut CudaSlice<f32>, add: bool) -> Result<(), Error> {
         let (rows, cols, add) = (m.rows as i32, m.cols as i32, add as i32);
         let cfg = LaunchConfig { grid_dim: ((m.rows as u32).div_ceil(8), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
@@ -270,7 +574,7 @@ impl GpuState {
     }
 
     /// Enqueues one full decode step reading the token and position from device memory.
-    fn enqueue(&mut self) -> Result<(), Error> {
+    fn enqueue(&mut self, model: &Model) -> Result<(), Error> {
         let sh = &self.sh;
         let s = &self.stream;
         let f = &self.f;
@@ -287,7 +591,7 @@ impl GpuState {
         let has_norm = sh.qk_norm as i32;
         let group = (sh.n_head / sh.n_kv) as i32;
         let scale = 1.0f32 / (sh.hd as f32).sqrt();
-        for l in &mut self.layers {
+        for (li, l) in self.layers.iter_mut().enumerate() {
             unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&l.attn_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
             Self::matvec(s, &f.matvec, &l.qkv, &self.xq, &self.xd, &mut self.qkv, false)?;
             {
@@ -339,10 +643,94 @@ impl GpuState {
             let qd = (sh.n_head * sh.hd) as i32;
             unsafe { s.launch_builder(&f.quant).arg(&self.att).arg(&mut self.xq).arg(&mut self.xd).arg(&qd).launch(blocks(sh.n_head * sh.hd)) }.map_err(gerr)?;
             Self::matvec(s, &f.matvec, &l.o, &self.xq, &self.xd, &mut self.x, true)?;
-            unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&l.ffn_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
-            Self::matvec(s, &f.matvec, &l.gu, &self.xq, &self.xd, &mut self.gu, false)?;
-            unsafe { s.launch_builder(&f.silu_mul_quant).arg(&self.gu).arg(&mut self.xq).arg(&mut self.xd).arg(&ffn).launch(blocks(sh.ffn)) }.map_err(gerr)?;
-            Self::matvec(s, &f.matvec, &l.down, &self.xq, &self.xd, &mut self.x, true)?;
+            if let (Some(gu), Some(down)) = (&l.gu, &l.down) {
+                unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&l.ffn_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
+                Self::matvec(s, &f.matvec, gu, &self.xq, &self.xd, &mut self.gu, false)?;
+                unsafe { s.launch_builder(&f.silu_mul_quant).arg(&self.gu).arg(&mut self.xq).arg(&mut self.xd).arg(&ffn).launch(blocks(sh.ffn)) }.map_err(gerr)?;
+                Self::matvec(s, &f.matvec, down, &self.xq, &self.xd, &mut self.x, true)?;
+                continue;
+            }
+            // Mixture of experts: route on the GPU, then cached experts on the GPU and the rest on the
+            // CPU at the same time.
+            let mo = self.moe.as_mut().expect("MoE state");
+            let router = l.router.as_ref().expect("router");
+            unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&l.ffn_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&mut mo.h).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
+            let (ne, k) = (mo.ne as i32, mo.k as i32);
+            unsafe { s.launch_builder(&f.router_topk).arg(router).arg(&mo.h).arg(&dim).arg(&ne).arg(&k).arg(&mut mo.ids).arg(&mut mo.wts).launch(one) }.map_err(gerr)?;
+            s.memcpy_dtoh(&mo.ids, &mut mo.ids_h).map_err(gerr)?;
+            s.memcpy_dtoh(&mo.wts, &mut mo.wts_h).map_err(gerr)?;
+            let mut on_gpu: Vec<(u32, f32)> = Vec::with_capacity(mo.k);
+            let mut on_cpu: Vec<(usize, f32)> = Vec::with_capacity(mo.k);
+            for (&e, &w) in mo.ids_h.iter().zip(&mo.wts_h) {
+                let key = li * mo.ne + e as usize;
+                mo.counts[key] += 1.0;
+                mo.lookups += 1;
+                match mo.slot_of[key] {
+                    Some(slot) => {
+                        mo.hits += 1;
+                        on_gpu.push((slot, w));
+                    }
+                    None => on_cpu.push((e as usize, w)),
+                }
+            }
+            let ng = on_gpu.len();
+            if ng > 0 {
+                let [kg, ku, kd] = mo.kinds[li].expect("cached experts imply a supported layer");
+                let mut ptrs = vec![0u64; 3 * ng];
+                for (i, &(slot, _)) in on_gpu.iter().enumerate() {
+                    let base = mo.pool_ptr + (slot as usize * mo.slot_bytes) as u64;
+                    ptrs[i] = base;
+                    ptrs[ng + i] = base + kg.bytes as u64;
+                    ptrs[2 * ng + i] = base + (kg.bytes + ku.bytes) as u64;
+                }
+                let wg: Vec<f32> = on_gpu.iter().map(|g| g.1).collect();
+                s.memcpy_htod(&ptrs, &mut mo.ptrs.slice_mut(0..3 * ng)).map_err(gerr)?;
+                s.memcpy_htod(&wg, &mut mo.wg.slice_mut(0..ng)).map_err(gerr)?;
+                let eff = mo.eff;
+                let launch_mv = |w: &cudarc::driver::CudaView<u64>, em: &ExpMat, xq: &CudaSlice<i8>, xd: &CudaSlice<f32>, xstride: i32, y: &mut cudarc::driver::CudaViewMut<f32>| -> Result<(), Error> {
+                    let (rows, cols) = (em.rows as i32, em.cols as i32);
+                    let cfg = LaunchConfig { grid_dim: ((em.rows as u32).div_ceil(8), ng as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+                    unsafe { s.launch_builder(&f.moe_matvec).arg(w).arg(&em.dtype).arg(&em.bb).arg(xq).arg(xd).arg(&xstride).arg(y).arg(&rows).arg(&cols).launch(cfg) }.map_err(gerr)?;
+                    Ok(())
+                };
+                launch_mv(&mo.ptrs.slice(0..ng), &kg, &self.xq, &self.xd, 0, &mut mo.gu.slice_mut(0..ng * eff))?;
+                launch_mv(&mo.ptrs.slice(ng..2 * ng), &ku, &self.xq, &self.xd, 0, &mut mo.gu.slice_mut(ng * eff..2 * ng * eff))?;
+                let (effi, ngi) = (eff as i32, ng as i32);
+                unsafe { s.launch_builder(&f.moe_silu).arg(&mo.gu).arg(&mut mo.axq).arg(&mut mo.axd).arg(&effi).arg(&ngi).launch(blocks(ng * eff)) }.map_err(gerr)?;
+                launch_mv(&mo.ptrs.slice(2 * ng..3 * ng), &kd, &mo.axq, &mo.axd, effi, &mut mo.eo.slice_mut(0..ng * sh.dim))?;
+            }
+            // CPU experts while the GPU works on its share.
+            if on_cpu.is_empty() {
+                mo.cpu_out.fill(0.0);
+            } else {
+                s.memcpy_dtoh(&mo.h, &mut mo.h_h).map_err(gerr)?;
+                mo.qa.quantize(&mo.h_h);
+                model.moe_cpu(li, &mo.h_h, &mo.qa, &on_cpu, &mut mo.scratch, &mut mo.cpu_out);
+            }
+            s.memcpy_htod(&mo.cpu_out, &mut mo.cpu).map_err(gerr)?;
+            if std::env::var_os("CEREBRO_MOE_DEBUG").is_some() && ng > 0 {
+                // Compare the GPU experts' outputs with the CPU computing the same experts.
+                let mut eo = vec![0f32; ng * sh.dim];
+                s.memcpy_dtoh(&mo.eo.slice(0..ng * sh.dim), &mut eo).map_err(gerr)?;
+                s.memcpy_dtoh(&mo.h, &mut mo.h_h).map_err(gerr)?;
+                mo.qa.quantize(&mo.h_h);
+                let mut gq = vec![0i8; 1];
+                let _ = &mut gq;
+                let ids: Vec<usize> = on_gpu.iter().map(|&(slot, _)| mo.owner[slot as usize] % mo.ne).collect();
+                let mut want = vec![0f32; sh.dim];
+                let mut worst = 0f32;
+                for (i, &e) in ids.iter().enumerate() {
+                    model.moe_cpu(li, &mo.h_h, &mo.qa, &[(e, 1.0)], &mut mo.scratch, &mut want);
+                    let got = &eo[i * sh.dim..(i + 1) * sh.dim];
+                    let sc = want.iter().fold(0f32, |m, v| m.max(v.abs())).max(1e-6);
+                    let d = got.iter().zip(&want).fold(0f32, |m, (a, b)| m.max((a - b).abs())) / sc;
+                    worst = worst.max(if d.is_nan() { f32::INFINITY } else { d });
+                }
+                let hn = mo.h_h.iter().any(|v| !v.is_finite());
+                eprintln!("layer {li}: {ng} GPU experts {ids:?}, worst rel err {worst:.2e}, h finite {}", !hn);
+            }
+            let ngi = ng as i32;
+            unsafe { s.launch_builder(&f.moe_combine).arg(&mut self.x).arg(&mo.eo).arg(&mo.wg).arg(&ngi).arg(&mo.cpu).arg(&dim).launch(blocks(sh.dim)) }.map_err(gerr)?;
         }
         unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&self.out_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
         Self::matvec(s, &f.matvec, &self.output, &self.xq, &self.xd, &mut self.logits, false)?;
@@ -352,29 +740,37 @@ impl GpuState {
     }
 
     /// Captures the decode step as a graph the first time; replays it afterwards.
-    fn run(&mut self) -> Result<(), Error> {
+    fn run(&mut self, model: &Model) -> Result<(), Error> {
+        if let Some(m) = self.moe.as_mut() {
+            // Hybrid decoding syncs with the CPU every layer, so it is not captured as a graph.
+            m.steps += 1;
+            if m.steps % 32 == 0 {
+                m.rebalance(&self.stream, model, 16)?;
+            }
+            return self.enqueue(model);
+        }
         if self.graph.is_none() {
             self.stream.begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED).map_err(gerr)?;
-            let r = self.enqueue();
+            let r = self.enqueue(model);
             let g = self.stream.end_capture(CUgraphInstantiate_flags(0)).map_err(gerr)?;
             r?;
             self.graph = g;
         }
         match &self.graph {
             Some(g) => g.launch().map_err(gerr),
-            None => self.enqueue(),
+            None => self.enqueue(model),
         }
     }
 
     /// Runs `token` at `pos`. Copies the logits into `out` when given (sampling); returns the greedy
     /// next token either way.
-    pub fn step(&mut self, token: u32, pos: usize, out: Option<&mut [f32]>) -> Result<u32, Error> {
+    pub fn step(&mut self, model: &Model, token: u32, pos: usize, out: Option<&mut [f32]>) -> Result<u32, Error> {
         if pos >= self.max_ctx {
             return Err(Error::Request("context full".into()));
         }
         self.stream.memcpy_htod(&[token as i32], &mut self.tok).map_err(gerr)?;
         self.stream.memcpy_htod(&[pos as i32], &mut self.pos).map_err(gerr)?;
-        self.run()?;
+        self.run(model)?;
         if let Some(o) = out {
             self.stream.memcpy_dtoh(&self.logits, o).map_err(gerr)?;
         }
@@ -386,9 +782,19 @@ impl GpuState {
     /// Batched forward over `toks` at positions pos0.. (prefill, or verifying a draft): every weight is
     /// read once per chunk of up to CHUNK tokens. Writes the KV cache for all of them and the logits of
     /// the last one into `out` when given; returns the greedy next token.
-    pub fn prefill(&mut self, toks: &[u32], pos0: usize, out: Option<&mut [f32]>) -> Result<u32, Error> {
+    pub fn prefill(&mut self, model: &Model, toks: &[u32], pos0: usize, out: Option<&mut [f32]>) -> Result<u32, Error> {
         if toks.is_empty() || pos0 + toks.len() > self.max_ctx {
             return Err(Error::Request("prefill outside the context".into()));
+        }
+        if self.moe.is_some() {
+            // MoE prefill goes token by token through the hybrid path for now.
+            let mut out = out;
+            let mut next = 0;
+            for (i, &t) in toks.iter().enumerate() {
+                let last = i + 1 == toks.len();
+                next = self.step(model, t, pos0 + i, if last { out.as_deref_mut() } else { None })?;
+            }
+            return Ok(next);
         }
         let mut last = 0u32;
         let mut out = out;
@@ -461,10 +867,10 @@ impl GpuState {
             unsafe { s.launch_builder(&f.quant).arg(&b.att).arg(&mut b.xq).arg(&mut b.xd).arg(&qn_total).launch(LaunchConfig { grid_dim: ((qn_total as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
             mm(&l.o, &b.xq, &b.xd, &mut b.x, true)?;
             unsafe { s.launch_builder(&f.norm_b).arg(&b.x).arg(&l.ffn_norm).arg(&mut b.xq).arg(&mut b.xd).arg(&dim).arg(&eps).launch(norm_cfg) }.map_err(gerr)?;
-            mm(&l.gu, &b.xq, &b.xd, &mut b.gu, false)?;
+            mm(l.gu.as_ref().expect("dense layer"), &b.xq, &b.xd, &mut b.gu, false)?;
             let n = (t * sh.ffn) as u32;
             unsafe { s.launch_builder(&f.silu_b).arg(&b.gu).arg(&mut b.xq).arg(&mut b.xd).arg(&ffn).arg(&ti).launch(LaunchConfig { grid_dim: (n.div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
-            mm(&l.down, &b.xq, &b.xd, &mut b.x, true)?;
+            mm(l.down.as_ref().expect("dense layer"), &b.xq, &b.xd, &mut b.x, true)?;
         }
         // Logits for the last token only, through the decode buffers.
         {
@@ -488,13 +894,26 @@ impl GpuState {
 
     /// Greedy decoding entirely on the GPU: each replay feeds its own pick into the next, with only a
     /// 4-byte read per token so generation can stop at an end-of-turn token.
-    pub fn generate_greedy(&mut self, first: u32, pos: usize, max_new: usize, stop: &[u32], mut emit: impl FnMut(u32)) -> Result<usize, Error> {
+    pub fn generate_greedy(&mut self, model: &Model, first: u32, pos: usize, max_new: usize, stop: &[u32], mut emit: impl FnMut(u32)) -> Result<usize, Error> {
+        if self.moe.is_some() {
+            let mut t = first;
+            let mut n = 0;
+            while n < max_new && pos + n < self.max_ctx {
+                t = self.step(model, t, pos + n, None)?;
+                n += 1;
+                if stop.contains(&t) {
+                    break;
+                }
+                emit(t);
+            }
+            return Ok(n);
+        }
         self.stream.memcpy_htod(&[first as i32], &mut self.tok).map_err(gerr)?;
         self.stream.memcpy_htod(&[pos as i32], &mut self.pos).map_err(gerr)?;
         let mut n = 0;
         let mut next = [0i32];
         while n < max_new && pos + n < self.max_ctx {
-            self.run()?;
+            self.run(model)?;
             self.stream.memcpy_dtoh(&self.next, &mut next).map_err(gerr)?;
             n += 1;
             let t = next[0] as u32;

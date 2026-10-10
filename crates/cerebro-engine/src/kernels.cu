@@ -385,3 +385,142 @@ extern "C" __global__ void silu_mul_quant_batch(const float* __restrict__ gu, si
     float g = r[j], u = r[ffn + j];
     quant32(g / (1.f + __expf(-g)) * u, xq, xd, i, threadIdx.x & 31);
 }
+
+// ---- Mixture of experts: router and K-quant expert kernels ------------------------------------
+//
+// Experts resident in VRAM keep their GGUF K-quant format (4-6 bits per weight, so about twice as
+// many fit as with an 8-bit repack). Q4_K (144 B) and Q5_K (176 B) blocks are used as stored; Q6_K
+// blocks are padded from 210 to 224 bytes at upload so every 16-byte load is aligned. A block of
+// 256 values is processed in 16-value units with dp4a against int8 activations.
+
+__device__ __forceinline__ void scale_min_k4(int j, const unsigned char* q, int& sc, int& m) {
+    if (j < 4) { sc = q[j] & 63; m = q[j + 4] & 63; }
+    else { sc = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4); m = (q[j + 4] >> 4) | ((q[j] >> 6) << 4); }
+}
+__device__ __forceinline__ int dot16(int4 a, int4 b) {
+    return __dp4a(a.w, b.w, __dp4a(a.z, b.z, __dp4a(a.y, b.y, __dp4a(a.x, b.x, 0))));
+}
+__device__ __forceinline__ int sum16(int4 x) {
+    const int one = 0x01010101;
+    return __dp4a(x.w, one, __dp4a(x.z, one, __dp4a(x.y, one, __dp4a(x.x, one, 0))));
+}
+__device__ __forceinline__ int4 and4(int4 a, int m) { return make_int4(a.x & m, a.y & m, a.z & m, a.w & m); }
+__device__ __forceinline__ int4 shr4(int4 a, int s) {
+    return make_int4((int)((unsigned)a.x >> s), (int)((unsigned)a.y >> s), (int)((unsigned)a.z >> s), (int)((unsigned)a.w >> s));
+}
+__device__ __forceinline__ int4 or4(int4 a, int4 b) { return make_int4(a.x | b.x, a.y | b.y, a.z | b.z, a.w | b.w); }
+__device__ __forceinline__ int4 shl4(int4 a, int s) { return make_int4(a.x << s, a.y << s, a.z << s, a.w << s); }
+
+// Unit u of a block: Q4_K/Q5_K have 8 (j = u/2 picks the 32-byte qs chunk, half = u%2 its 16 bytes;
+// low nibbles belong to sub-block 2j, high to 2j+1); Q6_K has 16 (half n, group g, 16-value part hh).
+__device__ __forceinline__ float unit_dot(int dtype, const unsigned char* blk, int u,
+                                          const signed char* xq, const float* xd) {
+    if (dtype == 12 || dtype == 13) {
+        int j = u >> 1, half = u & 1, sb0 = 2 * j, sb1 = sb0 + 1;
+        float d = __half2float(*reinterpret_cast<const __half*>(blk));
+        float dmin = __half2float(*reinterpret_cast<const __half*>(blk + 2));
+        int4 x0 = *reinterpret_cast<const int4*>(xq + sb0 * 32 + half * 16);
+        int4 x1 = *reinterpret_cast<const int4*>(xq + sb1 * 32 + half * 16);
+        int4 lo, hi;
+        if (dtype == 12) {
+            int4 q = *reinterpret_cast<const int4*>(blk + 16 + j * 32 + half * 16);
+            lo = and4(q, 0x0F0F0F0F);
+            hi = and4(shr4(q, 4), 0x0F0F0F0F);
+        } else {
+            int4 q = *reinterpret_cast<const int4*>(blk + 48 + j * 32 + half * 16);
+            int4 h = *reinterpret_cast<const int4*>(blk + 16 + half * 16);
+            lo = or4(and4(q, 0x0F0F0F0F), shl4(and4(shr4(h, sb0), 0x01010101), 4));
+            hi = or4(and4(shr4(q, 4), 0x0F0F0F0F), shl4(and4(shr4(h, sb1), 0x01010101), 4));
+        }
+        int sc0, m0, sc1, m1;
+        scale_min_k4(sb0, blk + 4, sc0, m0);
+        scale_min_k4(sb1, blk + 4, sc1, m1);
+        return xd[sb0] * (d * sc0 * dot16(lo, x0) - dmin * m0 * sum16(x0))
+             + xd[sb1] * (d * sc1 * dot16(hi, x1) - dmin * m1 * sum16(x1));
+    } else {
+        int n = u >> 3, g = (u >> 1) & 3, hh = u & 1;
+        float d = __half2float(*reinterpret_cast<const __half*>(blk + 208));
+        int4 ql = *reinterpret_cast<const int4*>(blk + n * 64 + (g & 1) * 32 + hh * 16);
+        int4 qh = *reinterpret_cast<const int4*>(blk + 128 + n * 32 + hh * 16);
+        int4 lo = g < 2 ? and4(ql, 0x0F0F0F0F) : and4(shr4(ql, 4), 0x0F0F0F0F);
+        int4 q = or4(lo, shl4(and4(shr4(qh, 2 * g), 0x03030303), 4));
+        int xo = n * 128 + g * 32 + hh * 16;
+        int4 x = *reinterpret_cast<const int4*>(xq + xo);
+        int sc = (signed char)blk[192 + n * 8 + 2 * g + hh];
+        return d * sc * xd[n * 4 + g] * (float)(dot16(q, x) - 32 * sum16(x));
+    }
+}
+
+// Batched expert matvec: gridDim.y matrices (one per resident expert); matrix k's weights start at
+// wptr[k], its input at xq + k*xstride, its output at y + k*rows. One warp per row.
+extern "C" __global__ void moe_matvec(const unsigned long long* __restrict__ wptr, int dtype, int bb,
+                                      const signed char* __restrict__ xq, const float* __restrict__ xd, int xstride,
+                                      float* __restrict__ y, int rows, int cols) {
+    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    int row = blockIdx.x * (blockDim.x >> 5) + warp;
+    if (row >= rows) return;
+    int k = blockIdx.y;
+    int nb = cols >> 8;
+    int upb = dtype == 14 ? 16 : 8;
+    const unsigned char* w = reinterpret_cast<const unsigned char*>(wptr[k]) + (size_t)row * nb * bb;
+    const signed char* x = xq + (size_t)k * xstride;
+    const float* d = xd + (size_t)k * (xstride >> 5);
+    float sum = 0.f;
+    for (int u = lane; u < nb * upb; u += 32) {
+        int b = u / upb;
+        sum += unit_dot(dtype, w + (size_t)b * bb, u - b * upb, x + b * 256, d + b * 8);
+    }
+    sum = warp_sum(sum);
+    if (lane == 0) y[(size_t)k * rows + row] = sum;
+}
+
+// Router: scores for n_expert experts (f32 weights), softmax, top-k, renormalised weights. One block of
+// 1024 threads (32 warps); writes k expert ids and weights.
+extern "C" __global__ void router_topk(const float* __restrict__ wr, const float* __restrict__ h, int dim,
+                                       int n_expert, int k, int* __restrict__ ids, float* __restrict__ wts) {
+    __shared__ float sc[512];
+    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    for (int e = warp; e < n_expert; e += 32) {
+        const float* r = wr + (size_t)e * dim;
+        float s = 0.f;
+        for (int i = lane; i < dim; i += 32) s += r[i] * h[i];
+        s = warp_sum(s);
+        if (lane == 0) sc[e] = s;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float mx = -1e30f;
+        for (int e = 0; e < n_expert; ++e) mx = fmaxf(mx, sc[e]);
+        for (int e = 0; e < n_expert; ++e) sc[e] = __expf(sc[e] - mx);
+        float tot = 0.f;
+        for (int t = 0; t < k; ++t) {
+            int best = 0;
+            float bv = -1.f;
+            for (int e = 0; e < n_expert; ++e) if (sc[e] > bv) { bv = sc[e]; best = e; }
+            ids[t] = best;
+            wts[t] = bv;
+            tot += bv;
+            sc[best] = -2.f;
+        }
+        for (int t = 0; t < k; ++t) wts[t] /= tot;
+    }
+}
+
+// act_k = silu(gate_k) * up_k for n experts (gate outputs first, then up outputs), quantised per expert.
+extern "C" __global__ void moe_silu_quant(const float* __restrict__ gu, signed char* __restrict__ xq,
+                                          float* __restrict__ xd, int eff, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if ((i & ~31) >= eff * n) return;
+    float g = gu[i], u = gu[eff * n + i];
+    quant32(g / (1.f + __expf(-g)) * u, xq, xd, i, threadIdx.x & 31);
+}
+
+// x += sum_k w[k] * eo[k] + cpu (the CPU experts' weighted sum, already scaled).
+extern "C" __global__ void moe_combine(float* __restrict__ x, const float* __restrict__ eo, const float* __restrict__ w,
+                                       int n, const float* __restrict__ cpu, int dim) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= dim) return;
+    float s = cpu[i];
+    for (int k = 0; k < n; ++k) s += w[k] * eo[(size_t)k * dim + i];
+    x[i] += s;
+}

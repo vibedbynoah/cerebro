@@ -52,7 +52,7 @@ fn run(model: &Model, sess: &mut Session, prompt: &[u32], n: usize, gpu: bool) -
     if gpu {
         let pos = sess.tokens.len();
         let g = sess.gpu.as_mut().expect("gpu");
-        g.generate_greedy(first, pos, n - 1, &[], |t| out.push(t)).expect("decode");
+        g.generate_greedy(model, first, pos, n - 1, &[], |t| out.push(t)).expect("decode");
         return (pre, t1.elapsed().as_secs_f64(), out);
     }
     let _ = gpu;
