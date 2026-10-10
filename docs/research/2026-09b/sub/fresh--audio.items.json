@@ -1,0 +1,247 @@
+{
+ "headline_findings": [
+  "whisper.cpp v1.9.4 + whisper-server file-POST and whisper-stream mic mode is the safest offline STT default; large-v3-turbo (809M, 4 decoder layers) is ~2.7-5x faster than large-v3 at +0.4pp WER.",
+  "Parakeet TDT 0.6B v3 (CC-BY-4.0, 25 langs) with NeMo-Speech.cpp q8 GGUF is the fastest accurate alternative to Whisper; batch-128 RTFx 3380 does not transfer to batch-1 laptop.",
+  "Kokoro-82M int8 ONNX (~92MB, Apache-2.0) is the default local TTS; Piper covers ultra-cheap CPU prompts; Qwen3-TTS-0.6B reports 97ms first packet; Chatterbox Turbo/Nano give MIT-licensed cloning with watermark.",
+  "Voice mode: ship push-to-talk first, then Silero+WebRTC dual-pass VAD auto-turn, barge-in behind a flag with AEC and <20ms TTS flush; no RTX 3070 Ti batch-1 voice latencies are published, soak-test locally."
+ ],
+ "items": [
+  {
+   "fit_reference_machine": "Excellent: large-v3-turbo int8 ~1.5GB VRAM fits 8GB Ampere; q5_0 GGML small; CPU fallback viable; batch-1 laptop numbers unverified, measure soak.",
+   "harness_integration": "Spawn whisper-server or whisper-cli as child argv-only; loopback POST /inference; mic via whisper-stream SDL2; expose model picker + language + VAD threshold in GUI/CLI.",
+   "name": "whisper.cpp + whisper-server + whisper-stream",
+   "quality_cost": "turbo +0.39pp mean WER vs large-v3 (7.83 vs 7.44); q5_0 quant minor loss; VAD gating cuts hallucinations on silence.",
+   "reported_gain": "turbo fp16 19.2s vs large-v3 52s on 13min audio GPU; ~12xRT faster-whisper int8 vs ~8xRT whisper.cpp CUDA on RTX 4070 large-v3.",
+   "sources": [
+    "https://github.com/ggml-org/whisper.cpp/releases/tag/v1.9.3",
+    "https://freedom.tech/posts/2026-09-11-whisper-cpp-1-9-4/",
+    "https://www.promptquorum.com/power-local-llm/local-whisper-stt-comparison-2026",
+    "https://whispernotes.app/blog/introducing-whisper-large-v3-turbo"
+   ],
+   "status": "production",
+   "what": "MIT C/C++ Whisper runtime (CUDA/Metal/Vulkan/CPU) with file-POST server and SDL2 live mic streamer.",
+   "where_implemented": "ggml-org/whisper.cpp v1.9.4 server + examples/stream (--step/--length/-vth)"
+  },
+  {
+   "fit_reference_machine": "Good: int8 ~2.5GB fits 8GB; CPU int8 viable; Python/CUDA12+cuDNN9 dependency weight; batch-1 3070 Ti unverified.",
+   "harness_integration": "Optional Python sidecar child process with OpenAI-compatible endpoint; share turbo/distil CT2 weights cache; flag for beam/VAD filter.",
+   "name": "faster-whisper (CTranslate2) + turbo/distil weights",
+   "quality_cost": "int8 <0.1pp WER cost claimed; turbo -0.4pp vs large-v3; distil EN-only, +1.3pp short-form vs large-v3.",
+   "reported_gain": "Up to 4x vs openai/whisper; int8 ~2x vs fp16; distil-large-v3 ~6x vs large-v3; turbo int8 19.6s per 13min, 1.5GB VRAM.",
+   "sources": [
+    "https://github.com/SYSTRAN/faster-whisper",
+    "https://github.com/SYSTRAN/faster-whisper/issues/1030",
+    "https://huggingface.co/openai/whisper-large-v3-turbo",
+    "https://weesperneonflow.ai/en/blog/2026-08-27-whisper-v3-turbo-vs-distil-whisper-comparison-2026/"
+   ],
+   "status": "production",
+   "what": "Python CTranslate2 Whisper reimplementation with int8/batched/VAD paths; turbo and distil checkpoints.",
+   "where_implemented": "SYSTRAN/faster-whisper + faster-whisper2 v2.1.1; Systran CT2 checkpoints"
+  },
+  {
+   "fit_reference_machine": "Very good: 0.6B q8 GGUF ~1GB fits easily; CPU INT8 ~8xRT reported on i7; Windows native unverified, use WSL2 sidecar.",
+   "harness_integration": "Spawn nemo-speech binary sidecar argv-only with q8_0 GGUF; file transcribe + chunked streaming flags; keep Whisper fallback for non-covered langs.",
+   "name": "NVIDIA Parakeet TDT 0.6B v2/v3",
+   "quality_cost": "Native PnC/caps and word timestamps; v3 multilingual holds accuracy; batch-128 leaderboard WER not batch-1 comparable.",
+   "reported_gain": "RTFx 3380 at batch 128 (datacenter, non-transferable); community i7 INT8 2.4s clip in 307ms (~8xRT).",
+   "sources": [
+    "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3",
+    "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2",
+    "https://docs.nvidia.com/nemo/speech/3.0.0/asr/asr_checkpoints.html",
+    "https://www.reddit.com/r/artificial/comments/1u3r85g/i_built_a_100_local_cpuonly_voice_loop_for_any/"
+   ],
+   "status": "production",
+   "what": "600M FastConformer+TDT ASR; v2 English-only, v3 25 European langs with auto-detect and timestamps.",
+   "where_implemented": "nvidia/parakeet-tdt-0.6b-v3 + NeMo-Speech.cpp q8_0.gguf; NeMo 2.2/Riva NIM"
+  },
+  {
+   "fit_reference_machine": "Excellent: tiny 27M/190MB and base 61M/400MB run on CPU/iGPU; ideal always-on dictation on laptop.",
+   "harness_integration": "Embed ONNX Runtime or spawn tiny sidecar; WebRTC/VAD-gated chunk feed; use for push-to-talk and low-power mode.",
+   "name": "Moonshine tiny/base + Moonshine Streaming",
+   "quality_cost": "Near-Whisper WER claimed (hardware unspecified, unverified); streaming decoder hallucinates on short noisy clips.",
+   "reported_gain": "5x faster than Whisper per 10s segment claimed; streaming 80ms lookahead; tiny 34M/small 123M/medium 245M.",
+   "sources": [
+    "https://pypi.org/project/getstream-plugins-moonshine/",
+    "https://huggingface.co/UsefulSensors/moonshine-streaming-tiny",
+    "https://huggingface.co/docs/transformers/v5.9.0/model_doc/moonshine_streaming",
+    "https://github.com/moonshine-ai/moonshine-js"
+   ],
+   "status": "production",
+   "what": "Edge-first encoder-decoder STT with ONNX tiny/base and sliding-window streaming variants plus browser WASM.",
+   "where_implemented": "UsefulSensors/moonshine-* ; moonshine-ai/moonshine-js + WebRTC demo"
+  },
+  {
+   "fit_reference_machine": "Good: 1B streams on GPU/CPU with 0.5s delay; 2.6B needs more VRAM; Windows server unverified, sidecar it.",
+   "harness_integration": "Spawn moshi-server worker with TOML config as sidecar; websocket streaming; subtract text delay for word timestamps.",
+   "name": "Kyutai STT (delayed streams: 1B en_fr + 2.6B en)",
+   "quality_cost": "Capitalized/punctuated output with word timestamps; 2.5s-delay model most accurate; noisy 2h audio robust claimed.",
+   "reported_gain": "0.5s delay (1B) vs 2.5s (2.6B); Mimi 12.5Hz streaming; latency figures on laptop unverified.",
+   "sources": [
+    "https://kyutai.org/stt/",
+    "https://huggingface.co/kyutai/stt-2.6b-en",
+    "https://github.com/kyutai-labs/delayed-streams-modeling/blob/main/README.md"
+   ],
+   "status": "production",
+   "what": "Decoder-only streaming STT over Mimi tokens with delayed text stream and semantic VAD on 1B model.",
+   "where_implemented": "kyutai/stt-1b-en_fr + stt-2.6b-en; moshi-server worker configs"
+  },
+  {
+   "fit_reference_machine": "Mixed: Qwen3-ASR smaller than 30B Omni; 8GB VRAM tight alongside LLM; reserve for audio-understanding turns.",
+   "harness_integration": "Reuse existing llama-server spawner with -hf GGUF + mmproj; audio file input via llama-mtmd-cli; keep dedicated STT default.",
+   "name": "llama.cpp audio input (Qwen3-Omni/ASR, Qwen2.5-Omni)",
+   "quality_cost": "Multilingual recognition/caption/translation in one model; quant quality poor on Qwen2-Audio noted upstream.",
+   "reported_gain": "Single model for text+image+audio+video; Qwen3-Omni 30B-A3B/3B-active; 3070 Ti latency unverified.",
+   "sources": [
+    "https://www.creativeainews.com/blog/llama-cpp-audio-qwen3-omni-multimodal/",
+    "https://github.com/ggml-org/llama.cpp/pull/19441",
+    "https://github.com/ggml-org/llama.cpp/blob/master/docs/multimodal.md",
+    "https://huggingface.co/blog/gemma3n"
+   ],
+   "status": "emerging",
+   "what": "mtmd audio encoder path in llama.cpp; Qwen3-Omni/ASR ship since b8769, Gemma 3n still text-only.",
+   "where_implemented": "llama.cpp b8769 mtmd PROJECTOR_TYPE_QWEN3A; ggml-org Qwen2.5-Omni/Qwen3 GGUFs"
+  },
+  {
+   "fit_reference_machine": "Excellent default: int8 ~92MB + voices 28MB; CPU ~2xRT; DirectML/CUDA optional; fits alongside any LLM.",
+   "harness_integration": "Spawn kokoro-onnx sidecar or link ONNX Runtime in Rust; sentence-chunk queue; voice picker + speed; loopback HTTP /v1/audio/speech.",
+   "name": "Kokoro-82M ONNX",
+   "quality_cost": "Near-frontier quality for size, human-like prosody; PyTorch and ONNX perceptually indistinguishable per CPU bench.",
+   "reported_gain": "CPU RTF ~0.45-0.51 (~2xRT) on 4-core EPYC; 24kHz; quant-resilient per HF card.",
+   "sources": [
+    "https://huggingface.co/hexgrad/Kokoro-82M",
+    "https://huggingface.co/onnx-community/Kokoro-82M-ONNX",
+    "http://www.github.com/thewh1teagle/kokoro-onnx",
+    "https://heyneo.com/blog/kokoro-tts-vs-supertonic-3-tts"
+   ],
+   "status": "production",
+   "what": "82M StyleTTS2-class TTS, Apache-2.0, 54 voices/8 langs with quantized ONNX down to ~92MB.",
+   "where_implemented": "hexgrad/kokoro + onnx-community/Kokoro-82M-v1.0-ONNX; kokoro-onnx runtime"
+  },
+  {
+   "fit_reference_machine": "Excellent for prompts: tens of MB per voice, tiny RAM, CPU-only; best fallback when GPU busy with LLM.",
+   "harness_integration": "Spawn piper CLI/sherpa-onnx sidecar; pre-warm model (~900ms first run); sentence chunking; SAPI5 registration optional.",
+   "name": "Piper VITS ONNX (+ streaming-vits wrapper)",
+   "quality_cost": "Robotic vs 2026 SOTA but clear; medium/high 22kHz better for narration; verify GPL fork before bundling.",
+   "reported_gain": "~10xRT desktop CPU, RT on Pi 5 claimed; streaming-vits TTFA 163ms vs 701ms non-streaming (M-series, unverified Win).",
+   "sources": [
+    "https://localaimaster.com/blog/piper-tts-setup-guide",
+    "https://pypi.org/project/streaming-vits/",
+    "https://github.com/willwade/sherpaonnxazuresapi-installer/",
+    "https://github.com/rhasspy/piper/blob/9b1c6397/README.md"
+   ],
+   "status": "production",
+   "what": "VITS voices as ONNX with espeak-ng phonemization; 100+ voices/30+ langs; streaming chunk wrapper Sep 2026.",
+   "where_implemented": "OHF-Voice/piper1-gpl v1.8.0; rhasspy/piper-voices; streaming-vits v0.1.0"
+  },
+  {
+   "fit_reference_machine": "Feasible but contends: 3B Q4 fits 8GB alone, not comfortably with 27-30B LLM; prefer TTS-only GPU time-slice.",
+   "harness_integration": "Reuse llama-server spawner (-ngl 29 -c 8192) + SNAC decoder sidecar; stream tokens to audio frames; voice_id flag.",
+   "name": "Orpheus 3B + SNAC (llama.cpp-routed TTS)",
+   "quality_cost": "Very expressive zero-shot cloning; rare stop failures (use VAD flag); SNAC decode quality depends on sidecar.",
+   "reported_gain": "Streams via orpheus-cpp pre-buffer (default 1.5s, tunable 0.5s); 3070 Ti figures unverified.",
+   "sources": [
+    "https://github.com/canopyai/Orpheus-TTS/blob/main/additional_inference_options/no_gpu/README.md",
+    "https://github.com/markuryy/orpheus-cpp",
+    "https://github.com/ggml-org/llama.cpp/issues/12476",
+    "https://github.com/mmwillet/TTS.cpp/pull/90"
+   ],
+   "status": "emerging",
+   "what": "Llama-3.2-3B finetune emitting SNAC 24kHz audio tokens as text tokens; community GGUF + TTS.cpp decoder.",
+   "where_implemented": "canopylabs/orpheus-3b-0.1-ft; mmwillet2/Orpheus_GGUF; llama.cpp issue 12476 + PR 12487"
+  },
+  {
+   "fit_reference_machine": "Poor for duplex: ~10GB VRAM full model cannot share 8GB with LLM; batch render on GPU alone only.",
+   "harness_integration": "Batch-only sidecar on CUDA box; [S1]/[S2] script input; no streaming path for Dia 1.6B.",
+   "name": "Dia 1.6B / Dia2",
+   "quality_cost": "Top dialogue realism + laugh/cough tokens + cloning; EN-only; quality varies per generation per Dia2 notes.",
+   "reported_gain": "~40 tok/s on A4000 (~0.46xRT, 86 tok = 1s audio); Dia2 streams from first tokens (CUDA-only).",
+   "sources": [
+    "https://github.com/nari-labs/dia",
+    "https://huggingface.co/nari-labs/Dia-1.6B-0626",
+    "https://codersera.com/blog/run-nari-dia-16b-on-mac-installation-guide/"
+   ],
+   "status": "production",
+   "what": "1.6B dialogue-native TTS with Descript codec; Dia2 (1B/2B, Nov 2025) is the streaming successor.",
+   "where_implemented": "nari-labs/dia + nari-labs/Dia-1.6B-0626; Dia2 CUDA 12.8+"
+  },
+  {
+   "fit_reference_machine": "1.6B too heavy to share 8GB with LLM; Pocket TTS CPU-friendly for alerts; sidecar on Linux/WSL2.",
+   "harness_integration": "Rust moshi-server worker sidecar with config-tts.toml; pipe LLM tokens as produced for 220ms first audio.",
+   "name": "Kyutai TTS 1.6B + Pocket TTS",
+   "quality_cost": "Natural streaming speech with timestamps; custom-voice embeddings private; Pocket is batch-only cloner.",
+   "reported_gain": "220ms token-to-audio; 350ms batched-32 on L40S; 16 streams >2xRTF (datacenter, non-transferable).",
+   "sources": [
+    "https://kyutai.org/blog/2025-07-03-kyutai-tts-1-6b/",
+    "https://huggingface.co/kyutai/tts-1.6b-en_fr",
+    "https://github.com/kyutai-labs/delayed-streams-modeling",
+    "https://github.com/kyutai-labs/moshi/issues/404"
+   ],
+   "status": "production",
+   "what": "Mimi-based text-streaming TTS (audio delayed 1.28s) plus tiny CPU Pocket TTS 5s cloner.",
+   "where_implemented": "kyutai/tts-1.6b-en_fr; moshi-server --config configs/config-tts.toml; MLX quant flags"
+  },
+  {
+   "fit_reference_machine": "Good: Turbo 350M GPU-light; Nano 110M CPU 3xRT on 8 cores; multilingual 0.5B fits 8GB; watermark disclosure needed.",
+   "harness_integration": "Python sidecar with generate/stream API; language_id + reference wav for cloning; surface watermark notice in GUI.",
+   "name": "Chatterbox Turbo / Nano / Multilingual v3",
+   "quality_cost": "Strong cloning + emotion/paralinguistic tags; v3 stability up; ko/vi CER ~71-75% not production.",
+   "reported_gain": "Turbo ~6xRT GPU ~75ms; Nano 3xRT on 8 CPU cores; NIM 2-39x vs raw PyTorch (datacenter).",
+   "sources": [
+    "https://www.resemble.ai/learn/models/chatterbox-turbo",
+    "https://github.com/resemble-ai/chatterbox",
+    "https://huggingface.co/ResembleAI/chatterbox",
+    "https://www.resemble.ai/resources/chatterbox-multilingual-v3-tts-with-embedded-watermarking-for-25-languages"
+   ],
+   "status": "production",
+   "what": "MIT TTS family: 350M Turbo EN, 110M Nano CPU, 0.5B Llama multilingual v3 with PerTh watermark.",
+   "where_implemented": "resemble-ai/chatterbox; ResembleAI HF weights; chatterbox-turbo/multilingual v3 + NIM"
+  },
+  {
+   "fit_reference_machine": "Best latency bet for 8GB: 0.6B streams at 97ms first packet claimed; verify VRAM with flash-attn on 3070 Ti.",
+   "harness_integration": "Python/vLLM-Omni sidecar; single-char streaming input from LLM tokens; speaker preset or 3s ref wav.",
+   "name": "Qwen3-TTS 0.6B/1.7B (12Hz dual-track)",
+   "quality_cost": "SOTA EN WER 1.24 (1.7B-12Hz) and speaker similarity 0.789; instruction voice-design on 1.7B.",
+   "reported_gain": "97ms first packet (0.6B) / 101ms (1.7B) at concurrency 1; RTF ~0.29-0.31 (lab GPU, non-transferable).",
+   "sources": [
+    "https://arxiv.org/html/2601.15621v1",
+    "https://github.com/QwenLM/Qwen3-TTS",
+    "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+    "https://qwenlm-qwen3-tts.mintlify.app/resources/faq"
+   ],
+   "status": "production",
+   "what": "Apache-2.0 multilingual streaming TTS, 10 langs, 3s cloning and NL voice design.",
+   "where_implemented": "Qwen/Qwen3-TTS-12Hz-0.6B/1.7B-Base/CustomVoice; vLLM-Omni day-0 offline"
+  },
+  {
+   "fit_reference_machine": "Excellent fallback: 99M/404MB assets, CPU-first, 44.1kHz; fixed voices only; check OpenRAIL-M terms.",
+   "harness_integration": "supertonic serve loopback OpenAI-compatible /v1/audio/speech; total_steps=5 default; fixed voice picker.",
+   "name": "Supertonic 3 ONNX",
+   "quality_cost": "Clear intelligible at 5 steps, robotic at 2 steps; Kokoro wins blind quality; 31 langs from one pipeline.",
+   "reported_gain": "CPU RTF ~0.31 at 5 steps (~3xRT), ~0.165 at 2 steps; M4-Pro CPU ~900-1200 chars/s per vendor table.",
+   "sources": [
+    "https://heyneo.com/blog/kokoro-tts-vs-supertonic-3-tts",
+    "https://github.com/supertone-inc/supertonic",
+    "https://www.kiadev.net/news/2026-05-15-supertonic-v3-release"
+   ],
+   "status": "production",
+   "what": "~99M flow-matching multilingual TTS as ONNX with tunable steps and OpenAI-compatible local server.",
+   "where_implemented": "Supertone/supertonic-3 HF assets; supertonic-py serve; onnxruntime CPU/WebGPU"
+  },
+  {
+   "fit_reference_machine": "Trivial footprint: Silero 0.2-2.2MB, <1% CPU/stream; runs alongside any STT/TTS on laptop CPU.",
+   "harness_integration": "Rust VAD thread pre-STT; push-to-talk default, VAD auto-turn optional, barge-in flag with AEC + TTS flush + 250ms cooldown.",
+   "name": "Voice-mode plumbing (Silero/WebRTC VAD + sherpa-onnx)",
+   "quality_cost": "Dual-pass lifts responsiveness without accuracy loss; semantic endpointing F1 0.78 to 0.92 on service audio.",
+   "reported_gain": "WebRTC trigger ~15-20ms; Silero ~1ms/30ms chunk + 150-300ms smoothing; dual-pass barge-in 110-140ms claimed.",
+   "sources": [
+    "https://k2-fsa.github.io/sherpa/onnx/vad/silero-vad.html",
+    "https://github.com/k2-fsa/sherpa-onnx/",
+    "https://www.syncsoft.ai/en/blog/voice-agent-barge-in-vad-tuning-2026",
+    "https://rajatpandit.com/agentic-ai/real-time-audio-vad"
+   ],
+   "status": "production",
+   "what": "VAD-gated turn-taking and barge-in recipe: WebRTC instant trigger plus Silero confirm plus echo cooldown.",
+   "where_implemented": "snakers4/silero-vad v4/v5; k2-fsa/sherpa-onnx VAD+ASR; SyncSoft barge-in ladder"
+  }
+ ]
+}

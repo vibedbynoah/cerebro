@@ -1,0 +1,32 @@
+2026-09-22 23:41:22 running 12 subtasks, concurrency 3
+2026-09-22 23:41:22 START fresh--llamacpp-latest attempt 1 model opencode/muse-spark-1.3-contributor-free
+2026-09-22 23:41:22 START fresh--new-models attempt 1 model opencode/muse-spark-1.3-contributor-free
+2026-09-22 23:41:22 START fresh--image-generation attempt 1 model opencode/muse-spark-1.3-contributor-free
+2026-09-22 23:41:24 END   fresh--image-generation attempt 1 exit:1 1s valid=False (notes.md missing or too small)
+2026-09-22 23:41:24 END   fresh--new-models attempt 1 exit:1 1s valid=False (notes.md missing or too small)
+2026-09-22 23:41:24 START fresh--image-generation attempt 2 model opencode/mimo-v2.5-free
+2026-09-22 23:41:24 START fresh--new-models attempt 2 model opencode/mimo-v2.5-free
+2026-09-22 23:41:26 END   fresh--image-generation attempt 2 exit:1 1s valid=False (notes.md missing or too small)
+2026-09-22 23:41:26 START fresh--audio attempt 1 model opencode/muse-spark-1.3-contributor-free
+2026-09-22 23:41:26 END   fresh--new-models attempt 2 exit:1 1s valid=False (notes.md missing or too small)
+2026-09-22 23:41:26 START fresh--hf-downloads attempt 1 model opencode/muse-spark-1.3-contributor-free
+2026-09-22 23:44:14 END   fresh--audio attempt 1 rate-limited 168s valid=True (15 items)
+2026-09-22 23:44:15 START fresh--mcp-plugins attempt 1 model opencode/muse-spark-1.3-contributor-free
+2026-09-22 23:44:50 END   fresh--hf-downloads attempt 1 rate-limited 204s valid=True (15 items)
+2026-09-22 23:44:50 START fresh--permissions attempt 1 model opencode/muse-spark-1.3-contributor-free
+2026-09-22 23:46:17 END   fresh--llamacpp-latest attempt 1 rate-limited 294s valid=True (18 items)
+2026-09-22 23:46:17 START fresh--tauri attempt 1 model opencode/muse-spark-1.3-contributor-free
+2026-09-22 23:47:59 END   fresh--permissions attempt 1 rate-limited 189s valid=True (15 items)
+2026-09-22 23:47:59 START fresh--rival-updates attempt 1 model opencode/muse-spark-1.3-contributor-free
+2026-09-22 23:48:46 END   fresh--tauri attempt 1 rate-limited 148s valid=True (14 items)
+2026-09-22 23:48:46 START fresh--verification attempt 1 model opencode/muse-spark-1.3-contributor-free
+2026-09-22 23:50:00 END   fresh--mcp-plugins attempt 1 rate-limited 345s valid=True (16 items)
+2026-09-22 23:50:00 START fresh--memory-rag attempt 1 model opencode/muse-spark-1.3-contributor-free
+2026-09-22 23:51:02 END   fresh--rival-updates attempt 1 rate-limited 182s valid=True (10 items)
+2026-09-22 23:51:02 START fresh--security attempt 1 model opencode/muse-spark-1.3-contributor-free
+2026-09-22 23:53:16 END   fresh--verification attempt 1 rate-limited 270s valid=True (15 items)
+2026-09-22 23:53:34 END   fresh--security attempt 1 rate-limited 152s valid=True (18 items)
+2026-09-22 23:53:37 END   fresh--memory-rag attempt 1 rate-limited 216s valid=True (16 items)
+2026-09-22 23:53:37 subtasks done: 10 ok, 2 failed ['fresh--new-models', 'fresh--image-generation']
+2026-09-22 23:53:37 link-checking 274 URLs
+2026-09-22 23:53:46 merged fresh: 152 items, 2 with dead links, missing subtasks: ['fresh--new-models', 'fresh--image-generation']

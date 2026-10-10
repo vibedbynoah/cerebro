@@ -1,0 +1,183 @@
+{
+ "headline_findings": [
+  "LM Studio 0.4.22-0.4.24 (Aug-Sep 2026) productized DFlash/DSpark/MTP drafters + llama.cpp argv overrides.",
+  "Ollama v0.34.x adds ChatGPT Desktop reuse, cached-token reporting, deprecates typical_p; GGUF create now needs llama.cpp tooling.",
+  "KoboldCpp 1.119-1.121 adds Minimax H3 video, DSpark/DFlash, --ffncpu and --usedirectio offload/IO flags.",
+  "Open WebUI v0.11.1-v0.11.4 adds approval-gated tools, ask_user, delta streaming (787x saving claimed) and slim 175MB image.",
+  "AnythingLLM v1.16.2 replaces Docker Model Runner with LLMman; Jan v0.8.4 (Jul) has no Aug-Sep release; Cline SDK cut mistake-limit 6.34% to 0.62%."
+ ],
+ "items": [
+  {
+   "active_2026": "0.4.25 Sep 19 2026; 0.4.24 Sep 9; 0.4.22/0.4.23 Aug 28",
+   "backend": "llama.cpp engines incl 2.28.1/2.29.1+; MLX; Vulkan/CUDA/ROCm per changelog",
+   "category": "runner",
+   "features": "chat, RAG, local server OpenAI/Anthropic compat, tool images, reasoning controls, enterprise endpoint + LM Link",
+   "license": "unknown",
+   "name": "LM Studio",
+   "perf_tuning": "load-time speculative decoding (DFlash/DSpark/MTP); argv overrides; mmap/mlock/direct-io; GPU priority; ctx-length controls",
+   "same_model_testable": true,
+   "security_record": "local-first; server API key + enterprise endpoint mode noted; no CVE enumerated in opened changelog",
+   "sources": [
+    "https://lmstudio.ai/changelog/lmstudio",
+    "https://github.com/ggml-org/llama.cpp/blob/master/docs/speculative.md"
+   ],
+   "url": "https://lmstudio.ai",
+   "ux_reputation": "praised polished GGUF UX and Model Hub; complaints on opaque defaults and Engine Protocol moves; exact forum quotes unverified",
+   "windows_install": "installer per lmstudio.ai; Linux AppImage/.deb in-app updates noted; exact Windows asset unverified"
+  },
+  {
+   "active_2026": "v0.34.3 Sep 19 2026 (stable); v0.34.4-rc0 Sep 23; v0.33.x through Aug",
+   "backend": "bundled llama.cpp + MLX + MLX-C runners",
+   "category": "runner",
+   "features": "chat via CLI/desktop, OpenAI compat incl tool search + response compaction, structured output, vision/audio on Gemma4 MLX, cloud models",
+   "license": "unknown",
+   "name": "Ollama",
+   "perf_tuning": "KV prefill restore points; MLX speculative decoding mem fix; TTFT metadata cache claim 995 to 524ms (vendor bench); llama.cpp/MLX bumps",
+   "same_model_testable": true,
+   "security_record": "binds localhost by default; Claude/Codex desktop proxies added (widens surface); no CVE in opened releases",
+   "sources": [
+    "https://github.com/ollama/ollama/releases"
+   ],
+   "url": "https://ollama.com",
+   "ux_reputation": "praised pull-and-run simplicity + API compat; complaints on Apple-Silicon regressions and opaque GGUF import; quotes unverified",
+   "windows_install": "install.ps1 + Windows desktop app; ollama-linux tar.zst and darwin zip listed in release assets"
+  },
+  {
+   "active_2026": "v0.8.4 Jul 23 2026 latest; no Aug-Sep release in opened list",
+   "backend": "llama.cpp router + MLX + remote providers; Foundry/ROCm-HIP on Linux",
+   "category": "runner",
+   "features": "chat, RAG embeddings, MCP/connectors, agents, vision/video input, artifacts, local API server OpenAI-compatible + Responses API",
+   "license": "unknown",
+   "name": "Jan",
+   "perf_tuning": "llama.cpp settings overhaul, per-model ctx + chat-template kwargs, KV-cache defaults, MTP support, backend dep checker",
+   "same_model_testable": true,
+   "security_record": "0.8.4 moves secrets to OS keyring; CORS fix and handlebars 4.7.9 RCE bump noted; full audit unverified",
+   "sources": [
+    "https://github.com/janhq/jan/releases"
+   ],
+   "url": "https://jan.ai",
+   "ux_reputation": "praised offline Tauri app + model hub; complaints on backend downloads and router crashes; quotes unverified",
+   "windows_install": "Jan_0.8.4_x64-setup.exe 55.1MB; also AppImage/deb/dmg"
+  },
+  {
+   "active_2026": "v1.16.2 Sep 22 2026; v1.16.1 Aug 27; v1.16.0 Aug 13",
+   "backend": "Ollama 0.33.3, KoboldCPP, LocalAI, Foundry Local, GenieX, plus cloud LLMs",
+   "category": "workspace",
+   "features": "chat, RAG workspaces, agents + skills + flows, MCP, /img generation, voice (Whisper/Piper/Kokoro), multi-user + embeds",
+   "license": "unknown",
+   "name": "AnythingLLM",
+   "perf_tuning": "LocalAI ctx auto-detect; abort kills inference; Mistral batched embeddings; Ollama bump; no exposed speculation UI",
+   "same_model_testable": false,
+   "security_record": "multi-user auth + API keys; GHSA-8wh8-3v68-whwj patched in 1.16.2; Docker self-host; details unverified beyond notes",
+   "sources": [
+    "https://github.com/Mintplex-Labs/anything-llm/releases"
+   ],
+   "url": "https://anythingllm.com",
+   "ux_reputation": "praised all-in-one RAG + Docker deploy; complaints on heavy resource use and modal churn; quotes unverified",
+   "windows_install": "Windows x64 installer with silent flags + ARM GenieX builds; Docker image; exact asset names in docs (unverified here)"
+  },
+  {
+   "active_2026": "1.121 Sep 15 2026; 1.120 Aug 29; 1.119 Aug 16",
+   "backend": "llama.cpp fork + stable-diffusion.cpp + XTTS/whisper audio",
+   "category": "enthusiast",
+   "features": "chat (Kobold Lite), OpenAI/Ollama/Anthropic compat, tool calling, vision/audio 64 attachments, image/video/music gen, TTS/STT",
+   "license": "unknown",
+   "name": "KoboldCpp",
+   "perf_tuning": "DSpark/DFlash + MTP drafters; --usedirectio/mmap/mlock; --ffncpu/--n-cpu-ffn; smartcache; tensor/layer split; Adaptive-P sampler",
+   "same_model_testable": true,
+   "security_record": "localhost:5001 default; --allow-config-onready gated CLI-only; parallel-requests experimental; no CVE in opened notes",
+   "sources": [
+    "https://github.com/LostRuins/koboldcpp/releases"
+   ],
+   "url": "https://github.com/LostRuins/koboldcpp",
+   "ux_reputation": "praised single-file exe + sampler depth + roleplay; complaints on GUI complexity and CUDA/Vulkan selection; quotes unverified",
+   "windows_install": "portable koboldcpp.exe (CUDA), oldpc CUDA11+AVX1, nocuda Vulkan, plus mac-arm64"
+  },
+  {
+   "active_2026": "v0.11.4 Sep 21 2026; v0.11.3/v0.11.2 Aug 31; v0.11.1 Aug 25",
+   "backend": "any OpenAI-compat (Ollama, llama.cpp, LM Studio managed); Pipelines/functions",
+   "category": "workspace",
+   "features": "chat, RAG KBs, agents + Tools/MCP + ask_user + approvals, coding via terminal, voice/vision, multi-user, OpenAI-compat API",
+   "license": "unknown",
+   "name": "Open WebUI",
+   "perf_tuning": "delta streaming (~99% byte cut claimed); ORJSON option; single-write chat save; manage llama.cpp/LM Studio models; no sampler UI",
+   "same_model_testable": false,
+   "security_record": "v0.11.1 notes withheld security fixes; auth/SSO/OAuth; 16-CVE Sep-9 batch unverified (not opened); update all instances together",
+   "sources": [
+    "https://openwebui.com/blog/v0-11-1-the-model-learns-to-stop-and-ask",
+    "https://github.com/open-webui/open-webui/releases"
+   ],
+   "url": "https://openwebui.com",
+   "ux_reputation": "praised ChatGPT-like polish + plugins; complaints on upgrade migrations and Redis multi-instance ops; quotes unverified",
+   "windows_install": "Docker (standard + 175MB slim); no portable zip; pip install legacy (unverified)"
+  },
+  {
+   "active_2026": "Studio 2.9.6/2.9.5 Jul 24 2026; no Aug-Sep Studio in opened changelog",
+   "backend": "Local AI, llama.cpp, MLX, Ollama MLX, plus cloud/remote providers",
+   "category": "workspace",
+   "features": "chat, Knowledge/Context Stacks, agents + Crew/Shadow Persona, Toolbox/MCP, Media Studio, voice STT (Go), skills/prompts library",
+   "license": "unknown",
+   "name": "Msty",
+   "perf_tuning": "GPU Local AI/llama.cpp builds; Llama.cpp presets; MLX bundles to 2.6.x; Dynamic pull-mode context; no speculation UI",
+   "same_model_testable": true,
+   "security_record": "proprietary; offline-capable with license check; PII scrub option; audit unverified",
+   "sources": [
+    "https://msty.ai/resources/changelog/studio/"
+   ],
+   "url": "https://msty.ai",
+   "ux_reputation": "praised design + Knowledge Stacks; complaints on pricing/Aurum gating and provider churn; quotes unverified",
+   "windows_install": "Windows/Linux/mac installers; GPU-arch service selector; Nexus/Go mobile apps (Sep items unverified)"
+  },
+  {
+   "active_2026": "v1.51.0 Sep 17 2026; v1.50.0 Sep 8; v1.49.0 Sep 3; v1.48.0 Aug 27",
+   "backend": "provider-agnostic (cloud + local OpenAI-compat); ACP harness for Claude/Codex/Gemini CLIs",
+   "category": "coding-agent",
+   "features": "coding agent CLI/desktop, recipes + schedules, subagents/summon, MCP + MCP Apps UI, computer control, skills, gateway API",
+   "license": "unknown",
+   "name": "goose",
+   "perf_tuning": "no GGUF tuning; agent-side cache-safe assembly, compaction, background extension load; local GGUF discovery only",
+   "same_model_testable": false,
+   "security_record": "sandbox on macOS; allowlists, secret redaction, symlink confinement, permission-denies-precedence batch in Aug-Sep",
+   "sources": [
+    "https://github.com/block/goose/releases"
+   ],
+   "url": "https://github.com/block/goose",
+   "ux_reputation": "praised provider freedom + recipes; complaints on recipe/schedule flakiness (Sep 10 report unverified); quotes unverified",
+   "windows_install": "portable extract Goose.exe + download_cli.sh; 39 assets (rpm/deb/tarbz2); exact Windows zip name unverified"
+  },
+  {
+   "active_2026": "SDK rollout 100% Aug 23 2026 per blog Sep 2; extension versions unverified",
+   "backend": "any provider incl open-weights via SDK; runs in VS Code/JetBrains/CLI/Desktop",
+   "category": "coding-agent",
+   "features": "coding agent, Plan/Act, MCP marketplace, checkpoints, compaction, provider/model auto-handling, team/enterprise",
+   "license": "unknown",
+   "name": "Cline",
+   "perf_tuning": "harness-level: rewritten prompts, tighter context/error loops, native tool calls; tbench gains cited (vendor-run, verify)",
+   "same_model_testable": false,
+   "security_record": "MCP permissions + approval concepts; telemetry-flag rollout; CVE posture unverified",
+   "sources": [
+    "https://cline.bot/blog/how-we-migrated-11-million-users-to-clines-biggest-harness-upgrade"
+   ],
+   "url": "https://cline.bot",
+   "ux_reputation": "praised autonomy on open models; complaints on mistake-limit stalls in legacy harness (6.34% tasks); quotes in blog only",
+   "windows_install": "VS Marketplace vsix auto-update; CLI via npm; Desktop app (versions unverified)"
+  },
+  {
+   "active_2026": "repo active Sep 2026 per fetch; latest version number unverified",
+   "backend": "pinned DeepSeek Harness + plugin runtimes; desktop shell as DSH plugin",
+   "category": "coding-agent",
+   "features": "agent desktop for DeepSeek Harness, plugin market, mobile remote (iOS/Android), tray/terminal/windows, work profiles",
+   "license": "MIT",
+   "name": "DSH Desktop",
+   "perf_tuning": "daemon supervisor + auto-recovery; no inference tuning exposed; local-first model routing via upstream",
+   "same_model_testable": false,
+   "security_record": "LAN open has no auth (trusted-LAN only warning); random install UUID headers; community-run, no DeepSeek affiliation",
+   "sources": [
+    "https://github.com/anywhere-labs/dsh-desktop"
+   ],
+   "url": "https://dshdesktop.cn",
+   "ux_reputation": "praised one-click Harness desktop + phone control; complaints on Chinese-first docs and upstream pin lag; quotes unverified",
+   "windows_install": "Windows x64 NSIS installer + macOS Universal DMG; portable zip not offered"
+  }
+ ]
+}

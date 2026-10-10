@@ -1,0 +1,264 @@
+{
+ "headline_findings": [
+  "EAGLE-3, DFlash/DFlash-2 and DSpark speculative decoding all merged upstream in the window (2-4x datacenter speedups, greedy-lossless; MoE and long-context gains are smaller).",
+  "Hybrid/recurrent models (Qwen3.5/Gemma4) gained speculative checkpointing and prompt-cache fixes, but carry crash and VRAM traps on 8 GB GPUs.",
+  "Router multi-model mode, built-in tools + MCP stdio servers, mtmd audio/video, and a critical RPC RCE fix (b11000) are the other harness-relevant changes; Windows CUDA 13.4 zips are the baseline asset."
+ ],
+ "items": [
+  {
+   "fit_reference_machine": "High: draft GGUFs (~1-2 GB) fit beside a 30B MoE on 8 GB VRAM + 32 GB RAM; verify accept rate on 3070 Ti since MoE verify fires extra experts.",
+   "harness_integration": "Spawn with -md <draft.gguf> --spec-type draft-eagle3; autotune --spec-draft-n-max 3-8 per model; log accept rate; fall back to draft-simple/ngram on low acceptance.",
+   "name": "EAGLE-3 speculative decoding",
+   "quality_cost": "None under greedy decoding (verified drafts, output identical); sampling preserves target distribution.",
+   "reported_gain": "2-3x tok/s reported on LLaMA-8B class, e.g. 121 to 274 t/s Q4_K_M quicksort (RTX 4090-class, batch 1, greedy).",
+   "sources": [
+    "https://github.com/ggml-org/llama.cpp/pull/18039",
+    "https://github.com/ggml-org/llama.cpp/blob/master/docs/speculative.md",
+    "https://github.com/ggml-org/llama.cpp/pull/24707"
+   ],
+   "status": "production",
+   "what": "One-layer autoregressive draft model reading target hidden states; higher acceptance than a standalone draft of equal size.",
+   "where_implemented": "llama.cpp merged PR #18039 (commit 88a3927); flag --spec-type draft-eagle3 with -md draft GGUF"
+  },
+  {
+   "fit_reference_machine": "High for dense 4-14B; moderate for 30B MoE (parallel verify cost). Draft stays bf16/Q8_0 (~1-2 GB).",
+   "harness_integration": "Spawn with -md <DFlash.gguf> --spec-type draft-dflash --spec-draft-n-max <= block size; combine with ngram-mod; disable on image turns (issue #27408).",
+   "name": "DFlash block-diffusion drafting",
+   "quality_cost": "None under greedy decoding (verified drafts); sampling preserves distribution.",
+   "reported_gain": "Up to ~8x claimed on Qwen3; Qwen3-8B bf16 geomean ~2.9x vs baseline across 5 domains (RTX 4090, batch 1, greedy, PR data).",
+   "sources": [
+    "https://github.com/ggml-org/llama.cpp/pull/22105",
+    "https://github.com/ggml-org/llama.cpp/blob/master/docs/speculative.md",
+    "https://github.com/ggml-org/llama.cpp/discussions/21569"
+   ],
+   "status": "production",
+   "what": "Small block-diffusion draft emitting a whole token block per forward pass with target hidden-state injection; GPU-friendly drafting.",
+   "where_implemented": "llama.cpp merged PR #22105; flag --spec-type draft-dflash; drafts e.g. z-lab/Qwen3-*-DFlash"
+  },
+  {
+   "fit_reference_machine": "High: 1.1 GB Q4_K_M draft for 27B target; best for predictable code/reasoning continuations; cap n-max at 7.",
+   "harness_integration": "Serve target plus -hfd incoai draft GGUF with --spec-type draft-dflash --spec-draft-n-max 5; verify merge status via --help before allowlisting.",
+   "name": "DFlash 2 parallel drafting",
+   "quality_cost": "Greedy-lossless (verified drafts); sampling preserves distribution.",
+   "reported_gain": "2.26x end-to-end (68 to 154 t/s) on Qwen3.8-27B Q4_K_M, optimum n-max 5, hard cap 7 (independent study, discrete-GPU server, batch 1).",
+   "sources": [
+    "https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2-GGUF",
+    "https://github.com/lukaLLM/DFlash2_Qwen3.8_3.6_27B_LlamaCPP",
+    "https://www.llms.blog/posts/llama-cpp-merges-dflash-2-support-for-up-to-2x-faster-speculative-decoding-across-long-contexts"
+   ],
+   "status": "emerging",
+   "what": "Non-autoregressive DFlash successor with local convolutions and candidate selector; one parallel draft step per block.",
+   "where_implemented": "llama.cpp PR #27342 (merge reported 2026-08-27, verify in build); same --spec-type draft-dflash path"
+  },
+  {
+   "fit_reference_machine": "High for Qwen3 4B/8B/14B targets on 8 GB VRAM; Qwen3-backbone drafts only so far.",
+   "harness_integration": "Spawn with -md <DSpark.gguf> --spec-type draft-dspark --spec-draft-n-max 7; optional --spec-draft-conf-min only at high concurrency with unified KV.",
+   "name": "DSpark Markov-head drafting",
+   "quality_cost": "Greedy-lossless by construction (drafts verified vs target).",
+   "reported_gain": "1.88x overall vs baseline and 1.21x over DFlash on Qwen3-8B bf16 SPEED-Bench (RTX 4090, greedy); Q4_K_M geomean 1.81x (PR data).",
+   "sources": [
+    "https://github.com/ggml-org/llama.cpp/pull/25173",
+    "https://github.com/ggml-org/llama.cpp/blob/master/docs/speculative.md"
+   ],
+   "status": "production",
+   "what": "DFlash plus a semi-autoregressive low-rank Markov head biasing each block position on the previously sampled token.",
+   "where_implemented": "llama.cpp merged PR #25173 (2026-07-28); flag --spec-type draft-dspark; drafts deepseek-ai/dspark_qwen3_*_block7"
+  },
+  {
+   "fit_reference_machine": "Critical for Qwen3.5/Gemma4 on this laptop; cap --ctx-checkpoints 1-2 and --parallel 1 to avoid the 150 MB-per-checkpoint VRAM trap.",
+   "harness_integration": "Pass --ctx-checkpoints N and --spec-use-checkpoints on for hybrid archs; monitor for persistent slowdown (restart recovers); disable spec on image turns.",
+   "name": "Speculative checkpointing for hybrid/recurrent models",
+   "quality_cost": "None on output; rejected drafts cost one extra target forward (replay from checkpoint).",
+   "reported_gain": "Makes speculation possible on SSM hybrids (e.g. ~20 to 24-30 t/s on Qwen3.5-122B-A10B + 0.8B draft, M3 Max, PR report); turn-2 prefill 12K to ~tens of tokens.",
+   "sources": [
+    "https://github.com/ggml-org/llama.cpp/pull/19493",
+    "https://github.com/ggml-org/llama.cpp/pull/22227",
+    "https://github.com/ggml-org/llama.cpp/issues/20222",
+    "https://github.com/ggml-org/llama.cpp/issues/20145"
+   ],
+   "status": "production",
+   "what": "Checkpoint/restore of SSM recurrent state enabling speculative decoding and prompt-cache reuse on DeltaNet/Mamba hybrids.",
+   "where_implemented": "llama.cpp PRs #19493 (server), #22227 (speculative-simple), #22114/#22168; flags --ctx-checkpoints, --spec-use-checkpoints"
+  },
+  {
+   "fit_reference_machine": "Very high: zero VRAM, ~16 MB RAM, shared across slots; ideal default for coding/agent repetition on a small office box.",
+   "harness_integration": "Add --spec-default (ngram-mod) to the default argv allowlist; expose n-match/n-min/n-max tunables; stack with one draft model type.",
+   "name": "ngram-mod default speculation + spec-type family",
+   "quality_cost": "None (verified drafts); only speed varies with text repetitiveness.",
+   "reported_gain": "Workload-dependent; up to ~5-9x on highly repetitive code prompts, ~1.3-2x typical mixed (independent DFlash study host numbers, batch 1).",
+   "sources": [
+    "https://github.com/ggml-org/llama.cpp/blob/master/docs/speculative.md"
+   ],
+   "status": "production",
+   "what": "Zero-model hash-pool n-gram drafter shared across server slots, selectable with other spec types via --spec-type list and --spec-default.",
+   "where_implemented": "llama.cpp master docs/speculative.md; flags --spec-type ..., --spec-default, --spec-ngram-mod-*"
+  },
+  {
+   "fit_reference_machine": "High: replaces hand-rolled model swapping; pin --models-max 1-2 on 8 GB VRAM; group requests by model to avoid reload churn.",
+   "harness_integration": "Spawn router (no -m) with --models-dir plus INI presets carrying per-model ngl/ctx/spec flags; drive /models/load and unloads from the supervisor.",
+   "name": "Router multi-model serving mode",
+   "quality_cost": "None on quality; model switch costs a full unload/reload per worker.",
+   "reported_gain": "No tok/s gain; eliminates process restarts (first request pays load time); eviction races fixed in b11114.",
+   "sources": [
+    "https://huggingface.co/blog/ggml-org/model-management-in-llamacpp",
+    "https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README-dev.md",
+    "https://github.com/ggml-org/llama.cpp/releases"
+   ],
+   "status": "production",
+   "what": "Multi-process llama-server dispatching by request model field with on-demand load and LRU eviction behind one endpoint.",
+   "where_implemented": "llama.cpp router mode; flags --models-dir, --models-preset, --models-max, --no-models-autoload; /models/load|/unload"
+  },
+  {
+   "fit_reference_machine": "High for a coding-agent harness, but treat as privileged: localhost-only, subset of tools, approval UX; never expose beyond the laptop/office.",
+   "harness_integration": "Keep OFF by default; opt-in argv adds --tools read_file,grep_search,... with --cors-origins localhost; spawn MCP stdio children only from user config, never model text.",
+   "name": "Built-in tools plus MCP stdio servers",
+   "quality_cost": "Model-dependent tool-use accuracy; wrong-tool calls possible without approval gates.",
+   "reported_gain": "No tok/s gain; enables file/shell/MCP tool loops locally; CORS default tightened to localhost when enabled.",
+   "sources": [
+    "https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md",
+    "https://github.com/ggml-org/llama.cpp/pull/25736",
+    "https://github.com/ggml-org/llama.cpp/pull/25655"
+   ],
+   "status": "production",
+   "what": "Experimental server-side file/shell tools (/tools, --tools/--agent) plus Cursor-JSON MCP stdio servers merged into the same tool surface.",
+   "where_implemented": "llama.cpp flags --tools, --agent, --mcp-servers-config, --ui-mcp-proxy; PRs #26062/#25736, #25655, #18655"
+  },
+  {
+   "fit_reference_machine": "High: any-model tool use via Jinja templates suits small-business automation; vision tool results need a VL target plus mmproj.",
+   "harness_integration": "Expose --jinja and template selection in config; pass vision tool outputs via function_call_output with image payloads on VL models.",
+   "name": "Universal tool calling with image tool results",
+   "quality_cost": "Template-dependent: wrong Jinja template degrades tool-call accuracy; verify per model.",
+   "reported_gain": "No tok/s gain; b11112 adds input_image in function_call_output enabling vision tool-result turns.",
+   "sources": [
+    "https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md",
+    "https://github.com/ggml-org/llama.cpp/releases"
+   ],
+   "status": "production",
+   "what": "Function calling for approximately any model plus image-capable function_call_output for vision tool results.",
+   "where_implemented": "llama-server; PR #22575 / issue #20663 (b11112); Anthropic Messages and responses API compat"
+  },
+  {
+   "fit_reference_machine": "Moderate: mmproj defaults to GPU offload, competing with LLM layers for 8 GB; use --no-mmproj-offload or small VL models (Gemma4-E2B, SmolVLM).",
+   "harness_integration": "Spawn with --mmproj <file> or -hf bundle; budget mmproj VRAM in the autotuner; force --spec-type none on multimodal turns.",
+   "name": "mtmd audio/video input plus new model coverage",
+   "quality_cost": "Modality quality is model-bound; OCR models need exact prompt structures per linked discussions.",
+   "reported_gain": "No tok/s gain; new usable prequants: Gemma4 family, Qwen3-Omni-30B-A3B, Qwen3-ASR, Voxtral-Mini-3B, five OCR models.",
+   "sources": [
+    "https://github.com/ggml-org/llama.cpp/blob/master/docs/multimodal.md",
+    "https://github.com/ggml-org/llama.cpp/issues/27408"
+   ],
+   "status": "production",
+   "what": "libmtmd image/audio/video input in llama-server and CLI with official pre-quantized GGUF plus mmproj bundles.",
+   "where_implemented": "llama.cpp libmtmd; flags --mmproj, --no-mmproj-offload, --no-mmproj; multimodal.md model list"
+  },
+  {
+   "fit_reference_machine": "Very high: q8_0/q4_0 KV plus Hadamard rotation is the main lever for large ctx on 8 GB VRAM; already in the harness flag set.",
+   "harness_integration": "Keep -ctk/-ctv in allowlist with per-model defaults (q8_0 safe, q4_0 for long ctx); leave rotation on; skip requantize until merged.",
+   "name": "Quantized KV cache with Hadamard attention rotation",
+   "quality_cost": "Small perplexity cost at q8_0/q4_0 on tolerant models; rotation reduces degradation vs naive quants.",
+   "reported_gain": "2-4x KV memory cut (q8_0 ~2x, q4_0 ~3.6x) enabling 2-4x context on the same VRAM; minor decode-speed effects.",
+   "sources": [
+    "https://github.com/ggml-org/llama.cpp/discussions/20969",
+    "https://github.com/ikawrakow/ik_llama.cpp/issues/1509"
+   ],
+   "status": "production",
+   "what": "Low-bit KV cache types with Hadamard rotation on K/V plus SWA sliding-window and mixed-precision cache design.",
+   "where_implemented": "llama.cpp flags -ctk/-ctv (--cache-type-k/v), LLAMA_ATTN_ROT_DISABLE, docs/mixed-kv-cache-design.md"
+  },
+  {
+   "fit_reference_machine": "High once merged: start sessions at q8_0 KV and step down instead of restarting the server when context fills.",
+   "harness_integration": "Watch PR #24367; until merged, approximate by restarting the child at lower -ctk/-ctv and replaying the prompt.",
+   "name": "Online KV-cache requantization endpoint",
+   "quality_cost": "Lower KV precision late in session; exact degradation unverified.",
+   "reported_gain": "No steady-state tok/s gain; avoids full model reload plus prompt reprocessing when stepping KV precision down.",
+   "sources": [
+    "https://github.com/ggml-org/llama.cpp/pull/24134"
+   ],
+   "status": "emerging",
+   "what": "PoC POST /cache/requantize plus llama_requantize_memory rebuilding the KV cache at new k/v types without reloading weights.",
+   "where_implemented": "llama.cpp PoC PR #24134 (unmerged); follow-up #24367"
+  },
+  {
+   "fit_reference_machine": "Low direct impact on Ampere (no Ampere-specific kernels in window); gains come free with the official CUDA 13.4 build.",
+   "harness_integration": "No new flags required; re-baseline the official build; keep MTP/speculative flags since CUDA-graph-for-MTP-draft helps those paths.",
+   "name": "CUDA path improvements (fused QKV, graphs, streams)",
+   "quality_cost": "None; correctness fixes plus graph/streaming efficiency.",
+   "reported_gain": "Unquantified per-kernel uplifts on modern NVIDIA GPUs (batch-1 laptop numbers not published); fused QKV fixes Gemma4/Qwen35 split correctness.",
+   "sources": [
+    "https://github.com/ggml-org/llama.cpp/releases"
+   ],
+   "status": "production",
+   "what": "Fused-QKV split fix for Gemma4/Qwen35, CUDA graphs for MTP draft, im2col access tuning, concurrent streams per split.",
+   "where_implemented": "llama.cpp b11009 (#28965), b11007 (#28549), b11002 (#28013), #28198; OpenCL MTP GEMV #26477"
+  },
+  {
+   "fit_reference_machine": "Critical: the office laptop must move off pre-b11000 RPC builds; keep the update check opt-in and offline-first as designed.",
+   "harness_integration": "Pin minimum backend build to b11000+ in the hardware probe; never expose RPC/server to LAN without API key plus reverse proxy.",
+   "name": "RPC RCE fix plus CORS hardening",
+   "quality_cost": "None; pure security fixes.",
+   "reported_gain": "No tok/s gain; closes unauthenticated remote code execution via cached compute-graph use-after-free.",
+   "sources": [
+    "https://github.com/ggml-org/llama.cpp/releases",
+    "https://github.com/ggml-org/llama.cpp/pull/25655"
+   ],
+   "status": "production",
+   "what": "b11000 discards cached RPC compute graphs on buffer free; --tools/--agent flips CORS default to localhost with explicit overrides.",
+   "where_implemented": "llama.cpp b11000 (PR #24292); CORS flags --cors-origins/--cors-methods/--cors-headers/--cors-credentials (#25655)"
+  },
+  {
+   "fit_reference_machine": "High: Qwen3.5/Gemma4 hybrids are the current quality frontier for this laptop; gpt-oss MXFP4 needs no Q4_K_M hunt; DFM-Mimir is a 1B side option.",
+   "harness_integration": "Add arch strings (qwen35, gemma4, gpt-oss, dspark/dflash drafts) to model detection; map MXFP4 as the native precise gpt-oss format.",
+   "name": "New architecture coverage (Qwen3.5, Gemma4, gpt-oss, DeepSeek-V4, Mimir)",
+   "quality_cost": "Model-bound; hybrid archs carry the checkpoint/spec caveats above; tensor-split hybrids can assert (issue #21765).",
+   "reported_gain": "No runtime gain; unlocks current models: Qwen3.5 MoE/dense, Gemma4 E-series, gpt-oss-20B/120B MXFP4, DeepSeek-V4, DFM Mimir 1B.",
+   "sources": [
+    "https://github.com/ggml-org/llama.cpp/pull/19468",
+    "https://github.com/ggml-org/llama.cpp/releases",
+    "https://github.com/ggml-org/llama.cpp/pull/20506"
+   ],
+   "status": "production",
+   "what": "Upstream model support plus NVFP4 wiring for Qwen3.5 and speculators-format DSpark checkpoint conversion.",
+   "where_implemented": "llama.cpp PRs #19468 (Qwen3.5), #24162 (DSV4), #27625 (Mimir, b11003), #20506 (NVFP4), #26275 (speculators DSpark)"
+  },
+  {
+   "fit_reference_machine": "Direct: use win-cuda-13.4-x64 plus cudart DLL zip on the 3070 Ti; keep a win-cpu zip fallback for CPU-only office machines.",
+   "harness_integration": "Probe script should prefer official win-cuda-13.4 asset by build number and SHA-256; record backend identity string for the allowlist.",
+   "name": "Windows release asset matrix",
+   "quality_cost": "None; official builds beat the local 3-5x-slower self-built fork on this machine.",
+   "reported_gain": "3-5x measured advantage of the official release binary over a self-built fork on this laptop (prior harness measurement).",
+   "sources": [
+    "https://github.com/ggml-org/llama.cpp/releases"
+   ],
+   "status": "production",
+   "what": "Per-commit Windows zips: CPU x64/arm64, CUDA 12.4/13.4, Vulkan, OpenVINO, SYCL, ROCm 10.0, OpenCL-Adreno arm64, each with attestations.",
+   "where_implemented": "llama.cpp GitHub releases page; e.g. llama-b11118-bin-win-cuda-13.4-x64.zip plus cudart DLL zip"
+  },
+  {
+   "fit_reference_machine": "Unknown until fused kernels exist; current ports are CPU/Metal-only, so no 3070 Ti benefit today.",
+   "harness_integration": "No integration now; track upstream -ctk/-ctv values and re-evaluate only if CUDA fused kernels plus PPL evidence appear.",
+   "name": "TurboQuant 3-bit KV cache",
+   "quality_cost": "Near-zero claimed (ICLR 2026); independent ik_llama.cpp tests show worse PPL than q4_0+Hadamard on several models.",
+   "reported_gain": "4.4-4.9x KV compression (3-3.5 bits/val) with MSE matching paper within 1% on CPU tests (no fused GPU path yet).",
+   "sources": [
+    "https://github.com/ggml-org/llama.cpp/discussions/20969",
+    "https://github.com/ikawrakow/ik_llama.cpp/issues/1509"
+   ],
+   "status": "research-only",
+   "what": "Online vector quantization (rotation plus Lloyd-Max codebooks) compressing KV cache under 3 bits per value.",
+   "where_implemented": "Paper Zandieh et al. ICLR 2026; CPU-only ports in forks (unixsysdev, Aaryan-Kapoor); not in upstream"
+  },
+  {
+   "fit_reference_machine": "Unknown; no public GGUF drafts or laptop measurements; watch only.",
+   "harness_integration": "None; note as a future --spec-type candidate if drafts publish with greedy-lossless verification.",
+   "name": "DDTree speculative decoding",
+   "quality_cost": "Unknown; unverified.",
+   "reported_gain": "Unknown; claimed acceleration layer over DFlash with no transferable batch-1 laptop numbers found.",
+   "sources": [
+    "https://github.com/ggml-org/llama.cpp/discussions/21569"
+   ],
+   "status": "research-only",
+   "what": "Proposed accelerated speculative-decoding layer on top of DFlash block drafts.",
+   "where_implemented": "Paper arXiv:2604.12989, code github.com/liranringel/ddtree; not in llama.cpp"
+  }
+ ]
+}

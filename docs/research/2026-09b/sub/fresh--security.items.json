@@ -1,0 +1,248 @@
+{
+ "headline_findings": [
+  "llama.cpp RPC UAF gives unauthenticated RCE before b8585 (CVSS 9.2); Cerebro must pin new builds and never expose RPC.",
+  "Ollama tensor-blob redirect SSRF (CVE-2026-85180, 0.30.0-0.33.2) has no merged fix; treat model pulls as SSRF-capable.",
+  "MCP tool/metadata poisoning is the trending live technique (Deadbugz Aug 2026, cache-scope chaining); requires continuous schema checks.",
+  "Sept 2026 agent cluster: GitSpawn (7 agents), Plugin4Shell (Copilot unpatched), Sentry PhantomFix (CVE-2026-90999, unpatched).",
+  "Malicious GGUF files are proven RCE (parser overflows, chat-template SSTI); pin llama.cpp >= b8146 and sandbox model loading."
+ ],
+ "items": [
+  {
+   "fit_reference_machine": "Direct fit: local b10751 is past b8585, but verify at startup; keep RPC on loopback only on the laptop.",
+   "harness_integration": "Gate RPC behind 127.0.0.1 + firewall; record backend build hash in probe; refuse to spawn RPC builds < b8585.",
+   "name": "llama.cpp RPC GRAPH_RECOMPUTE use-after-free (CVE-2026-39909)",
+   "quality_cost": "No quality effect; patch-only fix plus network isolation.",
+   "reported_gain": "CVSS 4.0 9.2; unauthenticated RCE with no user interaction on RPC builds < b8585.",
+   "sources": [
+    "https://www.vulncheck.com/advisories/llama-cpp-use-after-free-in-rpc-graph-recompute-handler"
+   ],
+   "status": "production",
+   "what": "UAF in the RPC server GRAPH_RECOMPUTE handler: stored graphs re-executed after buffer free give arbitrary read/write.",
+   "where_implemented": "llama.cpp < b8585, RPC backend; fix b8585 commit 389c7d4, PR #21175"
+  },
+  {
+   "fit_reference_machine": "High fit: small offices pull community models; laptop has no cloud metadata, but LAN services are reachable.",
+   "harness_integration": "Never auto-pull from untrusted registries; pin allowlisted registry host; egress-filter the model-fetch path.",
+   "name": "Ollama tensor-blob redirect SSRF (CVE-2026-85180)",
+   "quality_cost": "No quality effect; breaks only malicious cross-host redirects.",
+   "reported_gain": "CVSS 4.0 8.7; unauthenticated SSRF via malicious registry redirect in Ollama 0.30.0-0.33.2, incl. metadata endpoints.",
+   "sources": [
+    "https://www.vulncheck.com/advisories/ollama-0.30.0-through-0.33.2-ssrf-via-cross-host-tensor-blob-redirect"
+   ],
+   "status": "production",
+   "what": "Tensor-layer blob downloader follows cross-host redirects without validation, turning model pulls into internal requests.",
+   "where_implemented": "Ollama x/transfer/download.go resolve() at v0.33.2; fix PRs #17082, #18021 open unmerged"
+  },
+  {
+   "fit_reference_machine": "Medium fit: same unsafe-pattern warning for any Python sidecar Cerebro ships; Windows user context execution.",
+   "harness_integration": "Ban torch.load without weights_only=True in code review; sandbox any model-adjacent Python in low-privilege job.",
+   "name": "ComfyUI LoadTrainingDataset pickle RCE (CVE-2026-68771)",
+   "quality_cost": "None; weights_only=True loads legit tensor shards identically.",
+   "reported_gain": "CVSS 4.0 9.3 / 3.1 9.8; unauthenticated RCE via crafted shard_*.pkl in ComfyUI <= 0.23.0; public exploit exists.",
+   "sources": [
+    "https://www.vulncheck.com/advisories/comfyui-unauthenticated-rce-via-loadtrainingdataset-pickle-deserialization"
+   ],
+   "status": "production",
+   "what": "Training-dataset node passes uploaded pickle shards to torch.load, executing __reduce__ payloads as the app user.",
+   "where_implemented": "ComfyUI comfy_extras/nodes_dataset.py; fixed by commit 94ee49b (PR #14543)"
+  },
+  {
+   "fit_reference_machine": "Direct fit: Cerebro GUI target is Windows WebView2; exact vulnerable code path applies.",
+   "harness_integration": "Pin Tauri >= 2.11.1; least-privilege capabilities; never load remote URLs in the privileged WebView.",
+   "name": "Tauri origin-confusion IPC bypass (CVE-2026-42184)",
+   "quality_cost": "No quality effect; strict origin check only.",
+   "reported_gain": "CVSS 4.0 6.1 (NVD 3.1 8.8); remote page at http://<scheme>.evil.com invokes local-only IPC on Tauri 2.0-2.11.0.",
+   "sources": [
+    "https://github.com/tauri-apps/tauri/security/advisories/GHSA-7gmj-67g7-phm9"
+   ],
+   "status": "production",
+   "what": "is_local_url() checks only the first DNS label, so attacker domains matching the app scheme gain local IPC rights.",
+   "where_implemented": "Tauri crates/tauri/src/webview/mod.rs; fixed in 2.11.1"
+  },
+  {
+   "fit_reference_machine": "Direct fit: offline small office still installs MCP servers; STDIO servers run with user privileges.",
+   "harness_integration": "Curated server allowlist, per-call description fingerprinting, privileged-tool isolation, out-of-band confirm for file/net ops.",
+   "name": "MCP tool poisoning + Deadbugz runtime-gated campaign",
+   "quality_cost": "Minor UX friction from confirmations; no model quality change.",
+   "reported_gain": "OWASP-listed class; Deadbugz active Aug 2026 via 23 GitHub PRs, payload hidden until 3rd tool call; no CVE.",
+   "sources": [
+    "https://owasp.org/www-community/attacks/MCP_Tool_Poisoning",
+    "https://labs.cloudsecurityalliance.org/research/csa-research-note-deadbugz-mcp-metadata-poisoning-20260902-c/"
+   ],
+   "status": "production",
+   "what": "Poisoned tool descriptions/responses steer agents to exfiltrate keys; Deadbugz variant stays benign until a call counter trips.",
+   "where_implemented": "Model Context Protocol tool metadata channel; observed against MCP hosts/clients generally"
+  },
+  {
+   "fit_reference_machine": "Medium fit: pattern applies if Cerebro ever adds web UI, channels, or RAG over shared knowledge.",
+   "harness_integration": "Copy the controls: per-message authorship checks, iframe sandbox without allow-same-origin, TOCTOU-free URL fetch.",
+   "name": "Open WebUI September security rollup (v0.11.1)",
+   "quality_cost": "No quality effect; adds optional human-in-the-loop tool approval UX.",
+   "reported_gain": "Fixes channel message overwrite (CVE-2026-87994), port-preview same-origin XSS (commit 54d7a22), Playwright DNS-rebinding SSRF (CVE-2026-87996).",
+   "sources": [
+    "https://github.com/open-webui/open-webui/releases/tag/v0.11.1"
+   ],
+   "status": "production",
+   "what": "v0.11.1 (2026-08-25) fixes message-overwrite, terminal-preview XSS takeover, TOCTOU rebinding SSRF, KB metadata leaks.",
+   "where_implemented": "open-webui/open-webui v0.11.1, commits 54d7a22, 27402ff, 1d6d4e6"
+  },
+  {
+   "fit_reference_machine": "Low direct fit (no browser chat UI yet), but relevant to any markdown/chart rendering Cerebro adds.",
+   "harness_integration": "Render charts with a restricted resource loader; block external fetches from model-generated markup.",
+   "name": "Open WebUI Vega chart client-side SSRF (CVE-2026-70480)",
+   "quality_cost": "No quality effect; only blocks attacker-chosen external loads.",
+   "reported_gain": "CVSS 3.1 4.1; any user-posted vega block makes viewers browsers issue attacker GETs; affects 0.6.34-0.11.0.",
+   "sources": [
+    "https://osv.dev/vulnerability/CVE-2026-70480",
+    "https://github.com/open-webui/open-webui/releases/tag/v0.11.1"
+   ],
+   "status": "production",
+   "what": "Vega/Vega-Lite blocks rendered without a restricted loader turn chat into browser-driven SSRF against same-origin targets.",
+   "where_implemented": "open-webui chart rendering; fixed in 0.11.0 (commit 5278eb9, PR #26806)"
+  },
+  {
+   "fit_reference_machine": "Direct fit: Cerebro loads community GGUF quants onto 8GB VRAM; chat templates ship inside every file.",
+   "harness_integration": "Pre-scan tokenizer.chat_template for __class__/os/subprocess/eval/exec; render templates only in a sandboxed Jinja2 env.",
+   "name": "GGUF chat-template Jinja2 SSTI (SGLang CVE-2026-5760 class)",
+   "quality_cost": "Sandboxed rendering is behavior-identical for legit templates.",
+   "reported_gain": "CVSS 9.8 RCE in SGLang /v1/rerank via malicious chat_template; unpatched at 2026-04-21; prior Llama-Drama CVE-2024-34359 patched.",
+   "sources": [
+    "https://research.jfrog.com/model-threats/gguf-ssti/",
+    "https://labs.cloudsecurityalliance.org/research/csa-research-note-sglang-cve-2026-5760-llm-serving-rce-20260/"
+   ],
+   "status": "production",
+   "what": "GGUF tokenizer.chat_template rendered in unsandboxed jinja2.Environment() executes attacker Python on model load/query.",
+   "where_implemented": "SGLang serving_rerank.py; llama-cpp-python < 0.2.72 (fixed); any unsandboxed renderer"
+  },
+  {
+   "fit_reference_machine": "Direct fit: Windows laptop browsing while serving local models is the exact victim posture; WSL path unfixed.",
+   "harness_integration": "Default 127.0.0.1 bind, refuse 0.0.0.0; Host-header validation always-on; hash chat templates against baseline at load.",
+   "name": "NemoClaw/Ollama DNS-rebinding template poisoning (CVE-2026-65105)",
+   "quality_cost": "None for single-user offline use; container reachability needs explicit proxy instead.",
+   "reported_gain": "CVSS 8.1; one malicious webpage visit rewrites Ollama chat template persistently; Win/WSL unpatched at 2026-08-25.",
+   "sources": [
+    "https://thehackernews.com/2026/08/a-malicious-webpage-could-poison-your.html"
+   ],
+   "status": "production",
+   "what": "OLLAMA_HOST=0.0.0.0 skips Host checks, so DNS rebinding reaches unauthenticated /api/create and poisons chat templates.",
+   "where_implemented": "NVIDIA NemoClaw Ollama config; fixed macOS/Linux v0.0.35, Windows/WSL warning-only"
+  },
+  {
+   "fit_reference_machine": "Direct fit: Cerebro will spawn local tools/MCP servers on the same Windows laptop with user privileges.",
+   "harness_integration": "First-enable consent showing resolved path+hash; no auto-spawn on launch; kill process groups; strip LD_PRELOAD-class env.",
+   "name": "LM Studio MCP execute-first-validate-later (issue #1819)",
+   "quality_cost": "One extra confirmation click per new server; no runtime quality change.",
+   "reported_gain": "No CVE; demonstrated benign command runs before handshake fails, respawns every launch; mcp.json writes equal persistence.",
+   "sources": [
+    "https://github.com/lmstudio-ai/lmstudio-bug-tracker/issues/1819"
+   ],
+   "status": "production",
+   "what": "Enabled MCP STDIO entries spawn immediately on enable/launch; failed handshakes cannot un-run code, forked children persist.",
+   "where_implemented": "LM Studio 0.4.12 MCP bridge; open issue, mitigations unshipped"
+  },
+  {
+   "fit_reference_machine": "Low direct perf relevance (attack-success rates, not tok/s); relevant to coding-agent prompt hygiene.",
+   "harness_integration": "Scan retrieved tool/repo content for conditional-instruction structure at ingestion, before it enters context.",
+   "name": "Explosive prompts: dormant trigger-based injections (arXiv 2609.22510)",
+   "quality_cost": "DeFuse-style filter adds ~1ms/doc; 5% FP budget needs tuning for coding workflows.",
+   "reported_gain": "43-83% success vs <=3% imperative across 9 production agents (n=30 each); DeFuse cuts live execution 34.3% to 3.0%.",
+   "sources": [
+    "https://arxiv.org/abs/2609.22510"
+   ],
+   "status": "research-only",
+   "what": "Conditional payloads stay dormant until a trigger, evading contact-time classifiers and firing at low-attention moments.",
+   "where_implemented": "Prototype DeFuse detector; tested vs Codex, Claude Code, Cursor, Copilot, Gemini/Qwen CLIs"
+  },
+  {
+   "fit_reference_machine": "Direct fit: dev laptop opening contractor ZIPs/USB repos in a coding agent is the exact attack handoff.",
+   "harness_integration": "Set core.fsmonitor false globally; sandbox git subprocess env; never auto-run git in untrusted checkouts; require fresh clones.",
+   "name": "GitSpawn: core.fsmonitor RCE across 7 coding agents",
+   "quality_cost": "Negligible (fsmonitor is a perf optimization); no model effect.",
+   "reported_gain": "CVE-2026-19592 CVSS 7.3 (Codex 0.102-0.130, fixed 0.131.0); Goose CVE-2026-72718 (fixed 1.44.0); 4 of 8 findings unpatched.",
+   "sources": [
+    "https://shattered.io/gitspawn-ai-coding-agent-vulnerability-2026/"
+   ],
+   "status": "production",
+   "what": "Malicious .git/config core.fsmonitor helper runs outside agent sandbox with user privileges on background git status.",
+   "where_implemented": "Claude Code, Codex, Cursor, Goose, Hermes, Qwen Code, Grok Build; disclosed 2026-09-01/02"
+  },
+  {
+   "fit_reference_machine": "High fit: small offices install editor plugins without review; one bad plugin owns the dev machine.",
+   "harness_integration": "Verify post-checkout commit hash equals the pin before loading any plugin; fail closed on mismatch; log pins.",
+   "name": "Plugin4Shell: SHA-pin checkout bypass in 4 coding agents",
+   "quality_cost": "One hash check at load; no quality effect.",
+   "reported_gain": "No CVE; zero-click RCE at plugin load in all 4 tested products; Copilot unpatched, Gemini CLI deprecated unpatched.",
+   "sources": [
+    "https://easternherald.com/2026/09/20/plugin4shell-ai-coding-agents-supply-chain-vulnerability/"
+   ],
+   "status": "production",
+   "what": "Agents check the requested commit but not the landed checkout, so pushed-branch redirects run attacker code silently.",
+   "where_implemented": "Claude Code 2.1.179 (fixed), Codex 0.146.0 (fixed), Copilot (unpatched), Gemini CLI (deprecated)"
+  },
+  {
+   "fit_reference_machine": "High fit: GGUF files are Cerebro's main untrusted input on a 32GB RAM laptop; parse-time crash corrupts runs.",
+   "harness_integration": "Reject GGUF with oversized string/array fields and >4 tensor dims before llama.cpp sees them; log source URI + hash per load.",
+   "name": "Ollama Go GGUF decoder integer overflow (CVE-2026-86289)",
+   "quality_cost": "No quality effect; bounds only reject pathological files.",
+   "reported_gain": "CVSS 4.0 5.3; crafted GGUF overflows readGGUFV1String sizes in Ollama <= 0.31.1; public exploit; fixed 0.31.2-rc1.",
+   "sources": [
+    "https://www.sentinelone.com/vulnerability-database/cve-2026-86289/"
+   ],
+   "status": "production",
+   "what": "Unbounded GGUF header length arithmetic wraps allocation sizes, enabling memory corruption when a crafted model loads.",
+   "where_implemented": "Ollama fs/ggml/gguf.go; fix commit 67b6a1c, PR #17062 (MaxStringLength/MaxArraySize/MaxTensorDims)"
+  },
+  {
+   "fit_reference_machine": "Medium fit: only if Cerebro adds shared gateways/caching; single-user offline use is unaffected.",
+   "harness_integration": "Key any tool-response cache by caller identity; isolate instructions field from system prompt; sign tool metadata.",
+   "name": "MCP CacheableResult cross-user poisoning (MCP-2026-008/015)",
+   "quality_cost": "Per-identity caching costs extra round trips; no model quality change.",
+   "reported_gain": "unverified exact blast radius; mechanism: one public-cacheable poisoned response re-served to all gateway users.",
+   "sources": [
+    "https://datapace.ai/blog/mcp-cache-poisoning-prompt-injection"
+   ],
+   "status": "emerging",
+   "what": "Attacker-set cacheScope:public lets shared gateways fan one poisoned tools/list plus system-prompt instructions to every user.",
+   "where_implemented": "MCP spec CacheableResult (2026-07-28); issues #3207, #3213 open with no merged fix"
+  },
+  {
+   "fit_reference_machine": "High fit as process lesson: offline pinning + hash verification is exactly Cerebro's update-check posture.",
+   "harness_integration": "Pin and hash all Python/Rust deps; verify signatures; monitor for .pth files and unexpected egress in build tooling.",
+   "name": "LiteLLM/Trivy PyPI supply-chain compromise (TeamPCP/Shai-Hulud)",
+   "quality_cost": "Pinned deps slow updates slightly; no runtime quality change.",
+   "reported_gain": "litellm 1.82.7/1.82.8 live ~40min 2026-03-24; .pth auto-exec harvested keys; Aug count: 118,829 dumps, 2,488 orgs.",
+   "sources": [
+    "https://docs.litellm.ai/blog/security-update-march-2026"
+   ],
+   "status": "production",
+   "what": "Backdoored PyPI releases via compromised CI stole SSH/cloud/k8s/LLM keys; FBI warns harvested creds will be reused.",
+   "where_implemented": "PyPI litellm 1.82.7/1.82.8; clean <= 1.82.6, safe >= 1.83.0 via CI/CD v2 + cosign"
+  },
+  {
+   "fit_reference_machine": "Medium fit: small offices wire error trackers to coding agents; pattern generalizes to any external tool feed.",
+   "harness_integration": "Disable auto-remediation handoffs; deny unprompted installs; treat all external tool output as untrusted data.",
+   "name": "Sentry Seer PhantomFix telemetry-to-agent RCE (CVE-2026-90999)",
+   "quality_cost": "Manual triage instead of autofix; no model quality change.",
+   "reported_gain": "CVSS 9.8; 85% success in prior agentjacking tests; 2,388 exposed DSNs; no patch, vendor status Unknown.",
+   "sources": [
+    "https://dev.to/jamilxt/a-fake-bug-report-can-make-your-ai-coding-agent-run-attacker-code-55pg"
+   ],
+   "status": "emerging",
+   "what": "Attacker-crafted Sentry events via public DSN flow through Seer analysis into coding-agent prompts that install evil packages.",
+   "where_implemented": "Sentry Seer + Claude/Cursor/Copilot agent handoffs; CERT/CC VU#212479, 2026-09-16"
+  },
+  {
+   "fit_reference_machine": "Direct fit: two-floor rule covers both Cerebro's direct llama.cpp use and any bundled Ollama copy.",
+   "harness_integration": "Enforce llama.cpp >= b8146 and Ollama >= 0.17.1 floors; quarantine unverified files; parse only in sandbox.",
+   "name": "llama.cpp GGUF parser heap overflows + Ollama Bleeding Llama (two floors)",
+   "quality_cost": "No quality effect; patch and provenance policy only.",
+   "reported_gain": "CVE-2026-27940 CVSS 7.8 (fixed b8146, bypass of CVE-2025-53630); CVE-2026-33298 CVSS 7.8 (fixed b7824); CVE-2026-7482 CVSS 9.1.",
+   "sources": [
+    "https://www.stingrai.io/blog/malicious-gguf-file-llama-cpp-parser-rce"
+   ],
+   "status": "production",
+   "what": "Crafted GGUF overflows ggml size math to heap corruption/RCE; Ollama Go loader flaw leaks memory unauthenticated over network.",
+   "where_implemented": "ggml/src/gguf.cpp, ggml/src/ggml.c; Ollama fs/ggml/gguf.go + server/quantization.go"
+  }
+ ]
+}

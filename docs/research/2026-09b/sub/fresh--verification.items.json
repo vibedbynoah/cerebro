@@ -1,0 +1,223 @@
+{
+ "headline_findings": [
+  "gpt-oss low/medium/high and Qwen3 think/no-think give prompt-level effort control that works locally today via llama.cpp template kwargs",
+  "llama.cpp now enforces real thinking-token budgets (--reasoning-budget + transition message) but per-model quirks require soak-testing",
+  "Intrinsic self-correction without external feedback degrades reasoning; spend verification budget on compiler/test grounding, concise prompts, and early-stopped parallel sampling instead"
+ ],
+ "items": [
+  {
+   "fit_reference_machine": "Excellent: pure prompt text, zero VRAM cost; halves latency at 2-30 tok/s batch 1. Default for all Cerebro chat and coding profiles.",
+   "harness_integration": "Ship concise-style system prompts per task tier (chat=c draft-like, code=short steps); expose verbosity toggle in config; no allowlist change.",
+   "name": "Concise CoT and Chain-of-Draft prompting",
+   "quality_cost": "Parity on capable models; weak-model math can drop (GPT-3.5 -27.7% on math); universal length-accuracy curve.",
+   "reported_gain": "CCoT -48.7% tokens at parity (GPT-4, MCQA); CoD matches CoT at 7.6-20% tokens (GSM8K 91% vs 95%, 44 vs 205 tokens).",
+   "sources": [
+    "https://arxiv.org/pdf/2401.05618v3.pdf",
+    "https://www.alphaxiv.org/abs/2502.18600",
+    "https://arxiv.org/html/2503.01141"
+   ],
+   "status": "production",
+   "what": "Prompting the model to reason briefly ('be concise', max 5 words per draft step) keeps accuracy while cutting thinking tokens roughly in half or more.",
+   "where_implemented": "Prompt-only; evaluated on GPT-4/Claude 3.5 Sonnet; no runtime flag needed"
+  },
+  {
+   "fit_reference_machine": "Excellent: one pass, no extra VRAM or latency; the single highest-ROI default for the 8 GB card at batch 1.",
+   "harness_integration": "Default gpt-oss profiles to low, escalate to medium/high only on hard tasks; pass reasoning_effort through chat_template_kwargs.",
+   "name": "gpt-oss reasoning effort levels",
+   "quality_cost": "Low trades accuracy for speed (120b AIME-2024 56.3 low vs 95.8 high); log-linear returns, not free quality.",
+   "reported_gain": "120b AIME-2024 no-tools 56.3/80.4/95.8 (low/med/high); SWE-Bench Verified 47.9/52.6/62.4; 20b fits consumer GPUs at ~50 tok/s (third-party).",
+   "sources": [
+    "https://openai.com/index/gpt-oss-model-card/",
+    "https://arxiv.org/html/2508.10925v1",
+    "https://github.com/openai/gpt-oss"
+   ],
+   "status": "production",
+   "what": "gpt-oss-120b/20b support low/medium/high reasoning effort set by a 'Reasoning: X' line in the Harmony system message (default medium).",
+   "where_implemented": "openai/gpt-oss repo, Harmony format, gpt_oss.chat -r flag; llama.cpp via chat-template-kwargs reasoning_effort"
+  },
+  {
+   "fit_reference_machine": "Excellent: thinking off converts a 1k-token 'hello' into a few tokens; essential for small-office latency on 8 GB VRAM.",
+   "harness_integration": "Spawn with --reasoning off plus chat_template_kwargs enable_thinking=false; per-request toggle via request body; soak-test per model.",
+   "name": "Qwen3 hybrid think/no-think switch",
+   "quality_cost": "Non-thinking answers lose step-by-step accuracy on hard math/code; route easy tasks to no-think, hard tasks to thinking.",
+   "reported_gain": "Qualitative: Qwen3.5 thinks ~1k tokens for a 5-word title unless disabled; no verified benchmark delta opened for local GGUF quants.",
+   "sources": [
+    "https://qwenlm.github.io/blog/qwen3/",
+    "https://github.com/ggml-org/llama.cpp/issues/20182",
+    "https://qwen.readthedocs.io/en/latest/run_locally/llama.cpp.html"
+   ],
+   "status": "production",
+   "what": "Qwen3 models switch between thinking and instant modes via enable_thinking template flag plus per-turn /think and /no_think prompt suffixes.",
+   "where_implemented": "Qwen3 chat template (enable_thinking); llama.cpp --reasoning off, --reasoning-budget 0, chat_template_kwargs"
+  },
+  {
+   "fit_reference_machine": "Good once verified: hard token cap bounds worst-case latency on the laptop; extension side has no local equivalent.",
+   "harness_integration": "Approximate the cap with --reasoning-budget N plus a transition message; re-prompt client-side for the extend side; never bare-cut budgets.",
+   "name": "Budget forcing (forced stop plus Wait extension)",
+   "quality_cost": "Bare truncation craters quality; gains flatten after ~6 extensions then loop; prompt-only length control fails.",
+   "reported_gain": "s1-32B (Qwen2.5-32B, 1K traces, H100 training): AIME24 50% to 57% via Wait extensions; up to +27% over o1-preview on MATH/AIME24.",
+   "sources": [
+    "https://arxiv.org/abs/2501.19393",
+    "https://simplescaling.github.io/"
+   ],
+   "status": "research-only",
+   "what": "Controls test-time compute by force-appending the end-of-thinking delimiter (cap) or suppressing it and appending 'Wait' (extend reflection).",
+   "where_implemented": "simplescaling/s1 research code; cap side approximated by llama.cpp --reasoning-budget"
+  },
+  {
+   "fit_reference_machine": "Good: grammar-level token counting is cheap; risk is per-model template quirks, so verify on the exact GGUF quant used.",
+   "harness_integration": "Add --reasoning, --reasoning-budget N, --reasoning-budget-message to the flag allowlist; expose Low/Med/High presets mapping to budgets.",
+   "name": "llama.cpp reasoning budget enforcement",
+   "quality_cost": "Bare budget cut without transition message dropped Qwen3.5-9B HumanEval 94% to 79%; with message ~89% vs 88% no-think.",
+   "reported_gain": "Maintainer test Qwen3.5-9B Q8_0 HumanEval: 94% full reasoning, 88% non-reasoning, ~89% with budget 400-1000 plus message; sampler overhead ~0 t/s.",
+   "sources": [
+    "https://github.com/ggml-org/llama.cpp/pull/20297",
+    "https://aihaven.com/news/llama-cpp-reasoning-budget-update/",
+    "https://github.com/ggml-org/llama.cpp/discussions/21445"
+   ],
+   "status": "emerging",
+   "what": "llama.cpp sampler counts reasoning tokens and force-closes thinking at budget N, with a configurable transition message and per-request thinking_budget_tokens.",
+   "where_implemented": "llama.cpp PR #20297 (--reasoning, --reasoning-budget, --reasoning-budget-message); server thinking_budget_tokens field"
+  },
+  {
+   "fit_reference_machine": "Poor as a loop: doubles latency at batch 1 for negative expected accuracy; do not ship as default on the laptop.",
+   "harness_integration": "Do not add a generic self-repair loop; gate every retry on external signal (compiler/tests); log correct-to-incorrect flips in evals.",
+   "name": "Intrinsic self-refine prompt loop",
+   "quality_cost": "Consistent degradation without oracle labels; flips correct answers to wrong ones; longer failed outputs (1.7-3.1x).",
+   "reported_gain": "No gain: GPT-3.5 GSM8K 77.4 to 75.9, CommonSenseQA 66.8 to 55.4; debate equals self-consistency (84.7 vs 84.7) at equal samples.",
+   "sources": [
+    "https://arxiv.org/abs/2310.01798",
+    "https://direct.mit.edu/tacl/article/doi/10.1162/tacl_a_00713/125177/When-Can-LLMs-Actually-Correct-Their-Own-Mistakes",
+    "https://www.alphaxiv.org/abs/2402.08115"
+   ],
+   "status": "production",
+   "what": "Asking the model to critique and fix its own answer using only its own judgment, with no tools, tests, or ground truth.",
+   "where_implemented": "Self-Refine (NeurIPS 2023) pattern, widely copied in products; negative result from Huang et al. ICLR 2024 and surveys"
+  },
+  {
+   "fit_reference_machine": "Mixed: N parallel samples cost N times the tokens at batch 1 and exceed 8 GB VRAM if concurrent; use sequentially only for hard tasks.",
+   "harness_integration": "Implement N-sample majority vote client-side over sequential llama.cpp calls with temperature>0; reserve for hard coding tasks only.",
+   "name": "Self-consistency majority vote",
+   "quality_cost": "Plateaus fast; on near-ceiling models can add noise and slightly hurt; gains concentrate on hard tasks weak single-pass models miss.",
+   "reported_gain": "Classic +10-20 pts on weak models; modern counterpoint: Gemini 2.5 Pro MATH-500 98 to 99.6% at ~15x tokens; Flash-Lite +0.4% at 20x.",
+   "sources": [
+    "https://arxiv.org/html/2511.00751",
+    "https://proceedings.neurips.cc/paper_files/paper/2025/file/fc067ac218430c409d6f65403328f740-Paper-Conference.pdf"
+   ],
+   "status": "production",
+   "what": "Sample N independent reasoning paths and take the majority answer; trades linear token cost for robustness on hard questions.",
+   "where_implemented": "Sampling harness-side (temperature sampling); no llama.cpp flag; ESC/DSC/CISC variants in research repos"
+  },
+  {
+   "fit_reference_machine": "Excellent: fewer tokens, less KV cache, lower latency with no model change; ideal economizer for the laptop.",
+   "harness_integration": "Client-side early-stop wrapper: sample in small windows, stop on window agreement; add difficulty pre-rank for batch office jobs.",
+   "name": "Early-stopped and difficulty-adaptive self-consistency",
+   "quality_cost": "Parity accuracy in reported settings; aggressive stopping can lock in a wrong consensus on genuinely hard items.",
+   "reported_gain": "ESC: GSM8K -80.1%, MATH -33.8% samples at parity; DSC: -65% cost vs SC on GPT-4; Slim-SC: -45% latency, -26% KV on R1-Distill.",
+   "sources": [
+    "https://proceedings.iclr.cc/paper_files/paper/2024/file/3fe2a777282299ecb4f9e7ebb531f0ab-Paper-Conference.pdf",
+    "https://doi.org/10.18653/v1/2025.findings-naacl.383",
+    "https://aclanthology.org/2025.emnlp-main.1750.pdf"
+   ],
+   "status": "emerging",
+   "what": "ESC stops sampling on window agreement; DSC single-samples easy questions via difficulty ranking; Slim-SC prunes redundant chains step-wise.",
+   "where_implemented": "Research prototypes (ESC/DSC/Slim-SC repos); harness-side logic, no runtime support needed"
+  },
+  {
+   "fit_reference_machine": "Good: one extra scoring pass per candidate reuses the same small model; affordable for 2-5 candidates at batch 1.",
+   "harness_integration": "Second low-temperature llama.cpp call asking P(True)/verbal confidence per candidate, then weighted vote; keep N small.",
+   "name": "Confidence-weighted self-consistency (CISC)",
+   "quality_cost": "Small accuracy gains (+0.2-1.6%); needs a follow-up scoring pass per path; miscalibrated confidence adds noise.",
+   "reported_gain": "P(True) weighting cuts needed paths 41-46% (10 samples match ~18.6 plain SC) across 9 models and 4 math/commonsense datasets.",
+   "sources": [
+    "https://aclanthology.org/2025.findings-acl.1030.pdf"
+   ],
+   "status": "research-only",
+   "what": "Weights each sampled path's vote by the model's own confidence (P(True) best) instead of one-person-one-vote.",
+   "where_implemented": "Research prototype (Findings of ACL 2025); harness-side second-pass scoring"
+  },
+  {
+   "fit_reference_machine": "Poor at batch 1: verifier chain-of-thought multiplies tokens ~8x before matching plain sampling; needs VRAM for a second model.",
+   "harness_integration": "Defer; if ever adopted, run a small verifier model as a second llama.cpp process and score N candidates with weighted vote.",
+   "name": "Generative verifiers with Best-of-N (GenRM/GenPRM)",
+   "quality_cost": "Large gains where verifier fits (GSM8K 73 to 93.4%); compute-hungry; needs verifier training data and rationale synthesis.",
+   "reported_gain": "GenRM: 5 to 45.3% algorithmic, GSM8K 73 to 93.4%; GenPRM-1.5B beats GPT-4o on ProcessBench; SC beats GenRM below ~8x compute.",
+   "sources": [
+    "https://arxiv.org/abs/2408.15240",
+    "https://ojs.aaai.org/index.php/AAAI/article/view/40797",
+    "https://doi.org/10.48550/arxiv.2504.01005"
+   ],
+   "status": "research-only",
+   "what": "Trains the verifier with next-token prediction so it writes verification rationales, then picks the best of N candidates by vote-averaged Yes scores.",
+   "where_implemented": "Research code (GenRM, GenPRM); not in llama.cpp; HSRM variant uses a 2M-param hidden-state head"
+  },
+  {
+   "fit_reference_machine": "Poor short-term (needs RL training the harness cannot do offline-cheaply); promising as future GGUF model property to exploit.",
+   "harness_integration": "No harness code needed: prefer future GGUFs advertising self-verification; at runtime use their verify-then-revise prompt pattern.",
+   "name": "Single-model self-verification RL (ReVISE and unified generator-verifier)",
+   "quality_cost": "Improves both solving and verification; shorter traces reported; still math-benchmark-bound, code/agentic transfer unproven.",
+   "reported_gain": "NeurIPS25 unified RL (Qwen2.5-Math-7B, R1-Distill-1.5B): self-verify aggregation beats external-RM best-of-N/beam; verify-only training matches generation training.",
+   "sources": [
+    "https://proceedings.mlr.press/v267/lee25ab.html",
+    "https://proceedings.neurips.cc/paper_files/paper/2025/file/07320f63b9d44f0f128f68ab56721729-Paper-Conference.pdf",
+    "https://arxiv.org/html/2602.07594v1"
+   ],
+   "status": "research-only",
+   "what": "One RL run trains the model to both solve and verify (curriculum preference learning plus confidence-aware decoding), enabling verifier-free test-time scaling.",
+   "where_implemented": "Research training code (ReVISE, self-verification RL); PAG variant is multi-turn RL; none shipped in runtimes"
+  },
+  {
+   "fit_reference_machine": "Fair: training is datacenter work, but the resulting small reasoner runs locally; matches the MoE-on-laptop strategy.",
+   "harness_integration": "Track SCoRe-style checkpoints for future GGUF adoption; runtime pattern is just alternating solve-then-verify turns.",
+   "name": "SCoRe multi-turn RL self-correction",
+   "quality_cost": "Positive flips only after staged RL with flip bonus; plain SFT on corrections collapses to trivial edits and can hurt.",
+   "reported_gain": "Gemini 1.0 Pro/1.5 Flash: self-correction +15.6% MATH, +9.1% HumanEval over base; SFT-only variants stay net-negative.",
+   "sources": [
+    "https://arxiv.org/html/2409.12917v1"
+   ],
+   "status": "research-only",
+   "what": "Two-stage online RL on self-generated correction traces with a correctness-flip reward bonus, avoiding SFT distribution collapse.",
+   "where_implemented": "Research training recipe; no runtime component"
+  },
+  {
+   "fit_reference_machine": "Excellent: uses CPU tools the office already has; zero extra model cost; fits offline constraint perfectly.",
+   "harness_integration": "Build the coding-agent loop as generate, compile/test, feed back errors; cap retries; treat tool output as the only verifier.",
+   "name": "Tool-grounded verification loop (compiler and unit tests)",
+   "quality_cost": "Consistent gains where specs are executable (code with tests); inapplicable to open-ended prose without external checks.",
+   "reported_gain": "Survey consensus positive wherever execution feedback exists; exact deltas are task-specific and unverified for Cerebro's stack.",
+   "sources": [
+    "https://arxiv.org/abs/2310.01798",
+    "https://direct.mit.edu/tacl/article/doi/10.1162/tacl_a_00713/125177/When-Can-LLMs-Actually-Correct-Their-Own-Mistakes"
+   ],
+   "status": "production",
+   "what": "Feeds compiler errors, test failures, or calculator/search output back into the next attempt instead of asking the model its opinion.",
+   "where_implemented": "Coding-agent harness pattern (e.g. self-debug); implement harness-side around llama.cpp calls"
+  },
+  {
+   "fit_reference_machine": "Fair: sequential extension risks loops and context bloat on 32 GB RAM; parallel split is safer but multiplies batch-1 latency.",
+   "harness_integration": "Under fixed token budget, prefer K short parallel attempts plus vote over one ever-longer trace; cap extensions and watch entropy.",
+   "name": "Parallel-thinking budget allocation",
+   "quality_cost": "Avoids overthinking collapse; costs K times the zero-shot tokens; needs an answer-extraction and voting step.",
+   "reported_gain": "Same 16K budget: parallel paths up to +22% over extended thinking (R1-Distill-1.5B GSM8K extended thinking -11.8%, parallel +10.1%).",
+   "sources": [
+    "https://proceedings.neurips.cc/paper_files/paper/2025/file/fc067ac218430c409d6f65403328f740-Paper-Conference.pdf"
+   ],
+   "status": "research-only",
+   "what": "Splits a fixed thinking-token budget across independent reasoning paths with majority vote instead of lengthening one trace with Wait prompts.",
+   "where_implemented": "Research protocol; harness-side sampling strategy, no runtime flag"
+  },
+  {
+   "fit_reference_machine": "Good: LoRA-level fine-tune is cheap to consume as a published GGUF; skipping saves ~40% decode time at batch 1.",
+   "harness_integration": "Prefer future GGUFs advertising skip-compressed traces; runtime side is just a compression-ratio prompt prefix.",
+   "name": "TokenSkip controllable CoT compression",
+   "quality_cost": "Under 0.4% drop at 40% skip on GSM8K (Qwen2.5-14B); up to 4% drop at 30% skip on MATH-500 (Llama-3.1-8B).",
+   "reported_gain": "Qwen2.5-14B GSM8K 313 to 181 reasoning tokens at parity; Llama-3.1-8B MATH-500 -30% tokens, 1.4x speedup; LoRA 0.2% params, 2x3090 GPUs.",
+   "sources": [
+    "https://aclanthology.org/anthology-files/anthology-files/pdf/emnlp/2025.emnlp-main.165.pdf"
+   ],
+   "status": "research-only",
+   "what": "Fine-tunes the model on importance-pruned CoT trajectories so it natively skips redundant tokens at a controllable compression ratio.",
+   "where_implemented": "Research training code and checkpoints; not a llama.cpp feature"
+  }
+ ]
+}

@@ -1,0 +1,231 @@
+{
+ "headline_findings": [
+  "Resolve-then-Range-GET with ETag pinning is the stable plain-HTTP path; HEAD gives LFS-sha256 etag, size and commit hash.",
+  "Multi-GB weights now live on the Xet CAS backend: plain resolve-URL follows can stall at 0 bytes; real Xet needs reconstruction-API + signed xorb fetches.",
+  "hf-hub Rust crate 1.0.0 (Jul 2026) gives Cerebro async/blocking search, listing, resume and Xet transfers with a Python-compatible cache.",
+  "Gated repos need user token + browser Agree flow; app must show licence/gated state before download and store tokens in OS keychain.",
+  "Rate limits are per-bucket over 5-min windows with 429 + RateLimit headers; always send HF_TOKEN and back off; hf cache verify fills the no-on-download-hash gap."
+ ],
+ "items": [
+  {
+   "fit_reference_machine": "Ideal: batch-1 laptop pulls are a few resolver calls; 429 headers guide backoff; cache means one search serves many sessions.",
+   "harness_integration": "reqwest GET /api/models with search/filter/sort/limit + Link pagination; custom User-Agent; cache JSON; gate behind explicit user action (offline-first).",
+   "name": "Hub REST search/list API",
+   "quality_cost": "None; metadata only. Curated ranking still needed since raw search returns many broken quant repos.",
+   "reported_gain": "No throughput gain; correctness path. Free tier 1000 API reqs/5min; resolvers 5000/5min per rate-limit doc.",
+   "sources": [
+    "https://huggingface.co/docs/huggingface_hub/en/guides/search",
+    "https://huggingface.co/docs/hub/en/api",
+    "https://huggingface.co/docs/hub/en/rate-limits"
+   ],
+   "status": "production",
+   "what": "GET /api/models search, author, filter, sort, limit with Link pagination; basis of every model browser.",
+   "where_implemented": "huggingface.co/.well-known/openapi.md; huggingface_hub HfApi.list_models; hf models ls CLI"
+  },
+  {
+   "fit_reference_machine": "Perfect: one pinned file list per commit; trees cache makes repeat GGUF-variant picks single-call.",
+   "harness_integration": "Fetch repo JSON once per dialog, filter siblings to *.gguf, rank by size vs 8GB VRAM/32GB RAM, pin commit hash for download.",
+   "name": "Repo siblings/tree file listing",
+   "quality_cost": "None; listing only. Must filter non-GGUF files or user downloads unusable weights.",
+   "reported_gain": "No speed gain; enables variant picker. snapshot trees cache cuts repeat metadata calls to ~1 (documented).",
+   "sources": [
+    "https://huggingface.co/docs/huggingface_hub/en/guides/download",
+    "https://huggingface.co/docs/huggingface_hub/en/guides/manage-cache",
+    "https://github.com/huggingface/huggingface.js/blob/main/packages/hub/src/lib/download-file-to-cache-dir.ts"
+   ],
+   "status": "production",
+   "what": "Per-repo file list (rfilename, size, LFS sha256, Xet flag) via API siblings/tree endpoints.",
+   "where_implemented": "huggingface_hub repo_info.siblings, list_repo_tree, trees/<commit>.json cache; hf models ls <repo> -R"
+  },
+  {
+   "fit_reference_machine": "Excellent: single-stream Range resume suits laptop links; generous timeouts beat default 10s on slow Wi-Fi.",
+   "harness_integration": "HEAD resolve URL for etag/size/commit; GET with Range to .part file; atomic rename; file lock; truncate+restart if server ignores Range (200 without Content-Range).",
+   "name": "Resolve-URL + ETag + Range resume",
+   "quality_cost": "None with correct Range handling; naive resume against gzip/CDN responses corrupts progress accounting (fixed PR #4209).",
+   "reported_gain": "Resume avoids full multi-GB restart after interrupt; correctness not throughput. HF_HUB_DOWNLOAD_TIMEOUT default 10s, raise on slow links.",
+   "sources": [
+    "https://huggingface.co/docs/huggingface_hub/main/en/package_reference/file_download",
+    "https://github.com/huggingface/huggingface_hub/blob/v1.22.0/src/huggingface_hub/file_download.py",
+    "https://github.com/huggingface/huggingface_hub/pull/4209"
+   ],
+   "status": "production",
+   "what": "HEAD /{ns}/{repo}/resolve/{rev}/{path} for ETag/size/commit, then resumable Range GET to .incomplete + rename.",
+   "where_implemented": "huggingface_hub http_get/_download_to_tmp_and_move; hf download --local-dir"
+  },
+  {
+   "fit_reference_machine": "Mixed: best speed on good links via adaptive concurrency; HP mode needs 64GB RAM so keep defaults on 32GB laptop.",
+   "harness_integration": "Prefer Xet-capable dependency (hf-hub 1.x/xet-core) or shell hf download; support HF_HUB_DISABLE_XET=1 fallback with stall warning.",
+   "name": "hf_xet Xet CAS download path",
+   "quality_cost": "Same bytes out; dedup can share chunks across related files. Interrupts may restart from 0 unlike LFS resume.",
+   "reported_gain": "Chunk-level dedup + adaptive concurrency saturate fast links; no published batch-1 laptop tok/s style figure, treat as transfer-time win only.",
+   "sources": [
+    "https://huggingface.co/docs/huggingface_hub/en/guides/download",
+    "https://huggingface.co/docs/hub/en/xet/using-xet-storage",
+    "https://github.com/huggingface/xet-core"
+   ],
+   "status": "production",
+   "what": "Default since huggingface_hub 0.32.0: CAS reconstruction query + signed multi-range xorb fetch + chunk reassembly.",
+   "where_implemented": "hf-xet package bundled with huggingface_hub>=0.32.0; xet-core Rust crates; HF_XET_* env vars"
+  },
+  {
+   "fit_reference_machine": "Directly explains the observed 0-byte stall on this laptop: bridge fallback hangs where CAS path proceeds.",
+   "harness_integration": "Read X-Xet-Hash on resolve HEAD; if Xet-backed and no Xet client, warn user and offer hf download/hfrs instead of hanging.",
+   "name": "Xet resolve-redirect vs CAS trap",
+   "quality_cost": "Bridge bytes are identical when it works; failure mode is a hang, not wrong bytes.",
+   "reported_gain": "No gain; diagnostic rule. MUST NOT follow 302 for Xet protocol use; signed xorb URLs are short-lived, never cache them.",
+   "sources": [
+    "https://github.com/huggingface/hub-docs/blob/main/docs/xet/file-id.md",
+    "https://huggingface.co/docs/xet/download-protocol",
+    "https://github.com/huggingface/huggingface_hub/issues/4475"
+   ],
+   "status": "production",
+   "what": "Following a resolve-URL 302 uses the legacy LFS-compat bridge (can stall at 0B); Xet protocol needs the reconstruction API.",
+   "where_implemented": "Xet spec docs/xet/file-id.md; CAS discovery via /xet-read-token (cas-server.xethub.hf.co)"
+  },
+  {
+   "fit_reference_machine": "Not applicable going forward; reference design should not copy it.",
+   "harness_integration": "Do not implement; if encountered in old docs, map to hf_xet defaults or plain Range resume.",
+   "name": "hf_transfer parallel-range downloader",
+   "quality_cost": "No resume, no proxies, weaker error handling by design.",
+   "reported_gain": "Up to ~1GB/s claimed on high-bandwidth machines (unverified, datacenter-class); deprecated, throughput not transferable to laptop.",
+   "sources": [
+    "https://huggingface.co/docs/huggingface_hub/en/package_reference/environment_variables"
+   ],
+   "status": "production",
+   "what": "Deprecated Rust parallel-range downloader (HF_HUB_ENABLE_HF_TRANSFER); replaced by hf_xet on the Xet backend.",
+   "where_implemented": "hf_transfer crate; deprecated env var HF_HUB_ENABLE_HF_TRANSFER in huggingface_hub"
+  },
+  {
+   "fit_reference_machine": "Excellent: native Rust, tokio or blocking, Python-compatible cache, no Python runtime to ship on Windows.",
+   "harness_integration": "Depend on hf-hub 1.0.0 for search, info, listing, download_file/snapshot_download with globs, progress events; explicit builder token/endpoint/cache.",
+   "name": "hf-hub Rust crate 1.0.0",
+   "quality_cost": "None; same bytes. Snapshot skips cached files; transient errors fall back to cache.",
+   "reported_gain": "No model-quality change; integration gain is native async, ETag/If-None-Match caching, per-file 404 resilience in snapshots.",
+   "sources": [
+    "https://crates.io/crates/hf-hub",
+    "https://github.com/huggingface/hf-hub",
+    "https://docs.rs/hf-hub/latest/src/hf_hub/repository/download.rs.html"
+   ],
+   "status": "production",
+   "what": "Official Rust Hub client: async HFClient + blocking HFClientSync, cache-compatible downloads, Xet transfers, hfrs CLI.",
+   "where_implemented": "crates.io hf-hub 1.0.0 (2026-07-10); github.com/huggingface/hf-hub; docs.rs hf-hub"
+  },
+  {
+   "fit_reference_machine": "Fine: one token in OS keychain unlocks gated + private pulls; SSH-key variant avoids tokens entirely for Ollama-style flows.",
+   "harness_integration": "Token field -> OS credential store -> Authorization Bearer header; show gated badge + Agree redirect before download; pass token downstream on every call.",
+   "name": "Gated repos + user access tokens",
+   "quality_cost": "None; access control only. Manual-approval gates can delay availability unpredictably.",
+   "reported_gain": "No speed gain; unlocks gated/private repos. Always sending HF_TOKEN is the top fix for 429s per rate-limit doc.",
+   "sources": [
+    "https://huggingface.co/docs/hub/en/models-gated",
+    "https://huggingface.co/docs/hub/en/security-tokens",
+    "https://huggingface.co/docs/hub/ollama"
+   ],
+   "status": "production",
+   "what": "Browser Agree flow shares contact with authors; downloads need fine-grained/read token as Bearer auth.",
+   "where_implemented": "huggingface.co/settings/tokens; hf auth login; Ollama SSH-key flow (~/.ollama/id_ed25519.pub in HF settings)"
+  },
+  {
+   "fit_reference_machine": "Laptop single-user pulls rarely hit resolver limits; unauthenticated bursts do (Ollama 429 precedent).",
+   "harness_integration": "Send token on all calls; parse RateLimit seconds-until-reset on 429; exponential backoff+jitter; prefer resolve URLs over API fan-out.",
+   "name": "Hub rate limits + smart retry",
+   "quality_cost": "Waiting on 429 delays downloads; no quality effect.",
+   "reported_gain": "huggingface_hub>=1.2.0 auto-waits exact reset seconds on 429; no throughput gain, avoids hard failures.",
+   "sources": [
+    "https://huggingface.co/docs/hub/en/rate-limits",
+    "https://github.com/ollama/ollama/issues/7240"
+   ],
+   "status": "production",
+   "what": "5-min buckets for APIs/Resolvers/Pages; 429 + RateLimit/RateLimit-Policy headers; SDK auto-retry.",
+   "where_implemented": "Hub rate-limits doc (Sep 2025 tiers); huggingface_hub>=1.2.0 retry; hf-hub HFError::RateLimited"
+  },
+  {
+   "fit_reference_machine": "Good: post-download sha256 of a 20-40GB GGUF takes minutes on NVMe; run as opt-in gate, not default.",
+   "harness_integration": "Always size-check; offer verify toggle comparing sha256 vs LFS etag (quality gate); never load unverified weights silently.",
+   "name": "LFS-sha256 checksums + hf cache verify",
+   "quality_cost": "Verification is pure win for integrity; costs a full re-read. No on-download hash by design (Dec 2025 decision).",
+   "reported_gain": "No speed gain; integrity gain. blobs/<etag> identity means corrupt files detectable; hf cache verify added Oct 2025 (PR #3461).",
+   "sources": [
+    "https://huggingface.co/docs/huggingface_hub/en/guides/manage-cache",
+    "https://github.com/huggingface/huggingface_hub/commit/80025cdf5c3ea7e0739f1233e6b510ff802a0a0c",
+    "https://github.com/huggingface/huggingface_hub/issues/3643"
+   ],
+   "status": "production",
+   "what": "Blob filename IS the sha256 (LFS) or git-sha1; hf cache verify recomputes and reports mismatches.",
+   "where_implemented": "huggingface_hub cache layout; hf cache verify CLI; verify_repo_checksums API"
+  },
+  {
+   "fit_reference_machine": "Best UX template for the 8GB-VRAM laptop: variant picker ranked by fit + publisher/model folder layout.",
+   "harness_integration": "Copy: curated GGUF list, size-per-quant display, publisher/model dirs + sidecar JSON, optional endpoint/proxy field, lms-get-like paste-URL box.",
+   "name": "LM Studio one-click pattern",
+   "quality_cost": "Curation risk: recommended quant may not be best for coding; show benchmark note per variant.",
+   "reported_gain": "UX gain only. Nested-subfolder repos supported since 0.3.9 (Jan 2025); full-URL paste; POST /api/v1/models/download.",
+   "sources": [
+    "https://lmstudio.ai/docs/app/basics/download-model",
+    "https://lmstudio.ai/blog/lmstudio-v0.3.9",
+    "https://huggingface.co/docs/hub/en/lmstudio",
+    "https://lmstudio.ai/docs/app/advanced/import-model"
+   ],
+   "status": "production",
+   "what": "Curated catalog + GGUF variant picker + URL paste + proxy setting + publisher/model on-disk layout.",
+   "where_implemented": "LM Studio app + lms get CLI; model loader with hardware-matched defaults"
+  },
+  {
+   "fit_reference_machine": "Strong fit: Tauri+Rust like Cerebro; plain .gguf files suit 8GB VRAM laptop; cancel/progress essential on Wi-Fi.",
+   "harness_integration": "Mirror: Rust downloader (downloadFile/downloadHfRepo/cancel), Tauri progress events, HF_TOKEN setting, path sanitization, proxy flag.",
+   "name": "Jan download manager",
+   "quality_cost": "None observed; earlier Jan bug fetched wrong GGUF metadata (CPU-only) shows need to verify quant filename.",
+   "reported_gain": "Chose Rust-over-IPC for large-file throughput (design rationale, no benchmark figure published).",
+   "sources": [
+    "https://github.com/menloresearch/jan/pull/4933"
+   ],
+   "status": "production",
+   "what": "Rust-backend HF downloader (single file + whole repo) with progress events, cancel, token and proxy settings.",
+   "where_implemented": "janhq/jan PR #4933 (merged May 2025, v0.5.18); @janhq/download-extension"
+  },
+  {
+   "fit_reference_machine": "Good precedent for GGUF-only flow on this laptop; chunked resume handles flaky links; CDN stall history is a caution.",
+   "harness_integration": "Adopt content-addressed blob store + chunked resume + NDJSON progress; consider hf.co/:quant bridge syntax for power users.",
+   "name": "Ollama OCI-registry pull model",
+   "quality_cost": "Imported HF GGUFs often lack/break templates, needing Modelfile surgery; weights themselves unaffected.",
+   "reported_gain": "Parallel chunked pull with per-chunk resume; no published speedup figure; R2-CDN stalls documented (Jan-Feb 2025 issues).",
+   "sources": [
+    "https://github.com/ollama/ollama/blob/e434a938/server/images.go",
+    "https://huggingface.co/docs/hub/ollama",
+    "https://github.com/ollama/ollama/issues/8632"
+   ],
+   "status": "production",
+   "what": "Manifest + sha256 blobs OCI-style pull with chunked resume; hf.co/<user>/<repo> bridge runs 45k HF GGUFs.",
+   "where_implemented": "ollama/ollama server/download.go, server/images.go, x/transfer; registry.ollama.ai + hf.co namespace"
+  },
+  {
+   "fit_reference_machine": "Lab-useful (proxied office), default-off for offline-first Cerebro; mirror trust is the risk, not speed.",
+   "harness_integration": "Accept explicit endpoint override (setting, not default); never hardcode third-party mirrors; surface checksum verify when mirror used.",
+   "name": "Endpoint mirrors (HF_ENDPOINT)",
+   "quality_cost": "Untrusted mirror could serve stale/mismatched bytes; mitigate with sha256 verify.",
+   "reported_gain": "Regional mirrors restore full speed where huggingface.co is blocked; no numeric claim, connectivity fix not speedup.",
+   "sources": [
+    "https://hf-mirror.com/",
+    "https://github.com/huggingface/huggingface_hub/issues/2830"
+   ],
+   "status": "production",
+   "what": "HF_ENDPOINT / endpoint override redirects Hub traffic to a mirror (e.g. community hf-mirror.com).",
+   "where_implemented": "huggingface_hub HF_ENDPOINT (read at import); HfApi(endpoint=...); hf-hub HFClient builder endpoint"
+  },
+  {
+   "fit_reference_machine": "Trivial cost: one metadata fetch; mandatory for blind-comparison credibility and enterprise users.",
+   "harness_integration": "Show licence + gated + base_model in picker before download; persist in sidecar JSON; fetch via card --metadata --format json.",
+   "name": "Licence display via model-card metadata",
+   "quality_cost": "None; display only. Missing licence field is common on quant re-uploads, show as unknown.",
+   "reported_gain": "No performance gain; legal/UX requirement. gated extra_gated_* text forms part of consent surface.",
+   "sources": [
+    "https://huggingface.co/docs/hub/en/model-cards",
+    "https://huggingface.co/docs/hub/en/models-gated",
+    "https://huggingface.co/docs/huggingface_hub/en/guides/cli"
+   ],
+   "status": "production",
+   "what": "licence from card YAML license:/license_name/license_link; show before download with gated state.",
+   "where_implemented": "Hub model-cards spec; hf models card <repo> --metadata; extra_gated_* card fields"
+  }
+ ]
+}

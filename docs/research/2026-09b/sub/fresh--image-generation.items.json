@@ -1,0 +1,218 @@
+{
+ "headline_findings": [
+  "stable-diffusion.cpp (MIT, CUDA/Vulkan, GGUF) is the embeddable local image core: sd-server speaks OpenAI, WebUI and native async APIs plus an embedded web UI",
+  "On discrete GPUs sd.cpp runs ~1.5-3.7x slower per 1024px image than ComfyUI but needs far less VRAM and no Python stack; FLUX.1-schnell Q4 and SDXL-Turbo fit the 8 GB Ampere card",
+  "Licences split the model menu: schnell/Qwen-Image-v1/SD3.5 are commercial-friendly while FLUX-dev and Qwen-Image-2.1 are non-commercial-only and must be gated",
+  "LM Studio and Jan ship no local diffusion (cloud plugins/proxies and image-input only), so bundled offline image gen is a real Cerebro differentiator"
+ ],
+ "items": [
+  {
+   "fit_reference_machine": "Best fit: native CUDA build on the RTX 3070 Ti; GGUF quants plus CPU offload let 12B models run in 8 GB VRAM + 32 GB RAM at batch 1.",
+   "harness_integration": "Sidecar sd-server/sd-cli binaries (pinned version + SHA) spawned with argv only, same supervisor pattern as llama.cpp; or link via diffusion-rs.",
+   "name": "stable-diffusion.cpp core engine",
+   "quality_cost": "q8_0 near-lossless vs fp16; q4 small drop; q2_k visible degradation (side-by-side reference images in flux doc).",
+   "reported_gain": "No tok/s metric; footprint win: FLUX.1 diffusion weights 12.1 GB at q8_0 down to 3.7 GB at q2_k per official table.",
+   "sources": [
+    "https://github.com/leejet/stable-diffusion.cpp",
+    "https://github.com/leejet/stable-diffusion.cpp/blob/master/docs/flux.md"
+   ],
+   "status": "production",
+   "what": "MIT-licensed pure C/C++ (ggml) diffusion runtime covering SD1.x-3.5, FLUX.1/2, Qwen-Image, Z-Image, Chroma and Wan/LTX video.",
+   "where_implemented": "leejet/stable-diffusion.cpp sd-cli binary; backends CPU/CUDA/Vulkan/Metal/OpenCL/SYCL; ckpt/safetensors/GGUF + convert mode"
+  },
+  {
+   "fit_reference_machine": "Ideal: localhost HTTP keeps GPU buffers hot across jobs; model fixed at server start so one model resident per process.",
+   "harness_integration": "Spawn sd-server as child, drive POST /sdcpp/v1/img_gen and poll jobs; fall back to OpenAI-compat endpoints for third-party clients.",
+   "name": "sd-server API mode + embedded web UI",
+   "quality_cost": "None; same pixels as CLI. Server ignores prompt-embedded <lora:...> tags, LoRA must use structured fields.",
+   "reported_gain": "No per-image speedup claimed; avoids per-call model reload (server caches model in memory); embedded web UI added 2026-04-11.",
+   "sources": [
+    "https://github.com/leejet/stable-diffusion.cpp/blob/master/examples/server/api.md",
+    "https://github.com/leejet/stable-diffusion.cpp"
+   ],
+   "status": "production",
+   "what": "HTTP server with OpenAI (/v1/images/*), WebUI (/sdapi/v1/txt2img|img2img) and native async sdcpp (img_gen/vid_gen/jobs) APIs.",
+   "where_implemented": "leejet/stable-diffusion.cpp examples/server; OpenAI, sdapi and sdcpp API families plus sd_cpp_extra_args extension"
+  },
+  {
+   "fit_reference_machine": "Top quality pick for 8 GB: q4 (~6.4 GB) or q2_k (~3.7 GB) diffusion weights + CLIP on CPU; 4-step schnell keeps 1024px times lowest of the FLUX family.",
+   "harness_integration": "Ship schnell-q4 GGUF preset with cfg-scale 1.0, euler, 4 steps, --clip-on-cpu; offer q8_0 only with CPU offload.",
+   "name": "FLUX.1-schnell GGUF path (Apache-2.0)",
+   "quality_cost": "Distilled 4-step model: slightly softer fine detail than 28-50-step dev, still strong prompt following.",
+   "reported_gain": "4 inference steps vs ~28-50 for dev-class models at 1024px; Apache-2.0 allows commercial use.",
+   "sources": [
+    "https://huggingface.co/black-forest-labs/FLUX.1-schnell",
+    "https://github.com/leejet/stable-diffusion.cpp/blob/master/docs/flux.md"
+   ],
+   "status": "production",
+   "what": "12B rectified-flow transformer distilled for 1-4-step 1024px generation, released by Black Forest Labs under Apache-2.0.",
+   "where_implemented": "black-forest-labs/FLUX.1-schnell HF repo; leejet preconverted GGUF quants; sd.cpp flux.md recipe"
+  },
+  {
+   "fit_reference_machine": "Runs on 8 GB with the same quant/offload recipe as schnell, but slower per image (many more steps); gate behind licence prompt.",
+   "harness_integration": "Hide behind non-commercial acknowledgement toggle; reuse schnell pipeline with higher default steps; Kontext enables edit mode.",
+   "name": "FLUX.1-dev / FLUX.1-Kontext / FLUX.2-dev (licence-gated)",
+   "quality_cost": "Highest FLUX.1 fidelity and real image editing (Kontext); dev needs ~28-50 steps so slower than schnell.",
+   "reported_gain": "Quality gain over schnell at cost of ~7-12x more steps; no speed gain. Licence is the constraint, not VRAM.",
+   "sources": [
+    "https://huggingface.co/black-forest-labs/FLUX.1-dev/blob/main/LICENSE.md",
+    "https://github.com/leejet/stable-diffusion.cpp"
+   ],
+   "status": "production",
+   "what": "Higher-fidelity FLUX variants plus Kontext image editing, all under BFL Non-Commercial License v1.1.1 (no commercial/production use).",
+   "where_implemented": "black-forest-labs/FLUX.1-dev LICENSE.md v1.1.1; sd.cpp kontext/edit docs; FLUX.2-dev support since 2025-11-30"
+  },
+  {
+   "fit_reference_machine": "Heavy: Q4_K_M Edit GGUF alone ~13.1 GB so the 8 GB card needs --offload-to-cpu/--diffusion-fa into 32 GB RAM; usable but slow.",
+   "harness_integration": "Advanced preset: diffusion GGUF + Qwen2.5-VL Q4 text encoder + safetensors VAE, 1024px/40 steps/euler/cfg 2.5/flow-shift 3.",
+   "name": "Qwen-Image / Qwen-Image-Edit GGUF (Apache-2.0)",
+   "quality_cost": "Best-in-class open text rendering (esp. CJK) and precise editing; Q4 quant small drop vs bf16 per community comparisons.",
+   "reported_gain": "No speed gain: 40-50 steps at 1024px; strength is text accuracy and multi-image edit consistency, not images/sec.",
+   "sources": [
+    "https://github.com/QwenLM/Qwen-Image",
+    "https://unsloth.ai/docs/models/tutorials/qwen-image-2512/stable-diffusion.cpp"
+   ],
+   "status": "production",
+   "what": "20B MMDiT foundation model family (Apache-2.0) with standout text rendering and single/multi-image editing variants.",
+   "where_implemented": "QwenLM/Qwen-Image repo; sd.cpp qwen_image docs since 2025-10-12; Unsloth GGUF + sd-cli recipe"
+  },
+  {
+   "fit_reference_machine": "Compact 7B visual component should fit 8 GB better than v1, but commercial use is banned by licence; treat as personal-use preview.",
+   "harness_integration": "Pin sd.cpp build with Day-0 support; show Research-licence banner; do not bundle weights, link external download.",
+   "name": "Qwen-Image-2.1 Day-0 support (non-commercial flip)",
+   "quality_cost": "unknown",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://github.com/leejet/stable-diffusion.cpp",
+    "https://huggingface.co/Qwen/Qwen-Image-2.1/raw/main/LICENSE"
+   ],
+   "status": "emerging",
+   "what": "Qwen image successor with Day-0 sd.cpp support 2026-09-20, but licence flipped to Qwen Research non-commercial-only.",
+   "where_implemented": "leejet/stable-diffusion.cpp news 2026-09-20 + qwen_image_2.1 docs; Qwen-Image-2.1 LICENSE (Research Agreement 2026-09-20)"
+  },
+  {
+   "fit_reference_machine": "Safest 1024px defaults on 8 GB: SDXL footprints of a few GB; SD3.5-Medium/Large-Turbo step up quality within Community licence.",
+   "harness_integration": "Default presets: SDXL-Turbo few-step fast mode; SD3.5-Large-Turbo quality mode; record Community-licence attribution requirement.",
+   "name": "SDXL-Turbo / SD3.5 practical 8 GB defaults",
+   "quality_cost": "Turbo few-step: good composition, softer micro-detail; SD3.5-Large-Turbo recovers most quality at more steps.",
+   "reported_gain": "SDXL 30 steps cfg 4 on RX 7800XT: ComfyUI 12.36 s warm vs sd.cpp Vulkan 29.63 s (same issue thread, batch 1).",
+   "sources": [
+    "https://github.com/leejet/stable-diffusion.cpp/issues/1215",
+    "https://stability.ai/license"
+   ],
+   "status": "production",
+   "what": "Stability models under the Community Licence (free incl. commercial under $1M revenue): SDXL family and SD3.5 Large/Medium/Turbo.",
+   "where_implemented": "stability.ai/license Community tier; sd.cpp sd.md/sd3.md docs; stabilityai/stable-diffusion-3.5-large HF repo"
+  },
+  {
+   "fit_reference_machine": "Designed for low VRAM: 9-step Z-Image-Turbo class is the fastest path to a decent 1024px image on the 3070 Ti.",
+   "harness_integration": "Add a sub-30 s 1024px preset (few steps, cfg 1) as the budget default alongside SDXL-Turbo.",
+   "name": "Z-Image-Turbo class compact distilled models",
+   "quality_cost": "Few-step distilled look: clean composition, less micro-texture than 40-step models; good enough for drafts and icons.",
+   "reported_gain": "RX 7800XT batch 1, 9 steps: ComfyUI 20.84 s vs sd.cpp Vulkan 34.57 s per 1024px image (same thread).",
+   "sources": [
+    "https://github.com/leejet/stable-diffusion.cpp/issues/1215",
+    "https://github.com/leejet/stable-diffusion.cpp"
+   ],
+   "status": "production",
+   "what": "Compact few-step distilled image models (Z-Image family supported since 2025-12-01) targeting fast low-VRAM generation.",
+   "where_implemented": "leejet/stable-diffusion.cpp z_image docs + news 2025-12-01; issue #1215 benchmark table"
+  },
+  {
+   "fit_reference_machine": "Speed leader on the same GPU but needs a full Python+Torch+CUDA stack and GBs of deps; fine as optional BYO engine, not bundled.",
+   "harness_integration": "Optional external target: POST workflow JSON to /prompt on a portable/manual install, poll /history; never target Desktop builds.",
+   "name": "ComfyUI headless /prompt API backend",
+   "quality_cost": "Reference quality (native PyTorch, no GGUF loss); sd.cpp trails it ~1.6-3.7x per image in the reported comparisons.",
+   "reported_gain": "FLUX.2-klein-4B 1024px 4 steps: ~5 s ComfyUI vs ~25 s sd.cpp; RTX 4090 CUDA ~10.5 it/s vs sd.cpp ~6.7 it/s (issue #1215).",
+   "sources": [
+    "https://github.com/leejet/stable-diffusion.cpp/issues/1215",
+    "https://docs.comfy.org/installation/desktop/faq"
+   ],
+   "status": "production",
+   "what": "Node-graph Python diffusion frontend whose manual/Portable installs expose a /prompt + /history (+websocket) API for headless use.",
+   "where_implemented": "ComfyUI manual/Portable installs (NOT Desktop); workflow API-format JSON submitted to the local server port"
+  },
+  {
+   "fit_reference_machine": "Not a backend target: the installed Comfy-Desktop copy cannot run headless or serve LAN/child-process requests.",
+   "harness_integration": "Detect and ignore Comfy-Desktop installs; auto-discover portable/manual servers or prompt the user to install one.",
+   "name": "Comfy Desktop headless limitation",
+   "quality_cost": "None (no image path through Desktop without GUI); snapshot/multi-instance features irrelevant to a harness.",
+   "reported_gain": "No gain; official FAQ states Desktop requires a graphical session and has no server-only mode.",
+   "sources": [
+    "https://docs.comfy.org/installation/desktop/faq"
+   ],
+   "status": "production",
+   "what": "Official Comfy Desktop FAQ: no headless/server/remote mode; headless deployments must use manual or Portable installs.",
+   "where_implemented": "docs.comfy.org Comfy Desktop FAQ entry 'Can I run Comfy Desktop in headless or server mode?'"
+  },
+  {
+   "fit_reference_machine": "Single-exe pattern proven on Windows+NVIDIA; image tab covers --sdmodel/--sdvae/--sdt5xxl/--sdclip/--sdoffloadcpu style flags.",
+   "harness_integration": "Copy the UX pattern (one GPU backend, per-component model slots, quantize toggle) without copying AGPL code into Cerebro.",
+   "name": "KoboldCpp bundled image generation",
+   "quality_cost": "Same sd.cpp pixels; Compress-weights Q4_0 toggle trades minor quality for memory on big models.",
+   "reported_gain": "No measured gain; value is packaging: one file, A1111-compatible txt2img endpoint plus bundled StableUI frontend.",
+   "sources": [
+    "https://github.com/LostRuins/koboldcpp/",
+    "https://koboldai.com/Guides/Kobold_CPP/KoboldCpp_ImageGen/"
+   ],
+   "status": "production",
+   "what": "AGPL single-file llama.cpp fork bundling stable-diffusion.cpp image gen (SD1.5/SDXL/SD3/FLUX/Qwen/Z-Image/Klein) with A1111 API.",
+   "where_implemented": "LostRuins/koboldcpp releases + image-gen guide (--sdmodel, --sdvae, --sdt5xxl, --sdclip1/2, --sdoffloadcpu, --sdflashattention)"
+  },
+  {
+   "fit_reference_machine": "Windows CUDA+Vulkan marked working, matching Cerebro's backend matrix (CUDA first, Vulkan fallback for iGPU/AMD).",
+   "harness_integration": "Evaluate linking sd.cpp via diffusion-rs sys crate for in-process gen; keep argv-spawned sd-server as the secure default.",
+   "name": "diffusion-rs Rust bindings",
+   "quality_cost": "None inherited; exposes same quant/format trade-offs as sd.cpp itself.",
+   "reported_gain": "No measured gain; value is native Rust API (gen_img + presets) instead of JSON over localhost.",
+   "sources": [
+    "https://github.com/newfla/diffusion-rs"
+   ],
+   "status": "production",
+   "what": "MIT Rust bindings (crates.io diffusion-rs) over stable-diffusion.cpp with CUDA/Vulkan support matrix including Windows.",
+   "where_implemented": "newfla/diffusion-rs repo: sys + safe API crates, PresetBuilder/gen_img, per-OS backend feature matrix"
+  },
+  {
+   "fit_reference_machine": "All run locally in 8 GB with tiling/TAESD; ESRGAN 4x on 1024px needs tiling but works.",
+   "harness_integration": "Expose init/mask/strength, hires-fix (scale 2x, denoising ~0.7) and ESRGAN upscale as first-class job parameters.",
+   "name": "img2img / inpainting / ESRGAN upscale / hires-fix stack",
+   "quality_cost": "Tiled VAE/TAESD slightly softens decode; ESRGAN 4x adds real detail on top of diffusion output.",
+   "reported_gain": "No speed gain; capability gain: full edit pipeline (txt2img, img2img, mask inpaint, hires second pass, model upscale).",
+   "sources": [
+    "https://github.com/leejet/stable-diffusion.cpp/blob/master/examples/server/api.md",
+    "https://koboldai.com/Guides/Kobold_CPP/KoboldCpp_ImageGen/"
+   ],
+   "status": "production",
+   "what": "sd.cpp-native edit stack: init/mask/control/reference images, denoising strength, VAE tiling, TAESD, ESRGAN, hires fix, LoRA.",
+   "where_implemented": "sdcpp API init_image/mask_image/hires/vae_tiling fields; sd.cpp TAESD/ESRGAN/ADetailer docs"
+  },
+  {
+   "fit_reference_machine": "Not recommended as default: video diffusion is VRAM-hungry; short low-res clips only, expect CPU offload and minutes per clip.",
+   "harness_integration": "Expose vid_gen jobs as experimental with strict frame/resolution caps and clear licence labels per video model.",
+   "name": "Wan 2.1/2.2 + LTX-2.3/2.5 video generation",
+   "quality_cost": "Low-res few-second clips on 8 GB; quality and temporal coherence far below datacenter GPU output.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://github.com/leejet/stable-diffusion.cpp",
+    "https://github.com/leejet/stable-diffusion.cpp/blob/master/examples/server/api.md"
+   ],
+   "status": "emerging",
+   "what": "Text/image-to-video models (Wan2.1/2.2, LTX-2.3/2.5, MiniMax-H3, HunyuanVideo) driven through sd.cpp async vid_gen jobs.",
+   "where_implemented": "sd.cpp wan.md/ltx2.md docs; POST /sdcpp/v1/vid_gen with video_frames/fps/high_noise_sample_params"
+  },
+  {
+   "fit_reference_machine": "Zero local VRAM use (cloud), but violates Cerebro's fully-offline goal; useful only as a negative benchmark.",
+   "harness_integration": "Treat as competitive gap to beat: offline one-click 1024px vs their login+credits+upload round-trips.",
+   "name": "LM Studio / Jan image-generation gap",
+   "quality_cost": "Cloud plugins add latency, accounts, per-gen credits and cold starts (20-60 s noted for idle HF endpoints).",
+   "reported_gain": "No local gain exists: LM Studio image plugin calls HuggingFace Inference API; Jan v0.6.9 image support is input-only.",
+   "sources": [
+    "https://lmstudio.ai/maticulous75/image",
+    "https://jan.ai/changelog/2025-08-28-image-support"
+   ],
+   "status": "production",
+   "what": "Neither harness bundles local diffusion: LM Studio generates via cloud HF Inference plugins; Jan supports image uploads, not synthesis.",
+   "where_implemented": "LM Studio Hub image plugin (generate_image via HF Inference API); Jan v0.6.9 changelog multimodal-input section"
+  }
+ ]
+}

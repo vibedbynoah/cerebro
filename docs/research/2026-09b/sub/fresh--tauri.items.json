@@ -1,0 +1,219 @@
+{
+ "headline_findings": [
+  "Tauri 2.11.5 + wry 0.56 is current (Sept 2026); use >=2.11.1 to avoid CVE-2026-42184 origin confusion on Windows.",
+  "Sidecar + shell-plugin arg allowlist is the sanctioned llama-server pattern: spawn from Rust, stream tokens over Channel.",
+  "Token deltas are tiny so plain Channel (fast eval path under 8 KB JSON) beats exotic binary IPC; images go via custom protocol, never invoke.",
+  "WebView2 Evergreen is preinstalled on Win11; downloadBootstrapper default keeps installer lean, offlineInstaller adds ~127 MB.",
+  "Updater minisign signing is mandatory and fits Cerebro's single opt-in network touch; MSI=WiX Windows-only, NSIS is cross-compilable."
+ ],
+ "items": [
+  {
+   "fit_reference_machine": "Excellent: zero extra runtime on Win11; offline-first preserved. Evergreen auto-patches Chromium without bundling ~180 MB.",
+   "harness_integration": "Pin tauri >=2.11.1, wry 0.56, bundler 2.9.x; use downloadBootstrapper + minimumWebview2Version; keep fixedVersion out.",
+   "name": "Tauri 2.11.5 core + wry 0.56 / WebView2 Evergreen",
+   "quality_cost": "None; newer WebView2 fixes rendering/security bugs. Fixed-version pinning would freeze bugs in.",
+   "reported_gain": "No tok/s gain (GUI shell). wry 0.56.1 fixes a Windows WebView2 parent-subclass crash; 2.11.4 fixes HDC leak hurting resize.",
+   "sources": [
+    "https://v2.tauri.app/release/tauri/",
+    "https://github.com/tauri-apps/tauri/releases",
+    "https://v2.tauri.app/release/wry/v0.56.0/",
+    "https://v2.tauri.app/reference/webview-versions/"
+   ],
+   "status": "production",
+   "what": "Current Tauri v2 stack (core 2.11.5, wry 0.56, tao 0.35/0.36) rendering via OS Evergreen WebView2/Chromium on Windows.",
+   "where_implemented": "tauri 2.11.5, tauri-bundler 2.9.4, wry 0.56.0, webview2-com 0.38.x via Evergreen runtime"
+  },
+  {
+   "fit_reference_machine": "Excellent: pure config, no runtime cost. Deny-by-default matches extreme-security goal and offline posture.",
+   "harness_integration": "Ship one capability per window (chat, settings, admin); never windows:[*]; CI-grep for *:default grants and remote urls entries.",
+   "name": "Capabilities ACL (allow/deny, per-window, remote)",
+   "quality_cost": "None on output; misconfig breaks features loudly (permission-denied) rather than silently.",
+   "reported_gain": "No throughput gain; shrinks blast radius of XSS to only granted commands. Remote origins ACL-enforced since Apr 2026.",
+   "sources": [
+    "https://v2.tauri.app/security/capabilities/",
+    "https://github.com/tauri-apps/tauri/commit/7a2672f7cf11652eab794781c63a5bb0124deb68",
+    "https://v2.tauri.app/security/"
+   ],
+   "status": "production",
+   "what": "JSON/TOML capabilities granting named plugin permissions to specific windows/webviews/platforms; unmatched webviews get zero IPC.",
+   "where_implemented": "src-tauri/capabilities/*.json + app.security.capabilities in tauri.conf.json (Tauri v2 ACL)"
+  },
+  {
+   "fit_reference_machine": "Good: AES-GCM per-message overhead negligible on i9-12900H, but adds latency to every token event if applied to chat window.",
+   "harness_integration": "Optional: apply isolation only to untrusted-preview window (RAG HTML), keep chat on brownfield + tight capabilities.",
+   "name": "Isolation pattern (sandboxed IPC interceptor)",
+   "quality_cost": "None if hook is pass-through; buggy hook can corrupt IPC args.",
+   "reported_gain": "Security only; adds small per-message AES-GCM cost. Recommended by Tauri except for perf-sensitive paths.",
+   "sources": [
+    "https://v2.tauri.app/concept/inter-process-communication/isolation/"
+   ],
+   "status": "production",
+   "what": "Sandboxed JS app that intercepts, validates, and AES-GCM-encrypts every frontend IPC message with per-run keys.",
+   "where_implemented": "app.security.pattern.use= isolation + options.dir (Tauri v2 config)"
+  },
+  {
+   "fit_reference_machine": "Excellent: build-time only. Matches offline posture; no CDN scripts allowed anyway.",
+   "harness_integration": "Set restrictive CSP (self + ipc: + asset:), keep dangerousDisableAssetCspModification false, freezePrototype true, withGlobalTauri false.",
+   "name": "CSP nonces/hashes + freezePrototype + asset scope",
+   "quality_cost": "Over-strict CSP breaks fonts/images until allowlisted; freezePrototype can break libs mutating Object.prototype.",
+   "reported_gain": "No speed gain; blocks XSS payload and prototype-pollution IPC hijack. Asset scope deny overrides allow.",
+   "sources": [
+    "https://v2.tauri.app/security/csp/",
+    "https://v2.tauri.app/security/asset-protocol/",
+    "https://v2.tauri.app/reference/config/",
+    "https://snyk.io/articles/5-common-security-misconfigurations/"
+   ],
+   "status": "production",
+   "what": "Build-time CSP nonce/hash injection, Object.prototype freezing, and glob-scoped asset: protocol gating convertFileSrc loads.",
+   "where_implemented": "app.security.{csp, assetProtocol, freezePrototype, dangerousDisableAssetCspModification} in tauri.conf.json"
+  },
+  {
+   "fit_reference_machine": "Perfect fit: updater is the only sanctioned network path, matching opt-in update check; artifacts reuse the MSI/NSIS installer.",
+   "harness_integration": "Gate updater:default capability behind opt-in toggle; static latest.json over HTTPS; guard TAURI_SIGNING_PRIVATE_KEY in CI; never lose key.",
+   "name": "Updater plugin with mandatory minisign signatures",
+   "quality_cost": "None on model quality; wrong latest.json/signature bricks updates until fixed.",
+   "reported_gain": "No tok/s gain; mandatory Ed25519 verify before install. TLS enforced; v1Compatible zip mode kept for v1 migrants, removed in v3.",
+   "sources": [
+    "https://v2.tauri.app/plugin/updater/",
+    "https://github.com/tauri-apps/plugins-workspace/blob/v2/plugins/updater/src/updater.rs"
+   ],
+   "status": "production",
+   "what": "In-app updates (check/download/install + relaunch) with mandatory Ed25519 signature verification against embedded pubkey.",
+   "where_implemented": "tauri-plugin-updater 2.x, plugins.updater config, createUpdaterArtifacts true"
+  },
+  {
+   "fit_reference_machine": "Perfect fit: llama-server/whisper.cpp ship as versioned sidecars beside the 8 GB-VRAM-aware backend picker; batch-1 unaffected.",
+   "harness_integration": "externalBin llama-server-<triple>.exe; spawn from Rust with argv allowlist; stream SSE via Channel; kill on RunEvent::Exit; one persistent server.",
+   "name": "Sidecar processes via shell plugin (externalBin)",
+   "quality_cost": "None; stale sidecar binary ships stale backend unless versioned with harness.",
+   "reported_gain": "No tok/s gain; avoids per-inference respawn (spawn ~50-200 ms + multi-second model reload on this laptop).",
+   "sources": [
+    "https://v2.tauri.app/develop/sidecar/",
+    "https://github.com/tauri-apps/plugins-workspace/tree/v2/plugins/shell",
+    "https://docs.rs/crate/tauri-plugin-shell/latest/source/src/lib.rs"
+   ],
+   "status": "production",
+   "what": "Bundled child binaries spawned with argv only (no shell); execute vs spawn gated by shell:allow-execute/spawn with exact arg allowlists.",
+   "where_implemented": "bundle.externalBin + tauri-plugin-shell 2.x Command::sidecar / app.shell().sidecar()"
+  },
+  {
+   "fit_reference_machine": "Ideal for token streaming on this laptop: per-token deltas (~10-50 B) stay on the fast eval path; batch only if deltas exceed 8 KB.",
+   "harness_integration": "Stream tokens over Channel<string>; batch tool-call JSON; use emit_raw only for ArrayBuffer payloads; never push images via eval.",
+   "name": "IPC Channel streaming (eval/fast vs fetch/slow path)",
+   "quality_cost": "None; chunking too coarse adds UI latency, too fine adds bridge overhead (~300 us floor for small payloads).",
+   "reported_gain": "Payloads <8192 B JSON / <1024 B raw use direct eval (~2x faster than fetch on WebView2 v135); larger use fetch-pull. 150 MB resp 29s->23s after #10641.",
+   "sources": [
+    "https://docs.rs/tauri/latest/src/tauri/ipc/channel.rs.html",
+    "https://github.com/tauri-apps/tauri/blob/cdf5276478f8c41cedff92fd730e6f85986387e1/crates/tauri/src/ipc/channel.rs",
+    "https://www.github.com/tauri-apps/tauri/commit/d0510f52eb7efeabe00df5030cf10be16f99e178"
+   ],
+   "status": "production",
+   "what": "Streaming IPC primitive: small messages delivered by direct JS eval, large ones staged server-side and pulled with fetch.",
+   "where_implemented": "tauri::ipc::Channel + Emitter::emit_raw/emit_raw_to (PR #14269), tauri 2.x"
+  },
+  {
+   "fit_reference_machine": "Good for thumbnails/plots on the laptop; keeps JS main thread free. Token path unaffected.",
+   "harness_integration": "Serve images/audio via custom scheme or asset: scope; signal readiness over Channel; frontend fetch()es bytes natively.",
+   "name": "Custom-protocol byte serving (invoke bypass)",
+   "quality_cost": "None; adds protocol-registration code and CSP/scope entries to audit.",
+   "reported_gain": "Community image bench: Vec<u8> over invoke arrives as JSON number array (worst); custom scheme fetched natively is fastest, ~zero main-thread cost.",
+   "sources": [
+    "https://github.com/iceinvein/tauri-ipc-bench",
+    "https://github.com/tauri-apps/tauri/issues/13758"
+   ],
+   "status": "production",
+   "what": "Serving binary blobs over a custom URI scheme / asset protocol fetched by the frontend instead of base64/JSON-array over invoke.",
+   "where_implemented": "register_uri_scheme_protocol / with_asynchronous_custom_protocol (wry, always-on since 0.56) + asset: scope"
+  },
+  {
+   "fit_reference_machine": "Good: downloadBootstrapper keeps offline installer lean; Win11 needs no runtime fetch. offlineInstaller (+127 MB) only for air-gapped offices.",
+   "harness_integration": "Default downloadBootstrapper + minimumWebview2Version gate; offer offlineInstaller build flavor for air-gapped small offices.",
+   "name": "WebView2 install modes + minimumWebview2Version",
+   "quality_cost": "fixedVersion freezes Chromium bugs; skip breaks the app if runtime missing.",
+   "reported_gain": "Size deltas: embedBootstrapper +1.8 MB, offlineInstaller +127 MB, fixedVersion +180 MB; downloadBootstrapper +0 MB.",
+   "sources": [
+    "https://v2.tauri.app/distribute/windows-installer/",
+    "https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution",
+    "https://github.com/tauri-apps/tauri/releases/tag/@tauri-apps%2Fcli-v2.11.0"
+   ],
+   "status": "production",
+   "what": "Five installer strategies for the WebView2 runtime plus a minimum-version gate that triggers the bootstrapper.",
+   "where_implemented": "bundle.windows.webviewInstallMode + bundle.windows.minimumWebview2Version (tauri-bundler 2.x)"
+  },
+  {
+   "fit_reference_machine": "Good: isolate untrusted RAG previews/cookies per profile on shared runtime; negligible memory cost for 2-3 profiles.",
+   "harness_integration": "Use default profile for chat; named profiles for plugin/untrusted preview webviews; deny device permissions by default handler.",
+   "name": "wry 0.56 permission handler + WebView2 named profiles",
+   "quality_cost": "None; over-denying breaks getUserMedia/geolocation features until allowed.",
+   "reported_gain": "Security/isolation only; covers all 12 COREWEBVIEW2_PERMISSION_KIND values with Allow/Deny/Prompt.",
+   "sources": [
+    "https://github.com/tauri-apps/wry/releases/tag/wry-v0.56.0",
+    "https://github.com/tauri-apps/wry/pull/1654",
+    "https://github.com/tauri-apps/wry/pull/1738"
+   ],
+   "status": "production",
+   "what": "Unified per-request permission API across backends plus isolated cookies/storage/IndexedDB per named WebView2 profile.",
+   "where_implemented": "wry 0.56 WebViewBuilder::with_permission_handler + WebViewBuilderExtWindows::with_profile_name"
+  },
+  {
+   "fit_reference_machine": "Good: NSIS per-user install needs no admin on office machines; MSI suits managed per-machine deploy. Both reuse updater artifacts.",
+   "harness_integration": "Ship NSIS per-user default + MSI per-machine; custom .nsi hooks only if needed; sign via signCommand; watch 7-call HSM cost.",
+   "name": "MSI (WiX v3) vs NSIS installers + signing",
+   "reported_gain": "No tok/s gain; NSIS cross-compiles via cargo-xwin, MSI needs Windows + VBSCRIPT feature. Signing now covers WiX/NSIS DLLs (7 calls).",
+   "quality_cost": "None on model quality; unsigned inner DLLs may trip strict AVs; post-build signing needs Store-zip + BOM-free JSON care.",
+   "sources": [
+    "https://v2.tauri.app/distribute/windows-installer/",
+    "https://www.github.com/tauri-apps/tauri/commit/8d994f60fe05ec0f45cbe926506bbe10b0d36e3c",
+    "https://github.com/tauri-apps/tauri/issues/15601",
+    "https://github.com/tauri-apps/tauri/pull/15422"
+   ],
+   "status": "production",
+   "what": "WiX MSI (Windows-only build, needs VBSCRIPT feature) vs NSIS setup.exe (cross-compilable, hooks, per-user/per-machine) with Authenticode signing.",
+   "where_implemented": "tauri-bundler 2.9.x bundle.windows.{wix, nsis}, certificateThumbprint/signCommand"
+  },
+  {
+   "fit_reference_machine": "Excellent: Solid fine-grained reactivity streams tokens at 60 fps with less JS work than VDOM; tiny bundle suits WebView2.",
+   "harness_integration": "Scaffold from create-tauri-app Solid TS template; pin @tauri-apps/api 2.11.x; stream via Channel into Solid signals; TanStack Router SPA mode.",
+   "name": "SolidJS official template + ecosystem",
+   "reported_gain": "No tok/s gain; fine-grained reactivity (no VDOM) lowers JS cost of 60 fps token streaming vs React.",
+   "quality_cost": "None on model quality; smaller hiring pool than React; SSR-prerender adds build complexity for zero desktop benefit.",
+   "sources": [
+    "https://v2.tauri.app/start/create-project/",
+    "https://github.com/riipandi/tauri-start-solid"
+   ],
+   "status": "production",
+   "what": "Official create-tauri-app SolidJS/TS template plus community starters (router, Tailwind, window-controls) on Vite.",
+   "where_implemented": "create-tauri-app Solid template; @tauri-apps/api 2.11.x; tauri-controls-v2 Solid package"
+  },
+  {
+   "fit_reference_machine": "Critical for this laptop: origin bug is Windows-specific; background-window OOM hits long coding sessions; fix by version pin + pull-model.",
+   "harness_integration": "Require tauri >=2.11.1; use opener not shell:open; never navigate privileged windows remotely; frontend-pull data; reload webview on crash.",
+   "name": "Known pitfalls: origin confusion, shell-open RCE, OOM",
+   "reported_gain": "No gain; fixes prevent RCE/IPC-escape. CVE-2026-42184 CVSS 8.8 (NVD 3.x); shell-open CVE-2025-31477 CVSS 9.3.",
+   "quality_cost": "Patching changes remote-command behavior (breaking for apps relying on open remote IPC); pull-model needs refactor of push code.",
+   "sources": [
+    "https://github.com/tauri-apps/tauri/security/advisories/GHSA-7gmj-67g7-phm9",
+    "https://github.com/advisories/GHSA-C9PR-Q8GX-3MGP",
+    "https://github.com/tauri-apps/tauri/issues/13758",
+    "https://github.com/tauri-apps/tauri/commit/7a2672f7cf11652eab794781c63a5bb0124deb68"
+   ],
+   "status": "production",
+   "what": "CVE-2026-42184 Windows origin confusion (fixed 2.11.1), shell-open protocol RCE (fixed shell 2.2.1), background-eval OOM crashes.",
+   "where_implemented": "tauri is_local_url() fix 2.11.1; tauri-plugin-shell 2.2.1; wry WebView2 eval path"
+  },
+  {
+   "fit_reference_machine": "unknown: unproven on batch-1 laptop streaming; binary codecs help 64 KB+ blobs, but per-token payloads are bridge-dominated (~300 us).",
+   "harness_integration": "Watch only: prototype behind a feature flag comparing Channel vs binary for image/diff payloads; do not rewire token path on Rust-ns numbers.",
+   "name": "Binary IPC codecs (conduit/RJON proposals)",
+   "quality_cost": "unknown: custom codecs risk type-mismatch bugs (u64/BigInt, Bytes) and bigger frontend bundles.",
+   "reported_gain": "Rust-side only: 25 B struct 722ns->330ns JSON-direct->78ns binary; 64 KB blob 2.27ms->0.83ms->0.20ms; end-to-end small msgs only ~1.3x.",
+   "sources": [
+    "https://github.com/userFRM/tauri-conduit/blob/master/BENCHMARKS.md",
+    "https://github.com/tauri-apps/tauri/issues/7706"
+   ],
+   "status": "research-only",
+   "what": "Experimental binary replacements for JSON IPC (sonic_rs direct, zero-copy binary, proposed RJON with BigInt/Bytes/Date) to cut serde overhead.",
+   "where_implemented": "userFRM/tauri-conduit (external bench); RJON issue tauri-apps/tauri#7706 (proposal, not merged)"
+  }
+ ]
+}

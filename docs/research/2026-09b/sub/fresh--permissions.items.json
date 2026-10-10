@@ -1,0 +1,221 @@
+{
+ "headline_findings": [
+  "Deny-first fixed precedence (Claude, Codex profiles) vs last-match-wins (opencode) vs model-graded safety (Cline, Cursor classifier) are the three permission design poles in 2026.",
+  "Native Windows command sandboxing is the industry-wide hole: only experimental AppContainer/Integrity-Level approaches exist; Claude and Cursor defer to WSL2.",
+  "Approval UX converges on once/session/always/deny plus diff or command preview; Cline's shadow-git checkpoints are the most forgiving undo model.",
+  "Classifier auto-review modes (Claude auto, Codex auto-review, Cursor Auto-review) cut prompt fatigue but vendors state they are non-boundaries.",
+  "Auditability is hook/transcript JSONL based; hash-chained logs, rotation, redaction and fail-closed policy are cheap patterns Cerebro can copy."
+ ],
+ "items": [
+  {
+   "fit_reference_machine": "Excellent fit: pure host-side JSON rules, zero GPU/RAM cost; PowerShell rule support matters on Win11; pair with WSL2 or job-object limits.",
+   "harness_integration": "Copy deny-first precedence and Tool(specifier) glob syntax into Cerebro config; enforce in Rust before spawning llama.cpp argv; add /permissions-style TUI list.",
+   "name": "Claude Code allow/ask/deny rules with modes",
+   "quality_cost": "None on model quality; misordered rules silently over/under-permit, and prefix Bash matches are bypassable by path or sh -c.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://code.claude.com/docs/en/permissions"
+   ],
+   "status": "production",
+   "what": "Three rule lists (allow, ask, deny) with deny-then-ask-then-allow precedence plus modes: manual, acceptEdits, plan, auto, dontAsk, bypassPermissions.",
+   "where_implemented": "Claude Code settings.json permissions.allow/ask/deny, permissions.defaultMode, /permissions dialog"
+  },
+  {
+   "fit_reference_machine": "Excellent fit: hooks are local scripts with timeouts; keep allowlist of interpreters (powershell.exe, node) and short timeouts on laptop.",
+   "harness_integration": "Add PreToolUse/PostToolUse hook Bicameral hook bus in Rust: spawn hook exe with JSON on stdin, honor allow/deny/ask JSON plus exit-2-blocks semantics.",
+   "name": "Claude Code PreToolUse hook policy gate",
+   "quality_cost": "None; risk is silent failure (hooks not firing on Windows, ask ignored under auto mode) leaving users unprotected.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://code.claude.com/docs/en/hooks.md",
+    "https://github.com/anthropics/claude-code/issues/25981",
+    "https://github.com/anthropics/claude-code/issues/85904"
+   ],
+   "status": "production",
+   "what": "User scripts run before/after each tool call and can allow, deny, prompt, or rewrite tool input; the community audit-log mechanism.",
+   "where_implemented": "Claude Code hooks PreToolUse, PostToolUse, PermissionRequest, PermissionDenied in settings.json"
+  },
+  {
+   "fit_reference_machine": "Partial fit: no native Windows sandbox, so on this laptop it only helps inside WSL2; document which path each benchmark used.",
+   "harness_integration": "Approximate with Windows job objects plus integrity levels for the llama.cpp child, and deny rules as the text layer on top.",
+   "name": "Claude Code Bash sandbox auto-allow",
+   "quality_cost": "None observed; sandboxed commands that need full access fall back to prompts or classifier.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://code.claude.com/docs/en/permissions"
+   ],
+   "status": "production",
+   "what": "Built-in Bash sandbox on macOS, Linux and WSL2 lets allowlisted-shape commands run with auto-allow while deny/ask rules still apply.",
+   "where_implemented": "Claude Code sandbox.enabled and autoAllowBashIfSandboxed settings, /sandbox command"
+  },
+  {
+   "fit_reference_machine": "Good fit conceptually; on native Win11 use read-only default plus on-request approvals since the Windows sandbox is experimental.",
+   "harness_integration": "Mirror the two-axis model: sandbox mode gates what the llama.cpp child and tool scripts can touch; approval policy gates when the TUI prompts.",
+   "name": "Codex sandbox modes x approval policies",
+   "quality_cost": "Stricter modes add prompts, not quality loss; YOLO-equivalent danger-full-access removes all gates.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://learn.chatgpt.com/docs/agent-approvals-security",
+    "https://github.com/openai/codex/blob/13c42a077c88a0d04ae7680a9891d2daf4558577/docs/sandbox.md"
+   ],
+   "status": "production",
+   "what": "Sandbox mode (read-only, workspace-write, danger-full-access) crossed with approval policy (on-request, never, unless-trusted, on-failure, granular).",
+   "where_implemented": "Codex CLI config.toml sandbox_mode and approval_policy, --sandbox and --ask-for-approval flags"
+  },
+  {
+   "fit_reference_machine": "Excellent fit: static prefix rules cost nothing at runtime and suit a small office sharing .codex/execpolicy files.",
+   "harness_integration": "Implement prefix_rule-style allow/prompt/forbidden lists for shell tools in Cerebro config; session accept persists a rule like Codex does.",
+   "name": "Codex execpolicy Starlark rules",
+   "quality_cost": "Overly broad patterns silently erase the approval boundary; docs advise narrow prefixes like cargo test over python.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://openai-codex.mintlify.app/concepts/approvals"
+   ],
+   "status": "production",
+   "what": "Starlark prefix_rule entries with allow, prompt or forbidden decisions persist trusted commands per project and across sessions.",
+   "where_implemented": "Codex .codex/execpolicy/*.rules files plus accept-and-add-to-policy approval UI"
+  },
+  {
+   "fit_reference_machine": "Good fit when stable; filesystem read/write/deny plus .env carve-outs map well to a small office least-privilege setup on Win11.",
+   "harness_integration": "Adopt profile schema (named profiles, extends, workspace roots, .env deny globs, domain allow/deny) as Cerebro permission profiles v1.",
+   "name": "Codex permission profiles (beta)",
+   "quality_cost": "unknown",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://developers.openai.com/codex/permissions"
+   ],
+   "status": "emerging",
+   "what": "Named profiles combining filesystem read/write/deny rules with network domain policy enforced through a proxy feature.",
+   "where_implemented": "Codex default_permissions and [permissions.<name>] tables, built-ins :read-only, :workspace, :danger-full-access"
+  },
+  {
+   "fit_reference_machine": "Poor direct fit: needs a second reviewer model, doubling VRAM/RAM pressure on an 8GB Ampere card at batch 1; use tiny local gate instead.",
+   "harness_integration": "Approximate with a deterministic rule gate plus optional small-model review step that can be disabled on the reference laptop.",
+   "name": "Codex and Cursor classifier auto-review",
+   "quality_cost": "Non-deterministic both directions: can allow what a user would block and vice versa; vendors say it is not a security boundary.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://developers.openai.com/codex/concepts/sandboxing/auto-review",
+    "https://cursor.com/changelog/auto-review"
+   ],
+   "status": "production",
+   "what": "A separate reviewer/classifier agent decides sandbox-escalation approvals instead of prompting the user; grants no new access.",
+   "where_implemented": "Codex approvals_reviewer=auto_review; Cursor Auto-review mode on Claude 4.5 Haiku or GPT-5.4 Mini"
+  },
+  {
+   "fit_reference_machine": "Excellent fit: trivial CPU cost, single JSON file, per-agent overlays suit coding-agent vs chat-agent splits on a laptop.",
+   "harness_integration": "Adopt per-tool glob objects plus external_directory guard; but choose deny-first instead of last-wins, and default to ask, not allow.",
+   "name": "opencode permission map with last-match-wins",
+   "quality_cost": "Permissive defaults plus last-wins ordering risk silent over-permission; .env deny default is the main safe built-in.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://opencode.ai/docs/permissions/",
+    "https://github.com/anomalyco/opencode/pull/6319"
+   ],
+   "status": "production",
+   "what": "Allow/ask/deny map keyed by tool with glob per-pattern objects where the last matching rule wins; --auto flips asks to approvals.",
+   "where_implemented": "opencode opencode.json permission key, --auto flag, v2 ordered permissions array with action/resource/effect"
+  },
+  {
+   "fit_reference_machine": "Excellent fit for a small office: global deny that repos cannot lift maps to owner-managed Cerebro policy on shared machines.",
+   "harness_integration": "Add a binary org-policy layer above per-agent rules: broader-scope deny wins, allow only lifts earlier deny, never prompts.",
+   "name": "opencode per-agent rules plus org policies",
+   "quality_cost": "None; policies only ever tighten what permissions would otherwise allow.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://opencode.ai/v2/docs/permissions/",
+    "https://opencode.ai/v2/docs/policies/"
+   ],
+   "status": "emerging",
+   "what": "Agent-specific permission overlays appended after global rules, plus binary experimental policies where broader authority always wins.",
+   "where_implemented": "opencode agents.<id>.permissions and experimental.policies with permission:<action>:<resource> statements"
+  },
+  {
+   "fit_reference_machine": "Good fit for friction, risky for safety: zero config cost but model-graded safety is non-deterministic on any hardware.",
+   "harness_integration": "Do not copy model-graded safety; if used, restrict to read-only classification and keep destructive commands on explicit rules.",
+   "name": "Cline category auto-approve with model-graded commands",
+   "quality_cost": "Model marks each command requires_approval itself; docs say examples are not guarantees, so risky commands can slip through.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://docs.cline.bot/features/auto-approve",
+    "https://github.com/cline/cline/blob/9dea336c/src/core/task/tools/autoApprove.ts"
+   ],
+   "status": "production",
+   "what": "Per-category toggles (read/edit project/all files, safe/all commands, browser, MCP) where the model flags commands safe or approval-required.",
+   "where_implemented": "Cline Auto Approve settings, yoloModeToggled, SDK toolPolicies autoApprove flags"
+  },
+  {
+   "fit_reference_machine": "Excellent fit: shadow git snapshots cost disk, not VRAM; ideal safety net for an offline laptop harness with destructive tools.",
+   "harness_integration": "Snapshot workspace (git-based shadow repo) after each tool call; offer per-step Compare diff plus restore-files/task/both in the TUI.",
+   "name": "Cline checkpoints with Compare and Restore",
+   "quality_cost": "None on quality; restores can desync conversation context from files if only one side is rolled back.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://docs.cline.bot/core-workflows/checkpoints",
+    "https://github.com/cline/cline/blob/65e9727c/src/integrations/checkpoints/index.ts"
+   ],
+   "status": "production",
+   "what": "Shadow-git snapshot after every tool call with multi-file diff Compare and Restore of files, task messages, or both.",
+   "where_implemented": "Cline CheckpointTracker and TaskCheckpointManager, checkpoint Compare/Restore buttons, /undo in CLI"
+  },
+  {
+   "fit_reference_machine": "Excellent fit: folder trust plus safe mode directly suits consultants opening untrusted client repos on one laptop.",
+   "harness_integration": "Add workspace trust: untrusted folders ignore project policy, disable auto-approve modes, skip MCP/env loading until user trusts.",
+   "name": "Gemini trusted folders with safe mode",
+   "quality_cost": "None; untrusted mode only restricts config loading and forces prompts.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://geminicli.com/docs/cli/trusted-folders/",
+    "https://github.com/google-gemini/gemini-cli/pull/7041"
+   ],
+   "status": "production",
+   "what": "Per-folder trust decision gating project settings, .env, extensions and MCP; untrusted folders force prompt-everything safe mode.",
+   "where_implemented": "Gemini CLI security.folderTrust, ~/.gemini/trustedFolders.json, /permissions trust dialog"
+  },
+  {
+   "fit_reference_machine": "Good fit: TOML policy plus expansion dialogs are cheap; Docker-based sandbox works on Win11 where native options are weakest.",
+   "harness_integration": "Copy the policy-engine shape (tool, decision, priority, modes, argsPattern) and turn sandbox denials into scoped one-run approval dialogs.",
+   "name": "Gemini policy engine plus sandbox expansion",
+   "quality_cost": "None; expansion approvals are per-run and scoped to the denied paths or network.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://geminicli.com/docs/cli/sandbox/",
+    "https://google-gemini.github.io/gemini-cli/docs/get-started/configuration.html"
+   ],
+   "status": "production",
+   "what": "TOML policy rules per tool and mode plus sandbox-expansion dialogs that convert a denial into a scoped one-run permission grant.",
+   "where_implemented": "Gemini CLI ~/.gemini/policies/*.toml, plan.toml tiers, Sandbox Expansion Request modal"
+  },
+  {
+   "fit_reference_machine": "Mixed fit: Seatbelt/Landlock help macOS/Linux, but on Win11 only WSL2 is supported, so native-laptop tests must note the sandbox gap.",
+   "harness_integration": "Offer Docker-based tool sandboxing as the Windows story (like Gemini) instead of pretending prefix rules contain anything.",
+   "name": "Windows sandbox gap across harnesses",
+   "quality_cost": "Sandboxed commands needing full access fail or reroute to prompts; behavior differs between native and WSL2 runs.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://geminicli.com/docs/cli/sandbox/",
+    "https://developers.openai.com/codex/permissions",
+    "https://cursor.com/docs/agent/security/run-modes",
+    "https://pypi.org/project/sneakoscope/0.4.1/"
+   ],
+   "status": "emerging",
+   "what": "Only experimental native Windows enforcement exists (Codex AppContainer token, Gemini icacls integrity); others require WSL2 or Docker.",
+   "where_implemented": "Codex elevated/unelevated Windows sandbox; Gemini windows-native; Cursor WSL2-only; agentguard run refuses on Windows"
+  },
+  {
+   "fit_reference_machine": "Excellent fit: three shipped patterns (JSONL log, hash chain, rotation/redaction) are all offline and laptop-cheap.",
+   "harness_integration": "Log every tool call as hash-chained JSONL from a separate process; add report/tail commands and fail-closed policy like cc-audit.",
+   "name": "Community audit-log hooks (cc-audit, agentguard, PolicyApprovalGate)",
+   "quality_cost": "None; fail-open internals keep a crashing auditor from bricking sessions while fail-closed policy keeps defaults enforced.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://pypi.org/project/cc-audit/0.1.2/",
+    "https://pypi.org/project/sneakoscope/0.4.1/",
+    "https://github.com/nobuo-miura/PolicyApprovalGate"
+   ],
+   "status": "production",
+   "what": "Local-only PreToolUse auditors writing append-only JSONL with blocklists, hash chains, rotation, redaction and session reports.",
+   "where_implemented": "cc-audit audit-policy.yaml; agentguard hook plus dashboard; policygate install-hook --host claude|codex"
+  }
+ ]
+}

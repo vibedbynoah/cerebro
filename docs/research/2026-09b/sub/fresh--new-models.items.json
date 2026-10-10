@@ -1,0 +1,199 @@
+{
+ "headline_findings": [
+  "Qwen3.8-27B (2026-08-14, Apache-2.0) is the default local quality pick with mature GGUFs; 2-bit fits 8GB VRAM + 32GB RAM via offload.",
+  "Gemma 4 E2B/E4B/12B/26B-A4B/31B (Apache-2.0) are the only frontier VL family fully or partly runnable on the reference laptop.",
+  "gpt-oss-20b MXFP4 remains the only frontier reasoning model fully usable on 8GB VRAM; 120b needs 64GB+.",
+  "DeepSeek-V4.1-Flash, GLM-5.3/Flash, Hy4, Qwen-Max 2.4T and Mistral Medium 3.5 are API-only on this hardware (300GB-1.5TB weights).",
+  "Laguna XS 2.1 (33B-A3B, OpenMDW-1.1) with DFlash drafter is the most promising fast local coding MoE; needs recent llama.cpp."
+ ],
+ "items": [
+  {
+   "fit_reference_machine": "Partial: IQ2_XXS 7-8GB file runs with GPU/CPU split at 8-32K; Q4_K_M 16-19GB needs heavy offload. Best quality-per-GB local pick.",
+   "harness_integration": "One-click GGUF entry with quant tiers, mmproj-F16 download, -c presets, MTP toggle, thinking/reasoning_effort switches via argv.",
+   "name": "Qwen3.8-27B",
+   "quality_cost": "Vendor: LiveCodeBench v6 90.3, GPQA 89.2, SWE-Pro 61.7. 2-bit costs some reasoning; GSQ-RCO claims near-BF16 at 3bpw.",
+   "reported_gain": "Vendor HF card, Claude-Code harness: TB2.1 73.0, SWE-Pro 61.7, OSWorld 84.3, 262K native to 1M via YaRN.",
+   "sources": [
+    "https://huggingface.co/Qwen/Qwen3.8-27B",
+    "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF"
+   ],
+   "status": "production",
+   "what": "27B dense native vision-language model, hybrid Gated DeltaNet+Attention, MTP, thinking by default, 262K context.",
+   "where_implemented": "Qwen/Qwen3.8-27B (Apache-2.0); GGUF unsloth/Qwen3.8-27B-GGUF; llama.cpp/Ollama/vLLM/SGLang"
+  },
+  {
+   "fit_reference_machine": "None locally: 397GB 1-bit file needs ~450GB RAM; BF16 ~4.9TB. API-only on reference machine.",
+   "harness_integration": "Expose as opt-in API endpoint entry only; hide local-install button; note YaRN and NVFP4 need Blackwell nodes.",
+   "name": "Qwen3.8-2.4T-A95B (Max)",
+   "quality_cost": "Flagship quality; 1-bit/2-bit GGUF degradation unverified vs BF16 on laptop-relevant tasks.",
+   "reported_gain": "2.4T MoE, 95B active; vendor: Terminal-Bench 2.1 ~86.6 class (secondary tracker). Datacenter batch, not batch-1.",
+   "sources": [
+    "https://qwen.ai/blog?id=qwen3.8",
+    "https://aws.amazon.com/blogs/machine-learning/deploying-qwen3-8-2-4t-a95b-on-amazon-sagemaker-hyperpod-with-vllm/"
+   ],
+   "status": "production",
+   "what": "First open Max-class MoE, 2.4T total / 95B active, hybrid linear+full attention, 262K to 1M context.",
+   "where_implemented": "Qwen HF org + ModelScope; vLLM NVFP4/MXFP4 on 8xB300; license file must be re-checked"
+  },
+  {
+   "fit_reference_machine": "Unverified; likely server-scale. Gate behind experimental flag until GGUF + llama.cpp support confirmed.",
+   "harness_integration": "Feature-flagged catalog entry; spawn via vLLM/SGLang recipe first, add GGUF path only after upstream support lands.",
+   "name": "Qwen3.8-Flash-Next",
+   "quality_cost": "Unknown; new architecture trades some peak quality for cost/latency.",
+   "reported_gain": "Positioned as Qwen4 arch preview; QwenCloud serve $0.16 in / $0.47 out per 1M tokens.",
+   "sources": [
+    "https://www.alibabacloud.com/blog/qwen3-8-flash-next-a-new-architecture-towards-ultimate-cost-efficiency_603501"
+   ],
+   "status": "emerging",
+   "what": "Open multimodal MoE previewing Qwen4 architecture; same role Qwen3-Next played for Qwen3.5.",
+   "where_implemented": "HuggingFace + ModelScope open weights; QwenCloud qwen3.8-flash production endpoint"
+  },
+  {
+   "fit_reference_machine": "No local fit; research preview. Do not offer in one-click catalog.",
+   "harness_integration": "Track only; future audio/video agent work via Qwen-MM-Plugins and Qwen-Live-Harness repos.",
+   "name": "Qwen3.8-Omni-Flash",
+   "quality_cost": "Omni training preserves text ability per vendor; audio/video gains task-dependent.",
+   "reported_gain": "Vendor: +25% avg over 29 audio/AV tasks vs Qwen3.5-Omni-Plus; 1M context; audio cost -98% claimed.",
+   "sources": [
+    "https://arxiv.org/abs/2609.25611"
+   ],
+   "status": "research-only",
+   "what": "Native omni MoE for text+image+audio+video, Thinker-Talker, built for long-horizon multimodal agents.",
+   "where_implemented": "arXiv 2609.25611 (2026-09-22); Qwen-MM-Plugins + Qwen-Live-Harness on GitHub"
+  },
+  {
+   "fit_reference_machine": "None: ~552-763B class, no mature small GGUF at release; needs multi-GPU + storage cluster. API-only.",
+   "harness_integration": "API endpoint entry; no llama.cpp argv path yet; note missing Jinja template uses encoding/ + deepseek-recipe Rust libs.",
+   "name": "DeepSeek-V4.1-Flash",
+   "quality_cost": "Vendor: beats V4-Pro on cheap agentic tier; loses hard sets vs Opus/GPT-5.6. FP4 KV effects need independent checks.",
+   "reported_gain": "Vendor internal max-effort: TB2.1 90.6, DeepSWE 74.2, CyberGym 88.1; KV 890B/token, 1/4 HBM 1/8 SSD vs V4-Flash.",
+   "sources": [
+    "https://www.deepseek.com/en/news/deepseek-v4-1-flash/",
+    "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash"
+   ],
+   "status": "production",
+   "what": "552B multimodal MoE, Causal Encoder-Decoder 8B prefill / 16B decode, CSA2 + FP4 KV, 1M context, MIT.",
+   "where_implemented": "deepseek-ai/DeepSeek-V4.1-Flash (MIT); API deepseek-flash; vLLM/SGLang recipes"
+  },
+  {
+   "fit_reference_machine": "None locally: FP8 ~756GB / 141 shards. API-only on reference laptop and small office.",
+   "harness_integration": "API-only catalog entry; surface custom glm-5.3 license gate ($10B MaaS review) in installer text.",
+   "name": "GLM-5.3 flagship",
+   "quality_cost": "Post-training-only gains; cyber uplift raises misuse review needs; vendor benchmarks self-reported.",
+   "reported_gain": "Vendor Claude-Code harness: TB2.1 88.2, TB3.0 28.3, CyberGym 84.5, ExploitBench 54.4 (2.2x vs 5.2).",
+   "sources": [
+    "https://huggingface.co/zai-org/GLM-5.3"
+   ],
+   "status": "production",
+   "what": "744-753B MoE (40B active), same base as GLM-5.2, post-training uplift, text-only, 1M context, custom license.",
+   "where_implemented": "zai-org/GLM-5.3 BF16+FP8; SGLang/vLLM/TokenSpeed/Transformers/KTransformers/Unsloth"
+  },
+  {
+   "fit_reference_machine": "None on laptop: FP8 ~331GB. Workstation (128GB+) 3-bit possible but unverified. API-first.",
+   "harness_integration": "API entry with MIT badge; add local path later via SGLang/vLLM recipe; no llama.cpp GGUF promise.",
+   "name": "GLM-5.3-Flash",
+   "quality_cost": "Smaller base trails flagship on hard coding/cyber; vendor AA index 57 vs 60 flagship.",
+   "reported_gain": "320B/18B active multimodal (text+image+video), 1M context; API $0.15 in / $0.50 out per 1M list.",
+   "sources": [
+    "https://z.ai/blog/glm-5.3-flash",
+    "https://huggingface.co/zai-org/GLM-5.3"
+   ],
+   "status": "production",
+   "what": "320B MoE efficiency variant, new base, hybrid linear+sparse, native multimodal, MIT license.",
+   "where_implemented": "zai-org/GLM-5.3-Flash (+BF16); SGLang, vLLM, TokenSpeed; ex-stealth Ox Alpha on OpenRouter"
+  },
+  {
+   "fit_reference_machine": "None: FP8 ~814GB, BF16 ~1.56TB; ref recipe 8-way TP on B200/B300. API-only.",
+   "harness_integration": "API-only entry; Apache-2.0 simplifies bundling vs custom licenses; no GGUF catalog row yet.",
+   "name": "Tencent Hy4 preview",
+   "quality_cost": "Preview: slow reasoning and over-verification listed as known issues; internal 2.99/4 blind test only.",
+   "reported_gain": "770B/49B active, 1M+ context; internal 203-task test 2.99/4 vs GLM-5.3 2.92, Kimi K3 2.94; 31.8% serving gain.",
+   "sources": [
+    "https://www.tencent.com/tencent-releases-and-open-sources-tencent-hy4-preview/"
+   ],
+   "status": "production",
+   "what": "Hunyuan MoE 770B/49B active for coding/office/science, Apache-2.0 BF16+FP8, preview-first release.",
+   "where_implemented": "tencent/Hy4-preview (+FP8) on HF/ModelScope; vLLM/SGLang; TokenHub + OpenRouter APIs"
+  },
+  {
+   "fit_reference_machine": "Yes: E2B ~3GB, E4B ~6GB 4-bit, 12B ~8GB 4-bit fit fully; 26B-A4B ~18GB via offload (3.8B active, fast); 31B ~20GB tight.",
+   "harness_integration": "Default offline VL rows; official ggml-org GGUFs, llama.cpp mtmd --mmproj, image-token budget 70-1120, MTP assistant toggle.",
+   "name": "Gemma 4 family (E2B/E4B/12B/26B-A4B/31B)",
+   "quality_cost": "Small sizes trail 31B on hard reasoning; shared-KV + QAT design keeps quality high per vendor Arena scores.",
+   "reported_gain": "Vendor: Arena 1452 (31B) / 1441 (26B-MoE); 128-256K context; multimodal OCR/chart/GUI per HF demos.",
+   "sources": [
+    "https://blog.google/innovation-and-ai/technology/developers-tools/gemma-4/",
+    "https://huggingface.co/blog/gemma4"
+   ],
+   "status": "production",
+   "what": "Apache-2.0 native multimodal family: dense 2-31B plus 26B MoE (3.8B active), thinking + MTP drafters.",
+   "where_implemented": "google/gemma-4-* on HF/Kaggle/Ollama; ggml-org GGUFs; llama.cpp/MLX/transformers day-0"
+  },
+  {
+   "fit_reference_machine": "Unknown; needs H100-class for claimed 1100 tok/s. No laptop recommendation yet.",
+   "harness_integration": "Track only; no spawn path until transformers diffusion class or llama.cpp port stabilizes.",
+   "name": "DiffusionGemma 26B-A4B",
+   "quality_cost": "Clear cost: MMLU-Pro 77.6 vs 82.6, AIME 69.1 vs 88.3 vs autoregressive 26B; faster on simple/structured tasks.",
+   "reported_gain": "Vendor: 15-20 tokens per forward pass, >1100 tok/s per-user on H100 FP8 at low batch; 256K context.",
+   "sources": [
+    "https://huggingface.co/blog/gemma4"
+   ],
+   "status": "emerging",
+   "what": "Discrete-diffusion text generator on 26B-A4B MoE base, block-parallel denoising, Apache-2.0.",
+   "where_implemented": "google/diffusiongemma-26B-A4B-it; DiffusionGemmaForBlockDiffusion in transformers"
+  },
+  {
+   "fit_reference_machine": "20b yes: MXFP4 ~12GB, 14.9GB @8K; partial --n-cpu-moe split runs on 8GB cards. 120b no (64GB @8K).",
+   "harness_integration": "Default offline reasoning row: -hf ggml-org/gpt-oss-20b-GGUF, --jinja, -fa, --n-cpu-moe auto-tier, harmony template intact.",
+   "name": "gpt-oss-20b / 120b",
+   "quality_cost": "MXFP4 native so ~Q4 size at near-full quality per vendor; harmony format required or output breaks.",
+   "reported_gain": "21B/3.6B and 117B/5.1B MoE; llama.cpp guide: 20b laptop-runnable, 120b single-80GB-GPU class; 128K context.",
+   "sources": [
+    "https://github.com/openai/gpt-oss"
+   ],
+   "status": "production",
+   "what": "OpenAI open MoE reasoning models, Apache-2.0, adjustable reasoning, agentic tool use, MXFP4 native.",
+   "where_implemented": "openai/gpt-oss-20b/120b; ggml-org GGUFs; llama.cpp -hf --jinja --n-cpu-moe; Ollama gpt-oss:20b"
+  },
+  {
+   "fit_reference_machine": "Experimental: Q4_K_M ~20GB file; needs INT4 + DFlash + offload and 8-32K context on 8/32GB laptop; 36GB Mac is sweet spot.",
+   "harness_integration": "Experimental row: official poolside GGUF + DFlash 0.5B drafter, require llama.cpp >= PR 25165 build check, 256K cap.",
+   "name": "Laguna XS 2.1",
+   "quality_cost": "Vendor-only coding suite; no independent rerun yet; DFlash ~2x tok/s at ~70% accept on coding tasks.",
+   "reported_gain": "33B-A3B MoE; vendor: SWE-Verified 70.9%, Multilingual 63.1% (+5.4), 256K; FP8/INT4/NVFP4 + GGUF.",
+   "sources": [
+    "https://poolside.ai/blog/introducing-laguna-xs-2-1"
+   ],
+   "status": "production",
+   "what": "Poolside 33B/3B-active agentic coding MoE, interleaved thinking, OpenMDW-1.1, DFlash speculators.",
+   "where_implemented": "poolside/Laguna-XS-2.1 + GGUF repo; Ollama laguna-xs-2.1; vLLM/SGLang/TRT-LLM; llama.cpp PR 25165"
+  },
+  {
+   "fit_reference_machine": "None locally: dense 128B needs ~4 GPUs / ~70GB+ at Q4. API-only; note revenue carve-out.",
+   "harness_integration": "API-only entry; surface modified-MIT enterprise gate in license screen; Ollama tag for workstation users.",
+   "name": "Mistral Medium 3.5 128B",
+   "quality_cost": "Single-weight instruct+reasoning+coding merge; vendor 77.6% SWE-Verified; dense predictability vs MoE.",
+   "reported_gain": "Dense 128B, 256K, vision encoder from scratch, configurable reasoning; API $1.5 in / $7.5 out per 1M.",
+   "sources": [
+    "https://mistral.ai/news/vibe-remote-agents-mistral-medium-3-5/"
+   ],
+   "status": "production",
+   "what": "Mistral flagship merged dense model for coding/agents, 128B, 256K, multimodal, modified MIT.",
+   "where_implemented": "mistralai/Mistral-Medium-3.5-128B; Ollama mistral-medium-3.5; NVIDIA NIM; Le Chat/Vibe default"
+  },
+  {
+   "fit_reference_machine": "Yes for OCR-2: ~4GB at 4-bit, single consumer GPU. Embeddings: no new verified release; keep existing picks.",
+   "harness_integration": "Sidecar ingest row for OCR-2 via Python/vLLM (llama.cpp VL unverified); embeddings catalog unchanged until primary source.",
+   "name": "DeepSeek-OCR-2 + embeddings gap",
+   "quality_cost": "OCR specialist boosts RAG ingest; not a chat/coding model. No verified new open embedder in window.",
+   "reported_gain": "OCR-2: 3B MoE / 570M active, 256-1120 visual tokens, Apache-2.0. Embeddings: unverified, use stable models.",
+   "sources": [
+    "https://huggingface.co/deepseek-ai/DeepSeek-OCR-2",
+    "https://github.com/deepseek-ai/DeepSeek-OCR-2"
+   ],
+   "status": "production",
+   "what": "OCR-2 is a small Apache-2.0 document VLM for RAG ingest; no Aug-Sep 2026 open embedder verified.",
+   "where_implemented": "deepseek-ai/DeepSeek-OCR-2 (HF + GitHub); embeddings: Qwen3-Embedding/bge-m3 as incumbents"
+  }
+ ]
+}

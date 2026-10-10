@@ -1,0 +1,226 @@
+{
+ "headline_findings": [
+  "Qwen3-Embedding-0.6B plus Qwen3-Reranker-0.6B both run locally via llama-server and form the default offline recall plus rerank pair",
+  "Consensus local pipeline is tantivy BM25 plus cosine vectors fused by RRF k=60 with a tau=0.50 rejection gate and fact-level atomic chunking",
+  "sqlite-vec (exact) and LanceDB (embedded ANN plus versioning) cover the no-server store ladder; docling.rs gives a Rust-native Windows ingestion path"
+ ],
+ "items": [
+  {
+   "fit_reference_machine": "Excellent: 0.6B Q4_K_M ~0.4GB fits 8GB VRAM alongside coder model; batch-1 CPU fallback fine; 32K ctx covers long chunks",
+   "harness_integration": "Spawn llama-server child: -m qwen3-embedding-0.6b-q4_k_m.gguf --embedding --pooling last -ngl 99 on 127.0.0.1; allowlist those argv flags; cache vectors in SQLite",
+   "name": "Qwen3-Embedding-0.6B via llama.cpp",
+   "quality_cost": "Top-tier 2025 MTEB (8B 70.58); 0.6B trails 4B/8B; dropping Instruct prefix costs ~1-5% retrieval",
+   "reported_gain": "8B scored 70.58 MTEB multilingual June 2025; 0.6B is efficiency tier; conditions: MTEB eval harness, not batch-1 laptop",
+   "sources": [
+    "https://github.com/QwenLM/Qwen3-Embedding",
+    "https://github.com/ggml-org/llama.cpp/pull/14029"
+   ],
+   "status": "production",
+   "what": "0.6B/4B/8B instruction-aware embedding family with 32K context and Matryoshka dims; llama.cpp serves it with --embedding --pooling last",
+   "where_implemented": "Qwen/Qwen3-Embedding-0.6B GGUF + llama.cpp --embedding --pooling last (support merged PR #15023)"
+  },
+  {
+   "fit_reference_machine": "Excellent: 0.6B reranker Q4_K_M is small; per-query cross-encoding is slower than bi-encoder so cap rerank depth at 5-20 docs",
+   "harness_integration": "Spawn second llama-server child with --reranking --alias qwen3-reranker-0.6b on another loopback port; POST query plus documents; sort by relevance_score",
+   "name": "Qwen3-Reranker-0.6B via llama-server",
+   "quality_cost": "Large quality lift on retrieval subsets (0.6B 65.80 MTEB-R, 67.28 MLDR); adds per-doc cross-encoder latency",
+   "reported_gain": "0.6B: 65.80 MTEB-R, 71.31 CMTEB-R, 67.28 MLDR, 73.42 code; 4B: 69.76 MTEB-R, 81.20 code; top-100 from Qwen3-Embedding-0.6B",
+   "sources": [
+    "https://github.com/QwenLM/Qwen3-Embedding",
+    "https://github.com/ggml-org/llama.cpp/pull/14029",
+    "https://github.com/ggerganov/llama.cpp/commit/b5bd037832bcb8ed3086dfe26ce9090bea989af1",
+    "https://github.com/ggml-org/llama.cpp/blob/873c825611d9cb76427931b5e74642bade4853dd/tools/server/README.md"
+   ],
+   "status": "production",
+   "what": "Cross-encoder reranker framing relevance as softmaxed yes/no score; llama.cpp exposes it at POST /reranking behind --reranking",
+   "where_implemented": "Qwen/Qwen3-Reranker-0.6B GGUF + llama.cpp PR #15824 (commit b5bd037, Sep 2025) + --reranking server flag"
+  },
+  {
+   "fit_reference_machine": "Good: 568M, Q4_K_M ~438MB; runs on CUDA or CPU; 8192 ctx handles long office docs without chunking tricks",
+   "harness_integration": "Alternative embedder child: llama-server -hf gpustack/bge-m3-GGUF:Q4_K_M --embedding; store dense vectors; use sparse weights for hybrid fusion",
+   "name": "BGE-M3 GGUF local embedder",
+   "quality_cost": "Strong multilingual quality; GGUF quant loses little at Q4_K_M; ColBERT mode costs extra storage and compute",
+   "reported_gain": "BGE-M3: 1024 dims, 8192 ctx, dense plus sparse plus ColBERT from one pass; GGUF Q4_K_M 438MB, Q8_0 635MB per HF page",
+   "sources": [
+    "https://huggingface.co/gpustack/bge-m3-GGUF"
+   ],
+   "status": "production",
+   "what": "568M MIT multilingual embedder emitting dense, sparse lexical and ColBERT vectors; GGUF builds run under llama.cpp",
+   "where_implemented": "BAAI/bge-m3 via gpustack/bge-m3-GGUF + llama serve -hf gpustack/bge-m3-GGUF:Q4_K_M"
+  },
+  {
+   "fit_reference_machine": "Good for small office: 305M active, Q4_K_M ~328MB; but 512-token cap forces aggressive chunking of long docs",
+   "harness_integration": "Optional small embedder child for query-side or prefix-truncated index; enforce search_query/search_document prefixes in Rust preprocessing",
+   "name": "Nomic embed v2 MoE GGUF",
+   "quality_cost": "SoTA in ~300M class, near 2x-size models; truncated 256-dim mode saves 3x storage with small quality loss",
+   "reported_gain": "52.86 BEIR, 65.80 MIRACL at 768 dims; Matryoshka 768->256 cuts storage ~3x; conditions: paper eval harness, large batch, not laptop batch-1",
+   "sources": [
+    "https://huggingface.co/nomic-ai/nomic-embed-text-v2-moe-GGUF"
+   ],
+   "status": "production",
+   "what": "475M total / 305M active MoE multilingual embedder (8 experts top-2) with Matryoshka dims and llama.cpp GGUF quants",
+   "where_implemented": "nomic-ai/nomic-embed-text-v2-moe-GGUF + llama-server -m <file> --embeddings"
+  },
+  {
+   "fit_reference_machine": "Excellent: pure CPU/Rust, negligible RAM at small-office scale; no GPU needed; sugest default for Cerebro v1",
+   "harness_integration": "Implement in Rust: tantivy index for BM25 leg, cosine scan or ANN for vector leg, RRF k=60 merge, then optional Qwen3 rerank top-N",
+   "name": "Hybrid BM25 plus vectors with RRF k=60",
+   "quality_cost": "Hybrid typically beats either leg alone on mixed keyword plus paraphrase loads; small extra indexing and tuning cost",
+   "reported_gain": "MemX: hybrid plus 4-factor rerank held 91-100% Hit@1 on 43 custom queries; Mem0 v3 cites multi-signal fusion gains on managed stack",
+   "sources": [
+    "https://arxiv.org/html/2603.16171v1",
+    "https://github.com/mem0ai/mem0",
+    "https://github.com/getzep/graphiti"
+   ],
+   "status": "production",
+   "what": "Parallel cosine vector recall and tantivy/FTS5 keyword recall fused by Reciprocal Rank Fusion, then cross-encoder rerank",
+   "where_implemented": "MemX Rust+libSQL pipeline; Mem0 v3 multi-signal retrieval; Graphiti semantic+BM25+graph; kwaai_rag::bm25 RRF k=60"
+  },
+  {
+   "fit_reference_machine": "Excellent: a float compare plus empty-set check; zero GPU/RAM cost; directly fixes hallucinated memory recall offline",
+   "harness_integration": "Gate every memory injection: if keyword set empty and max cosine below tau, inject nothing and let model say unknown; expose tau in config",
+   "name": "Low-confidence rejection gate (tau=0.50)",
+   "quality_cost": "Trades a little recall for far fewer spurious recalls; at tau 0.64 recall drops ~9pp while miss-empty hits 100%",
+   "reported_gain": "Tau 0.50 tied best 95.7% avg Hit@1 with 62.5% miss-empty on 43 queries; FTS5 cut keyword latency 1100x at 100K rows",
+   "sources": [
+    "https://arxiv.org/html/2603.16171v1"
+   ],
+   "status": "production",
+   "what": "Reject memory recall when keyword recall is empty and max vector similarity is below threshold tau (0.50 recommended)",
+   "where_implemented": "MemX Algorithm 1 + Section 5.3 threshold sweep over {0.48,0.50,0.52,0.64}"
+  },
+  {
+   "fit_reference_machine": "Excellent: more small rows fit the same SQLite/LanceDB file; extraction cost is one-time and can run idle-time on CPU",
+   "harness_integration": "Add Rust ingest step: LLM distills sessions/docs to atomic facts with source IDs; store typed facts with supersedes links; make dedup tag-aware",
+   "name": "Fact-level atomic chunking",
+   "quality_cost": "Doubles Hit@5/MRR vs session chunks; knowledge-update jumps most; naive tag-signature dedup can hurt tag-free facts (-5pp)",
+   "reported_gain": "LongMemEval 500 Qs: fact storage 51.6% Hit@5 / 0.38 MRR vs 24.6% / 0.18 session-level; update queries 30.8%->75.6%",
+   "sources": [
+    "https://arxiv.org/html/2603.16171v1"
+   ],
+   "status": "research-only",
+   "what": "LLM-extracted atomic facts as the retrieval unit instead of whole sessions or turns; semantic density per record drives quality",
+   "where_implemented": "MemX LongMemEval study: session 19K vs round 100K vs fact 220K records (DeepSeek-Chat extraction)"
+  },
+  {
+   "fit_reference_machine": "Excellent: pure Rust, Windows/Linux/macOS, mmap index, <10ms startup; ideal for desktop sidecar with no server",
+   "harness_integration": "Add tantivy crate dependency; persistent index dir beside SQLite file; incremental writer on ingest; spawn_blocking for search",
+   "name": "tantivy BM25 crate 0.26.x",
+   "quality_cost": "Best exact-term, identifier and error-code recall; needs stemming/tokenizer config; not semantic alone",
+   "reported_gain": "Project claims ~2x Lucene search latency on its benchmark game; tiny <10ms startup; conditions: vendor benchmark, not laptop RAG load",
+   "sources": [
+    "https://docs.rs/crate/tantivy/latest"
+   ],
+   "status": "production",
+   "what": "Lucene-inspired Rust full-text engine with BM25, incremental indexing and mmap directories; the keyword leg of hybrid RAG",
+   "where_implemented": "quickwit-oss/tantivy crate 0.26.2 (2026-09-08); tantivy-py and kwaai_rag::bm25 wrappers"
+  },
+  {
+   "fit_reference_machine": "Excellent to ~1M vectors: single .db file, zero infra, SIMD scans in ms at 100K scale; linear cost beyond that",
+   "harness_integration": "Bundle sqlite-vec extension or equivalent Rust vector table in existing SQLite file; one SQL join of chunks plus vectors plus FTS5",
+   "name": "sqlite-vec exact vector store",
+   "quality_cost": "Perfect recall, zero index corruption; query cost grows linearly with rows and dims; pre-1.0 API churn",
+   "reported_gain": "Exact brute-force KNN only; ANN (IVF/DiskANN) still open tracking issue #25 as of mid-2026; fast to a few 100K rows",
+   "sources": [
+    "https://dreaming.press/posts/lancedb-vs-sqlite-vec-vs-duckdb.html"
+   ],
+   "status": "production",
+   "what": "C SQLite extension adding vec0 virtual table with SIMD brute-force KNN inside the same .db as app state",
+   "where_implemented": "asg017/sqlite-vec v0.1.x vec0 table; ANN issue #25 unshipped"
+  },
+  {
+   "fit_reference_machine": "Good: embedded no-server, larger-than-RAM mmap, modest RAM (centroids plus page cache); heavier dep than sqlite-vec",
+   "harness_integration": "Add lancedb Rust crate; columnar table with vector plus FTS columns; build IVF-PQ/HNSW index once table grows; keep SQLite for metadata",
+   "name": "LanceDB embedded ANN store",
+   "quality_cost": "Approximate recall tradeoff set by caller; versioning/auditability gain; new format to adopt and ship",
+   "reported_gain": "IVF-PQ/HNSW on Lance format with MVCC time-travel and zero-copy schema evolution; 10M-vector index fits 2-4GB per cited blog",
+   "sources": [
+    "https://dreaming.press/posts/lancedb-vs-sqlite-vec-vs-duckdb.html"
+   ],
+   "status": "production",
+   "what": "Embedded Rust vector engine on Lance columnar files with ANN indexes, ACID, versioning and multimodal columns",
+   "where_implemented": "lancedb/lancedb crate (Rust+Python/JS); docs.rs lancedb; Lance format docs"
+  },
+  {
+   "fit_reference_machine": "Mixed: OSS self-host path exists but reference stack assumes cloud LLM plus Qdrant; port extraction prompts to local model for offline use",
+   "harness_integration": "Copy API shape (add/search with user_id) and MCP tool trio plus dashboard edit/delete; swap OpenAI embedder for local llama-server endpoint",
+   "name": "Mem0 v3 plus OpenMemory MCP",
+   "quality_cost": "Vendor claims 92.5 LoCoMo / 94.4 LongMemEval at ~7K tokens on managed stack; OSS self-host directionally similar, not identical",
+   "reported_gain": "Apr 2026 algo: single-pass ADD-only extraction, entity linking, semantic+BM25+entity fusion, temporal ranking; 21pt LoCoMo lift claimed",
+   "sources": [
+    "https://github.com/mem0ai/mem0"
+   ],
+   "status": "production",
+   "what": "Drop-in memory API with ADD-only extraction and multi-signal retrieval, plus local MCP server shared across editors",
+   "where_implemented": "mem0ai/mem0 (65.9k stars) OSS + Docker self-host + OpenMemory MCP tools add_memories/search_memory"
+  },
+  {
+   "fit_reference_machine": "Excellent: 500-line core, SQLite brute-force default, tiny footprint; Windows adapters exist with minor Hermes caveats",
+   "harness_integration": "Copy sidecar pattern: scheduled Rust task slices chat logs to job files, local model distills to Markdown memory/skills, progressive retrieve injects",
+   "name": "MemU Markdown-wiki memory",
+   "reported_gain": "unknown",
+   "quality_cost": "Human-readable editable wiki plus auto-distilled skills; retrieval quality depends on agent-written Markdown discipline",
+   "sources": [
+    "https://github.com/NevaMind-AI/MemU"
+   ],
+   "status": "production",
+   "what": "Agent-driven sidecar mining per-host session logs into a shared Markdown wiki/skill store with sqlite or pgvector backends",
+   "where_implemented": "NevaMind-AI/MemU (14.4k stars): memu-codex/claude-code/cursor/openclaw/hermes binaries + ~/.memu/config.env"
+  },
+  {
+   "fit_reference_machine": "Good: idle-time consolidation hides small-model weakness; filesystem tools already in model training data; needs local agent runtime",
+   "harness_integration": "Add idle/nightly Rust job: local model rewrites core-memory blocks and doc findings; keep chat path to grep plus vector search tools only",
+   "name": "Letta filesystem plus sleep-time consolidation",
+   "quality_cost": "Simple tools are more reliably used by agents than exotic graph APIs; background tokens cost extra but hide latency",
+   "reported_gain": "File-tools-only agent hit 74.0% LoCoMo (gpt-4o-mini) vs 68.5% graph variant; sleep-time cuts test-time compute ~5x on math tasks",
+   "sources": [
+    "https://www.letta.com/blog/benchmarking-ai-agent-memory/",
+    "https://www.letta.com/blog/sleep-time-compute/"
+   ],
+   "status": "emerging",
+   "what": "Plain file search tools for recall plus a background sleeper agent that reorganizes core memory off the critical path",
+   "where_implemented": "Letta filesystem tools (search_files/grep/open) + sleep-time agents (Letta 0.7.0) + arXiv 2504.13171"
+  },
+  {
+   "fit_reference_machine": "Poor as default (needs Neo4j/FalkorDB plus LLM extraction); good as optional power mode; FalkorDB-lite embed path is closest to laptop fit",
+   "harness_integration": "Defer full server; approximate with episodes table plus supersedes edges plus validity timestamps; add hybrid vector+BM25+1hop traversal later",
+   "name": "Graphiti temporal knowledge graph",
+   "quality_cost": "Best handling of changing facts with history preserved; write-time graph construction is the heaviest of the three compared systems",
+   "reported_gain": "Zep paper: 94.8% vs 93.4% DMR over MemGPT; up to +18.5% LongMemEval with -90% latency vs baseline; conditions: cloud stack, not laptop",
+   "sources": [
+    "https://github.com/getzep/graphiti"
+   ],
+   "status": "production",
+   "what": "Bi-temporal context graph with fact validity windows, invalidation-not-deletion and hybrid semantic plus keyword plus graph retrieval",
+   "where_implemented": "getzep/graphiti (31.1k stars) OSS + Zep Context Lake; backends Neo4j/FalkorDB/Neptune; OpenAI-compatible LLM/embedder incl. Ollama"
+  },
+  {
+   "fit_reference_machine": "Good for Office/HTML/PDF-text on Windows; scanned-PDF ML path needs pdfium+ONNX and is Linux-x64-only for now",
+   "harness_integration": "Shell out to docling-rs CLI or bind docling crate in Rust ingest worker; flags --no-ocr/--no-table-former for speed vs fidelity; WASM for client-side",
+   "name": "docling.rs Rust document parser",
+   "quality_cost": "Declarative formats byte-checked vs Python docling; --no-ocr fastest but drops headings/tables and empty on scanned PDFs",
+   "reported_gain": "Claims declarative 20-60x faster at ~60x less RAM; PDF ML 4.3x faster at 2.3-2.6x less RAM; conditions: in-repo fixtures, not office laptop",
+   "sources": [
+    "https://github.com/docling-project/docling.rs/blob/master/README.md"
+   ],
+   "status": "emerging",
+   "what": "Rust port of docling converting DOCX/PPTX/XLSX/HTML/PDF/images/audio to unified DoclingDocument Markdown/JSON plus RAG chunking",
+   "where_implemented": "docling-project/docling.rs crates docling/docling-pdf/docling-rag/docling-serve; CLI, HTTP, Node/Python/WASM/FFI bindings"
+  },
+  {
+   "fit_reference_machine": "Excellent: all recommended pieces run offline in-process or loopback with no inbound ports; fits small-office threat model",
+   "harness_integration": "Keep single libSQL file with per-user scope; default-off updater; explicit access vs retrieval counters; provenance plus delete per memory; PII gate",
+   "name": "Offline privacy control stack",
+   "quality_cost": "Local-first removes cloud leakage but puts backup, auth and redaction burden on Cerebro; over-strict redaction can hurt recall",
+   "reported_gain": "Structural gain: embedded tantivy/sqlite-vec/LanceDB open no network port, removing server-CVE family; no tok/s number applies",
+   "sources": [
+    "https://arxiv.org/html/2603.16171v1",
+    "https://github.com/getzep/graphiti",
+    "https://github.com/mem0ai/mem0"
+   ],
+   "status": "production",
+   "what": "Single-file local store, per-user scoping, redaction before embedding, episode provenance and GUI edit/delete with auth on local ports",
+   "where_implemented": "Pattern from MemX libSQL file + Graphiti episodes/validity + Mem0 self-host auth-default + OpenMemory dashboard"
+  }
+ ]
+}

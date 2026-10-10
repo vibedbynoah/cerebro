@@ -1,0 +1,230 @@
+{
+ "headline_findings": [
+  "MCP 2026-07-28 (2026-07-28) is the stable spec: stateless core, MRTR, header routing, cacheable lists, CIMD-first auth, Tasks/Apps as extensions.",
+  "TypeScript SDK v2 and Rust rmcp 3.x (3.4.0 on 2026-09-15) implement 2026-07-28; rmcp is the natural dependency for a Rust harness.",
+  "One-click distribution is MCPB .mcpb zips + official Registry (server.json/mcp-publisher) + host galleries/deeplinks.",
+  "No protocol fix for tool poisoning/rug pulls: pin hashes, allowlist, sandbox, human-in-loop confirmations, gateway scanning.",
+  "Image-gen MCP servers are all networked/API-keyed and conflict with Cerebro offline default; gate behind explicit opt-in."
+ ],
+ "items": [
+  {
+   "fit_reference_machine": "Excellent: pure client logic, no GPU/VRAM cost; stateless HTTP scales on plain localhost LB. Fits offline stdio use.",
+   "harness_integration": "Implement rmcp client with Discover lifecycle + _meta per request; cache tools/list via ttlMs; route on Mcp-Method headers.",
+   "name": "MCP spec 2026-07-28 stateless core",
+   "quality_cost": "None: wire change. App-level state moves to explicit server-minted handles passed as tool args.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://blog.modelcontextprotocol.io/posts/2026-07-28/",
+    "https://github.com/modelcontextprotocol/rust-sdk"
+   ],
+   "status": "production",
+   "what": "Stable 2026-07-28 spec: no initialize handshake or sessions; per-request version/caps in _meta plus server/discover RPC.",
+   "where_implemented": "modelcontextprotocol/modelcontextprotocol rev 2026-07-28; SEPs 2575, 2567, 2243, 2549, 2322, 2663"
+  },
+  {
+   "fit_reference_machine": "Good: small split packages reduce dep weight for local builds; works fully offline over stdio on the laptop.",
+   "harness_integration": "Use server package for Cerebro-owned tools and client package for spawning sidecars; reuse codemod pattern for config migration.",
+   "name": "TypeScript SDK v2 split packages",
+   "quality_cost": "None on quality; migration cost for session-id-era code only.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://github.com/modelcontextprotocol/typescript-sdk",
+    "https://blog.modelcontextprotocol.io/posts/2026-07-28/"
+   ],
+   "status": "production",
+   "what": "Monolithic SDK split into @modelcontextprotocol/server and /client v2.0.0 with Standard Schema and web-standard handlers.",
+   "where_implemented": "modelcontextprotocol/typescript-sdk main branch; npm @modelcontextprotocol/server@2.0.0, /client@2.0.0"
+  },
+  {
+   "fit_reference_machine": "Ideal: native Rust/tokio, tiny footprint, no VRAM/RAM pressure beside llama.cpp; stdio child supervision suits the laptop.",
+   "harness_integration": "Depend on rmcp with server feature; spawn sidecars via TokioChildProcess argv arrays; negotiate Discover with Auto fallback to 2025-11-25.",
+   "name": "Rust rmcp 3.x SDK",
+   "quality_cost": "None; object-typed tools unaffected by SEP-2106 outputSchema relaxation.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://github.com/modelcontextprotocol/rust-sdk",
+    "https://crates.io/crates/rmcp"
+   ],
+   "status": "production",
+   "what": "Official Rust SDK implementing stable 2026-07-28 with back-compat, MRTR, tasks, caching, routing headers, OAuth helpers.",
+   "where_implemented": "modelcontextprotocol/rust-sdk; crates.io rmcp 3.4.0 (2026-09-15), 3.0.0 cut 2026-07-28"
+  },
+  {
+   "fit_reference_machine": "Ideal for small-office distribution: single signed zip, bundled node_modules, no per-machine npm/python setup; verify hash before spawn.",
+   "harness_integration": "Ship curated local servers as signed .mcpb-style zips; validate manifest, template user_config, store secrets in OS vault (DPAPI/keychain).",
+   "name": "MCPB .mcpb one-click bundles",
+   "quality_cost": "None; same server code, fewer install failures from missing runtimes.",
+   "reported_gain": "Install friction: terminal+JSON editing replaced by download, double-click, Install (no batch-1 tok/s claim).",
+   "sources": [
+    "https://github.com/modelcontextprotocol/mcpb",
+    "https://www.anthropic.com/engineering/desktop-extensions"
+   ],
+   "status": "production",
+   "what": "Zip + manifest.json packaging for local MCP servers with config UI, secrets handling, auto-updates; renamed from .dxt late 2025.",
+   "where_implemented": "modelcontextprotocol/mcpb repo; @anthropic-ai/mcpb CLI (mcpb init/pack); Claude Desktop Extensions gallery"
+  },
+  {
+   "fit_reference_machine": "Good for discovery; laptop pulls only chosen pinned servers. Private sub-registry pattern suits an office allowlist mirror.",
+   "harness_integration": "Consume registry API for a vetted catalog; publish Cerebro servers with server.json; verify SHA-256 of artifacts before install.",
+   "name": "Official MCP Registry + mcp-publisher",
+   "quality_cost": "Registry is self-reported metadata; vetting still required to avoid typosquat/malicious servers.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://blog.modelcontextprotocol.io/posts/2025-09-08-mcp-registry-preview/",
+    "https://github.blog/ai-and-ml/generative-ai/how-to-find-install-and-manage-mcp-servers-with-the-github-mcp-registry/"
+   ],
+   "status": "production",
+   "what": "Hosted catalog at registry.modelcontextprotocol.io with OpenAPI, server.json manifests and mcp-publisher CLI for npm/PyPI/Docker/MCPB.",
+   "where_implemented": "registry.modelcontextprotocol.io (preview 2025-09-08); modelcontextprotocol/registry repo + GitHub MCP Registry one-click"
+  },
+  {
+   "fit_reference_machine": "Directly applicable: same Windows paths and Cursor-style mcp.json notation LM Studio documents; low overhead per sidecar process.",
+   "harness_integration": "Accept Claude/Cursor JSON plus VS Code servers key; support gallery, deeplink paste, per-server toggles and allowed_tools gating.",
+   "name": "Cross-host install pattern (Desktop/Cursor/VS Code/LM Studio/Claude Code)",
+   "quality_cost": "Claude-oriented servers can flood small local context windows; gating tools preserves reasoning quality.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://code.claude.com/docs/en/mcp",
+    "https://code.visualstudio.com/docs/agent-customization/mcp-servers",
+    "https://lmstudio.ai/docs/app/mcp",
+    "https://github.com/github/github-mcp-server/blob/main/docs/installation-guides/install-cursor.md"
+   ],
+   "status": "production",
+   "what": "JSON config (mcpServers vs VS Code servers) plus galleries, CLI adds, and install deeplinks across all major desktop hosts.",
+   "where_implemented": "Claude Desktop Extensions tab; Cursor ~/.cursor/mcp.json; VS Code .vscode/mcp.json; LM Studio ~/.lmstudio/mcp.json; claude mcp add"
+  },
+  {
+   "fit_reference_machine": "Relevant pattern for Cerebro: same namespace + pipeline-gating idea works on the 8GB laptop with a few local stdio tools.",
+   "harness_integration": "Copy namespacing (mcp__server__tool), tools/pre-execute gating, per-call timeouts, reconnect budgets, and paste-to-YAML converter UX.",
+   "name": "DSH dsh-mcp-client plugin bridge",
+   "quality_cost": "Only Tools bridged (no Resources/Prompts); image-only rich results. Narrower than full MCP but safer for small models.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://deepseekdocs.com/en/docs/features/mcp"
+   ],
+   "status": "production",
+   "what": "DeepSeek Harness mounts one MCP server per plugin instance, namespacing tools as mcp__server__tool under unified governance.",
+   "where_implemented": "@deepseek-ai/dsh-mcp-client (stdio + streamable-http) in cordis.yml; dsh-desktop Electron/Tauri markets"
+  },
+  {
+   "fit_reference_machine": "Partial: sandbox flags are macOS/Linux only, not Windows; trust dialogs, autostart policy and per-tool toggles apply on Windows.",
+   "harness_integration": "Copy trust-on-first-start, re-consent on argv hash change, autostart policy, per-tool toggles, enterprise allowlist; add Win Job-Object sandbox.",
+   "name": "VS Code sandbox + trust and approvals",
+   "quality_cost": "Sandboxed servers auto-approve calls; over-broad allowWrite/allowedDomains silently widens blast radius if misconfigured.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://code.visualstudio.com/docs/agent-customization/mcp-servers"
+   ],
+   "status": "production",
+   "what": "Per-server trust dialog, autostart policy, per-tool toggles, stdio sandboxing (fs allowWrite + network domains) and enterprise policy gating.",
+   "where_implemented": "VS Code MCP servers doc; mcp.json sandboxEnabled/sandbox object; chat.mcp.autostart; MCP: Reset Trust"
+  },
+  {
+   "fit_reference_machine": "Offline default needs none of this; enable only for opt-in remote servers. CIMD fetch needs SSRF guards if Cerebro ever acts as AS.",
+   "harness_integration": "For opt-in remote: CIMD-first with DCR fallback, RFC8707 resource binding, per-issuer credential store, iss validation, audience checks.",
+   "name": "OAuth 2.1 CIMD-first auth hardening",
+   "quality_cost": "None on output; misconfigured discovery/scope step-up breaks connections rather than degrading answers.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://blog.modelcontextprotocol.io/posts/2026-07-28/"
+   ],
+   "status": "production",
+   "what": "Six-SEP package: RFC9207 iss validation, per-issuer credential binding, application_type fix, refresh/scope/discovery cleanup, DCR deprecated.",
+   "where_implemented": "MCP 2026-07-28 auth; SEPs 2468/2352/837/2207/2350/2351; Tier 1 SDK OAuth helpers"
+  },
+  {
+   "fit_reference_machine": "Heavy for local models: interactive HTML + bidirectional tool loop adds context and render cost; use sparingly on batch-1 laptop.",
+   "harness_integration": "Render ui:// HTML in sandboxed WebView with strict CSP; require consent for UI-initiated tool calls; keep text fallback for local models.",
+   "name": "MCP Apps interactive UI extension",
+   "quality_cost": "Rich UI can distract small models; keep structuredContent lean so text fallback stays high quality.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://modelcontextprotocol.io/extensions/apps/overview"
+   ],
+   "status": "production",
+   "what": "Tools link _meta.ui.resourceUri to ui:// HTML rendered in sandboxed iframes with postMessage tool-call proxying and CSP.",
+   "where_implemented": "Extension io.modelcontextprotocol/ui (stable 2026-01-26); modelcontextprotocol/ext-apps SDK; Claude, VS Code Copilot, Goose, Postman"
+  },
+  {
+   "fit_reference_machine": "Direct threat to Cerebro: local sidecars with filesystem tools plus one poisoned server enable silent exfiltration on this laptop.",
+   "harness_integration": "Show full descriptions pre-install, pin tool hashes, isolate privileged tools, enforce server-side ACLs, confirm sensitive calls out-of-band.",
+   "name": "Tool poisoning attack class",
+   "quality_cost": "Defenses (schema pinning, confirmations) add friction but prevent silent hijack of otherwise good model output.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks",
+    "https://github.com/OWASP/www-community/blob/master/pages/attacks/MCP_Tool_Poisoning.md"
+   ],
+   "status": "production",
+   "what": "Hidden directives in tool descriptions/params hijack agents (SSH/config theft, email reroute) while UI shows benign summary.",
+   "where_implemented": "Demonstrated vs Cursor and other clients Apr 2025; OWASP community MCP_Tool_Poisoning page; MCPTox/CSA follow-ups"
+  },
+  {
+   "fit_reference_machine": "Same laptop risk via shared repo configs: one committed .cursor/mcp.json change can persist a malicious sidecar across reboots.",
+   "harness_integration": "Re-verify tool definitions every launch/call; alert on description/schema drift; bind approvals to content hash, not server name.",
+   "name": "Rug pulls, shadowing, MCPoison CVE-2025-54136",
+   "quality_cost": "Re-approval prompts add friction; without them a trusted tool silently turns malicious after review.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks",
+    "https://learn.microsoft.com/en-us/security/zero-trust/catalog-ai-attack-techniques/rug-pull-attack"
+   ],
+   "status": "production",
+   "what": "Approved tools redefined server-side; malicious servers override trusted tools cross-server; Cursor team-RCE via config swap, patched 1.3.9.",
+   "where_implemented": "Invariant Labs Apr 2025 demos; Microsoft Zero-Trust rug-pull catalog; CVE-2025-54136 (Cursor, CVSS 8.8)"
+  },
+  {
+   "fit_reference_machine": "Feasible on laptop (signature checks are cheap) but needs key infra Cerebro would have to ship and maintain offline.",
+   "harness_integration": "Prototype as opt-in: sign curated manifests, verify + version-pin before spawn, evaluate Cedar/OPA policy per call with call-stack limits.",
+   "name": "ETDI signed tool definitions + policy engine",
+   "quality_cost": "unknown",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://arxiv.org/html/2506.01333v1"
+   ],
+   "status": "research-only",
+   "what": "Signed versioned tool defs (incl. API-contract hash) plus OAuth scopes and PDP policy/call-stack checks against poisoning and rug pulls.",
+   "where_implemented": "arXiv 2506.01333 (2025-06-02); prototype fork vineethsai/python-sdk + MCP-ETDI-docs; not in MCP spec"
+  },
+  {
+   "fit_reference_machine": "Scores do not transfer to batch-1 laptop use; treat as vulnerability signal only, not a throughput or quality predictor.",
+   "harness_integration": "Use as test harness: build adversarial tool variants for Cerebro approvals UI and measure refusal/escape rate before shipping a server.",
+   "name": "MCPTox poisoning benchmark",
+   "quality_cost": "More capable instruction-followers proved more susceptible; hardening may slightly reduce tool-use eagerness.",
+   "reported_gain": "36.5% avg attack success across 20 LLMs (max 72.8%); lab benchmark, not laptop batch-1 measurement.",
+   "sources": [
+    "https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks"
+   ],
+   "status": "research-only",
+   "what": "353 adversarial variants of 45 live servers tested across 20 models to quantify tool-description poisoning success.",
+   "where_implemented": "unverified-arXiv-link; reported via CSA 2026-07-01/02 research notes and Invariant Labs follow-ups"
+  },
+  {
+   "fit_reference_machine": "Good fit: filesystem/fetch/memory run locally with small token cost; GitHub/Playwright/Postgres need network and keys (opt-in).",
+   "harness_integration": "Bundle filesystem (scoped dirs + Roots), fetch (URL to markdown), memory (JSONL graph) as default-deny sidecars with allowed_tools.",
+   "name": "Reference + community utility servers",
+   "quality_cost": "Brave/Search and browser servers bloat context for small locals; filesystem/memory keep quality high when scoped.",
+   "reported_gain": "unknown",
+   "sources": [
+    "https://github.com/github/github-mcp-server/blob/main/docs/installation-guides/install-cursor.md",
+    "https://lmstudio.ai/docs/app/mcp"
+   ],
+   "status": "production",
+   "what": "Filesystem, fetch, memory, git, sequential-thinking, time plus GitHub (ghcr image/hosted), Postgres, Playwright, Brave Search.",
+   "where_implemented": "modelcontextprotocol/servers (npx @modelcontextprotocol/server-*); ghcr.io/github/github-mcp-server; api.githubcopilot.com/mcp"
+  },
+  {
+   "fit_reference_machine": "Poor default fit: every option is cloud API + key + egress fees; local 8GB VRAM cannot serve FLUX-class weights as substitute here.",
+   "harness_integration": "Expose only as explicit network opt-in with cost/latency badge; prefer queue-and-download pattern; never bundle keys; log spend.",
+   "name": "Image-generation MCP servers",
+   "quality_cost": "External image quality high (FLUX/Recraft/Ideogram); local-model text reasoning unaffected except added tool-context size.",
+   "reported_gain": "Per-image cost about $0.003 Schnell to $0.08 2-Max; seconds for images, minutes for video; network-dependent, not laptop tok/s.",
+   "sources": [
+    "https://github.com/sena-labs/replicate-mcp-server"
+   ],
+   "status": "production",
+   "what": "mcpimg (OpenRouter/Together/Replicate/fal), mcp-fal-ai-image, and curated sena-labs Replicate studio with wait, download, cost tools.",
+   "where_implemented": "npm mcpimg / mcp-fal-ai-image; sena-labs/replicate-mcp-server (36 tools, .mcpb, Smithery, stdio + HTTP/SSE)"
+  }
+ ]
+}
