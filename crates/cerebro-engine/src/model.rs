@@ -12,7 +12,7 @@ use std::time::Instant;
 use rayon::prelude::*;
 
 use crate::gguf::{Gguf, TensorInfo};
-use crate::quant::{dequant_row, dot_q8_0_q8, dot_row, DType, QAct};
+use crate::quant::{dequant_row, dot_k_q8, dot_q8_0_q8, dot_row, DType, QAct};
 use crate::Error;
 
 #[derive(Debug, Clone)]
@@ -178,7 +178,7 @@ impl Model {
             for (j, o) in ch.iter_mut().enumerate() {
                 let r = ci * chunk + j;
                 let row = &all[r * rb..(r + 1) * rb];
-                *o = if dt == DType::Q8_0 { dot_q8_0_q8(row, qa) } else { dot_row(dt, row, x) };
+                *o = dot_any(dt, row, x, qa);
             }
         });
     }
@@ -211,7 +211,7 @@ impl Model {
             let rb = m.row_bytes;
             for r in r0..r0 + n {
                 let row = &all[r * rb..(r + 1) * rb];
-                let v = if m.dtype == DType::Q8_0 { dot_q8_0_q8(row, qa) } else { dot_row(m.dtype, row, x) };
+                let v = dot_any(m.dtype, row, x, qa);
                 // SAFETY: r < m.rows == the job's output length; ranges never overlap.
                 unsafe { *outs[ji].0.add(r) = v };
             }
@@ -220,6 +220,16 @@ impl Model {
 
     fn embed_row(&self, token: u32, out: &mut [f32]) {
         dequant_row(self.embed.dtype, self.row(&self.embed, token as usize), out);
+    }
+}
+
+/// One weight row times the activations: integer kernels for Q8_0 and the K-quants, float otherwise.
+#[inline]
+pub(crate) fn dot_any(dt: DType, row: &[u8], x: &[f32], qa: &QAct) -> f32 {
+    match dt {
+        DType::Q8_0 => dot_q8_0_q8(row, qa),
+        DType::Q4K | DType::Q5K | DType::Q6K => dot_k_q8(dt, row, qa),
+        _ => dot_row(dt, row, x),
     }
 }
 
