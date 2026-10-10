@@ -85,6 +85,10 @@ struct Funcs {
     moe_silu: CudaFunction,
     moe_combine: CudaFunction,
     matvec_k: CudaFunction,
+    kmatmul: CudaFunction,
+    router_b: CudaFunction,
+    scatter_add: CudaFunction,
+    add_inplace: CudaFunction,
 }
 
 /// GPU-side block size of a K-quant format (Q6_K padded to 224 bytes for aligned loads) and its GGML
@@ -157,6 +161,16 @@ struct MoeGpu {
     h_pin: PinnedHostSlice<f32>,
     cpu_pin: PinnedHostSlice<f32>,
     h_h: Vec<f32>,
+    // Prompt-processing scratch (CHUNK tokens).
+    bh: CudaSlice<f32>,
+    bsel: CudaSlice<i32>,
+    bidx: CudaSlice<i32>,
+    bw: CudaSlice<f32>,
+    bgu: CudaSlice<f32>,
+    baxq: CudaSlice<i8>,
+    baxd: CudaSlice<f32>,
+    beo: CudaSlice<f32>,
+    bcpu: CudaSlice<f32>,
     qa: QAct,
     scratch: MoeScratch,
     cpu_out: Vec<f32>,
@@ -375,6 +389,10 @@ impl GpuState {
             moe_silu: lf("moe_silu_quant")?,
             moe_combine: lf("moe_combine")?,
             matvec_k: lf("matvec_k")?,
+            kmatmul: lf("kmatmul")?,
+            router_b: lf("router_topk_batch")?,
+            scatter_add: lf("scatter_add")?,
+            add_inplace: lf("add_inplace")?,
         };
         let c = &model.cfg;
         if c.head_dim > 256 || c.head_dim % 64 != 0 || c.dim > 8192 {
@@ -564,6 +582,15 @@ impl GpuState {
             h_pin: unsafe { ctx.alloc_pinned::<f32>(dim) }.map_err(gerr)?,
             cpu_pin: unsafe { ctx.alloc_pinned::<f32>(dim) }.map_err(gerr)?,
             h_h: vec![0.0; dim],
+            bh: z(CHUNK * dim)?,
+            bsel: stream.alloc_zeros::<i32>(CHUNK * 3 * k).map_err(gerr)?,
+            bidx: stream.alloc_zeros::<i32>(CHUNK * k).map_err(gerr)?,
+            bw: z(CHUNK * k)?,
+            bgu: z(2 * CHUNK * eff)?,
+            baxq: stream.alloc_zeros::<i8>(CHUNK * eff).map_err(gerr)?,
+            baxd: z(CHUNK * eff / 32)?,
+            beo: z(CHUNK * dim)?,
+            bcpu: z(CHUNK * dim)?,
             qa: QAct::new(dim),
             scratch: MoeScratch::new(c),
             cpu_out: vec![0.0; dim],
@@ -884,14 +911,13 @@ impl GpuState {
             return Err(Error::Request("prefill outside the context".into()));
         }
         if self.moe.is_some() {
-            // MoE prefill goes token by token through the hybrid path for now.
             let mut out = out;
-            let mut next = 0;
-            for (i, &t) in toks.iter().enumerate() {
-                let last = i + 1 == toks.len();
-                next = self.step(model, t, pos0 + i, if last { out.as_deref_mut() } else { None })?;
+            let mut last = 0u32;
+            for (ci, chunk) in toks.chunks(CHUNK).enumerate() {
+                let is_last = (ci + 1) * CHUNK >= toks.len();
+                last = self.prefill_moe_chunk(model, chunk, pos0 + ci * CHUNK, if is_last { out.as_deref_mut() } else { None })?;
             }
-            return Ok(next);
+            return Ok(last);
         }
         let mut last = 0u32;
         let mut out = out;
@@ -901,6 +927,187 @@ impl GpuState {
             last = self.prefill_chunk(chunk, p0, if is_last { out.as_deref_mut() } else { None })?;
         }
         Ok(last)
+    }
+
+    /// Batched hybrid forward for MoE models: attention for all tokens on the GPU; per layer the
+    /// router runs for every token, tokens are grouped by expert, cached experts run on the GPU over
+    /// their tokens (weights read once per tile of tokens) while the CPU runs the rest, likewise once
+    /// per expert.
+    fn prefill_moe_chunk(&mut self, model: &Model, toks: &[u32], pos0: usize, out: Option<&mut [f32]>) -> Result<u32, Error> {
+        let t = toks.len();
+        let sh = &self.sh;
+        let s = &self.stream;
+        let f = &self.f;
+        let (dim, hd) = (sh.dim as i32, sh.hd as i32);
+        let (n_head, n_kv) = (sh.n_head as i32, sh.n_kv as i32);
+        let (eps, base) = (sh.eps, sh.base);
+        let ti = t as i32;
+        let has_norm = sh.qk_norm as i32;
+        let group = (sh.n_head / sh.n_kv) as i32;
+        let scale = 1.0f32 / (sh.hd as f32).sqrt();
+        let null_f: u64 = 0;
+        let null_i: u64 = 0;
+        let b = &mut self.b;
+        // Embeddings on the CPU.
+        let mut emb = vec![0f32; t * sh.dim];
+        for (i, &tok) in toks.iter().enumerate() {
+            model.embed_into(tok, &mut emb[i * sh.dim..(i + 1) * sh.dim]);
+        }
+        s.memcpy_htod(&emb, &mut b.x.slice_mut(0..t * sh.dim)).map_err(gerr)?;
+        s.memcpy_htod(&[pos0 as i32], &mut b.pos0).map_err(gerr)?;
+        let norm_cfg = LaunchConfig { grid_dim: (t as u32, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
+        let kmm = |w: &cudarc::driver::CudaView<u8>, dtype: i32, bb: i32, xq: &CudaSlice<i8>, xd: &CudaSlice<f32>, idx: Option<&cudarc::driver::CudaView<i32>>, n: usize, y: &mut cudarc::driver::CudaViewMut<f32>, ystride: usize, rows: usize, cols: usize, add: bool| -> Result<(), Error> {
+            let (ni, ys, r, c, a) = (n as i32, ystride as i32, rows as i32, cols as i32, add as i32);
+            let cfg = LaunchConfig { grid_dim: ((rows as u32).div_ceil(8), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+            let mut lb = s.launch_builder(&f.kmatmul);
+            lb.arg(w).arg(&dtype).arg(&bb).arg(xq).arg(xd);
+            match idx {
+                Some(v) => lb.arg(v),
+                None => lb.arg(&null_i),
+            };
+            unsafe { lb.arg(&ni).arg(y).arg(&ys).arg(&r).arg(&c).arg(&a).launch(cfg) }.map_err(gerr)?;
+            Ok(())
+        };
+        // Dense matrix (K parts stacked by rows) over all T tokens.
+        let dense = |m: &GMat, xq: &CudaSlice<i8>, xd: &CudaSlice<f32>, y: &mut CudaSlice<f32>, ystride: usize, add: bool| -> Result<(), Error> {
+            let GMat::K { parts, cols } = m else { return Err(Error::Unsupported("int8 weights in the MoE prefill".into())) };
+            let mut r0 = 0;
+            for p in parts {
+                let mut yv = y.slice_mut(r0..);
+                kmm(&p.w.slice(0..), p.dtype, p.bb, xq, xd, None, t, &mut yv, ystride, p.rows, *cols, add)?;
+                r0 += p.rows;
+            }
+            Ok(())
+        };
+        let qd = sh.n_head * sh.hd;
+        let row = qd + 2 * sh.n_kv * sh.hd;
+        for li in 0..self.layers.len() {
+            let l = &mut self.layers[li];
+            unsafe { s.launch_builder(&f.norm_b).arg(&b.x).arg(&l.attn_norm).arg(&mut b.xq).arg(&mut b.xd).arg(&dim).arg(&eps).arg(&null_f).launch(norm_cfg) }.map_err(gerr)?;
+            dense(&l.qkv, &b.xq, &b.xd, &mut b.qkv, row, false)?;
+            {
+                let qn = l.q_norm.as_ref().unwrap_or(&l.attn_norm);
+                let kn = l.k_norm.as_ref().unwrap_or(&l.attn_norm);
+                let cfg = LaunchConfig { grid_dim: ((sh.n_head + sh.n_kv) as u32, t as u32, 1), block_dim: ((sh.hd / 2) as u32, 1, 1), shared_mem_bytes: 0 };
+                unsafe {
+                    s.launch_builder(&f.qkv_post)
+                        .arg(&mut b.qkv)
+                        .arg(qn)
+                        .arg(kn)
+                        .arg(&has_norm)
+                        .arg(&mut l.kc)
+                        .arg(&mut l.vc)
+                        .arg(&n_head)
+                        .arg(&n_kv)
+                        .arg(&hd)
+                        .arg(&b.pos0)
+                        .arg(&base)
+                        .arg(&eps)
+                        .launch(cfg)
+                }
+                .map_err(gerr)?;
+                let cfg = LaunchConfig { grid_dim: (sh.n_head as u32, t as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+                unsafe { s.launch_builder(&f.attn_pre).arg(&b.qkv).arg(&l.kc).arg(&l.vc).arg(&mut b.att).arg(&n_head).arg(&n_kv).arg(&hd).arg(&b.pos0).arg(&group).arg(&scale).launch(cfg) }.map_err(gerr)?;
+            }
+            let qn_total = (t * qd) as i32;
+            unsafe { s.launch_builder(&f.quant).arg(&b.att).arg(&mut b.xq).arg(&mut b.xd).arg(&qn_total).launch(LaunchConfig { grid_dim: ((qn_total as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
+            dense(&l.o, &b.xq, &b.xd, &mut b.x, sh.dim, true)?;
+            // Router for every token.
+            let mo = self.moe.as_mut().expect("MoE state");
+            let router = l.router.as_ref().expect("router");
+            unsafe { s.launch_builder(&f.norm_b).arg(&b.x).arg(&l.ffn_norm).arg(&mut b.xq).arg(&mut b.xd).arg(&dim).arg(&eps).arg(&mut mo.bh).launch(norm_cfg) }.map_err(gerr)?;
+            let (ne, k) = (mo.ne as i32, mo.k as i32);
+            {
+                let tab = mo.slot_tab.slice(li * mo.ne..(li + 1) * mo.ne);
+                let cfg = LaunchConfig { grid_dim: (t as u32, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
+                unsafe { s.launch_builder(&f.router_b).arg(router).arg(&mo.bh).arg(&dim).arg(&ne).arg(&k).arg(&tab).arg(&mut mo.bsel).launch(cfg) }.map_err(gerr)?;
+            }
+            let mut sel = vec![0i32; t * 3 * mo.k];
+            s.memcpy_dtoh(&mo.bsel.slice(0..t * 3 * mo.k), &mut sel).map_err(gerr)?;
+            // Group the tokens by expert.
+            let mut by_expert: Vec<Vec<(usize, f32)>> = vec![Vec::new(); mo.ne];
+            let mut slot_of_e: Vec<i32> = vec![-1; mo.ne];
+            for tt in 0..t {
+                let st = &sel[tt * 3 * mo.k..(tt + 1) * 3 * mo.k];
+                for j in 0..mo.k {
+                    let e = st[j] as usize;
+                    by_expert[e].push((tt, f32::from_bits(st[mo.k + j] as u32)));
+                    slot_of_e[e] = st[2 * mo.k + j];
+                    mo.counts[li * mo.ne + e] += 1.0;
+                }
+            }
+            let mut gpu_groups: Vec<(usize, i32)> = Vec::new();
+            let mut cpu_groups: Vec<(usize, Vec<(usize, f32)>)> = Vec::new();
+            for e in 0..mo.ne {
+                if by_expert[e].is_empty() {
+                    continue;
+                }
+                if slot_of_e[e] >= 0 {
+                    gpu_groups.push((e, slot_of_e[e]));
+                } else {
+                    cpu_groups.push((e, std::mem::take(&mut by_expert[e])));
+                }
+            }
+            // Cached experts on the GPU, one expert at a time over its tokens.
+            if let (Some([kg, ku, kd]), false) = (mo.kinds[li], gpu_groups.is_empty()) {
+                let mut idx: Vec<i32> = Vec::new();
+                let mut wv: Vec<f32> = Vec::new();
+                let mut spans = Vec::new();
+                for &(e, slot) in &gpu_groups {
+                    spans.push((idx.len(), by_expert[e].len(), slot));
+                    for &(tt, w) in &by_expert[e] {
+                        idx.push(tt as i32);
+                        wv.push(w);
+                    }
+                }
+                s.memcpy_htod(&idx, &mut mo.bidx.slice_mut(0..idx.len())).map_err(gerr)?;
+                s.memcpy_htod(&wv, &mut mo.bw.slice_mut(0..wv.len())).map_err(gerr)?;
+                let eff = mo.eff;
+                for &(o, n, slot) in &spans {
+                    let base = slot as usize * mo.slot_bytes;
+                    let iv = mo.bidx.slice(o..o + n);
+                    let gw = mo.pool.slice(base..base + kg.bytes);
+                    let uw = mo.pool.slice(base + kg.bytes..base + kg.bytes + ku.bytes);
+                    let dw = mo.pool.slice(base + kg.bytes + ku.bytes..base + kg.bytes + ku.bytes + kd.bytes);
+                    kmm(&gw, kg.dtype, kg.bb, &b.xq, &b.xd, Some(&iv), n, &mut mo.bgu.slice_mut(0..n * eff), eff, eff, kg.cols, false)?;
+                    kmm(&uw, ku.dtype, ku.bb, &b.xq, &b.xd, Some(&iv), n, &mut mo.bgu.slice_mut(n * eff..2 * n * eff), eff, eff, ku.cols, false)?;
+                    let (effi, ni) = (eff as i32, n as i32);
+                    let cfg = LaunchConfig { grid_dim: (((n * eff) as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+                    unsafe { s.launch_builder(&f.moe_silu).arg(&mo.bgu).arg(&mut mo.baxq).arg(&mut mo.baxd).arg(&effi).arg(&ni).launch(cfg) }.map_err(gerr)?;
+                    kmm(&dw, kd.dtype, kd.bb, &mo.baxq, &mo.baxd, None, n, &mut mo.beo.slice_mut(0..n * sh.dim), sh.dim, sh.dim, kd.cols, false)?;
+                    let wvv = mo.bw.slice(o..o + n);
+                    let cfg = LaunchConfig { grid_dim: ((sh.dim as u32).div_ceil(256), n as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+                    unsafe { s.launch_builder(&f.scatter_add).arg(&mut b.x).arg(&mo.beo).arg(&iv).arg(&wvv).arg(&ni).arg(&dim).launch(cfg) }.map_err(gerr)?;
+                }
+            }
+            // The rest on the CPU at the same time.
+            if !cpu_groups.is_empty() {
+                let mut h = vec![0f32; t * sh.dim];
+                s.memcpy_dtoh(&mo.bh.slice(0..t * sh.dim), &mut h).map_err(gerr)?;
+                let mut acc = vec![0f32; t * sh.dim];
+                model.moe_cpu_batch(li, &cpu_groups, &h, &mut acc);
+                s.memcpy_htod(&acc, &mut mo.bcpu.slice_mut(0..t * sh.dim)).map_err(gerr)?;
+                let n = (t * sh.dim) as i32;
+                unsafe { s.launch_builder(&f.add_inplace).arg(&mut b.x).arg(&mo.bcpu).arg(&n).launch(LaunchConfig { grid_dim: ((n as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
+            }
+            let _ = ti;
+        }
+        // Logits for the last token.
+        {
+            let last = b.x.slice((t - 1) * sh.dim..t * sh.dim);
+            let one = LaunchConfig { grid_dim: (1, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
+            unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&last).arg(&self.out_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
+        }
+        Self::matvec(s, f, &self.output, &self.xq, &self.xd, &mut self.logits, false)?;
+        let vocab = sh.vocab as i32;
+        let one = LaunchConfig { grid_dim: (1, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
+        unsafe { s.launch_builder(&f.argmax).arg(&self.logits).arg(&vocab).arg(&mut self.next).arg(&mut self.tok).arg(&mut self.pos).launch(one) }.map_err(gerr)?;
+        if let Some(o) = out {
+            s.memcpy_dtoh(&self.logits, o).map_err(gerr)?;
+        }
+        let mut next = [0i32];
+        s.memcpy_dtoh(&self.next, &mut next).map_err(gerr)?;
+        Ok(next[0] as u32)
     }
 
     fn prefill_chunk(&mut self, toks: &[u32], pos0: usize, out: Option<&mut [f32]>) -> Result<u32, Error> {
@@ -926,6 +1133,7 @@ impl GpuState {
             unsafe { s.launch_builder(&f.embed_b).arg(qs).arg(ds).arg(&b.toks).arg(&mut b.x).arg(&dim).launch(cfg) }.map_err(gerr)?;
         }
         let norm_cfg = LaunchConfig { grid_dim: (t as u32, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
+        let null_f: u64 = 0;
         let mm = |m: &GMat, xq: &CudaSlice<i8>, xd: &CudaSlice<f32>, y: &mut CudaSlice<f32>, add: bool| -> Result<(), Error> {
             let (qs, ds, mrows, mcols) = m.q8();
             let (rows, cols, add) = (mrows as i32, mcols as i32, add as i32);
@@ -933,7 +1141,7 @@ impl GpuState {
             Ok(())
         };
         for l in &mut self.layers {
-            unsafe { s.launch_builder(&f.norm_b).arg(&b.x).arg(&l.attn_norm).arg(&mut b.xq).arg(&mut b.xd).arg(&dim).arg(&eps).launch(norm_cfg) }.map_err(gerr)?;
+            unsafe { s.launch_builder(&f.norm_b).arg(&b.x).arg(&l.attn_norm).arg(&mut b.xq).arg(&mut b.xd).arg(&dim).arg(&eps).arg(&null_f).launch(norm_cfg) }.map_err(gerr)?;
             mm(&l.qkv, &b.xq, &b.xd, &mut b.qkv, false)?;
             {
                 let qn = l.q_norm.as_ref().unwrap_or(&l.attn_norm);
@@ -964,7 +1172,7 @@ impl GpuState {
             let qn_total = (t * sh.n_head * sh.hd) as i32;
             unsafe { s.launch_builder(&f.quant).arg(&b.att).arg(&mut b.xq).arg(&mut b.xd).arg(&qn_total).launch(LaunchConfig { grid_dim: ((qn_total as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
             mm(&l.o, &b.xq, &b.xd, &mut b.x, true)?;
-            unsafe { s.launch_builder(&f.norm_b).arg(&b.x).arg(&l.ffn_norm).arg(&mut b.xq).arg(&mut b.xd).arg(&dim).arg(&eps).launch(norm_cfg) }.map_err(gerr)?;
+            unsafe { s.launch_builder(&f.norm_b).arg(&b.x).arg(&l.ffn_norm).arg(&mut b.xq).arg(&mut b.xd).arg(&dim).arg(&eps).arg(&null_f).launch(norm_cfg) }.map_err(gerr)?;
             mm(l.gu.as_ref().expect("dense layer"), &b.xq, &b.xd, &mut b.gu, false)?;
             let n = (t * sh.ffn) as u32;
             unsafe { s.launch_builder(&f.silu_b).arg(&b.gu).arg(&mut b.xq).arg(&mut b.xd).arg(&ffn).arg(&ti).launch(LaunchConfig { grid_dim: (n.div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
@@ -974,7 +1182,6 @@ impl GpuState {
         {
             let last = b.x.slice((t - 1) * sh.dim..t * sh.dim);
             let one = LaunchConfig { grid_dim: (1, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
-            let null_f: u64 = 0;
             unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&last).arg(&self.out_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
         }
         Self::matvec(s, f, &self.output, &self.xq, &self.xd, &mut self.logits, false)?;

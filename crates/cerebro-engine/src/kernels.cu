@@ -315,7 +315,8 @@ extern "C" __global__ void embed_batch(const signed char* __restrict__ qs, const
 
 // Row t of x (grid T): RMSNorm then quantise into row t of xq/xd.
 extern "C" __global__ void rmsnorm_quant_batch(const float* __restrict__ x, const float* __restrict__ w,
-                                               signed char* __restrict__ xq, float* __restrict__ xd, int n, float eps) {
+                                               signed char* __restrict__ xq, float* __restrict__ xd, int n, float eps,
+                                               float* __restrict__ yout) {
     __shared__ float red[32];
     const float* xr = x + (size_t)blockIdx.x * n;
     signed char* q = xq + (size_t)blockIdx.x * n;
@@ -325,7 +326,11 @@ extern "C" __global__ void rmsnorm_quant_batch(const float* __restrict__ x, cons
     float s = rsqrtf(block_sum(ss, red) / n + eps);
     for (int base = 0; base < n; base += blockDim.x) {
         int i = base + threadIdx.x;
-        if (i < n) quant32(xr[i] * s * w[i], q, d, i, threadIdx.x & 31);
+        if (i < n) {
+            float v = xr[i] * s * w[i];
+            if (yout) yout[(size_t)blockIdx.x * n + i] = v;
+            quant32(v, q, d, i, threadIdx.x & 31);
+        }
     }
 }
 
@@ -553,4 +558,98 @@ extern "C" __global__ void matvec_k(const unsigned char* __restrict__ w, int dty
     }
     sum = warp_sum(sum);
     if (lane == 0) y[row] = add ? y[row] + sum : sum;
+}
+
+// ---- Batched MoE (prompt processing) ------------------------------------------------------------
+
+// Y[i][row] (+)= W[row] . X[r_i] for n tokens, K-quant weights. r_i = idx[i] when idx is given (the
+// tokens routed to one expert), else i. Output row stride ystride. One warp per weight row; each
+// weight unit is loaded once per tile of TT tokens.
+extern "C" __global__ void kmatmul(const unsigned char* __restrict__ w, int dtype, int bb,
+                                   const signed char* __restrict__ xq, const float* __restrict__ xd,
+                                   const int* __restrict__ idx, int n, float* __restrict__ y, int ystride,
+                                   int rows, int cols, int add) {
+    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    int row = blockIdx.x * (blockDim.x >> 5) + warp;
+    if (row >= rows) return;
+    int nb = cols >> 8;
+    int upb = dtype == 14 ? 16 : 8;
+    const unsigned char* wr = w + (size_t)row * nb * bb;
+    for (int t0 = 0; t0 < n; t0 += TT) {
+        int tn = min(TT, n - t0);
+        float sum[TT];
+        #pragma unroll
+        for (int k = 0; k < TT; ++k) sum[k] = 0.f;
+        for (int u = lane; u < nb * upb; u += 32) {
+            int b = u / upb, uu = u - b * upb;
+            const unsigned char* blk = wr + (size_t)b * bb;
+            #pragma unroll
+            for (int k = 0; k < TT; ++k) {
+                if (k < tn) {
+                    int r = idx ? idx[t0 + k] : t0 + k;
+                    sum[k] += unit_dot(dtype, blk, uu, xq + (size_t)r * cols + b * 256, xd + (size_t)r * (cols >> 5) + b * 8);
+                }
+            }
+        }
+        #pragma unroll
+        for (int k = 0; k < TT; ++k) {
+            if (k < tn) {
+                float v = warp_sum(sum[k]);
+                if (lane == 0) {
+                    float* o = y + (size_t)(t0 + k) * ystride + row;
+                    *o = add ? *o + v : v;
+                }
+            }
+        }
+    }
+}
+
+// Router for T tokens (one block each): sel + t*3k = [ids k | weights k | cache slots k].
+extern "C" __global__ void router_topk_batch(const float* __restrict__ wr, const float* __restrict__ h, int dim,
+                                             int n_expert, int k, const int* __restrict__ slot_tab, int* __restrict__ sel) {
+    __shared__ float sc[512];
+    const float* ht = h + (size_t)blockIdx.x * dim;
+    int* st = sel + (size_t)blockIdx.x * 3 * k;
+    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    for (int e = warp; e < n_expert; e += 32) {
+        const float* r = wr + (size_t)e * dim;
+        float s = 0.f;
+        for (int i = lane; i < dim; i += 32) s += r[i] * ht[i];
+        s = warp_sum(s);
+        if (lane == 0) sc[e] = s;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float mx = -1e30f;
+        for (int e = 0; e < n_expert; ++e) mx = fmaxf(mx, sc[e]);
+        for (int e = 0; e < n_expert; ++e) sc[e] = __expf(sc[e] - mx);
+        float tot = 0.f;
+        float* wts = reinterpret_cast<float*>(st + k);
+        for (int t = 0; t < k; ++t) {
+            int best = 0;
+            float bv = -1.f;
+            for (int e = 0; e < n_expert; ++e) if (sc[e] > bv) { bv = sc[e]; best = e; }
+            st[t] = best;
+            wts[t] = bv;
+            tot += bv;
+            sc[best] = -2.f;
+        }
+        for (int t = 0; t < k; ++t) {
+            wts[t] /= tot;
+            st[2 * k + t] = slot_tab[st[t]];
+        }
+    }
+}
+
+// x[idx[i]] += w[i] * eo[i] for the n tokens one expert processed.
+extern "C" __global__ void scatter_add(float* __restrict__ x, const float* __restrict__ eo, const int* __restrict__ idx,
+                                       const float* __restrict__ w, int n, int dim) {
+    int d = blockIdx.x * blockDim.x + threadIdx.x, i = blockIdx.y;
+    if (d >= dim || i >= n) return;
+    x[(size_t)idx[i] * dim + d] += w[i] * eo[(size_t)i * dim + d];
+}
+
+extern "C" __global__ void add_inplace(float* __restrict__ x, const float* __restrict__ y, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] += y[i];
 }

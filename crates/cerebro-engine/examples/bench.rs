@@ -78,7 +78,14 @@ fn main() {
     let model = Model::load(&model_path).expect("load");
     let tok = Tokenizer::from_gguf(model.gguf()).expect("tokenizer");
     let ctx = lengths.iter().max().copied().unwrap_or(512) + decode + 16;
-    let bytes_per_token: usize = model.gguf().tensors.values().map(|t| t.size).sum();
+    // Weight bytes one token reads: everything, except that an MoE layer reads only n_used of its
+    // n_expert experts.
+    let bytes_per_token: usize = model
+        .gguf()
+        .tensors
+        .values()
+        .map(|t| if t.name.contains("_exps") && model.cfg.n_expert > 0 { t.size * model.cfg.n_used / model.cfg.n_expert } else { t.size })
+        .sum();
     let mut reference: Vec<Vec<u32>> = Vec::new();
     let mut f = OpenOptions::new().create(true).append(true).open(&out_path).expect("open out");
 
@@ -118,6 +125,10 @@ fn main() {
                 f64::NAN
             };
             let dtps = median(dec);
+            #[cfg(feature = "cuda")]
+            let cache = sess.gpu.as_ref().and_then(|g| g.expert_cache());
+            #[cfg(not(feature = "cuda"))]
+            let cache: Option<(usize, usize, f64)> = None;
             let line = serde_json::json!({
                 "commit": commit,
                 "machine": machine,
@@ -131,7 +142,11 @@ fn main() {
                 "weight_bytes_per_token": bytes_per_token,
                 "effective_gb_s": bytes_per_token as f64 * dtps / 1e9,
                 "greedy_prefix_match_vs_cpu_64": agree,
-                "threads": rayon::current_num_threads(),
+                "threads": cerebro_engine::pool::global().threads(),
+                "ctx": ctx,
+                "experts_in_vram": cache.map(|c| c.0),
+                "experts_total": cache.map(|c| c.1),
+                "expert_vram_hit_rate": cache.map(|c| c.2),
             });
             println!("{line}");
             writeln!(f, "{line}").expect("write");

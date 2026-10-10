@@ -289,6 +289,110 @@ impl Model {
         }
     }
 
+    /// CPU experts for a batch of tokens (prompt processing): `groups` lists, per expert of layer
+    /// `li`, the (token, weight) pairs routed to it; `h` holds the T normed inputs (T x dim). Adds the
+    /// weighted expert outputs into `out` (T x dim). Each weight row is read once and applied to all
+    /// of its expert's tokens.
+    pub fn moe_cpu_batch(&self, li: usize, groups: &[(usize, Vec<(usize, f32)>)], h: &[f32], out: &mut [f32]) {
+        let Ffn::Moe(e) = &self.layers[li].ffn else { return };
+        let (ne, eff, dim) = (self.cfg.n_expert, self.cfg.expert_ffn, self.cfg.dim);
+        let g: &Gguf = &self.gguf;
+        let t_n = h.len() / dim;
+        let mut qa: Vec<QAct> = (0..t_n).map(|_| QAct::new(dim)).collect();
+        for (t, q) in qa.iter_mut().enumerate() {
+            q.quantize(&h[t * dim..(t + 1) * dim]);
+        }
+        // Pair p = one (expert, token); pairs of a group are contiguous starting at start[gi].
+        let mut start = Vec::with_capacity(groups.len());
+        let mut pairs: Vec<(usize, f32)> = Vec::new();
+        for (_, toks) in groups {
+            start.push(pairs.len());
+            pairs.extend_from_slice(toks);
+        }
+        let np = pairs.len();
+        if np == 0 {
+            return;
+        }
+        let mut gbuf = vec![0f32; np * eff];
+        let mut ubuf = vec![0f32; np * eff];
+        let mut ebuf = vec![0f32; np * dim];
+        struct P(*mut f32);
+        // SAFETY: every (pair, row) element is written by exactly one work item.
+        unsafe impl Sync for P {}
+        impl P {
+            fn at(&self, i: usize) -> *mut f32 {
+                self.0.wrapping_add(i)
+            }
+        }
+        let pool = crate::pool::global();
+        let chunk = 32;
+        // Gate and up rows for every expert's tokens.
+        {
+            let (gp, up) = (P(gbuf.as_mut_ptr()), P(ubuf.as_mut_ptr()));
+            let mut items = Vec::new();
+            for gi in 0..groups.len() {
+                for r0 in (0..eff).step_by(chunk) {
+                    items.push((gi, r0, 0u8));
+                    items.push((gi, r0, 1u8));
+                }
+            }
+            pool.run(items.len(), &|ii| {
+                let (gi, r0, which) = items[ii];
+                let ex = groups[gi].0;
+                let m = if which == 0 { e.gate.part(ex, ne) } else { e.up.part(ex, ne) };
+                let dst = if which == 0 { &gp } else { &up };
+                let all = g.bytes_at(m.offset, m.rows * m.row_bytes);
+                for r in r0..(r0 + chunk).min(eff) {
+                    let row = &all[r * m.row_bytes..(r + 1) * m.row_bytes];
+                    for (k, &(t, _)) in groups[gi].1.iter().enumerate() {
+                        let p = start[gi] + k;
+                        let v = dot_any(m.dtype, row, &h[t * dim..(t + 1) * dim], &qa[t]);
+                        // SAFETY: (p, r) is unique to this item.
+                        unsafe { *dst.at(p * eff + r) = v };
+                    }
+                }
+            });
+        }
+        let mut aq: Vec<QAct> = (0..np).map(|_| QAct::new(eff)).collect();
+        for (p, q) in aq.iter_mut().enumerate() {
+            let (gr, ur) = (&mut gbuf[p * eff..(p + 1) * eff], &ubuf[p * eff..(p + 1) * eff]);
+            for i in 0..eff {
+                gr[i] = gr[i] / (1.0 + (-gr[i]).exp()) * ur[i];
+            }
+            q.quantize(gr);
+        }
+        // Down rows.
+        {
+            let ep = P(ebuf.as_mut_ptr());
+            let mut items = Vec::new();
+            for gi in 0..groups.len() {
+                for r0 in (0..dim).step_by(chunk * 2) {
+                    items.push((gi, r0));
+                }
+            }
+            pool.run(items.len(), &|ii| {
+                let (gi, r0) = items[ii];
+                let m = e.down.part(groups[gi].0, ne);
+                let all = g.bytes_at(m.offset, m.rows * m.row_bytes);
+                for r in r0..(r0 + chunk * 2).min(dim) {
+                    let row = &all[r * m.row_bytes..(r + 1) * m.row_bytes];
+                    for k in 0..groups[gi].1.len() {
+                        let p = start[gi] + k;
+                        let v = dot_any(m.dtype, row, &gbuf[p * eff..(p + 1) * eff], &aq[p]);
+                        // SAFETY: (p, r) is unique to this item.
+                        unsafe { *ep.at(p * dim + r) = v };
+                    }
+                }
+            });
+        }
+        for (p, &(t, w)) in pairs.iter().enumerate() {
+            let o = &mut out[t * dim..(t + 1) * dim];
+            for (a, b) in o.iter_mut().zip(&ebuf[p * dim..(p + 1) * dim]) {
+                *a += w * b;
+            }
+        }
+    }
+
     fn embed_row(&self, token: u32, out: &mut [f32]) {
         dequant_row(self.embed.dtype, self.row(&self.embed, token as usize), out);
     }
