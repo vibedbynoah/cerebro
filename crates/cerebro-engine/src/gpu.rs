@@ -34,8 +34,9 @@ struct GLayer {
     ffn_norm: CudaSlice<f32>,
     gu: GMat,
     down: GMat,
-    kc: CudaSlice<f32>,
-    vc: CudaSlice<f32>,
+    /// f16 KV cache, max_ctx positions.
+    kc: CudaSlice<u16>,
+    vc: CudaSlice<u16>,
 }
 
 struct Funcs {
@@ -43,10 +44,32 @@ struct Funcs {
     rmsnorm_quant: CudaFunction,
     quant: CudaFunction,
     qkv_post: CudaFunction,
-    attention: CudaFunction,
+    attn_partial: CudaFunction,
+    attn_combine: CudaFunction,
     silu_mul_quant: CudaFunction,
     embed: CudaFunction,
     argmax: CudaFunction,
+    embed_b: CudaFunction,
+    norm_b: CudaFunction,
+    matmul_b: CudaFunction,
+    silu_b: CudaFunction,
+    attn_pre: CudaFunction,
+}
+
+/// Prefill scratch: up to `CHUNK` tokens per batched pass.
+const CHUNK: usize = 256;
+/// Positions per split-K attention block.
+const SPLIT: usize = 256;
+
+struct Batch {
+    x: CudaSlice<f32>,
+    qkv: CudaSlice<f32>,
+    att: CudaSlice<f32>,
+    gu: CudaSlice<f32>,
+    xq: CudaSlice<i8>,
+    xd: CudaSlice<f32>,
+    toks: CudaSlice<i32>,
+    pos0: CudaSlice<i32>,
 }
 
 struct Shape {
@@ -81,6 +104,11 @@ pub struct GpuState {
     tok: CudaSlice<i32>,
     pos: CudaSlice<i32>,
     next: CudaSlice<i32>,
+    pm: CudaSlice<f32>,
+    pl: CudaSlice<f32>,
+    pacc: CudaSlice<f32>,
+    splits: usize,
+    b: Batch,
     graph: Option<CudaGraph>,
     pub max_ctx: usize,
     pub vram_bytes: usize,
@@ -146,10 +174,16 @@ impl GpuState {
             rmsnorm_quant: lf("rmsnorm_quant")?,
             quant: lf("quantize_q8")?,
             qkv_post: lf("qkv_post")?,
-            attention: lf("attention")?,
+            attn_partial: lf("attn_partial")?,
+            attn_combine: lf("attn_combine")?,
             silu_mul_quant: lf("silu_mul_quant")?,
             embed: lf("embed")?,
             argmax: lf("argmax_next")?,
+            embed_b: lf("embed_batch")?,
+            norm_b: lf("rmsnorm_quant_batch")?,
+            matmul_b: lf("matmul_q8_batch")?,
+            silu_b: lf("silu_mul_quant_batch")?,
+            attn_pre: lf("attn_prefill")?,
         };
         let c = &model.cfg;
         if c.head_dim > 256 || c.head_dim % 64 != 0 || c.dim > 8192 {
@@ -174,17 +208,29 @@ impl GpuState {
                 ffn_norm: stream.clone_htod(&l.ffn_norm).map_err(gerr)?,
                 gu: up(&[&l.gate, &l.up])?,
                 down: up(&[&l.down])?,
-                kc: stream.alloc_zeros::<f32>(max_ctx * kvd).map_err(gerr)?,
-                vc: stream.alloc_zeros::<f32>(max_ctx * kvd).map_err(gerr)?,
+                kc: stream.alloc_zeros::<u16>(max_ctx * kvd).map_err(gerr)?,
+                vc: stream.alloc_zeros::<u16>(max_ctx * kvd).map_err(gerr)?,
             });
         }
         let output = up(&[model.output_mat()])?;
         // Tied embeddings reuse the output matrix on the GPU; otherwise upload the table too.
         let embed = if model.tied() { None } else { Some(up(&[model.embed_mat()])?) };
-        vram += c.n_layer * 2 * max_ctx * kvd * 4;
+        vram += c.n_layer * 2 * max_ctx * kvd * 2;
         let z = |n: usize| stream.alloc_zeros::<f32>(n).map_err(gerr);
         let qd = c.n_head * c.head_dim;
         let widest = c.dim.max(c.ffn).max(qd);
+        let splits = max_ctx.div_ceil(SPLIT);
+        let row = qd + 2 * kvd;
+        let b = Batch {
+            x: z(CHUNK * c.dim)?,
+            qkv: z(CHUNK * row)?,
+            att: z(CHUNK * qd)?,
+            gu: z(CHUNK * 2 * c.ffn)?,
+            xq: stream.alloc_zeros::<i8>(CHUNK * widest).map_err(gerr)?,
+            xd: z(CHUNK * widest / 32)?,
+            toks: stream.alloc_zeros::<i32>(CHUNK).map_err(gerr)?,
+            pos0: stream.alloc_zeros::<i32>(1).map_err(gerr)?,
+        };
         let sh = Shape { dim: c.dim, ffn: c.ffn, n_head: c.n_head, n_kv: c.n_kv, hd: c.head_dim, vocab: c.vocab, eps: c.eps, base: c.rope_base, qk_norm: c.qk_norm };
         Ok(Self {
             out_norm: stream.clone_htod(model.out_norm()).map_err(gerr)?,
@@ -200,6 +246,11 @@ impl GpuState {
             tok: stream.alloc_zeros::<i32>(1).map_err(gerr)?,
             pos: stream.alloc_zeros::<i32>(1).map_err(gerr)?,
             next: stream.alloc_zeros::<i32>(1).map_err(gerr)?,
+            pm: z(c.n_head * splits)?,
+            pl: z(c.n_head * splits)?,
+            pacc: z(c.n_head * splits * c.head_dim)?,
+            splits,
+            b,
             graph: None,
             layers,
             f,
@@ -262,8 +313,28 @@ impl GpuState {
                 .map_err(gerr)?;
             }
             {
-                let cfg = LaunchConfig { grid_dim: (sh.n_head as u32, 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
-                unsafe { s.launch_builder(&f.attention).arg(&self.qkv).arg(&l.kc).arg(&l.vc).arg(&mut self.att).arg(&n_kv).arg(&hd).arg(&self.pos).arg(&group).arg(&scale).launch(cfg) }.map_err(gerr)?;
+                let chunk = SPLIT as i32;
+                let cfg = LaunchConfig { grid_dim: (sh.n_head as u32, self.splits as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
+                unsafe {
+                    s.launch_builder(&f.attn_partial)
+                        .arg(&self.qkv)
+                        .arg(&l.kc)
+                        .arg(&l.vc)
+                        .arg(&mut self.pm)
+                        .arg(&mut self.pl)
+                        .arg(&mut self.pacc)
+                        .arg(&n_kv)
+                        .arg(&hd)
+                        .arg(&self.pos)
+                        .arg(&group)
+                        .arg(&scale)
+                        .arg(&chunk)
+                        .launch(cfg)
+                }
+                .map_err(gerr)?;
+                let splits = self.splits as i32;
+                let cfg = LaunchConfig { grid_dim: (sh.n_head as u32, 1, 1), block_dim: (sh.hd as u32, 1, 1), shared_mem_bytes: 0 };
+                unsafe { s.launch_builder(&f.attn_combine).arg(&self.pm).arg(&self.pl).arg(&self.pacc).arg(&mut self.att).arg(&hd).arg(&splits).launch(cfg) }.map_err(gerr)?;
             }
             let qd = (sh.n_head * sh.hd) as i32;
             unsafe { s.launch_builder(&f.quant).arg(&self.att).arg(&mut self.xq).arg(&mut self.xd).arg(&qd).launch(blocks(sh.n_head * sh.hd)) }.map_err(gerr)?;
@@ -309,6 +380,109 @@ impl GpuState {
         }
         let mut next = [0i32];
         self.stream.memcpy_dtoh(&self.next, &mut next).map_err(gerr)?;
+        Ok(next[0] as u32)
+    }
+
+    /// Batched forward over `toks` at positions pos0.. (prefill, or verifying a draft): every weight is
+    /// read once per chunk of up to CHUNK tokens. Writes the KV cache for all of them and the logits of
+    /// the last one into `out` when given; returns the greedy next token.
+    pub fn prefill(&mut self, toks: &[u32], pos0: usize, out: Option<&mut [f32]>) -> Result<u32, Error> {
+        if toks.is_empty() || pos0 + toks.len() > self.max_ctx {
+            return Err(Error::Request("prefill outside the context".into()));
+        }
+        let mut last = 0u32;
+        let mut out = out;
+        for (ci, chunk) in toks.chunks(CHUNK).enumerate() {
+            let p0 = pos0 + ci * CHUNK;
+            let is_last = (ci + 1) * CHUNK >= toks.len();
+            last = self.prefill_chunk(chunk, p0, if is_last { out.as_deref_mut() } else { None })?;
+        }
+        Ok(last)
+    }
+
+    fn prefill_chunk(&mut self, toks: &[u32], pos0: usize, out: Option<&mut [f32]>) -> Result<u32, Error> {
+        let t = toks.len();
+        let sh = &self.sh;
+        let s = &self.stream;
+        let f = &self.f;
+        let ids: Vec<i32> = toks.iter().map(|&v| v as i32).collect();
+        s.memcpy_htod(&ids, &mut self.b.toks).map_err(gerr)?;
+        s.memcpy_htod(&[pos0 as i32], &mut self.b.pos0).map_err(gerr)?;
+        let (dim, ffn, hd) = (sh.dim as i32, sh.ffn as i32, sh.hd as i32);
+        let (n_head, n_kv) = (sh.n_head as i32, sh.n_kv as i32);
+        let (eps, base) = (sh.eps, sh.base);
+        let ti = t as i32;
+        let has_norm = sh.qk_norm as i32;
+        let group = (sh.n_head / sh.n_kv) as i32;
+        let scale = 1.0f32 / (sh.hd as f32).sqrt();
+        let rows_cfg = |rows: usize| LaunchConfig { grid_dim: ((rows as u32).div_ceil(8), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+        let b = &mut self.b;
+        {
+            let e = self.embed.as_ref().unwrap_or(&self.output);
+            let cfg = LaunchConfig { grid_dim: ((sh.dim as u32).div_ceil(256), t as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+            unsafe { s.launch_builder(&f.embed_b).arg(&e.qs).arg(&e.ds).arg(&b.toks).arg(&mut b.x).arg(&dim).launch(cfg) }.map_err(gerr)?;
+        }
+        let norm_cfg = LaunchConfig { grid_dim: (t as u32, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
+        let mm = |m: &GMat, xq: &CudaSlice<i8>, xd: &CudaSlice<f32>, y: &mut CudaSlice<f32>, add: bool| -> Result<(), Error> {
+            let (rows, cols, add) = (m.rows as i32, m.cols as i32, add as i32);
+            unsafe { s.launch_builder(&f.matmul_b).arg(&m.qs).arg(&m.ds).arg(xq).arg(xd).arg(y).arg(&rows).arg(&cols).arg(&ti).arg(&add).launch(rows_cfg(m.rows)) }.map_err(gerr)?;
+            Ok(())
+        };
+        for l in &mut self.layers {
+            unsafe { s.launch_builder(&f.norm_b).arg(&b.x).arg(&l.attn_norm).arg(&mut b.xq).arg(&mut b.xd).arg(&dim).arg(&eps).launch(norm_cfg) }.map_err(gerr)?;
+            mm(&l.qkv, &b.xq, &b.xd, &mut b.qkv, false)?;
+            {
+                let qn = l.q_norm.as_ref().unwrap_or(&l.attn_norm);
+                let kn = l.k_norm.as_ref().unwrap_or(&l.attn_norm);
+                let cfg = LaunchConfig { grid_dim: ((sh.n_head + sh.n_kv) as u32, t as u32, 1), block_dim: ((sh.hd / 2) as u32, 1, 1), shared_mem_bytes: 0 };
+                unsafe {
+                    s.launch_builder(&f.qkv_post)
+                        .arg(&mut b.qkv)
+                        .arg(qn)
+                        .arg(kn)
+                        .arg(&has_norm)
+                        .arg(&mut l.kc)
+                        .arg(&mut l.vc)
+                        .arg(&n_head)
+                        .arg(&n_kv)
+                        .arg(&hd)
+                        .arg(&b.pos0)
+                        .arg(&base)
+                        .arg(&eps)
+                        .launch(cfg)
+                }
+                .map_err(gerr)?;
+            }
+            {
+                let cfg = LaunchConfig { grid_dim: (sh.n_head as u32, t as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+                unsafe { s.launch_builder(&f.attn_pre).arg(&b.qkv).arg(&l.kc).arg(&l.vc).arg(&mut b.att).arg(&n_head).arg(&n_kv).arg(&hd).arg(&b.pos0).arg(&group).arg(&scale).launch(cfg) }.map_err(gerr)?;
+            }
+            let qn_total = (t * sh.n_head * sh.hd) as i32;
+            unsafe { s.launch_builder(&f.quant).arg(&b.att).arg(&mut b.xq).arg(&mut b.xd).arg(&qn_total).launch(LaunchConfig { grid_dim: ((qn_total as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
+            mm(&l.o, &b.xq, &b.xd, &mut b.x, true)?;
+            unsafe { s.launch_builder(&f.norm_b).arg(&b.x).arg(&l.ffn_norm).arg(&mut b.xq).arg(&mut b.xd).arg(&dim).arg(&eps).launch(norm_cfg) }.map_err(gerr)?;
+            mm(&l.gu, &b.xq, &b.xd, &mut b.gu, false)?;
+            let n = (t * sh.ffn) as u32;
+            unsafe { s.launch_builder(&f.silu_b).arg(&b.gu).arg(&mut b.xq).arg(&mut b.xd).arg(&ffn).arg(&ti).launch(LaunchConfig { grid_dim: (n.div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
+            mm(&l.down, &b.xq, &b.xd, &mut b.x, true)?;
+        }
+        // Logits for the last token only, through the decode buffers.
+        {
+            let last = b.x.slice((t - 1) * sh.dim..t * sh.dim);
+            let one = LaunchConfig { grid_dim: (1, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
+            let null_f: u64 = 0;
+            unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&last).arg(&self.out_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
+        }
+        Self::matvec(s, &f.matvec, &self.output, &self.xq, &self.xd, &mut self.logits, false)?;
+        let vocab = sh.vocab as i32;
+        let one = LaunchConfig { grid_dim: (1, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
+        // argmax_next also bumps pos/tok, which decode overwrites before it runs, so this is harmless.
+        unsafe { s.launch_builder(&f.argmax).arg(&self.logits).arg(&vocab).arg(&mut self.next).arg(&mut self.tok).arg(&mut self.pos).launch(one) }.map_err(gerr)?;
+        if let Some(o) = out {
+            s.memcpy_dtoh(&self.logits, o).map_err(gerr)?;
+        }
+        let mut next = [0i32];
+        s.memcpy_dtoh(&self.next, &mut next).map_err(gerr)?;
         Ok(next[0] as u32)
     }
 

@@ -1,3 +1,5 @@
+#include <cuda_fp16.h>
+
 // Cerebro Engine CUDA kernels. Compiled to PTX by build.rs with nvcc and embedded in the binary;
 // the driver JIT-compiles the PTX for the user's GPU (Turing sm_75 and newer).
 //
@@ -89,17 +91,21 @@ extern "C" __global__ void rmsnorm_quant(const float* __restrict__ x, const floa
     }
 }
 
-// After the fused QKV matmul: per-head RMSNorm (optional) + NeoX RoPE for Q (in place) and K (written
-// into the K cache at *pos), and V copied into the V cache. Grid: n_head + n_kv blocks of hd/2.
+// After the fused QKV matmul for T tokens at positions pos0..pos0+T-1 (T = gridDim.y; decode uses
+// T = 1 with pos0 read from device memory): per-head RMSNorm (optional) + NeoX RoPE for Q (in place)
+// and K (written into the f16 K cache), V copied into the f16 V cache. Grid: (n_head + n_kv, T).
 extern "C" __global__ void qkv_post(float* __restrict__ qkv, const float* __restrict__ qn, const float* __restrict__ kn,
-                                    int has_norm, float* __restrict__ kc, float* __restrict__ vc,
+                                    int has_norm, __half* __restrict__ kc, __half* __restrict__ vc,
                                     int n_head, int n_kv, int hd, const int* __restrict__ posp, float base, float eps) {
     __shared__ float red[32];
-    int pos = *posp;
+    int t = blockIdx.y;
+    int pos = *posp + t;
     int h = blockIdx.x, i = threadIdx.x, half = hd >> 1;
     int kvd = n_kv * hd;
+    int row = n_head * hd + 2 * kvd;
+    float* base_t = qkv + (size_t)t * row;
     bool is_k = h >= n_head;
-    float* src = is_k ? qkv + n_head * hd + (h - n_head) * hd : qkv + h * hd;
+    float* src = is_k ? base_t + n_head * hd + (h - n_head) * hd : base_t + h * hd;
     float a = src[i], b = src[i + half];
     if (has_norm) {
         const float* nw = is_k ? kn : qn;
@@ -110,44 +116,121 @@ extern "C" __global__ void qkv_post(float* __restrict__ qkv, const float* __rest
     float inv = powf(base, -2.f * i / hd);
     float sn, cs;
     sincosf(pos * inv, &sn, &cs);
-    float* o = is_k ? kc + (size_t)pos * kvd + (h - n_head) * hd : src;
-    o[i] = a * cs - b * sn;
-    o[i + half] = a * sn + b * cs;
+    float ra = a * cs - b * sn, rb = a * sn + b * cs;
     if (is_k) {
-        // V for this KV head goes to the cache too.
-        const float* v = qkv + n_head * hd + kvd + (h - n_head) * hd;
-        float* vo = vc + (size_t)pos * kvd + (h - n_head) * hd;
-        vo[i] = v[i];
-        vo[i + half] = v[i + half];
+        size_t o = (size_t)pos * kvd + (h - n_head) * hd;
+        kc[o + i] = __float2half(ra);
+        kc[o + i + half] = __float2half(rb);
+        const float* v = base_t + n_head * hd + kvd + (h - n_head) * hd;
+        vc[o + i] = __float2half(v[i]);
+        vc[o + i + half] = __float2half(v[i + half]);
+    } else {
+        src[i] = ra;
+        src[i + half] = rb;
     }
 }
 
-// Decode attention over positions 0..*pos. One block per head, 8 warps, online softmax per warp,
-// combined at the end; head_dim up to 256.
-extern "C" __global__ void attention(const float* __restrict__ q, const float* __restrict__ kc,
-                                     const float* __restrict__ vc, float* __restrict__ out,
-                                     int n_kv, int hd, const int* __restrict__ posp, int group, float scale) {
-    __shared__ float sm[8], sl[8];
-    __shared__ float sacc[8][256];
+// Split-K decode attention ("flash decoding"): grid (n_head, splits); block s covers positions
+// [s*chunk, (s+1)*chunk) of the len = *pos + 1 cached ones with 4 warps and an online softmax, and
+// writes its partial max, sum and weighted values. attn_combine merges the splits. Long contexts use
+// every SM instead of one block per head. head_dim up to 256.
+extern "C" __global__ void attn_partial(const float* __restrict__ q, const __half* __restrict__ kc,
+                                        const __half* __restrict__ vc, float* __restrict__ pm, float* __restrict__ pl,
+                                        float* __restrict__ pacc, int n_kv, int hd, const int* __restrict__ posp,
+                                        int group, float scale, int chunk) {
+    __shared__ float sm[4], sl[4];
+    __shared__ float sacc[4][256];
     int len = *posp + 1;
-    int head = blockIdx.x, kvh = head / group;
+    int head = blockIdx.x, split = blockIdx.y, splits = gridDim.y;
+    int start = split * chunk, end = min(len, start + chunk);
+    int kvh = head / group;
     int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     int per = (hd + 31) >> 5;
+    size_t pidx = (size_t)head * splits + split;
+    if (start >= len) {
+        if (threadIdx.x == 0) { pm[pidx] = -1e30f; pl[pidx] = 0.f; }
+        return;
+    }
     const float* qh = q + head * hd;
     float qv[8], acc[8];
     for (int j = 0; j < per; ++j) { int d = lane + j * 32; qv[j] = d < hd ? qh[d] : 0.f; acc[j] = 0.f; }
     float m = -1e30f, l = 0.f;
     int stride = n_kv * hd;
-    for (int t = warp; t < len; t += 8) {
-        const float* kt = kc + (size_t)t * stride + kvh * hd;
+    for (int t = start + warp; t < end; t += 4) {
+        const __half* kt = kc + (size_t)t * stride + kvh * hd;
         float s = 0.f;
-        for (int j = 0; j < per; ++j) { int d = lane + j * 32; if (d < hd) s += qv[j] * kt[d]; }
+        for (int j = 0; j < per; ++j) { int d = lane + j * 32; if (d < hd) s += qv[j] * __half2float(kt[d]); }
         s = warp_sum(s) * scale;
         float mn = fmaxf(m, s);
         float c = __expf(m - mn), p = __expf(s - mn);
         l = l * c + p;
-        const float* vt = vc + (size_t)t * stride + kvh * hd;
-        for (int j = 0; j < per; ++j) { int d = lane + j * 32; if (d < hd) acc[j] = acc[j] * c + p * vt[d]; }
+        const __half* vt = vc + (size_t)t * stride + kvh * hd;
+        for (int j = 0; j < per; ++j) { int d = lane + j * 32; if (d < hd) acc[j] = acc[j] * c + p * __half2float(vt[d]); }
+        m = mn;
+    }
+    if (lane == 0) { sm[warp] = m; sl[warp] = l; }
+    for (int j = 0; j < per; ++j) { int d = lane + j * 32; if (d < hd) sacc[warp][d] = acc[j]; }
+    __syncthreads();
+    if (warp == 0) {
+        float M = -1e30f;
+        for (int w = 0; w < 4; ++w) M = fmaxf(M, sm[w]);
+        float L = 0.f;
+        for (int w = 0; w < 4; ++w) L += sl[w] * __expf(sm[w] - M);
+        for (int j = 0; j < per; ++j) {
+            int d = lane + j * 32;
+            if (d < hd) {
+                float o = 0.f;
+                for (int w = 0; w < 4; ++w) o += sacc[w][d] * __expf(sm[w] - M);
+                pacc[pidx * hd + d] = o;
+            }
+        }
+        if (lane == 0) { pm[pidx] = M; pl[pidx] = L; }
+    }
+}
+
+extern "C" __global__ void attn_combine(const float* __restrict__ pm, const float* __restrict__ pl,
+                                        const float* __restrict__ pacc, float* __restrict__ out, int hd, int splits) {
+    int head = blockIdx.x, d = threadIdx.x;
+    if (d >= hd) return;
+    float M = -1e30f;
+    for (int s = 0; s < splits; ++s) M = fmaxf(M, pm[head * splits + s]);
+    float L = 0.f, o = 0.f;
+    for (int s = 0; s < splits; ++s) {
+        float w = __expf(pm[head * splits + s] - M);
+        L += pl[head * splits + s] * w;
+        o += pacc[((size_t)head * splits + s) * hd + d] * w;
+    }
+    out[head * hd + d] = o / L;
+}
+
+// Causal attention for a prefill chunk: query t (blockIdx.y) at position *pos0 + t attends to cached
+// positions 0..pos. One block per (head, token), 8 warps, online softmax.
+extern "C" __global__ void attn_prefill(const float* __restrict__ qkv, const __half* __restrict__ kc,
+                                        const __half* __restrict__ vc, float* __restrict__ out,
+                                        int n_head, int n_kv, int hd, const int* __restrict__ posp, int group, float scale) {
+    __shared__ float sm[8], sl[8];
+    __shared__ float sacc[8][256];
+    int t = blockIdx.y;
+    int len = *posp + t + 1;
+    int head = blockIdx.x, kvh = head / group;
+    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    int per = (hd + 31) >> 5;
+    int row = n_head * hd + 2 * n_kv * hd;
+    const float* qh = qkv + (size_t)t * row + head * hd;
+    float qv[8], acc[8];
+    for (int j = 0; j < per; ++j) { int d = lane + j * 32; qv[j] = d < hd ? qh[d] : 0.f; acc[j] = 0.f; }
+    float m = -1e30f, l = 0.f;
+    int stride = n_kv * hd;
+    for (int p = warp; p < len; p += 8) {
+        const __half* kt = kc + (size_t)p * stride + kvh * hd;
+        float s = 0.f;
+        for (int j = 0; j < per; ++j) { int d = lane + j * 32; if (d < hd) s += qv[j] * __half2float(kt[d]); }
+        s = warp_sum(s) * scale;
+        float mn = fmaxf(m, s);
+        float c = __expf(m - mn), pr = __expf(s - mn);
+        l = l * c + pr;
+        const __half* vt = vc + (size_t)p * stride + kvh * hd;
+        for (int j = 0; j < per; ++j) { int d = lane + j * 32; if (d < hd) acc[j] = acc[j] * c + pr * __half2float(vt[d]); }
         m = mn;
     }
     if (lane == 0) { sm[warp] = m; sl[warp] = l; }
@@ -163,7 +246,7 @@ extern "C" __global__ void attention(const float* __restrict__ q, const float* _
             if (d < hd) {
                 float o = 0.f;
                 for (int w = 0; w < 8; ++w) o += sacc[w][d] * __expf(sm[w] - M);
-                out[head * hd + d] = o / L;
+                out[(size_t)t * n_head * hd + head * hd + d] = o / L;
             }
         }
     }
@@ -218,4 +301,87 @@ extern "C" __global__ void argmax_next(const float* __restrict__ logits, int n, 
         }
         if (lane == 0) { out[0] = idx; *tok = idx; *pos = *pos + 1; }
     }
+}
+
+// ---- Batched (prefill / verification) kernels: T tokens per launch ----------------------------
+
+extern "C" __global__ void embed_batch(const signed char* __restrict__ qs, const float* __restrict__ ds,
+                                       const int* __restrict__ toks, float* __restrict__ x, int dim) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x, t = blockIdx.y;
+    if (i >= dim) return;
+    size_t r = (size_t)toks[t] * dim;
+    x[(size_t)t * dim + i] = (float)qs[r + i] * ds[(r + i) >> 5];
+}
+
+// Row t of x (grid T): RMSNorm then quantise into row t of xq/xd.
+extern "C" __global__ void rmsnorm_quant_batch(const float* __restrict__ x, const float* __restrict__ w,
+                                               signed char* __restrict__ xq, float* __restrict__ xd, int n, float eps) {
+    __shared__ float red[32];
+    const float* xr = x + (size_t)blockIdx.x * n;
+    signed char* q = xq + (size_t)blockIdx.x * n;
+    float* d = xd + (size_t)blockIdx.x * (n >> 5);
+    float ss = 0.f;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) ss += xr[i] * xr[i];
+    float s = rsqrtf(block_sum(ss, red) / n + eps);
+    for (int base = 0; base < n; base += blockDim.x) {
+        int i = base + threadIdx.x;
+        if (i < n) quant32(xr[i] * s * w[i], q, d, i, threadIdx.x & 31);
+    }
+}
+
+// Y[t][row] (+)= W[row] . X[t] for T tokens. One warp per weight row; each 16-byte weight chunk is
+// loaded once and used for TT tokens at a time, so the weights are read T/TT times instead of T.
+#define TT 16
+extern "C" __global__ void matmul_q8_batch(const signed char* __restrict__ qs, const float* __restrict__ ds,
+                                           const signed char* __restrict__ xq, const float* __restrict__ xd,
+                                           float* __restrict__ y, int rows, int cols, int T, int add) {
+    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    int row = blockIdx.x * (blockDim.x >> 5) + warp;
+    if (row >= rows) return;
+    int nb = cols >> 5;
+    const signed char* w = qs + (size_t)row * cols;
+    const float* d = ds + (size_t)row * nb;
+    for (int t0 = 0; t0 < T; t0 += TT) {
+        int tn = min(TT, T - t0);
+        float sum[TT];
+        #pragma unroll
+        for (int k = 0; k < TT; ++k) sum[k] = 0.f;
+        for (int i = lane * 16; i < cols; i += 512) {
+            int4 wv = __ldg(reinterpret_cast<const int4*>(w + i));
+            int b = i >> 5;
+            float wd = __ldg(d + b);
+            #pragma unroll
+            for (int k = 0; k < TT; ++k) {
+                if (k < tn) {
+                    const signed char* xr = xq + (size_t)(t0 + k) * cols;
+                    int4 xv = *reinterpret_cast<const int4*>(xr + i);
+                    int acc = __dp4a(wv.x, xv.x, 0);
+                    acc = __dp4a(wv.y, xv.y, acc);
+                    acc = __dp4a(wv.z, xv.z, acc);
+                    acc = __dp4a(wv.w, xv.w, acc);
+                    sum[k] += (float)acc * wd * xd[(size_t)(t0 + k) * nb + b];
+                }
+            }
+        }
+        #pragma unroll
+        for (int k = 0; k < TT; ++k) {
+            if (k < tn) {
+                float v = warp_sum(sum[k]);
+                if (lane == 0) {
+                    float* o = y + (size_t)(t0 + k) * rows + row;
+                    *o = add ? *o + v : v;
+                }
+            }
+        }
+    }
+}
+
+extern "C" __global__ void silu_mul_quant_batch(const float* __restrict__ gu, signed char* __restrict__ xq,
+                                                float* __restrict__ xd, int ffn, int T) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if ((i & ~31) >= ffn * T) return;
+    int t = i / ffn, j = i - t * ffn;
+    const float* r = gu + (size_t)t * 2 * ffn;
+    float g = r[j], u = r[ffn + j];
+    quant32(g / (1.f + __expf(-g)) * u, xq, xd, i, threadIdx.x & 31);
 }

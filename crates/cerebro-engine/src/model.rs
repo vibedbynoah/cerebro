@@ -341,6 +341,14 @@ impl Session {
         }
         self.tokens.truncate(common);
         let t0 = Instant::now();
+        #[cfg(feature = "cuda")]
+        if let Some(g) = self.gpu.as_mut() {
+            // Batched prefill on the GPU: every weight read once per chunk of tokens.
+            g.prefill(&prompt[common..], common, Some(&mut self.logits))?;
+            self.tokens.extend_from_slice(&prompt[common..]);
+            self.stats = Stats { prompt_tokens: prompt.len(), reused_tokens: common, prefill_ms: t0.elapsed().as_secs_f64() * 1000.0, ..Default::default() };
+            return Ok(common);
+        }
         for &tok in &prompt[common..] {
             self.step(m, tok);
         }
