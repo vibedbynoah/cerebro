@@ -243,11 +243,18 @@ pub struct QAct {
     pub q: Vec<i8>,
     /// Sum of the int8 values of each block (for the K-quant minimum terms).
     pub s: Vec<i32>,
+    /// The same activations quantised with one scale per 256 (the K-quant block size), so a K-quant
+    /// block's integer products can be summed across its sub-blocks and converted to float once.
+    pub kq: Vec<i8>,
+    pub kd: Vec<f32>,
+    /// Sums of kq per 16 values (minimum terms and the Q6_K offset).
+    pub ks: Vec<i32>,
 }
 
 impl QAct {
     pub fn new(len: usize) -> Self {
-        Self { d: vec![0.0; len / 32], q: vec![0; len], s: vec![0; len / 32] }
+        let k = if len % 256 == 0 { len } else { 0 };
+        Self { d: vec![0.0; len / 32], q: vec![0; len], s: vec![0; len / 32], kq: vec![0; k], kd: vec![0.0; k / 256], ks: vec![0; k / 16] }
     }
 
     pub fn quantize(&mut self, x: &[f32]) {
@@ -263,6 +270,23 @@ impl QAct {
                 sum += q as i32;
             }
             self.s[bi] = sum;
+        }
+        if !self.kq.is_empty() {
+            for (bi, xb) in x.chunks_exact(256).enumerate() {
+                let amax = xb.iter().fold(0f32, |m, v| m.max(v.abs()));
+                let d = amax / 127.0;
+                let id = if d > 0.0 { 1.0 / d } else { 0.0 };
+                self.kd[bi] = d;
+                for (gi, g) in xb.chunks_exact(16).enumerate() {
+                    let mut sum = 0i32;
+                    for (i, v) in g.iter().enumerate() {
+                        let q = (v * id).round() as i8;
+                        self.kq[bi * 256 + gi * 16 + i] = q;
+                        sum += q as i32;
+                    }
+                    self.ks[bi * 16 + gi] = sum;
+                }
+            }
         }
     }
 }
@@ -322,15 +346,145 @@ pub fn dot_k_q8(t: DType, row: &[u8], a: &QAct) -> f32 {
         if std::arch::is_x86_feature_detected!("avx2") {
             // SAFETY: AVX2 support was checked at run time just above.
             return unsafe {
-                match t {
-                    DType::Q4K => dot_q4k_avx2(row, a),
-                    DType::Q5K => dot_q5k_avx2(row, a),
-                    _ => dot_q6k_avx2(row, a),
+                if a.kq.is_empty() {
+                    match t {
+                        DType::Q4K => dot_q4k_avx2(row, a),
+                        DType::Q5K => dot_q5k_avx2(row, a),
+                        _ => dot_q6k_avx2(row, a),
+                    }
+                } else {
+                    match t {
+                        DType::Q4K => dot_q4k_k8_avx2(row, a),
+                        DType::Q5K => dot_q5k_k8_avx2(row, a),
+                        _ => dot_q6k_k8_avx2(row, a),
+                    }
                 }
             };
         }
     }
     dot_k_q8_scalar(t, row, a)
+}
+
+/// Q4_K row times per-256 int8 activations: per block, the eight sub-blocks' products are scaled in
+/// integer (madd with the 6-bit scales) and summed, then converted to float once.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_q4k_k8_avx2(row: &[u8], a: &QAct) -> f32 {
+    use std::arch::x86_64::*;
+    let m4 = _mm256_set1_epi8(0xF);
+    let mut facc = _mm256_setzero_ps();
+    let mut mins = 0f32;
+    for blk in 0..row.len() / 144 {
+        let b = row.as_ptr().add(blk * 144);
+        let d = f16_to_f32(u16::from_le_bytes([*b, *b.add(1)]));
+        let dmin = f16_to_f32(u16::from_le_bytes([*b.add(2), *b.add(3)]));
+        let sc = std::slice::from_raw_parts(b.add(4), 12);
+        let xq = a.kq.as_ptr().add(blk * 256);
+        let ks = a.ks.as_ptr().add(blk * 16);
+        let mut acc = _mm256_setzero_si256();
+        let mut msum = 0i32;
+        for j in 0..4 {
+            let (s0, m0) = scale_min_k4(2 * j, sc);
+            let (s1, m1) = scale_min_k4(2 * j + 1, sc);
+            let qv = _mm256_loadu_si256(b.add(16 + j * 32) as *const __m256i);
+            let lo = _mm256_and_si256(qv, m4);
+            let hi = _mm256_and_si256(_mm256_srli_epi16(qv, 4), m4);
+            let xl = _mm256_loadu_si256(xq.add(j * 64) as *const __m256i);
+            let xh = _mm256_loadu_si256(xq.add(j * 64 + 32) as *const __m256i);
+            let pl = _mm256_madd_epi16(_mm256_maddubs_epi16(lo, xl), _mm256_set1_epi16(s0 as i16));
+            let ph = _mm256_madd_epi16(_mm256_maddubs_epi16(hi, xh), _mm256_set1_epi16(s1 as i16));
+            acc = _mm256_add_epi32(acc, _mm256_add_epi32(pl, ph));
+            msum += m0 as i32 * (*ks.add(4 * j) + *ks.add(4 * j + 1)) + m1 as i32 * (*ks.add(4 * j + 2) + *ks.add(4 * j + 3));
+        }
+        let kd = *a.kd.get_unchecked(blk);
+        facc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(acc), _mm256_set1_ps(d * kd), facc);
+        mins += dmin * kd * msum as f32;
+    }
+    hsum_ps(facc) - mins
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_q5k_k8_avx2(row: &[u8], a: &QAct) -> f32 {
+    use std::arch::x86_64::*;
+    let m4 = _mm256_set1_epi8(0xF);
+    let sixteen = _mm256_set1_epi8(16);
+    let mut facc = _mm256_setzero_ps();
+    let mut mins = 0f32;
+    for blk in 0..row.len() / 176 {
+        let b = row.as_ptr().add(blk * 176);
+        let d = f16_to_f32(u16::from_le_bytes([*b, *b.add(1)]));
+        let dmin = f16_to_f32(u16::from_le_bytes([*b.add(2), *b.add(3)]));
+        let sc = std::slice::from_raw_parts(b.add(4), 12);
+        let qh = _mm256_loadu_si256(b.add(16) as *const __m256i);
+        let xq = a.kq.as_ptr().add(blk * 256);
+        let ks = a.ks.as_ptr().add(blk * 16);
+        let mut acc = _mm256_setzero_si256();
+        let mut msum = 0i32;
+        for j in 0..4 {
+            let (s0, m0) = scale_min_k4(2 * j, sc);
+            let (s1, m1) = scale_min_k4(2 * j + 1, sc);
+            let qv = _mm256_loadu_si256(b.add(48 + j * 32) as *const __m256i);
+            let b0 = _mm256_set1_epi8(1i8.wrapping_shl(2 * j as u32));
+            let b1 = _mm256_set1_epi8(1i8.wrapping_shl(2 * j as u32 + 1));
+            let h0 = _mm256_and_si256(_mm256_cmpeq_epi8(_mm256_and_si256(qh, b0), b0), sixteen);
+            let h1 = _mm256_and_si256(_mm256_cmpeq_epi8(_mm256_and_si256(qh, b1), b1), sixteen);
+            let lo = _mm256_or_si256(_mm256_and_si256(qv, m4), h0);
+            let hi = _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16(qv, 4), m4), h1);
+            let xl = _mm256_loadu_si256(xq.add(j * 64) as *const __m256i);
+            let xh = _mm256_loadu_si256(xq.add(j * 64 + 32) as *const __m256i);
+            let pl = _mm256_madd_epi16(_mm256_maddubs_epi16(lo, xl), _mm256_set1_epi16(s0 as i16));
+            let ph = _mm256_madd_epi16(_mm256_maddubs_epi16(hi, xh), _mm256_set1_epi16(s1 as i16));
+            acc = _mm256_add_epi32(acc, _mm256_add_epi32(pl, ph));
+            msum += m0 as i32 * (*ks.add(4 * j) + *ks.add(4 * j + 1)) + m1 as i32 * (*ks.add(4 * j + 2) + *ks.add(4 * j + 3));
+        }
+        let kd = *a.kd.get_unchecked(blk);
+        facc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(acc), _mm256_set1_ps(d * kd), facc);
+        mins += dmin * kd * msum as f32;
+    }
+    hsum_ps(facc) - mins
+}
+
+/// Q6_K row times per-256 int8 activations: unsigned 6-bit values times activations, scaled per 16 in
+/// integer; the -32 offset is applied once per block from the activation sums.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_q6k_k8_avx2(row: &[u8], a: &QAct) -> f32 {
+    use std::arch::x86_64::*;
+    let m4 = _mm256_set1_epi8(0xF);
+    let m2 = _mm256_set1_epi8(3);
+    let mut facc = _mm256_setzero_ps();
+    let mut off = 0f32;
+    for blk in 0..row.len() / 210 {
+        let b = row.as_ptr().add(blk * 210);
+        let d = f16_to_f32(u16::from_le_bytes([*b.add(208), *b.add(209)]));
+        let xq = a.kq.as_ptr().add(blk * 256);
+        let ks = a.ks.as_ptr().add(blk * 16);
+        let mut acc = _mm256_setzero_si256();
+        let mut osum = 0i32;
+        for n in 0..2 {
+            let ql0 = _mm256_loadu_si256(b.add(n * 64) as *const __m256i);
+            let ql1 = _mm256_loadu_si256(b.add(n * 64 + 32) as *const __m256i);
+            let qh = _mm256_loadu_si256(b.add(128 + n * 32) as *const __m256i);
+            let sc = b.add(192 + n * 8) as *const i8;
+            for g in 0..4usize {
+                let ql = if g % 2 == 0 { ql0 } else { ql1 };
+                let lo = if g < 2 { _mm256_and_si256(ql, m4) } else { _mm256_and_si256(_mm256_srli_epi16(ql, 4), m4) };
+                let hi = _mm256_and_si256(_mm256_srl_epi16(qh, _mm_cvtsi32_si128((2 * g) as i32)), m2);
+                let q = _mm256_or_si256(lo, _mm256_slli_epi16(hi, 4));
+                let x = _mm256_loadu_si256(xq.add(n * 128 + g * 32) as *const __m256i);
+                let (s1, s2) = (*sc.add(2 * g) as i16, *sc.add(2 * g + 1) as i16);
+                let scales = _mm256_setr_epi16(s1, s1, s1, s1, s1, s1, s1, s1, s2, s2, s2, s2, s2, s2, s2, s2);
+                acc = _mm256_add_epi32(acc, _mm256_madd_epi16(_mm256_maddubs_epi16(q, x), scales));
+                let k = n * 8 + 2 * g;
+                osum += s1 as i32 * *ks.add(k) + s2 as i32 * *ks.add(k + 1);
+            }
+        }
+        let kd = *a.kd.get_unchecked(blk);
+        facc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(acc), _mm256_set1_ps(d * kd), facc);
+        off += d * kd * 32.0 * osum as f32;
+    }
+    hsum_ps(facc) - off
 }
 
 /// Unpacks sub-block `sb` (32 values) of a K-quant block into unsigned values and returns
@@ -544,6 +698,8 @@ mod kq_tests {
             let x: Vec<f32> = (0..cols).map(|i| ((i as f32) * 0.37).sin()).collect();
             let mut qa = QAct::new(cols);
             qa.quantize(&x);
+            // Per-32 path first (kq cleared selects it).
+            qa.kq.clear();
             // Reference: the float dot with the same quantised activations, so only kernel error remains.
             let xq: Vec<f32> = (0..cols).map(|i| qa.q[i] as f32 * qa.d[i / 32]).collect();
             let want = dot_row(t, &row, &xq);
@@ -552,6 +708,13 @@ mod kq_tests {
             let tol = want.abs() * 1e-3 + 1e-3;
             assert!((scalar - want).abs() <= tol, "{t:?} scalar {scalar} vs {want}");
             assert!((fast - scalar).abs() <= scalar.abs() * 1e-4 + 1e-3, "{t:?} simd {fast} vs scalar {scalar}");
+            // Per-256 activations (the default path): exact against the float dot on the same values.
+            let mut qk = QAct::new(cols);
+            qk.quantize(&x);
+            let xk: Vec<f32> = (0..cols).map(|i| qk.kq[i] as f32 * qk.kd[i / 256]).collect();
+            let want_k = dot_row(t, &row, &xk);
+            let got_k = dot_k_q8(t, &row, &qk);
+            assert!((got_k - want_k).abs() <= want_k.abs() * 1e-3 + 1e-3, "{t:?} k8 {got_k} vs {want_k}");
         }
     }
 }
