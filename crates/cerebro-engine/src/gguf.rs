@@ -243,13 +243,26 @@ impl Gguf {
     }
 
     /// A byte range already validated when the tensor table was parsed.
-    /// Touches every page of the file in parallel so later reads hit mapped memory instead of taking
-    /// a page fault per 4 KB (reads it from disk if it is not in the OS file cache). Returns bytes.
-    pub fn prefault(&self) -> usize {
+    /// Reads one byte of every page in these ranges, in parallel, so they are mapped into this
+    /// process before decoding needs them. A first touch costs a page fault per 4 KB even when the
+    /// file is in the OS cache; done lazily on the CPU expert path it measured 30.3 tok/s against
+    /// 36.2 after touching up front (Qwen3-Coder-30B-A3B hybrid, i9-12900H + RTX 3070 Ti).
+    pub fn touch(&self, ranges: &[(usize, usize)]) {
         use rayon::prelude::*;
         let m: &[u8] = &self.mmap;
-        m.par_chunks(1 << 22).map(|c| c.iter().step_by(4096).fold(0u8, |a, &b| a ^ unsafe { std::ptr::read_volatile(&b) }) as usize).sum::<usize>();
-        m.len()
+        ranges.par_iter().for_each(|&(o, l)| {
+            let end = (o + l).min(m.len());
+            let mut acc = 0u8;
+            for i in (o..end).step_by(4096) {
+                // SAFETY: i is inside the mapping; the volatile read keeps the touch from being elided.
+                acc ^= unsafe { std::ptr::read_volatile(m.as_ptr().add(i)) };
+            }
+            std::hint::black_box(acc);
+        });
+    }
+
+    pub fn len(&self) -> usize {
+        self.mmap.len()
     }
 
     /// Tells the OS these file bytes will not be read soon (e.g. experts now served from VRAM): their
@@ -325,10 +338,38 @@ mod win {
         pub bytes: usize,
     }
 
+    #[repr(C)]
+    #[derive(Default)]
+    pub struct MemoryStatusEx {
+        pub length: u32,
+        pub memory_load: u32,
+        pub total_phys: u64,
+        pub avail_phys: u64,
+        pub total_page_file: u64,
+        pub avail_page_file: u64,
+        pub total_virtual: u64,
+        pub avail_virtual: u64,
+        pub avail_extended_virtual: u64,
+    }
+
     #[link(name = "kernel32")]
     extern "system" {
+        pub fn GlobalMemoryStatusEx(st: *mut MemoryStatusEx) -> i32;
         pub fn VirtualUnlock(addr: *mut c_void, size: usize) -> i32;
         pub fn PrefetchVirtualMemory(process: *mut c_void, n: usize, entries: *const MemoryRange, flags: u32) -> i32;
         pub fn GetCurrentProcess() -> *mut c_void;
     }
+}
+
+/// Physical memory currently available to applications, in bytes (u64::MAX if unknown).
+pub fn available_ram() -> u64 {
+    #[cfg(windows)]
+    {
+        let mut st = win::MemoryStatusEx { length: std::mem::size_of::<win::MemoryStatusEx>() as u32, ..Default::default() };
+        // SAFETY: st is a properly sized MEMORYSTATUSEX with its length set.
+        if unsafe { win::GlobalMemoryStatusEx(&mut st) } != 0 {
+            return st.avail_phys;
+        }
+    }
+    u64::MAX
 }

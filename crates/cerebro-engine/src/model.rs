@@ -107,11 +107,7 @@ fn vec_f32(g: &Gguf, name: &str) -> Result<Vec<f32>, Error> {
 impl Model {
     pub fn load(path: &Path) -> Result<Self, Error> {
         let g = Arc::new(Gguf::open(path)?);
-        if std::env::var_os("CEREBRO_PREFAULT").is_some() {
-            let t = Instant::now();
-            let n = g.prefault();
-            eprintln!("prefaulted {:.1} GB in {:.2}s", n as f64 / 1e9, t.elapsed().as_secs_f64());
-        }
+
         let arch = g.str("general.architecture").unwrap_or("").to_owned();
         if !matches!(arch.as_str(), "qwen3" | "qwen3moe" | "qwen2" | "llama") {
             return Err(Error::Unsupported(format!("architecture {arch}")));
@@ -438,7 +434,17 @@ pub struct Session {
 }
 
 impl Session {
+    /// A CPU session. The weights are touched into memory up front when they fit in available RAM
+    /// (see `Gguf::touch`); `CEREBRO_PREFAULT=0` turns that off.
     pub fn new(m: &Model, max_ctx: usize) -> Self {
+        let g = m.gguf();
+        if std::env::var("CEREBRO_PREFAULT").as_deref() != Ok("0") && (g.len() as f64) < crate::gguf::available_ram() as f64 * 0.9 {
+            g.touch(&[(0, g.len())]);
+        }
+        Self::empty(m, max_ctx)
+    }
+
+    fn empty(m: &Model, max_ctx: usize) -> Self {
         let c = &m.cfg;
         let kv = c.n_kv * c.head_dim;
         Self {
@@ -504,7 +510,7 @@ impl Session {
     /// A session whose whole forward pass runs on the first CUDA GPU.
     #[cfg(feature = "cuda")]
     pub fn new_gpu(m: &Model, max_ctx: usize) -> Result<Self, Error> {
-        let mut s = Self::new(m, 1);
+        let mut s = Self::empty(m, 1);
         s.max_ctx = max_ctx;
         s.gpu = Some(crate::gpu::GpuState::load(m, max_ctx)?);
         Ok(s)

@@ -190,8 +190,8 @@ impl MoeGpu {
         if let Some(&old) = self.owner.get(slot) {
             if old != usize::MAX {
                 self.slot_of[old] = None;
-                // The evicted expert is computed on the CPU from now on: start reading it into RAM.
-                model.gguf().prefetch(&Self::expert_ranges(model, old / self.ne, old % self.ne));
+                // The evicted expert is computed on the CPU from now on: map it in.
+                model.gguf().touch(&Self::expert_ranges(model, old / self.ne, old % self.ne));
                 stream.memcpy_htod(&[-1i32], &mut self.slot_tab.slice_mut(old..old + 1)).map_err(gerr)?;
             }
         }
@@ -574,9 +574,25 @@ impl GpuState {
         for (slot, &key) in order.iter().take(n_slots).enumerate() {
             mg.upload(stream, model, slot, key)?;
         }
-        // Bring the experts the CPU will compute into RAM ahead of the first tokens.
-        let cpu_side: Vec<(usize, usize)> = (0..total).filter(|&k| mg.slot_of[k].is_none()).flat_map(|k| MoeGpu::expert_ranges(model, k / c.n_expert, k % c.n_expert)).collect();
-        model.gguf().prefetch(&cpu_side);
+        // Map the experts the CPU will compute into memory before the first token, most used first,
+        // as many as available RAM holds (CEREBRO_PREFAULT=0 skips this); ask the OS to read ahead
+        // the rest.
+        let mut cpu_side: Vec<usize> = (0..total).filter(|&k| mg.slot_of[k].is_none()).collect();
+        cpu_side.sort_by(|&a, &b| mg.counts[b].total_cmp(&mg.counts[a]));
+        let mut room = if std::env::var("CEREBRO_PREFAULT").as_deref() == Ok("0") { 0 } else { (crate::gguf::available_ram() as f64 * 0.85) as usize };
+        let (mut touch, mut ahead) = (Vec::new(), Vec::new());
+        for k in cpu_side {
+            let r = MoeGpu::expert_ranges(model, k / c.n_expert, k % c.n_expert);
+            let bytes: usize = r.iter().map(|x| x.1).sum();
+            if bytes <= room {
+                room -= bytes;
+                touch.extend(r);
+            } else {
+                ahead.extend(r);
+            }
+        }
+        model.gguf().touch(&touch);
+        model.gguf().prefetch(&ahead);
         Ok(mg)
     }
 
