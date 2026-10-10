@@ -77,6 +77,30 @@ fn main() {
         let mut out = Vec::new();
         let td = Instant::now();
         let mut printed = 0usize;
+        // Greedy on the GPU: the whole loop stays on the device (graph replay, pick on the GPU).
+        #[cfg(feature = "cuda")]
+        if temp <= 0.0 {
+            if let Some(g) = session.gpu.as_mut() {
+                let first = cerebro_engine::sample::argmax(&session.logits);
+                if !tok.eot.contains(&first) {
+                    out.push(first);
+                    let pos = session.tokens.len();
+                    g.generate_greedy(first, pos, n.saturating_sub(1), &tok.eot, |t| out.push(t)).unwrap_or_else(|e| die(e.to_string()));
+                }
+                let secs = td.elapsed().as_secs_f64();
+                println!("{}", tok.decode(&out));
+                eprintln!(
+                    "prompt {} tokens ({} reused), prefill {:.1} tok/s; generated {} tokens at {:.1} tok/s (GPU greedy)",
+                    ids.len(),
+                    reused,
+                    session.stats.prefill_tps(),
+                    out.len(),
+                    out.len() as f64 / secs
+                );
+                history.push((p, tok.decode(&out)));
+                continue;
+            }
+        }
         for _ in 0..n {
             let next = sampler.sample(&session.logits, &session.tokens);
             if tok.eot.contains(&next) {

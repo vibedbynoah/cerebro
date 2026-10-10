@@ -146,6 +146,15 @@ impl Model {
         &self.out_norm
     }
 
+    /// True when the output projection reuses the token embedding table.
+    pub fn tied(&self) -> bool {
+        self.output.offset == self.embed.offset
+    }
+
+    pub fn embed_mat(&self) -> &Mat {
+        &self.embed
+    }
+
     pub fn embed_into(&self, token: u32, out: &mut [f32]) {
         self.embed_row(token, out);
     }
@@ -353,7 +362,7 @@ impl Session {
         #[cfg(feature = "cuda")]
         if let Some(g) = self.gpu.as_mut() {
             let pos = self.tokens.len();
-            if let Err(e) = g.step(m, token, pos, &mut self.logits) {
+            if let Err(e) = g.step(token, pos, Some(&mut self.logits)) {
                 panic!("GPU step failed: {e}");
             }
             self.tokens.push(token);
