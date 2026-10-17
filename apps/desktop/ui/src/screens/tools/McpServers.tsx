@@ -1,5 +1,6 @@
 import { createEffect, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { Section } from "../../components/Screen";
+import { MCP_CATALOGUE, type McpCatalogueEntry, type McpRisk } from "../../lib/mcp-catalogue";
 import { notify } from "../../lib/toast";
 import { useService } from "../../service/context";
 import type { McpCallResult, McpConfig, McpServerConfig, McpServerStatus, McpTool } from "../../service/types";
@@ -10,6 +11,15 @@ const ADD_KINDS = [
   { value: "url" as const, label: "Web address", note: "Talks to an MCP server at a web address, with headers for anything it asks for (like a token)." },
 ];
 type AddKind = (typeof ADD_KINDS)[number]["value"];
+
+const RISK_LABELS: Record<McpRisk, string> = { read: "Read", write: "Write", run: "Run", network: "Network", account: "Account" };
+
+/** Catalogue categories in first-appearance order, so the chips read like the data. */
+const CATEGORIES = [...new Set(MCP_CATALOGUE.map((e) => e.category))];
+
+/** The one line a card shows for its install: the command line or the hosted endpoint. */
+const installText = (entry: McpCatalogueEntry): string =>
+  "url" in entry.install ? entry.install.url : [entry.install.command, ...entry.install.args].join(" ");
 
 /** MCP servers: configure, monitor and try the servers that give your models tools (screens/Tools.tsx, id="mcp"). */
 export function McpServers(): JSX.Element {
@@ -30,6 +40,13 @@ export function McpServers(): JSX.Element {
   const [addUrl, setAddUrl] = createSignal("");
   const [addArgs, setAddArgs] = createSignal("");
   const [addEnv, setAddEnv] = createSignal("");
+
+  // Browse servers: text and category filter the catalogue; choosing an entry pre-fills the form.
+  const [browseQuery, setBrowseQuery] = createSignal("");
+  const [browseCategory, setBrowseCategory] = createSignal("");
+  const [chosen, setChosen] = createSignal<McpCatalogueEntry | null>(null);
+  const [chosenEnv, setChosenEnv] = createSignal<Record<string, string>>({});
+  let formCard: HTMLFormElement | undefined;
 
   const [selectedTool, setSelectedTool] = createSignal("");
   const [callArgs, setCallArgs] = createSignal("{}");
@@ -151,6 +168,31 @@ export function McpServers(): JSX.Element {
     }
   };
 
+  const browseResults = () => {
+    const category = browseCategory();
+    const inCategory = category ? MCP_CATALOGUE.filter((e) => e.category === category) : MCP_CATALOGUE;
+    const query = browseQuery().trim().toLowerCase();
+    if (!query) return inCategory;
+    return inCategory.filter((e) => `${e.name} ${e.category} ${e.description}`.toLowerCase().includes(query));
+  };
+
+  // Pre-fill the add form from the catalogue; the user still adjusts paths and fills the keys.
+  const chooseFromCatalogue = (entry: McpCatalogueEntry) => {
+    if ("url" in entry.install) return; // hosted entries need a browser sign-in; shown, not added
+    setChosen(entry);
+    setChosenEnv({});
+    setAddKind("command");
+    setAddName(entry.id);
+    setAddCommand(entry.install.command);
+    setAddArgs(entry.install.args.join(" "));
+    formCard?.scrollIntoView({ block: "start" });
+  };
+
+  const clearChosen = () => {
+    setChosen(null);
+    setChosenEnv({});
+  };
+
   const addServer = async (event: SubmitEvent) => {
     event.preventDefault();
     const current = config();
@@ -171,7 +213,9 @@ export function McpServers(): JSX.Element {
         notify("A server needs a command", "For example: npx -y @modelcontextprotocol/server-filesystem", "warning");
         return;
       }
-      entry = { command, args: splitArguments(addArgs()), env: parseEnv(addEnv()), disabled: false };
+      // Catalogue entries keep their keys in named fields; a manual add uses the free-form text.
+      const env = chosen() ? Object.fromEntries(Object.entries(chosenEnv()).filter(([, value]) => value.trim() !== "")) : parseEnv(addEnv());
+      entry = { command, args: splitArguments(addArgs()), env, disabled: false };
     } else {
       const url = addUrl().trim();
       if (!/^https?:\/\/\S+$/.test(url)) {
@@ -187,6 +231,7 @@ export function McpServers(): JSX.Element {
       setAddUrl("");
       setAddArgs("");
       setAddEnv("");
+      clearChosen();
     } catch (e) {
       notify(`Could not add ${name}`, errMessage(e), "error");
     }
@@ -205,22 +250,6 @@ export function McpServers(): JSX.Element {
     } catch (e) {
       notify("Could not save mcp.json", errMessage(e), "error");
     }
-  };
-
-  type Preset = { label: string; command: string; args: string };
-  const PRESETS: Preset[] = [
-    { label: "Files", command: "npx", args: "-y @modelcontextprotocol/server-filesystem <your folder>" },
-    { label: "Git", command: "uvx", args: "mcp-server-git" },
-    { label: "Fetch", command: "uvx", args: "mcp-server-fetch" },
-    { label: "Memory", command: "npx", args: "-y @modelcontextprotocol/server-memory" },
-    { label: "SQLite", command: "uvx", args: "mcp-server-sqlite --db-path <file>" },
-  ];
-
-  const applyPreset = (preset: Preset) => {
-    setAddKind("command");
-    setAddName(preset.label.toLowerCase());
-    setAddCommand(preset.command);
-    setAddArgs(preset.args);
   };
 
   const stateFor = (name: string, disabled: boolean): { label: string; pill: string } => {
@@ -307,7 +336,82 @@ export function McpServers(): JSX.Element {
           </For>
         </ul>
 
-        <form class="mcp__form" onSubmit={addServer}>
+        <div class="mcp__browse" data-testid="mcp-catalogue">
+          <h3 class="mcp__form-title">Browse servers</h3>
+          <p class="hint">
+            Real servers from the official MCP project and their vendors. "Add" fills the form below with the command and the keys that server
+            needs.
+          </p>
+          <div class="mcp__browse-controls">
+            <input
+              class="tools-search mcp__search"
+              type="search"
+              placeholder="Search servers"
+              aria-label="Search servers"
+              value={browseQuery()}
+              onInput={(e) => setBrowseQuery(e.currentTarget.value)}
+            />
+            <div class="mcp__chips" role="group" aria-label="Filter by category">
+              <button class="mcp__chip" type="button" aria-pressed={browseCategory() === ""} onClick={() => setBrowseCategory("")}>
+                All
+              </button>
+              <For each={CATEGORIES}>
+                {(category) => (
+                  <button
+                    class="mcp__chip"
+                    type="button"
+                    aria-pressed={browseCategory() === category}
+                    onClick={() => setBrowseCategory(browseCategory() === category ? "" : category)}
+                  >
+                    {category}
+                  </button>
+                )}
+              </For>
+            </div>
+          </div>
+          <p class="hint" data-testid="mcp-catalogue-count">
+            {browseResults().length} of {MCP_CATALOGUE.length} servers
+          </p>
+          <ul class="mcp__grid">
+            <For each={browseResults()} fallback={<li class="hint">Nothing matches. Clear the search or pick another category.</li>}>
+              {(entry) => (
+                <li class="mcp__card" data-testid={`mcp-catalogue-${entry.id}`}>
+                  <div class="mcp__card-head">
+                    <span class="mcp__card-name">{entry.name}</span>
+                    <span class="mcp__badge" data-risk={entry.risk}>
+                      {RISK_LABELS[entry.risk]}
+                    </span>
+                    <span class="mcp__badge" data-offline={entry.offline ? "yes" : "no"}>
+                      {entry.offline ? "Works offline" : "Needs internet"}
+                    </span>
+                    <Show when={"url" in entry.install}>
+                      <span class="mcp__badge" data-remote="yes">
+                        Remote
+                      </span>
+                    </Show>
+                  </div>
+                  <p class="mcp__card-desc">{entry.description}</p>
+                  <code class="mcp__command mcp__card-command">{installText(entry)}</code>
+                  <div class="mcp__card-actions">
+                    <a class="text-link" href={entry.homepage} target="_blank" rel="noopener noreferrer nofollow" aria-label={`${entry.name} homepage`}>
+                      Homepage
+                    </a>
+                    <Show
+                      when={"command" in entry.install}
+                      fallback={<span class="hint">Signs in through your browser (OAuth), which Cerebro does not support yet.</span>}
+                    >
+                      <button class="btn btn--ghost btn--sm" type="button" aria-label={`Add ${entry.name}`} onClick={() => chooseFromCatalogue(entry)}>
+                        Add
+                      </button>
+                    </Show>
+                  </div>
+                </li>
+              )}
+            </For>
+          </ul>
+        </div>
+
+        <form class="mcp__form" onSubmit={addServer} ref={formCard}>
           <h3 class="mcp__form-title">Add a server</h3>
           <fieldset class="segmented segmented--sm" aria-describedby="mcp-add-note">
             <legend class="sr-only">How the server runs</legend>
@@ -323,16 +427,44 @@ export function McpServers(): JSX.Element {
           <p class="hint" id="mcp-add-note">
             {ADD_KINDS.find((kind) => kind.value === addKind())!.note}
           </p>
-          <Show when={addKind() === "command"}>
-            <div class="mcp__presets" role="group" aria-label="Server presets">
-              <For each={PRESETS}>
-                {(preset) => (
-                  <button class="btn btn--ghost btn--sm" type="button" onClick={() => applyPreset(preset)}>
-                    {preset.label}
+          <Show when={chosen()}>
+            {(entry) => (
+              <div class="mcp__keys" data-testid="mcp-catalogue-keys">
+                <div class="mcp__keys-head">
+                  <span>
+                    From the catalogue: <strong>{entry().name}</strong>
+                  </span>
+                  <button class="btn btn--ghost btn--sm" type="button" onClick={clearChosen}>
+                    Clear
                   </button>
-                )}
-              </For>
-            </div>
+                </div>
+                <For
+                  each={entry().env}
+                  fallback={<p class="hint">This server needs no keys. Adjust the arguments if needed, then add it.</p>}
+                >
+                  {(key) => {
+                    const inputId = `mcp-key-${entry().id}-${key.name}`;
+                    return (
+                      <div class="mcp__field">
+                        <label for={inputId}>{key.label}</label>
+                        <input
+                          id={inputId}
+                          class="input"
+                          type={key.secret ? "password" : "text"}
+                          autocomplete={key.secret ? "new-password" : "off"}
+                          placeholder={key.name}
+                          value={chosenEnv()[key.name] ?? ""}
+                          onInput={(e) => setChosenEnv((v) => ({ ...v, [key.name]: e.currentTarget.value }))}
+                        />
+                        <a class="hint mcp__key-link" href={key.url} target="_blank" rel="noopener noreferrer nofollow">
+                          {new URL(key.url).hostname}
+                        </a>
+                      </div>
+                    );
+                  }}
+                </For>
+              </div>
+            )}
           </Show>
           <label class="mcp__field">
             <span>Name</span>
@@ -368,6 +500,8 @@ export function McpServers(): JSX.Element {
               <span>Arguments</span>
               <input class="input" aria-label="Server arguments, quoted parts stay together" value={addArgs()} onInput={(e) => setAddArgs(e.currentTarget.value)} placeholder="C:\my\folder" />
             </label>
+          </Show>
+          <Show when={addKind() === "command" && !chosen()}>
             <label class="mcp__field">
               <span>Environment</span>
               <textarea
