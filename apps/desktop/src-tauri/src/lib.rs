@@ -18,6 +18,7 @@ mod mcp;
 mod remote;
 mod mcp_server;
 mod toolcall;
+mod orchestrate;
 mod commands;
 mod engine;
 mod hub;
@@ -86,6 +87,9 @@ pub fn run() -> Result<(), tauri::Error> {
                 use tauri::Manager;
                 mcp::mcp_start_all(app.handle().clone(), app.state::<mcp::Mcp>());
                 app.state::<engine::Engine>().set_tool_host(std::sync::Arc::new(commands::McpToolHost(app.handle().clone())));
+                if let Ok(dir) = app.path().app_data_dir() {
+                    app.state::<engine::Engine>().set_ledger_root(dir);
+                }
                 // Phone access: saved settings, written atomically (temp file + rename) on change.
                 let path = commands::remote_file(app.handle());
                 let settings = path.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();

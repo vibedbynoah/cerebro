@@ -267,6 +267,16 @@ pub struct ChatRequest {
     /// MCP tools the model may call this turn, with the user's rule for each; None = no tools.
     #[serde(default)]
     pub tools: Option<ToolsRequest>,
+    /// Orchestrate mode (GVS5H, orchestrate.rs): several instances of the model and a shared ledger.
+    #[serde(default)]
+    pub orchestrate: Option<OrchestrateRequest>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestrateRequest {
+    pub workers: usize,
+    pub rounds: usize,
 }
 
 /// The user's rules (Tools screen), resolved by the UI to allow / ask / deny per "server/tool".
@@ -337,6 +347,15 @@ pub enum ChatEvent {
     },
     Error {
         message: String,
+    },
+    /// Orchestrate mode: a role started (`step`), or a ledger file changed (`file` + `content`).
+    Ledger {
+        step: Option<String>,
+        round: usize,
+        file: Option<&'static str>,
+        content: Option<String>,
+        /// The ledger folder on disk (first event only).
+        dir: Option<String>,
     },
     /// A tool call and each change of its state: approval, running, done, denied, error.
     Tool {
@@ -438,6 +457,8 @@ pub struct Engine {
     /// Tool calls waiting for the user, by call id; `decide` answers them.
     approvals: Arc<Mutex<std::collections::HashMap<String, Sender<bool>>>>,
     tool_host: Arc<Mutex<Option<Arc<dyn ToolHost>>>>,
+    /// Where Orchestrate mode keeps its ledgers (the app's data folder).
+    ledger_root: Arc<Mutex<Option<PathBuf>>>,
 }
 
 fn now_ms() -> u64 {
@@ -462,7 +483,8 @@ impl Engine {
         let tool_host: Arc<Mutex<Option<Arc<dyn ToolHost>>>> = Arc::default();
         let st = status.clone();
         let cn = cancel.clone();
-        let (ap, th) = (approvals.clone(), tool_host.clone());
+        let ledger_root: Arc<Mutex<Option<PathBuf>>> = Arc::default();
+        let (ap, th, lr) = (approvals.clone(), tool_host.clone(), ledger_root.clone());
         std::thread::Builder::new()
             .name("cerebro-engine".into())
             .spawn(move || {
@@ -500,6 +522,10 @@ impl Engine {
                         Job::Chat { req, events, reply } => {
                             cn.store(false, Ordering::SeqCst);
                             match loaded.as_mut() {
+                                Some(l) if l.info.id == req.model_id && req.orchestrate.is_some() => {
+                                    let root = lr.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(std::env::temp_dir);
+                                    run_orchestrate(l, &req, &events, &st, &cn, &root);
+                                }
                                 Some(l) if l.info.id == req.model_id => {
                                     let host = th.lock().unwrap_or_else(|e| e.into_inner()).clone();
                                     run_chat(l, &req, &events, &st, &cn, Tooling { host, approvals: &ap });
@@ -534,7 +560,7 @@ impl Engine {
                 s.history.pop_front();
             }
         });
-        Self { tx: Arc::new(Mutex::new(tx)), status, cancel, library: Arc::new(Mutex::new(Vec::new())), approvals, tool_host }
+        Self { tx: Arc::new(Mutex::new(tx)), status, cancel, library: Arc::new(Mutex::new(Vec::new())), approvals, tool_host, ledger_root }
     }
 
     /// A handle that can move into a blocking task.
@@ -545,6 +571,11 @@ impl Engine {
     /// Where chat tool calls go (set once at start-up, to the MCP client).
     pub fn set_tool_host(&self, host: Arc<dyn ToolHost>) {
         *self.tool_host.lock().unwrap_or_else(|e| e.into_inner()) = Some(host);
+    }
+
+    /// Where Orchestrate ledgers are written (set once at start-up).
+    pub fn set_ledger_root(&self, dir: PathBuf) {
+        *self.ledger_root.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir);
     }
 
     /// The user's answer to a tool call waiting for approval. False if nothing was waiting.
@@ -926,6 +957,168 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
     });
 }
 
+/// The engine as an orchestration participant: every call is a fresh context on the loaded model.
+/// Each role's output streams to the reply's reasoning, headed by the role, so the discussion is
+/// visible as it happens.
+struct EngineLlm<'a> {
+    l: &'a mut Loaded,
+    cfg: GenConfig,
+    think: bool,
+    events: &'a ChatSink,
+    st: &'a Arc<Mutex<Status>>,
+    cancel: &'a Arc<AtomicBool>,
+    t0: Instant,
+    started: bool,
+    tokens: usize,
+    decode_ms: f64,
+    prompt_tokens: usize,
+    reused_tokens: usize,
+    ttft_ms: Option<f64>,
+}
+
+impl crate::orchestrate::Llm for EngineLlm<'_> {
+    fn call(&mut self, role: &str, system: &str, user: &str, temperature: f32) -> Result<crate::orchestrate::Reply, String> {
+        let text = cerebro_engine::chatml(Some(system), &[("user", user)], self.think);
+        let ids = self.l.tok.encode(&text);
+        self.cfg.sampler.temperature = temperature;
+        self.cfg.sampler.seed = now_ms();
+        let cfg = &self.cfg;
+        (self.events)(ChatEvent::Thinking { text: format!("\n\n**{role}**\n") });
+        set(self.st, |s| {
+            s.activity = "reading";
+            s.live_prompt = ids.len();
+        });
+        let mut out = String::new();
+        let (events, st, cancel, t0) = (self.events, self.st, self.cancel, self.t0);
+        let mut started = self.started;
+        let mut n = 0usize;
+        let r = generate(&self.l.model, &mut self.l.session, &self.l.tok, &ids, cfg, |piece| {
+            if !started {
+                started = true;
+                events(ChatEvent::Start { ttft_ms: t0.elapsed().as_secs_f64() * 1000.0 });
+            }
+            n += 1;
+            out.push_str(piece);
+            events(ChatEvent::Thinking { text: piece.to_owned() });
+            let secs = t0.elapsed().as_secs_f64();
+            set(st, |s| {
+                s.activity = "generating";
+                s.live_generated += 1;
+                s.live_decode_tps = Some(s.live_generated as f64 / secs.max(1e-3));
+            });
+            !cancel.load(Ordering::SeqCst)
+        });
+        self.started = started;
+        let g = r.map_err(|e| format!("Generation failed: {e}"))?;
+        self.ttft_ms.get_or_insert(g.ttft_ms);
+        self.tokens += g.output_tokens;
+        self.decode_ms += g.total_ms - g.ttft_ms;
+        self.prompt_tokens += g.prompt_tokens;
+        self.reused_tokens += g.reused_tokens;
+        if g.stopped && self.cancel.load(Ordering::SeqCst) {
+            return Err("Stopped.".into());
+        }
+        // A reply that used all of max_tokens was cut off.
+        Ok(crate::orchestrate::Reply { text: crate::orchestrate::strip_think(&out), cut_off: g.output_tokens >= cfg.max_tokens })
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+}
+
+/// Orchestrate mode: GVS5H over the loaded model; the final result is the reply.
+fn run_orchestrate(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex<Status>>, cancel: &Arc<AtomicBool>, root: &Path) {
+    let Some(o) = req.orchestrate else { return };
+    // The goal is the last user message; earlier turns are context.
+    let goal = req.turns.iter().rev().find(|t| t.role != "assistant").map(|t| t.text.clone()).unwrap_or_default();
+    let mut context = req.turns[..req.turns.len().saturating_sub(1)].iter().map(|t| format!("{}: {}", t.role, t.text)).collect::<Vec<_>>().join("\n\n");
+    if !req.system_prompt.trim().is_empty() {
+        context = format!("Instructions: {}\n\n{context}", req.system_prompt.trim());
+    }
+    let id = format!("r{}", now_ms());
+    let dir = root.join("orchestrate").join(&id);
+    let ledger = match crate::orchestrate::Ledger::create(&dir, &goal) {
+        Ok(x) => x,
+        Err(e) => return events(ChatEvent::Error { message: e }),
+    };
+    events(ChatEvent::Ledger { step: None, round: 0, file: None, content: None, dir: Some(ledger.dir().to_string_lossy().into_owned()) });
+    set(st, |s| {
+        s.live_generated = 0;
+        s.live_decode_tps = None;
+        s.requests.push_front(RequestRecord {
+            id: id.clone(),
+            started_at: now_ms(),
+            model: l.info.name.clone(),
+            state: "generating",
+            wall_s: None,
+            first_token_s: None,
+            prompt_tokens: 0,
+            reused_tokens: 0,
+            output_tokens: 0,
+            decode_tps: None,
+            prefill_tps: None,
+            input: goal.chars().take(256 * 1024).collect(),
+            output: String::new(),
+        });
+        while s.requests.len() > 100 {
+            s.requests.pop_back();
+        }
+    });
+    let cfg = GenConfig {
+        sampler: SamplerConfig { temperature: 0.2, top_k: req.sampler.top_k, top_p: req.sampler.top_p, min_p: req.sampler.min_p, repeat_penalty: req.sampler.repeat_penalty, seed: now_ms() },
+        max_tokens: req.sampler.max_tokens.max(256),
+    };
+    let t0 = Instant::now();
+    let mut llm = EngineLlm { l, cfg, think: req.native.is_some(), events, st, cancel, t0, started: false, tokens: 0, decode_ms: 0.0, prompt_tokens: 0, reused_tokens: 0, ttft_ms: None };
+    let opts = crate::orchestrate::Options { workers: o.workers, rounds: o.rounds };
+    let result = crate::orchestrate::run(&mut llm, &ledger, &goal, &context, opts, &mut |p| match p {
+        crate::orchestrate::Progress::Step { role, round } => events(ChatEvent::Ledger { step: Some(role.to_owned()), round, file: None, content: None, dir: None }),
+        crate::orchestrate::Progress::File { name, content } => events(ChatEvent::Ledger { step: None, round: 0, file: Some(name), content: Some(content.to_owned()), dir: None }),
+    });
+    let stopped = cancel.load(Ordering::SeqCst);
+    let (tokens, decode_ms, prompt_tokens, reused_tokens, ttft) = (llm.tokens, llm.decode_ms, llm.prompt_tokens, llm.reused_tokens, llm.ttft_ms.unwrap_or(0.0));
+    let answer = match result {
+        Ok(text) => text,
+        Err(_) if stopped => std::fs::read_to_string(ledger.dir().join("result.md")).unwrap_or_default(),
+        Err(e) => {
+            events(ChatEvent::Error { message: e });
+            set(st, |s| {
+                s.totals.errors += 1;
+                if let Some(r) = s.requests.iter_mut().find(|r| r.id == id) {
+                    r.state = "error";
+                }
+            });
+            return;
+        }
+    };
+    for chunk in answer.split_inclusive(' ') {
+        events(ChatEvent::Token { text: chunk.to_owned() });
+    }
+    let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let tps = if decode_ms > 0.0 { tokens as f64 / (decode_ms / 1000.0) } else { 0.0 };
+    events(ChatEvent::Done { stats: ChatStats { output_tokens: tokens, thinking_tokens: 0, tok_per_sec: tps, ttft_ms: ttft, total_ms, extra_ms: 0.0, stopped } });
+    set(st, |s| {
+        s.last_decode_tps = Some(tps);
+        s.live_decode_tps = None;
+        s.totals.requests += 1;
+        s.totals.prompt_tokens += prompt_tokens as u64;
+        s.totals.reused_tokens += reused_tokens as u64;
+        s.totals.output_tokens += tokens as u64;
+        s.totals.decode_ms += decode_ms;
+        if let Some(r) = s.requests.iter_mut().find(|r| r.id == id) {
+            r.state = if stopped { "cancelled" } else { "completed" };
+            r.wall_s = Some(total_ms / 1000.0);
+            r.first_token_s = Some(ttft / 1000.0);
+            r.prompt_tokens = prompt_tokens;
+            r.reused_tokens = reused_tokens;
+            r.output_tokens = tokens;
+            r.decode_tps = Some(tps);
+            r.output = answer.chars().take(256 * 1024).collect();
+        }
+    });
+}
+
 /// The tool's own name from the name the model saw ("server__tool" when names collided).
 fn original_name(server: &str, exposed: &str) -> String {
     exposed.strip_prefix(&format!("{server}__")).unwrap_or(exposed).to_owned()
@@ -981,6 +1174,7 @@ mod tool_loop_tests {
             sampler: ChatSampler { temperature: 0.0, top_p: 1.0, min_p: 0.0, top_k: 1, repeat_penalty: 1.0, max_tokens: 400 },
             native: None,
             tools: Some(ToolsRequest { rules: Default::default(), default_rule: "ask".into() }),
+            orchestrate: None,
         };
         engine.chat(req, sink).unwrap();
         let events = events.lock().unwrap();
@@ -992,5 +1186,46 @@ mod tool_loop_tests {
         assert!(answer.contains("21"), "the answer uses the tool result");
         assert!(!answer.starts_with(char::is_whitespace), "no blank lead-in before the answer");
         assert!(matches!(events.last(), Some(ChatEvent::Done { .. })));
+    }
+
+    /// Orchestrate mode on the real engine: plan, ideate, manage, workers and finalize all run on
+    /// the loaded model, the ledger lands on disk, and the final result is the reply.
+    /// `cargo test -p cerebro-desktop orchestrate_on -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn orchestrate_on_a_real_model() {
+        let path = std::env::var("CEREBRO_TEST_MODEL").unwrap_or_else(|_| r"C:\models\dev\Qwen3-0.6B-Q8_0.gguf".into());
+        let model = describe(Path::new(&path), "test").expect("model");
+        let engine = Engine::start();
+        let root = std::env::temp_dir().join(format!("cerebro-orch-{}", std::process::id()));
+        engine.set_ledger_root(root.clone());
+        engine.load(model.clone(), 8192).unwrap();
+        let events: Arc<Mutex<Vec<ChatEvent>>> = Arc::default();
+        let ev = events.clone();
+        let sink: ChatSink = Arc::new(move |e: ChatEvent| ev.lock().unwrap().push(e));
+        let req = ChatRequest {
+            model_id: model.id.clone(),
+            system_prompt: String::new(),
+            turns: vec![ChatTurn { role: "user".into(), text: "What is 17 multiplied by 23? Show the working briefly, then the number.".into() }],
+            sampler: ChatSampler { temperature: 0.2, top_p: 0.8, min_p: 0.05, top_k: 20, repeat_penalty: 1.0, max_tokens: 600 },
+            native: None,
+            tools: None,
+            orchestrate: Some(OrchestrateRequest { workers: 2, rounds: 2 }),
+        };
+        let t = Instant::now();
+        engine.chat(req, sink).unwrap();
+        let events = events.lock().unwrap();
+        let steps: Vec<String> = events.iter().filter_map(|e| if let ChatEvent::Ledger { step: Some(s), .. } = e { Some(s.clone()) } else { None }).collect();
+        let files: Vec<&str> = events.iter().filter_map(|e| if let ChatEvent::Ledger { file: Some(f), .. } = e { Some(*f) } else { None }).collect();
+        let answer: String = events.iter().filter_map(|e| if let ChatEvent::Token { text } = e { Some(text.as_str()) } else { None }).collect();
+        eprintln!("{:.1} s, steps {steps:?}
+files {files:?}
+answer: {answer}", t.elapsed().as_secs_f64());
+        assert_eq!(steps.first().map(String::as_str), Some("plan"));
+        assert_eq!(steps.last().map(String::as_str), Some("finalize"));
+        assert!(files.contains(&"result.md") && files.contains(&"plan.md"));
+        assert!(!answer.trim().is_empty());
+        assert!(matches!(events.last(), Some(ChatEvent::Done { .. })));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

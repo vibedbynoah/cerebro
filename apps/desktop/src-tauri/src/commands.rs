@@ -482,13 +482,14 @@ impl crate::remote::Backend for PhoneBackend {
             native: None,
             // A phone never drives tools: approvals belong at the computer.
             tools: None,
+            orchestrate: None,
         };
         let out: crate::engine::ChatSink = std::sync::Arc::new(move |e| match e {
             ChatEvent::Token { text } => sink(PhoneEvent::Token(text)),
             ChatEvent::Thinking { text } => sink(PhoneEvent::Thinking(text)),
             ChatEvent::Done { stats } => sink(PhoneEvent::Done { tokens: stats.output_tokens as u64, tps: stats.tok_per_sec }),
             ChatEvent::Error { message } => sink(PhoneEvent::Error(message)),
-            ChatEvent::Start { .. } | ChatEvent::Tool { .. } => {}
+            ChatEvent::Start { .. } | ChatEvent::Tool { .. } | ChatEvent::Ledger { .. } => {}
         });
         engine.handle().chat(request, out)
     }
@@ -626,6 +627,7 @@ impl crate::mcp_server::McpBackend for McpEngineBackend {
             sampler: crate::engine::ChatSampler { temperature, top_p: 0.8, min_p: 0.05, top_k: 20, repeat_penalty: 1.0, max_tokens },
             native: None,
             tools: None,
+            orchestrate: None,
         };
         let out: Arc<Mutex<(String, u64, f64, Option<String>)>> = Arc::default();
         let o = out.clone();
