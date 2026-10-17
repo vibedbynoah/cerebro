@@ -25,6 +25,7 @@ import type { EngineSwitch, McpServerView, RemoteOptions, RemotePairing, RemoteV
   TuneRunInfo,
   HubDownloadEvent,
   HubFile,
+  HubFileMeta,
   HubRepo,
 } from "./types";
 
@@ -168,6 +169,8 @@ export interface CerebroService {
   hubSearch?(query: string): Promise<HubRepo[]>;
   /** A repository's GGUF files with their real sizes. */
   hubFiles?(repo: string): Promise<HubFile[]>;
+  /** The architecture numbers and real size of one file's GGUF header (metadata only). */
+  hubFileMeta?(repo: string, file: string): Promise<HubFileMeta>;
   /** Downloads one file into Cerebro's model folder; resolves with its path when complete. */
   hubDownload?(repo: string, file: HubFile, onEvent: (e: HubDownloadEvent) => void): Promise<string>;
   /** Stops a download; the partial file resumes next time. */

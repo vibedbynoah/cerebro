@@ -1,11 +1,20 @@
-import { createMemo, createResource, createSignal, For, Show, type JSX } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { Icon } from "../../components/icons";
+import { memoryNeeds } from "../../components/QuantTable";
 import { ScreenHeader } from "../../components/Screen";
+import { estimateFor, recommend, type MemoryModel } from "../../lib/memory-estimate";
+import { contextLabel } from "../../onboarding/autoconfig";
 import { useService } from "../../service/context";
-import type { HubDownloadEvent, HubFile, HubRepo } from "../../service/types";
+import type { HubDownloadEvent, HubFile, HubFileMeta, HubRepo } from "../../service/types";
 
 const GIB = 1024 ** 3;
 const gib = (b: number) => (b / GIB).toFixed(b >= 10 * GIB ? 1 : 2);
+
+/** The Hub sizes every file with a full-precision KV cache. */
+const KV_TYPE = "f16" as const;
+
+/** A hub file's architecture, for the memory estimate. */
+const memoryModel = (meta: HubFileMeta): MemoryModel => ({ architecture: meta.experts ? "moe" : "dense", layers: meta.layers, kvHeads: meta.kvHeads, headDim: meta.headDim, embedding: meta.embedding, contextMax: meta.contextMax, attentionLayers: meta.attentionLayers });
 
 /** How a file of `bytes` fits this machine: all in VRAM, VRAM + RAM (experts or layers on the CPU), RAM only, or not at all. */
 function fitOf(bytes: number, vram: number, ram: number): { label: string; tone: "good" | "ok" | "slow" | "no" } {
@@ -32,6 +41,54 @@ export function LiveHub(): JSX.Element {
   const [progress, setProgress] = createSignal<Record<string, { done: number; total: number; bps: number; error?: string; path?: string }>>({});
   const vram = createMemo(() => (hw()?.gpu?.vramTotalGiB ?? 0) * GIB);
   const ram = createMemo(() => (hw()?.ramTotalGiB ?? 0) * GIB);
+  const [ctx, setCtx] = createSignal(8192);
+  const ctxLabel = () => contextLabel(ctx());
+  const [metas, setMetas] = createSignal<Record<string, HubFileMeta | null>>({});
+
+  // Read each file's GGUF header (metadata only) once its repository is listed, so the memory line
+  // and the recommendation use the real architecture, not a guess.
+  createEffect(() => {
+    const r = repo();
+    const list = files.error ? undefined : files();
+    const api = service.hubFileMeta;
+    let alive = true;
+    onCleanup(() => {
+      alive = false;
+    });
+    if (!r || !list || !api) {
+      setMetas({});
+      return;
+    }
+    setMetas({});
+    void (async () => {
+      for (const f of list) {
+        try {
+          const meta = await api(r, f.path);
+          if (alive) setMetas((p) => ({ ...p, [f.path]: meta }));
+        } catch {
+          if (alive) setMetas((p) => ({ ...p, [f.path]: null }));
+        }
+      }
+    })();
+  });
+
+  const estimateOf = (f: HubFile) => {
+    const meta = metas()[f.path];
+    const h = hw();
+    return meta && h ? estimateFor(memoryModel(meta), { label: f.quant, sizeGiB: f.size / GIB }, ctx(), KV_TYPE, h) : null;
+  };
+
+  const best = createMemo(() => {
+    const h = hw();
+    const list = files.error ? undefined : files();
+    if (!h || !list) return [];
+    const m = metas();
+    const candidates = list.flatMap((f) => {
+      const meta = m[f.path];
+      return meta ? [{ model: memoryModel(meta), quant: { label: f.quant, sizeGiB: f.size / GIB }, file: f }] : [];
+    });
+    return recommend(candidates, h, ctx(), KV_TYPE, 3);
+  });
 
   const start = (r: string, f: HubFile) => {
     const key = `${r}/${f.path}`;
@@ -95,6 +152,35 @@ export function LiveHub(): JSX.Element {
         <section class="livehub__files" aria-label="Files">
           <Show when={repo()} fallback={<p class="livehub__muted">Pick a repository to see its files.</p>}>
             <h2 class="livehub__title">{repo()}</h2>
+            <div class="livehub__controls">
+              <label class="livehub__ctx" for="livehub-context">
+                <span>Context</span>
+                <input
+                  id="livehub-context"
+                  class="hub-slider"
+                  type="range"
+                  min={2048}
+                  max={131072}
+                  step={2048}
+                  value={ctx()}
+                  data-ctx-slider
+                  aria-valuetext={`${ctxLabel()} tokens`}
+                  onInput={(e) => setCtx(e.currentTarget.valueAsNumber)}
+                />
+                <span class="mono">{ctxLabel()}</span>
+              </label>
+              <Show when={best().length > 0}>
+                <ol class="livehub__best" aria-label="Best for this computer">
+                  <For each={best()}>
+                    {(p) => (
+                      <li data-best={p.file.quant}>
+                        <span class="mono">{p.file.quant}</span> — {p.why} <span class="mono" data-estimate={p.file.path}>{memoryNeeds(p.estimate, ctxLabel())}</span>
+                      </li>
+                    )}
+                  </For>
+                </ol>
+              </Show>
+            </div>
             <Show when={!files.loading} fallback={<p class="livehub__muted">Reading the file list…</p>}>
               <Show when={!files.error} fallback={<p class="notice">{String(files.error?.message ?? files.error)}</p>}>
                 <table class="livehub__table">
@@ -102,6 +188,7 @@ export function LiveHub(): JSX.Element {
                     <tr>
                       <th>Quant</th>
                       <th>Size</th>
+                      <th>Memory</th>
                       <th>Fit here</th>
                       <th />
                     </tr>
@@ -119,6 +206,11 @@ export function LiveHub(): JSX.Element {
                               <span class="livehub__file">{f.path}{f.parts.length > 1 ? ` (+${f.parts.length - 1} parts)` : ""}</span>
                             </td>
                             <td class="num">{gib(f.size)} GiB</td>
+                            <td class="num livehub__mem">
+                              <Show when={estimateOf(f)} fallback={<span class="livehub__muted">—</span>}>
+                                {(e) => <span class="mono" data-estimate={f.path}>{memoryNeeds(e(), ctxLabel())}</span>}
+                              </Show>
+                            </td>
                             <td>
                               <span class={`livehub__fit livehub__fit--${fit().tone}`}>{fit().label}</span>
                             </td>

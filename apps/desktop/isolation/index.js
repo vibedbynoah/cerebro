@@ -132,6 +132,7 @@ const WITH_ARGS = {
   model_load: (p) => isPlain(p) && hasOnlyKeys(p, ["id"], ["context"]) && isModelId(p.id) && (p.context === undefined || p.context === null || (Number.isInteger(p.context) && /** @type {number} */ (p.context) > 0)),
   hub_search: (p) => isPlain(p) && hasOnlyKeys(p, ["query"]) && typeof p.query === "string" && p.query.length <= 120,
   hub_files: (p) => isPlain(p) && hasOnlyKeys(p, ["repo"]) && isRepo(p.repo),
+  hub_file_meta: (p) => isPlain(p) && hasOnlyKeys(p, ["repo", "file"]) && isRepo(p.repo) && isGguf(p.file),
   hub_download: (p) => isPlain(p) && hasOnlyKeys(p, ["repo", "file", "parts", "total", "onEvent"]) && isRepo(p.repo) && isGguf(p.file) && Array.isArray(p.parts) && p.parts.length > 0 && p.parts.length <= 64 && p.parts.every(isGguf) && Number.isSafeInteger(p.total) && isChannel(p.onEvent),
   hub_cancel: (p) => isPlain(p) && hasOnlyKeys(p, ["repo", "file"]) && isRepo(p.repo) && isGguf(p.file),
   switch_set: (p) => isPlain(p) && hasOnlyKeys(p, ["id", "value"]) && typeof p.id === "string" && /^[a-z0-9_]{1,48}$/.test(p.id) && Number.isSafeInteger(p.value),
