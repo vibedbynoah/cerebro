@@ -13,7 +13,7 @@
  * themes against --color-bg and every surface. tests/preview.spec.ts measures the rendered colours;
  * run `npm test` after changing any colour.
  *
- * Hue 75/85: warm neutral. Hue 62-64: the calibrated-amber accent. Danger (~20-25) and warning
+ * Hue 265: cool slate neutral. Hue 258 light / 235 dark: the blue accent (owner, 2026-10-07: amber rejected, then 'go to blue'). Danger (~20-25) and warning
  * (97-98) sit at least 30deg of rendered hue from the accent-as-text role and from each other in both
  * themes (tests/consistency.spec.ts "text roles stay distinct"), so a link never reads as a warning.
  */
@@ -42,28 +42,28 @@
 [data-theme="light"],
 [data-theme="dark"] {
   /* ---- Surfaces: light-dark(LIGHT, DARK) ---- */
-  --color-bg: light-dark(oklch(98.5% 0.004 85), oklch(16% 0.012 75));
-  --color-surface-1: light-dark(oklch(95.5% 0.006 85), oklch(20% 0.014 75));
-  --color-surface-2: light-dark(oklch(91.5% 0.008 85), oklch(24% 0.016 75));
-  --color-surface-3: light-dark(oklch(86.5% 0.011 85), oklch(29% 0.018 75));
+  --color-bg: light-dark(oklch(98.5% 0.007 265), oklch(16% 0.022 265));
+  --color-surface-1: light-dark(oklch(95.5% 0.011 265), oklch(20% 0.025 265));
+  --color-surface-2: light-dark(oklch(91.5% 0.014 265), oklch(24% 0.029 265));
+  --color-surface-3: light-dark(oklch(86.5% 0.02 265), oklch(29% 0.032 265));
 
   /* Decorative divider — no AA requirement. Never used for text or a focusable edge. */
-  --color-border: light-dark(oklch(80% 0.014 75), oklch(34% 0.02 75));
+  --color-border: light-dark(oklch(80% 0.025 265), oklch(34% 0.036 265));
   /* Interactive edge (inputs, bounded cards): 3:1 on bg and every surface, both themes. */
-  --color-border-strong: light-dark(oklch(52% 0.02 75), oklch(60% 0.02 75));
+  --color-border-strong: light-dark(oklch(52% 0.036 265), oklch(60% 0.036 265));
 
   /* ---- Text ---- */
-  --color-text-primary: light-dark(oklch(20% 0.014 75), oklch(94% 0.01 75));
-  --color-text-secondary: light-dark(oklch(38% 0.02 75), oklch(80% 0.015 75));
-  --color-text-muted: light-dark(oklch(46% 0.02 75), oklch(68.5% 0.02 75));
+  --color-text-primary: light-dark(oklch(20% 0.025 265), oklch(94% 0.018 265));
+  --color-text-secondary: light-dark(oklch(38% 0.036 265), oklch(80% 0.027 265));
+  --color-text-muted: light-dark(oklch(46% 0.036 265), oklch(68.5% 0.036 265));
 
   /* ---- Brand + status ----
      Accent has a FILL role (buttons, the tuned bar) and a TEXT role (links, the one live value),
-     both amber in both themes. Never use the fill as text or the text token as a fill. */
-  --color-accent: light-dark(oklch(72% 0.15 64), oklch(76% 0.14 62)); /* fill */
-  --color-accent-contrast: light-dark(oklch(18% 0.03 60), oklch(16% 0.02 62)); /* text on fill */
-  --color-accent-text: light-dark(oklch(47% 0.11 62), oklch(80% 0.13 64)); /* accent as text/link/trace on bg */
-  --color-accent-muted: light-dark(oklch(72% 0.15 64 / 0.12), oklch(76% 0.14 62 / 0.14));
+     both blue in both themes. Never use the fill as text or the text token as a fill. */
+  --color-accent: light-dark(oklch(55% 0.21 258), oklch(74% 0.14 235)); /* fill */
+  --color-accent-contrast: light-dark(oklch(99% 0.01 258), oklch(15% 0.04 240)); /* text on fill */
+  --color-accent-text: light-dark(oklch(46% 0.19 258), oklch(82% 0.11 235)); /* accent as text/link/trace on bg */
+  --color-accent-muted: light-dark(oklch(55% 0.21 258 / 0.12), oklch(74% 0.14 235 / 0.14));
 
   --color-success: light-dark(oklch(38% 0.11 150), oklch(76% 0.15 150));
   --color-success-contrast: light-dark(oklch(99% 0.01 150), oklch(14% 0.02 150));
@@ -101,35 +101,35 @@
   --state-press-danger: light-dark(oklch(46% 0.21 25 / 0.18), oklch(42% 0.16 22 / 0.3));
 
   /* ---- Backdrop: decorative grid and glow, far below any contrast threshold on purpose ---- */
-  --color-grid-line: light-dark(oklch(20% 0.02 75 / 0.07), oklch(94% 0.01 75 / 0.055));
-  --color-glow: light-dark(oklch(72% 0.15 64 / 0.16), oklch(76% 0.14 62 / 0.11));
+  --color-grid-line: light-dark(oklch(20% 0.036 265 / 0.07), oklch(94% 0.018 265 / 0.055));
+  --color-glow: light-dark(oklch(55% 0.21 258 / 0.16), oklch(74% 0.14 235 / 0.11));
 
   /* ---- Disabled ---- */
-  --color-disabled-bg: light-dark(oklch(91.5% 0.006 80), oklch(24% 0.01 75));
-  --color-disabled-text: light-dark(oklch(60% 0.01 80), oklch(58% 0.01 75));
+  --color-disabled-bg: light-dark(oklch(91.5% 0.012 265), oklch(24% 0.018 265));
+  --color-disabled-text: light-dark(oklch(60% 0.018 265), oklch(58% 0.018 265));
 
   /* ---- Elevation ----
      light-dark() takes colours, not shadow lists, so each layer wraps its own colour; a layer used
      in one theme only is `transparent` in the other. Dark adds an inset top highlight and a
      hairline ring, because a drop shadow alone vanishes on near-black. */
   --shadow-1:
-    0 1px 2px light-dark(oklch(40% 0.02 75 / 0.10), oklch(0% 0 0 / 0.36)),
-    0 1px 1px light-dark(oklch(40% 0.02 75 / 0.08), transparent),
+    0 1px 2px light-dark(oklch(40% 0.036 265 / 0.10), oklch(0% 0 0 / 0.36)),
+    0 1px 1px light-dark(oklch(40% 0.036 265 / 0.08), transparent),
     inset 0 1px 0 light-dark(transparent, oklch(100% 0 0 / 0.04)),
     0 0 0 1px light-dark(transparent, oklch(100% 0 0 / 0.03));
   --shadow-2:
-    0 4px 12px light-dark(oklch(40% 0.02 75 / 0.12), oklch(0% 0 0 / 0.5)),
-    0 2px 4px light-dark(oklch(40% 0.02 75 / 0.08), transparent),
+    0 4px 12px light-dark(oklch(40% 0.036 265 / 0.12), oklch(0% 0 0 / 0.5)),
+    0 2px 4px light-dark(oklch(40% 0.036 265 / 0.08), transparent),
     inset 0 1px 0 light-dark(transparent, oklch(100% 0 0 / 0.06)),
     0 0 0 1px light-dark(transparent, oklch(100% 0 0 / 0.04));
   --shadow-3:
-    0 12px 32px light-dark(oklch(40% 0.02 75 / 0.16), oklch(0% 0 0 / 0.56)),
-    0 4px 10px light-dark(oklch(40% 0.02 75 / 0.10), transparent),
+    0 12px 32px light-dark(oklch(40% 0.036 265 / 0.16), oklch(0% 0 0 / 0.56)),
+    0 4px 10px light-dark(oklch(40% 0.036 265 / 0.10), transparent),
     inset 0 1px 0 light-dark(transparent, oklch(100% 0 0 / 0.08)),
     0 0 0 1px light-dark(transparent, oklch(100% 0 0 / 0.05));
   --shadow-accent-glow:
-    0 0 0 1px light-dark(oklch(72% 0.15 64 / 0.4), oklch(76% 0.14 62 / 0.4)),
-    0 8px 24px light-dark(oklch(72% 0.15 64 / 0.16), oklch(76% 0.14 62 / 0.18));
+    0 0 0 1px light-dark(oklch(55% 0.21 258 / 0.4), oklch(74% 0.14 235 / 0.4)),
+    0 8px 24px light-dark(oklch(55% 0.21 258 / 0.16), oklch(74% 0.14 235 / 0.18));
 
   /* Light-sweep highlight (motion.css). Resolves per element, so theme islands get the right one. */
   --sweep-highlight: light-dark(oklch(20% 0 0 / 0.06), oklch(100% 0 0 / 0.16));
@@ -142,19 +142,19 @@
 @supports not (color: light-dark(#000, #fff)) {
   :root,
   [data-theme="dark"] {
-    --color-bg: oklch(16% 0.012 75);
-    --color-surface-1: oklch(20% 0.014 75);
-    --color-surface-2: oklch(24% 0.016 75);
-    --color-surface-3: oklch(29% 0.018 75);
-    --color-border: oklch(34% 0.02 75);
-    --color-border-strong: oklch(60% 0.02 75);
-    --color-text-primary: oklch(94% 0.01 75);
-    --color-text-secondary: oklch(80% 0.015 75);
-    --color-text-muted: oklch(68.5% 0.02 75);
-    --color-accent: oklch(76% 0.14 62);
-    --color-accent-contrast: oklch(16% 0.02 62);
-    --color-accent-text: oklch(80% 0.13 64);
-    --color-accent-muted: oklch(76% 0.14 62 / 0.14);
+    --color-bg: oklch(16% 0.022 265);
+    --color-surface-1: oklch(20% 0.025 265);
+    --color-surface-2: oklch(24% 0.029 265);
+    --color-surface-3: oklch(29% 0.032 265);
+    --color-border: oklch(34% 0.036 265);
+    --color-border-strong: oklch(60% 0.036 265);
+    --color-text-primary: oklch(94% 0.018 265);
+    --color-text-secondary: oklch(80% 0.027 265);
+    --color-text-muted: oklch(68.5% 0.036 265);
+    --color-accent: oklch(74% 0.14 235);
+    --color-accent-contrast: oklch(15% 0.04 240);
+    --color-accent-text: oklch(82% 0.11 235);
+    --color-accent-muted: oklch(74% 0.14 235 / 0.14);
     --color-success: oklch(76% 0.15 150);
     --color-success-contrast: oklch(14% 0.02 150);
     --color-success-muted: oklch(76% 0.15 150 / 0.14);
@@ -168,31 +168,31 @@
     --state-press: oklch(0% 0 0 / 0.16);
     --state-press-ghost: oklch(100% 0 0 / 0.12);
     --state-press-danger: oklch(42% 0.16 22 / 0.3);
-    --color-grid-line: oklch(94% 0.01 75 / 0.055);
-    --color-glow: oklch(76% 0.14 62 / 0.11);
-    --color-disabled-bg: oklch(24% 0.01 75);
-    --color-disabled-text: oklch(58% 0.01 75);
+    --color-grid-line: oklch(94% 0.018 265 / 0.055);
+    --color-glow: oklch(74% 0.14 235 / 0.11);
+    --color-disabled-bg: oklch(24% 0.018 265);
+    --color-disabled-text: oklch(58% 0.018 265);
     --shadow-1: 0 1px 2px oklch(0% 0 0 / 0.36), 0 1px 1px transparent, inset 0 1px 0 oklch(100% 0 0 / 0.04), 0 0 0 1px oklch(100% 0 0 / 0.03);
     --shadow-2: 0 4px 12px oklch(0% 0 0 / 0.5), 0 2px 4px transparent, inset 0 1px 0 oklch(100% 0 0 / 0.06), 0 0 0 1px oklch(100% 0 0 / 0.04);
     --shadow-3: 0 12px 32px oklch(0% 0 0 / 0.56), 0 4px 10px transparent, inset 0 1px 0 oklch(100% 0 0 / 0.08), 0 0 0 1px oklch(100% 0 0 / 0.05);
-    --shadow-accent-glow: 0 0 0 1px oklch(76% 0.14 62 / 0.4), 0 8px 24px oklch(76% 0.14 62 / 0.18);
+    --shadow-accent-glow: 0 0 0 1px oklch(74% 0.14 235 / 0.4), 0 8px 24px oklch(74% 0.14 235 / 0.18);
     --sweep-highlight: oklch(100% 0 0 / 0.16);
   }
 
   [data-theme="light"] {
-    --color-bg: oklch(98.5% 0.004 85);
-    --color-surface-1: oklch(95.5% 0.006 85);
-    --color-surface-2: oklch(91.5% 0.008 85);
-    --color-surface-3: oklch(86.5% 0.011 85);
-    --color-border: oklch(80% 0.014 75);
-    --color-border-strong: oklch(52% 0.02 75);
-    --color-text-primary: oklch(20% 0.014 75);
-    --color-text-secondary: oklch(38% 0.02 75);
-    --color-text-muted: oklch(46% 0.02 75);
-    --color-accent: oklch(72% 0.15 64);
-    --color-accent-contrast: oklch(18% 0.03 60);
-    --color-accent-text: oklch(47% 0.11 62);
-    --color-accent-muted: oklch(72% 0.15 64 / 0.12);
+    --color-bg: oklch(98.5% 0.007 265);
+    --color-surface-1: oklch(95.5% 0.011 265);
+    --color-surface-2: oklch(91.5% 0.014 265);
+    --color-surface-3: oklch(86.5% 0.02 265);
+    --color-border: oklch(80% 0.025 265);
+    --color-border-strong: oklch(52% 0.036 265);
+    --color-text-primary: oklch(20% 0.025 265);
+    --color-text-secondary: oklch(38% 0.036 265);
+    --color-text-muted: oklch(46% 0.036 265);
+    --color-accent: oklch(55% 0.21 258);
+    --color-accent-contrast: oklch(99% 0.01 258);
+    --color-accent-text: oklch(46% 0.19 258);
+    --color-accent-muted: oklch(55% 0.21 258 / 0.12);
     --color-success: oklch(38% 0.11 150);
     --color-success-contrast: oklch(99% 0.01 150);
     --color-success-muted: oklch(38% 0.11 150 / 0.1);
@@ -206,32 +206,32 @@
     --state-press: oklch(0% 0 0 / 0.1);
     --state-press-ghost: oklch(0% 0 0 / 0.1);
     --state-press-danger: oklch(46% 0.21 25 / 0.18);
-    --color-grid-line: oklch(20% 0.02 75 / 0.07);
-    --color-glow: oklch(72% 0.15 64 / 0.16);
-    --color-disabled-bg: oklch(91.5% 0.006 80);
-    --color-disabled-text: oklch(60% 0.01 80);
-    --shadow-1: 0 1px 2px oklch(40% 0.02 75 / 0.10), 0 1px 1px oklch(40% 0.02 75 / 0.08), inset 0 1px 0 transparent, 0 0 0 1px transparent;
-    --shadow-2: 0 4px 12px oklch(40% 0.02 75 / 0.12), 0 2px 4px oklch(40% 0.02 75 / 0.08), inset 0 1px 0 transparent, 0 0 0 1px transparent;
-    --shadow-3: 0 12px 32px oklch(40% 0.02 75 / 0.16), 0 4px 10px oklch(40% 0.02 75 / 0.10), inset 0 1px 0 transparent, 0 0 0 1px transparent;
-    --shadow-accent-glow: 0 0 0 1px oklch(72% 0.15 64 / 0.4), 0 8px 24px oklch(72% 0.15 64 / 0.16);
+    --color-grid-line: oklch(20% 0.036 265 / 0.07);
+    --color-glow: oklch(55% 0.21 258 / 0.16);
+    --color-disabled-bg: oklch(91.5% 0.012 265);
+    --color-disabled-text: oklch(60% 0.018 265);
+    --shadow-1: 0 1px 2px oklch(40% 0.036 265 / 0.10), 0 1px 1px oklch(40% 0.036 265 / 0.08), inset 0 1px 0 transparent, 0 0 0 1px transparent;
+    --shadow-2: 0 4px 12px oklch(40% 0.036 265 / 0.12), 0 2px 4px oklch(40% 0.036 265 / 0.08), inset 0 1px 0 transparent, 0 0 0 1px transparent;
+    --shadow-3: 0 12px 32px oklch(40% 0.036 265 / 0.16), 0 4px 10px oklch(40% 0.036 265 / 0.10), inset 0 1px 0 transparent, 0 0 0 1px transparent;
+    --shadow-accent-glow: 0 0 0 1px oklch(55% 0.21 258 / 0.4), 0 8px 24px oklch(55% 0.21 258 / 0.16);
     --sweep-highlight: oklch(20% 0 0 / 0.06);
   }
 
   @media (prefers-color-scheme: light) {
     :root:not([data-theme]) {
-      --color-bg: oklch(98.5% 0.004 85);
-      --color-surface-1: oklch(95.5% 0.006 85);
-      --color-surface-2: oklch(91.5% 0.008 85);
-      --color-surface-3: oklch(86.5% 0.011 85);
-      --color-border: oklch(80% 0.014 75);
-      --color-border-strong: oklch(52% 0.02 75);
-      --color-text-primary: oklch(20% 0.014 75);
-      --color-text-secondary: oklch(38% 0.02 75);
-      --color-text-muted: oklch(46% 0.02 75);
-      --color-accent: oklch(72% 0.15 64);
-      --color-accent-contrast: oklch(18% 0.03 60);
-      --color-accent-text: oklch(47% 0.11 62);
-      --color-accent-muted: oklch(72% 0.15 64 / 0.12);
+      --color-bg: oklch(98.5% 0.007 265);
+      --color-surface-1: oklch(95.5% 0.011 265);
+      --color-surface-2: oklch(91.5% 0.014 265);
+      --color-surface-3: oklch(86.5% 0.02 265);
+      --color-border: oklch(80% 0.025 265);
+      --color-border-strong: oklch(52% 0.036 265);
+      --color-text-primary: oklch(20% 0.025 265);
+      --color-text-secondary: oklch(38% 0.036 265);
+      --color-text-muted: oklch(46% 0.036 265);
+      --color-accent: oklch(55% 0.21 258);
+      --color-accent-contrast: oklch(99% 0.01 258);
+      --color-accent-text: oklch(46% 0.19 258);
+      --color-accent-muted: oklch(55% 0.21 258 / 0.12);
       --color-success: oklch(38% 0.11 150);
       --color-success-contrast: oklch(99% 0.01 150);
       --color-success-muted: oklch(38% 0.11 150 / 0.1);
@@ -245,14 +245,14 @@
       --state-press: oklch(0% 0 0 / 0.1);
       --state-press-ghost: oklch(0% 0 0 / 0.1);
       --state-press-danger: oklch(46% 0.21 25 / 0.18);
-      --color-grid-line: oklch(20% 0.02 75 / 0.07);
-      --color-glow: oklch(72% 0.15 64 / 0.16);
-      --color-disabled-bg: oklch(91.5% 0.006 80);
-      --color-disabled-text: oklch(60% 0.01 80);
-      --shadow-1: 0 1px 2px oklch(40% 0.02 75 / 0.10), 0 1px 1px oklch(40% 0.02 75 / 0.08), inset 0 1px 0 transparent, 0 0 0 1px transparent;
-      --shadow-2: 0 4px 12px oklch(40% 0.02 75 / 0.12), 0 2px 4px oklch(40% 0.02 75 / 0.08), inset 0 1px 0 transparent, 0 0 0 1px transparent;
-      --shadow-3: 0 12px 32px oklch(40% 0.02 75 / 0.16), 0 4px 10px oklch(40% 0.02 75 / 0.10), inset 0 1px 0 transparent, 0 0 0 1px transparent;
-      --shadow-accent-glow: 0 0 0 1px oklch(72% 0.15 64 / 0.4), 0 8px 24px oklch(72% 0.15 64 / 0.16);
+      --color-grid-line: oklch(20% 0.036 265 / 0.07);
+      --color-glow: oklch(55% 0.21 258 / 0.16);
+      --color-disabled-bg: oklch(91.5% 0.012 265);
+      --color-disabled-text: oklch(60% 0.018 265);
+      --shadow-1: 0 1px 2px oklch(40% 0.036 265 / 0.10), 0 1px 1px oklch(40% 0.036 265 / 0.08), inset 0 1px 0 transparent, 0 0 0 1px transparent;
+      --shadow-2: 0 4px 12px oklch(40% 0.036 265 / 0.12), 0 2px 4px oklch(40% 0.036 265 / 0.08), inset 0 1px 0 transparent, 0 0 0 1px transparent;
+      --shadow-3: 0 12px 32px oklch(40% 0.036 265 / 0.16), 0 4px 10px oklch(40% 0.036 265 / 0.10), inset 0 1px 0 transparent, 0 0 0 1px transparent;
+      --shadow-accent-glow: 0 0 0 1px oklch(55% 0.21 258 / 0.4), 0 8px 24px oklch(55% 0.21 258 / 0.16);
       --sweep-highlight: oklch(20% 0 0 / 0.06);
     }
   }

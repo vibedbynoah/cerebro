@@ -343,7 +343,7 @@ section > :where(div, ul, ol, figure, dl, table) + :where(div, ul, ol, figure, d
 }
 
 /* --color-accent-text, not the fill token: the trace is information-carrying graphics on a
-   surface, so it needs 3:1 (WCAG 1.4.11) in light theme too, where the amber fill is too pale. */
+   surface, so it needs 3:1 (WCAG 1.4.11) in light theme too, where the accent fill is too pale. */
 .hero__trace-line {
   fill: none;
   stroke: var(--color-accent-text);
