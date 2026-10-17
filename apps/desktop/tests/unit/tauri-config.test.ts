@@ -193,6 +193,14 @@ describe("isolation hook", () => {
     ok("mcp_config_save", { config: { mcpServers: { files: server } } });
     no("mcp_config_save", { config: { mcpServers: { files: { ...server, extra: 1 } } } });
     no("mcp_config_save", { config: { mcpServers: { files: { ...server, args: [1] } } } });
+    // A web address server: url and headers replace command, args and env.
+    const web = { url: "https://example.com/mcp", headers: { Authorization: "Bearer t" }, disabled: false };
+    ok("mcp_config_save", { config: { mcpServers: { web } } });
+    ok("mcp_config_save", { config: { mcpServers: { web: { url: "http://127.0.0.1:9000/mcp" } } } });
+    no("mcp_config_save", { config: { mcpServers: { web: { url: "ftp://example.com" } } } });
+    no("mcp_config_save", { config: { mcpServers: { web: { url: "https://example.com/mcp", headers: { A: 1 } } } } });
+    no("mcp_config_save", { config: { mcpServers: { web: { ...web, command: "npx" } } } });
+    no("mcp_config_save", { config: { mcpServers: { web: { disabled: false } } } });
   });
 
   it("refuses every other command, and any argument smuggled into an allowed one", () => {

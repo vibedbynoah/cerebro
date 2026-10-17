@@ -546,11 +546,13 @@ export interface EngineSwitch {
   default: number;
 }
 
-/** MCP servers (mcp.json, standard format). */
+/** MCP servers (mcp.json, standard format). A server is a local program (command) or a web address (url). */
 export interface McpServerConfig {
-  command: string;
-  args: string[];
-  env: Record<string, string>;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
   disabled: boolean;
 }
 export interface McpConfig {
