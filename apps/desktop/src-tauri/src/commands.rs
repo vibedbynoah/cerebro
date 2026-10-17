@@ -170,7 +170,9 @@ pub fn live_stats(engine: State<'_, Engine>) -> serde_json::Value {
 /// The Monitor's snapshot (camelCase, matching ui/src/service/monitor-types.ts). Values the engine
 /// cannot read yet are null and show as a dash.
 #[tauri::command]
-pub fn metrics(engine: State<'_, Engine>) -> serde_json::Value {
+pub fn metrics(engine: State<'_, Engine>, tele: State<'_, Telemetry>) -> serde_json::Value {
+    let (live, th) = tele.tick();
+    let gp = live.gpus.first().cloned().unwrap_or_default();
     let hw = cerebro_engine::hw::machine();
     let s = engine.status.lock().unwrap_or_else(|e| e.into_inner());
     let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
@@ -227,21 +229,23 @@ pub fn metrics(engine: State<'_, Engine>) -> serde_json::Value {
             "phase": if activity == "generating" { Some("answer") } else { None },
         },
         "hardware": {
-            "gpuUtil": null,
+            "gpuUtil": gp.util_pct,
             "vramUsedGiB": g0.map(|g| gib(g.vram_total - g.vram_free)),
             "vramTotalGiB": g0.map_or(0.0, |g| gib(g.vram_total)),
-            "vram": null, "gpuTempC": null, "gpuPowerW": null, "gpuPowerLimitW": null,
-            "pcieRxMBs": null, "pcieTxMBs": null, "pcieGen": null, "pcieGenMax": null, "pcieWidth": null,
-            "cpu": null,
+            "vram": null, "gpuTempC": gp.temp_c, "gpuPowerW": gp.power_w, "gpuPowerLimitW": gp.power_limit_w,
+            "pcieRxMBs": gp.pcie_rx_mbs, "pcieTxMBs": gp.pcie_tx_mbs, "pcieGen": gp.pcie_gen, "pcieGenMax": gp.pcie_gen_max, "pcieWidth": gp.pcie_width,
+            "cpu": live.cpu_pct,
             "ramUsedGiB": gib(hw.ram_total - hw.ram_available), "ramTotalGiB": gib(hw.ram_total),
-            "ramPinnedGiB": null, "diskReadMBs": null, "diskWriteMBs": null, "throttle": [],
+            "ramPinnedGiB": null, "diskReadMBs": null, "diskWriteMBs": null, "throttle": gp.throttle_reasons.iter().filter(|r| **r != "idle").collect::<Vec<_>>(),
             "gpus": hw.gpus.iter().enumerate().map(|(i, g)| serde_json::json!({
-                "index": i, "name": g.name, "util": null, "memUsedGiB": gib(g.vram_total - g.vram_free),
-                "memTotalGiB": gib(g.vram_total), "tempC": null, "powerW": null, "powerLimitW": null, "pcieRxMBs": null,
+                "index": i, "name": g.name, "util": live.gpus.get(i).and_then(|t| t.util_pct), "memUsedGiB": gib(g.vram_total - g.vram_free),
+                "memTotalGiB": gib(g.vram_total), "tempC": live.gpus.get(i).and_then(|t| t.temp_c),
+                "powerW": live.gpus.get(i).and_then(|t| t.power_w), "powerLimitW": live.gpus.get(i).and_then(|t| t.power_limit_w),
+                "pcieRxMBs": live.gpus.get(i).and_then(|t| t.pcie_rx_mbs),
             })).collect::<Vec<_>>(),
         },
         "hardwareStatic": {
-            "gpuName": g0.map(|g| g.name.clone()), "gpuCount": hw.gpus.len(), "driver": null,
+            "gpuName": g0.map(|g| g.name.clone()), "gpuCount": hw.gpus.len(), "driver": gp.driver,
             "cpuName": hw.cpu_name, "cores": hw.cpu_threads, "threads": hw.cpu_threads,
             "ramTotalGiB": gib(hw.ram_total), "gpuThrottleTempC": null,
         },
@@ -252,8 +256,8 @@ pub fn metrics(engine: State<'_, Engine>) -> serde_json::Value {
         "history": {
             "stepS": 1, "end": now,
             "series": {
-                "decodeTps": col(0), "prefillTps": col(1), "gpuUtil": nulls, "vramUsedGiB": col(3),
-                "gpuTempC": nulls, "gpuPowerW": nulls, "pcieRxMBs": nulls, "cpu": nulls,
+                "decodeTps": col(0), "prefillTps": col(1), "gpuUtil": th[0], "vramUsedGiB": col(3),
+                "gpuTempC": th[1], "gpuPowerW": th[2], "pcieRxMBs": th[3], "cpu": th[4],
                 "ramUsedGiB": col(4), "diskReadMBs": nulls, "expertHitPct": col(2), "draftAcceptPct": nulls,
             },
         },
@@ -362,5 +366,31 @@ pub fn load_switches<R: Runtime>(app: &tauri::AppHandle<R>) {
         if let Some(v) = v.as_i64() {
             let _ = cerebro_engine::switches::set(&id, v);
         }
+    }
+}
+
+/// Live GPU/CPU telemetry (NVML + OS), sampled on each Monitor poll, with the last 60 samples of the
+/// series the Monitor charts: GPU load, temperature, power, PCIe receive and CPU load.
+#[derive(Default)]
+pub struct Telemetry {
+    inner: std::sync::Mutex<(cerebro_engine::telemetry::Sampler, std::collections::VecDeque<[Option<f64>; 5]>)>,
+}
+
+impl Telemetry {
+    fn tick(&self) -> (cerebro_engine::telemetry::Sample, [Vec<Option<f64>>; 5]) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let (sampler, hist) = &mut *g;
+        let s = sampler.sample();
+        let gp = s.gpus.first();
+        hist.push_back([gp.and_then(|x| x.util_pct), gp.and_then(|x| x.temp_c), gp.and_then(|x| x.power_w), gp.and_then(|x| x.pcie_rx_mbs), s.cpu_pct]);
+        while hist.len() > 60 {
+            hist.pop_front();
+        }
+        let col = |i: usize| -> Vec<Option<f64>> {
+            let mut v = vec![None; 60 - hist.len()];
+            v.extend(hist.iter().map(|x| x[i]));
+            v
+        };
+        (s, [col(0), col(1), col(2), col(3), col(4)])
     }
 }

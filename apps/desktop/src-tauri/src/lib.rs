@@ -67,6 +67,7 @@ pub fn run() -> Result<(), tauri::Error> {
         .manage(engine::Engine::start())
         .manage(hub::Downloads::default())
         .manage(mcp::Mcp::default())
+        .manage(commands::Telemetry::default())
         .setup(|app| {
             commands::load_switches(app.handle());
             {
