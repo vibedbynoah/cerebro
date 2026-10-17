@@ -138,7 +138,7 @@ fn registry() -> &'static [Switch] {
                 applies: Applies::Live,
                 beginner: "Works on four rows of the model at once on the processor. Off until it is measured faster on this machine.",
                 advanced: "Q8_0 decode matvec computes four rows per call: one activation load per block for four rows, four independent FMA chains, block scales via F16C. Bit-identical to the one-row kernel. Needs AVX-VNNI and F16C.",
-                env: "CEREBRO_NO_ROWS4",
+                env: "CEREBRO_ROWS4",
                 default: off,
             },
             Switch {
