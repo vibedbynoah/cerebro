@@ -169,9 +169,15 @@ export interface ChatPrefs {
   addInstructions: boolean;
   base: string;
   memoryOn: boolean;
+  /** Orchestrate mode on: several instances of the model through a shared ledger (GVS5H). */
+  orchestrate: boolean;
+  /** Workers per round, 1-6. */
+  workers: number;
+  /** Rounds of manage -> workers before the result is finalized, 1-8. */
+  rounds: number;
 }
 
-export const DEFAULT_PREFS: ChatPrefs = { effort: "medium", verbosity: "brief", source: "native", addInstructions: true, base: DEFAULT_BASE_PROMPT, memoryOn: true };
+export const DEFAULT_PREFS: ChatPrefs = { effort: "medium", verbosity: "brief", source: "native", addInstructions: true, base: DEFAULT_BASE_PROMPT, memoryOn: true, orchestrate: false, workers: 3, rounds: 3 };
 
 const isOneOf = <T extends string>(list: readonly T[], v: unknown): v is T => typeof v === "string" && (list as readonly string[]).includes(v);
 
@@ -186,6 +192,7 @@ export function parsePrefs(raw: string | null): ChatPrefs {
   } catch {
     return { ...DEFAULT_PREFS };
   }
+  const inRange = (x: unknown, min: number, max: number, d: number): number => (typeof x === "number" && Number.isInteger(x) && x >= min && x <= max ? x : d);
   return {
     effort: isOneOf(EFFORTS, v.effort) ? v.effort : DEFAULT_PREFS.effort,
     verbosity: isOneOf(VERBOSITIES, v.verbosity) ? v.verbosity : DEFAULT_PREFS.verbosity,
@@ -193,6 +200,9 @@ export function parsePrefs(raw: string | null): ChatPrefs {
     addInstructions: typeof v.addInstructions === "boolean" ? v.addInstructions : DEFAULT_PREFS.addInstructions,
     base: typeof v.base === "string" && v.base.length <= 8000 ? v.base : DEFAULT_PREFS.base,
     memoryOn: typeof v.memoryOn === "boolean" ? v.memoryOn : DEFAULT_PREFS.memoryOn,
+    orchestrate: typeof v.orchestrate === "boolean" ? v.orchestrate : DEFAULT_PREFS.orchestrate,
+    workers: inRange(v.workers, 1, 6, DEFAULT_PREFS.workers),
+    rounds: inRange(v.rounds, 1, 8, DEFAULT_PREFS.rounds),
   };
 }
 

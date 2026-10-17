@@ -1,8 +1,9 @@
-import { createSignal, For, onCleanup, Show, type JSX } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { Icon } from "../../components/icons";
 import { parseMarkdown, plainText } from "../../lib/chat/markdown";
 import { EFFORT_LABELS, REASONING_LABELS } from "../../lib/chat/prompt";
 import type { ChatMessage } from "../../lib/chat/store";
+import { LedgerPanel } from "./Ledger";
 import { Markdown } from "./Markdown";
 import { ToolCard, type ToolDecision } from "./ToolCard";
 
@@ -60,6 +61,16 @@ function AssistantMessage(props: { m: ChatMessage; last: boolean; onRegenerate: 
       /* clipboard blocked: the text stays selectable */
     }
   };
+  // The ledger folds away once the reply is done, so a long thread stays calm; opening it by hand
+  // keeps it open.
+  let ledgerEl: HTMLDetailsElement | undefined;
+  let wasStreaming = m().streaming;
+  createEffect(() => {
+    const now = m().streaming;
+    if (wasStreaming && !now && ledgerEl) ledgerEl.open = false;
+    wasStreaming = now;
+  });
+
   // Read-aloud is simulated in this build (no audio leaves a sound; the engine's TTS will play it).
   const readAloud = () => {
     if (speaking()) {
@@ -74,6 +85,9 @@ function AssistantMessage(props: { m: ChatMessage; last: boolean; onRegenerate: 
 
   return (
     <article class="msg msg--bot" aria-label="Reply" aria-busy={m().streaming} data-streaming={m().streaming}>
+      <Show when={m().ledger}>
+        {(ledger) => <LedgerPanel id={m().id} ledger={ledger()} streaming={m().streaming} ref={(el) => void (ledgerEl = el)} />}
+      </Show>
       <Show when={m().thinking}>
         <details class="msg__fold">
           <summary>

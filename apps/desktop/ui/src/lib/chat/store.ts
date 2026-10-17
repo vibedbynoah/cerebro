@@ -1,4 +1,4 @@
-import type { ChatStats, ToolActivity } from "../../service/chat-types";
+import { LEDGER_FILES, type ChatStats, type LedgerFileName, type ToolActivity } from "../../service/chat-types";
 import { readPref, writePref } from "../storage";
 import type { Effort, Memory, ReasoningSource, Verbosity } from "./prompt";
 
@@ -16,6 +16,16 @@ export interface Attachment {
   preview: string | null;
 }
 
+/** Orchestrate mode state of one reply: the ledger folder, the role running now, the files so far. */
+export interface LedgerState {
+  /** The ledger folder on disk, from the first event; null until it arrives. */
+  dir: string | null;
+  /** The role that started last ("plan", "worker 2", "finalize"), with its round. */
+  step: { role: string; round: number } | null;
+  /** The whole text of each ledger file that changed. */
+  files: Partial<Record<LedgerFileName, string>>;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -25,6 +35,8 @@ export interface ChatMessage {
   image: { prompt: string; seed: number } | null;
   /** Tool calls the model made in this reply, in order. */
   tools: ToolActivity[];
+  /** Orchestrate mode's ledger, null for a normal reply. */
+  ledger: LedgerState | null;
   attachments: Attachment[];
   stats: ChatStats | null;
   effort: Effort;
@@ -69,6 +81,24 @@ const str = (v: unknown, max = MAX_TEXT): string | null => (typeof v === "string
 const oneOf = <T extends string>(v: unknown, list: readonly T[], d: T): T => (typeof v === "string" && (list as readonly string[]).includes(v) ? (v as T) : d);
 const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
 
+const MAX_LEDGER_FILE = 20_000;
+const LEDGER_STEP = /^(plan|ideate|manage|finalize|worker [1-6])$/;
+
+function parseLedger(v: unknown): LedgerState | null {
+  if (!v || typeof v !== "object") return null;
+  const x = v as Record<string, unknown>;
+  const files: Partial<Record<LedgerFileName, string>> = {};
+  if (x.files && typeof x.files === "object") {
+    for (const name of LEDGER_FILES) {
+      const text = str((x.files as Record<string, unknown>)[name], MAX_LEDGER_FILE);
+      if (text !== null) files[name] = text;
+    }
+  }
+  const s = x.step && typeof x.step === "object" ? (x.step as Record<string, unknown>) : null;
+  const step = s && str(s.role, 40) !== null && LEDGER_STEP.test(s.role as string) ? { role: s.role as string, round: num(s.round) } : null;
+  return { dir: str(x.dir, 1000), step, files };
+}
+
 function parseMessage(v: unknown): ChatMessage | null {
   if (!v || typeof v !== "object") return null;
   const m = v as Record<string, unknown>;
@@ -112,6 +142,7 @@ function parseMessage(v: unknown): ChatMessage | null {
           .slice(0, 32)
       : [],
     attachments: atts.slice(0, 10),
+    ledger: parseLedger(m.ledger),
     stats: s
       ? { outputTokens: num(s.outputTokens), thinkingTokens: num(s.thinkingTokens), tokPerSec: num(s.tokPerSec), ttftMs: num(s.ttftMs), totalMs: num(s.totalMs), extraMs: num(s.extraMs), stopped: s.stopped === true }
       : null,

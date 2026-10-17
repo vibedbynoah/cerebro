@@ -1,4 +1,4 @@
-import type { ChatEvent, ChatRequest, ChatStats } from "../service/chat-types";
+import type { ChatEvent, ChatRequest, ChatStats, LedgerFileName } from "../service/chat-types";
 
 /**
  * Illustrative chat engine for web mode and tests: streams a reply token by token at a believable
@@ -12,6 +12,8 @@ export interface MockChatOptions {
   speed?: number;
   /** Decode speed of the simulated model, tokens per second. */
   tokPerSec?: number;
+  /** Playback speed multiplier for Orchestrate runs: slow enough to watch the steps advance. */
+  orchestrateSpeed?: number;
 }
 
 const BRIEF = [
@@ -73,10 +75,100 @@ const wait = (ms: number, signal: AbortSignal) =>
     signal.addEventListener("abort", () => (clearTimeout(t), resolve()), { once: true });
   });
 
+// ---- Orchestrate mode (GVS5H): a scripted ledger run, the same shape the engine streams ---------
+
+interface LedgerScript {
+  role: string;
+  round: number;
+  /** The role's reply, as "thinking" events (the engine streams each role's reasoning this way). */
+  thinking: string;
+  /** A ledger file this role rewrites (its whole new text), as the engine's `file` events carry it. */
+  file?: { name: LedgerFileName; text: string };
+}
+
+/** One planned run: plan, ideate, manage, two workers, a second manage, then finalize. The file
+ *  texts are illustrative, exactly as the UI labels the web build. */
+function ledgerScript(goal: string): { dir: string; steps: LedgerScript[]; answer: string } {
+  const a = goal.length * 37 + 11;
+  const b = goal.length * 19 + 7;
+  const tasks = (done: number[]) =>
+    JSON.stringify(
+      [
+        { id: 1, desc: "Work out what the question really asks", status: done.includes(1) ? "done" : "todo" },
+        { id: 2, desc: `Work the numbers through from scratch (${a} and ${b})`, status: done.includes(2) ? "done" : "todo" },
+        { id: 3, desc: "Verify the result a second, independent way", status: done.includes(3) ? "done" : "todo" },
+      ],
+      null,
+      2,
+    );
+  const notes1 = "- **Ideation:** The plain computation is easy to get wrong in the head; write the steps out, then check the result by regrouping the factors.\n- **Approaches:** closed form first; repeated addition as the cross-check.\n";
+  const notes2 = "- **Ideation:** The plain computation is easy to get wrong in the head; write the steps out, then check the result by regrouping the factors.\n- **Worker 1:** split the factors - " + a + " x " + b + " = " + a * 10 + " + " + a * (b - 10) + " = " + a * b + ".\n- **Worker 2:** regrouping as " + b + " x " + a + " gives the same " + a * b + ".\n";
+  const answer = [
+    `Here is the worked answer for "${goal.trim().slice(0, 80)}".\n\n`,
+    `Split the product and add the parts: ${a} × ${b} = ${a} × 10 + ${a} × ${b - 10} = ${a * 10} + ${a * (b - 10)} = ${a * b}.\n`,
+    `The same result comes from regrouping the other way, ${b} × ${a} = ${a * b}. Both workers agreed, so this is the answer.`,
+  ].join("\n");
+  return {
+    // A plausible app-data path; the desktop build's ledger really lands on disk.
+    dir: "C:\\Users\\me\\AppData\\Roaming\\Cerebro\\orchestrate\\r1illustrative",
+    steps: [
+      { role: "plan", round: 0, thinking: "Read the goal, then settle on a strategy and write it down before anyone computes anything.\n", file: { name: "plan.md", text: "Split the product into parts that can be checked by hand, then have two workers verify the result in different ways. Do not treat the first number that comes out as the final one.\n" } },
+      { role: "ideate", round: 0, thinking: "First worker: find approaches that are genuinely different before picking one.\n", file: { name: "notes.md", text: notes1 } },
+      { role: "manage", round: 1, thinking: "Two independent checks are worth more than one careful one, so keep both workers on this.\n", file: { name: "tasks.json", text: tasks([1]) } },
+      { role: "worker 1", round: 1, thinking: "Work the computation through step by step and say how each step could go wrong.\n", file: { name: "notes.md", text: notes2 } },
+      { role: "worker 2", round: 1, thinking: "Take the same problem from the other end, so a shared mistake cannot hide.\n", file: { name: "result.md", text: `Draft: ${a} x ${b} = ${a * b}. Both methods agree.\n` } },
+      { role: "manage", round: 2, thinking: "The two checks agree; there is nothing left to split out, so finish.\n", file: { name: "tasks.json", text: tasks([1, 2, 3]) } },
+      { role: "finalize", round: 3, thinking: "Write the answer for the user: complete, no mention of the team or the ledger.\n", file: { name: "result.md", text: answer } },
+    ],
+    answer,
+  };
+}
+
 export function createMockChat(options: MockChatOptions = {}) {
   const speed = options.speed && options.speed > 0 ? options.speed : 1;
   const tps = options.tokPerSec ?? 24;
+  const orchestrateSpeed = options.orchestrateSpeed && options.orchestrateSpeed > 0 ? options.orchestrateSpeed : speed;
   const pendingDecisions = new Map<string, (allow: boolean) => void>();
+
+  async function orchestrate(req: ChatRequest, onEvent: (e: ChatEvent) => void, signal: AbortSignal, ttftMs: number): Promise<void> {
+    const goal = [...req.turns].reverse().find((t) => t.role === "user")?.text.trim() ?? "";
+    const script = ledgerScript(goal);
+    const started = performance.now();
+    let out = 0;
+    let thinkingTokens = 0;
+    // The engine's first event is the ledger folder, then a step event per role and a file event per
+    // rewrite. A stop mid-run keeps whatever already landed, so the partial run stays readable.
+    onEvent({ type: "ledger", step: null, round: 0, file: null, content: null, dir: script.dir });
+    for (const step of script.steps) {
+      if (signal.aborted) break;
+      onEvent({ type: "ledger", step: step.role, round: step.round, file: null, content: null, dir: null });
+      for (const w of tokenize(step.thinking)) {
+        if (signal.aborted) break;
+        onEvent({ type: "thinking", text: w });
+        thinkingTokens++;
+        await wait(1000 / tps / orchestrateSpeed, signal);
+      }
+      if (signal.aborted) break;
+      await wait(900 / orchestrateSpeed, signal);
+      if (step.file) {
+        onEvent({ type: "ledger", step: null, round: 0, file: step.file.name, content: step.file.text, dir: null });
+        await wait(300 / orchestrateSpeed, signal);
+      }
+    }
+    // A stopped run keeps the partial ledger and produces no final answer; one that finishes streams
+    // the finished result.md as plain tokens, as the engine does.
+    if (!signal.aborted) {
+      for (const w of tokenize(script.answer)) {
+        if (signal.aborted) break;
+        onEvent({ type: "token", text: w });
+        out++;
+        await wait(1000 / tps / orchestrateSpeed, signal);
+      }
+    }
+    const totalMs = Math.round((performance.now() - started) * orchestrateSpeed);
+    const stats: ChatStats = { outputTokens: out, thinkingTokens, tokPerSec: tps, ttftMs, totalMs, extraMs: 0, stopped: signal.aborted };
+    onEvent({ type: "done", stats });
+  }
 
   async function chat(req: ChatRequest, onEvent: (e: ChatEvent) => void, signal: AbortSignal): Promise<void> {
     if (!req || typeof req.systemPrompt !== "string" || !Array.isArray(req.turns) || req.turns.length === 0) throw new TypeError("Malformed chat request");
@@ -85,6 +177,8 @@ export function createMockChat(options: MockChatOptions = {}) {
     const ttftMs = Math.round(180 + promptChars / 40);
     await wait(ttftMs / speed, signal);
     onEvent({ type: "start", ttftMs });
+
+    if (req.orchestrate) return orchestrate(req, onEvent, signal, ttftMs);
 
     // A request with tools that asks about files: the model calls the mock files server's
     // list_directory first, following the rule the UI sent (allow / ask / deny), as the engine does.

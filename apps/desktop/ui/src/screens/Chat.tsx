@@ -17,11 +17,12 @@ import {
   type Attachment,
   type ChatMessage,
   type Conversation,
+  type LedgerState,
 } from "../lib/chat/store";
 import { chatToolRules, loadPolicy, mcpToolKey, savePolicy } from "../lib/permissions";
 import { notify } from "../lib/toast";
 import { useAppState } from "../state";
-import { DEFAULT_SAMPLER, type ChatTools, type ChatTurn, type Sampler, type ToolActivity } from "../service/chat-types";
+import { DEFAULT_SAMPLER, LEDGER_FILES, type ChatTools, type ChatTurn, type LedgerFileName, type Sampler, type ToolActivity } from "../service/chat-types";
 import { useService } from "../service/context";
 import type { LibraryModel } from "../service/types";
 import { Composer } from "./chat/Composer";
@@ -146,7 +147,7 @@ export function Chat(): JSX.Element {
       .filter((m) => !m.streaming && !m.error)
       .map((m) => ({ role: m.role, text: m.text, ...(m.attachments.length ? { attachments: m.attachments.map(({ name, type, bytes }) => ({ name, type, bytes })) } : {}) }));
     const mid = newId();
-    const reply: ChatMessage = { id: mid, role: "assistant", text: "", thinking: "", checks: [], image: null, tools: [], attachments: [], stats: null, effort: p.effort, verbosity: p.verbosity, source: p.source, streaming: true, error: null };
+    const reply: ChatMessage = { id: mid, role: "assistant", text: "", thinking: "", checks: [], image: null, tools: [], ledger: null, attachments: [], stats: null, effort: p.effort, verbosity: p.verbosity, source: p.source, streaming: true, error: null };
     setState("list", (c) => c.id === cid, "messages", (l) => [...l, reply]);
     abort = new AbortController();
     let tokens = 0;
@@ -163,7 +164,19 @@ export function Chat(): JSX.Element {
     };
     try {
       await service.chat(
-        { modelId: modelId(), systemPrompt: req.systemPrompt, turns, sampler: sampler(), native: req.native, passes: req.passes, effort: p.effort, verbosity: p.verbosity, source: p.source, tools },
+        {
+          modelId: modelId(),
+          systemPrompt: req.systemPrompt,
+          turns,
+          sampler: sampler(),
+          native: req.native,
+          passes: req.passes,
+          effort: p.effort,
+          verbosity: p.verbosity,
+          source: p.source,
+          tools,
+          orchestrate: p.orchestrate ? { workers: p.workers, rounds: p.rounds } : null,
+        },
         (e) => {
           switch (e.type) {
             case "start":
@@ -194,6 +207,16 @@ export function Chat(): JSX.Element {
               if (e.state === "approval") notify("A tool needs your approval", `${e.name} from ${e.server}. Answer in the chat.`, "info");
               break;
             }
+            case "ledger":
+              updateMsg(cid, mid, (m) => {
+                const l: LedgerState = m.ledger ?? { dir: null, step: null, files: {} };
+                m.ledger = l;
+                if (typeof e.dir === "string" && e.dir.length <= 1000) l.dir = e.dir;
+                // The engine's roles and files come from a closed set; a foreign value is ignored.
+                if (typeof e.step === "string" && /^(plan|ideate|manage|finalize|worker [1-6])$/.test(e.step) && Number.isInteger(e.round) && e.round >= 0) l.step = { role: e.step, round: e.round };
+                if (e.file !== null && (LEDGER_FILES as readonly string[]).includes(e.file) && typeof e.content === "string") l.files[e.file as LedgerFileName] = e.content.slice(0, 20000);
+              });
+              break;
             case "image":
               updateMsg(cid, mid, (m) => void (m.image = { prompt: e.prompt, seed: e.seed }));
               break;
@@ -242,7 +265,7 @@ export function Chat(): JSX.Element {
       if (!conv.messages.length) setState("list", (c) => c.id === cid, "title", titleFrom(text || atts[0]?.name || ""));
       setState("list", (c) => c.id === cid, "messages", (l) => [
         ...l,
-        { id: newId(), role: "user", text, thinking: "", checks: [], image: null, tools: [], attachments: atts, stats: null, effort: prefs().effort, verbosity: prefs().verbosity, source: prefs().source, streaming: false, error: null } satisfies ChatMessage,
+        { id: newId(), role: "user", text, thinking: "", checks: [], image: null, tools: [], ledger: null, attachments: atts, stats: null, effort: prefs().effort, verbosity: prefs().verbosity, source: prefs().source, streaming: false, error: null } satisfies ChatMessage,
       ]);
     });
     void run(cid);

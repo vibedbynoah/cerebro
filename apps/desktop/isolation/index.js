@@ -96,7 +96,18 @@ function isMcpConfig(c) {
 /** @param {unknown} r */
 function isChatRequest(r) {
   if (!isPlain(r) || !isModelId(r.modelId) || typeof r.systemPrompt !== "string" || !Array.isArray(r.turns) || !isPlain(r.sampler)) return false;
-  return r.turns.every((t) => isPlain(t) && (t.role === "user" || t.role === "assistant") && typeof t.text === "string") && (r.tools === undefined || r.tools === null || isToolsRequest(r.tools));
+  return (
+    r.turns.every((t) => isPlain(t) && (t.role === "user" || t.role === "assistant") && typeof t.text === "string") &&
+    (r.tools === undefined || r.tools === null || isToolsRequest(r.tools)) &&
+    (r.orchestrate === undefined || r.orchestrate === null || isOrchestrateRequest(r.orchestrate))
+  );
+}
+
+/** Orchestrate mode: workers per round and rounds, both plain integers in range. @param {unknown} o */
+function isOrchestrateRequest(o) {
+  if (!isPlain(o) || !hasOnlyKeys(o, ["workers", "rounds"])) return false;
+  const { workers, rounds } = /** @type {{ workers: unknown; rounds: unknown }} */ (o);
+  return Number.isInteger(workers) && /** @type {number} */ (workers) >= 1 && /** @type {number} */ (workers) <= 6 && Number.isInteger(rounds) && /** @type {number} */ (rounds) >= 1 && /** @type {number} */ (rounds) <= 8;
 }
 
 const TOOL_RULES = new Set(["allow", "ask", "deny"]);

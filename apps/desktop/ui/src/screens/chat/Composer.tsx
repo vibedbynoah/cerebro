@@ -6,6 +6,8 @@ import type { Attachment } from "../../lib/chat/store";
 const IMAGE = /^image\/(png|jpeg|gif|webp)$/;
 const MAX_IMAGE = 10 * 1024 * 1024;
 const MAX_FILES = 10;
+const ORCHESTRATE_WORKERS: readonly [number, number] = [1, 6];
+const ORCHESTRATE_ROUNDS: readonly [number, number] = [1, 8];
 
 export function Composer(props: {
   levels: Readonly<Record<Effort, EffortLevel>>;
@@ -240,6 +242,36 @@ export function Composer(props: {
           <input type="checkbox" checked={!props.prefs.addInstructions} onChange={(e) => props.setPrefs({ addInstructions: !e.currentTarget.checked })} />
           <span>No added prompt</span>
         </label>
+        <label class="composer__check">
+          <input type="checkbox" checked={props.prefs.orchestrate} onChange={(e) => props.setPrefs({ orchestrate: e.currentTarget.checked })} />
+          <span>Orchestrate</span>
+        </label>
+        <Show when={props.prefs.orchestrate}>
+          <span class="stepper">
+            Workers
+            <button class="icon-btn icon-btn--sm" type="button" aria-label="Fewer workers" disabled={props.prefs.workers <= ORCHESTRATE_WORKERS[0]} onClick={() => props.setPrefs({ workers: props.prefs.workers - 1 })}>
+              <Icon name="chevron" size={14} />
+            </button>
+            <span class="mono stepper__value" data-testid="orchestrate-workers">
+              {props.prefs.workers}
+            </span>
+            <button class="icon-btn icon-btn--sm stepper__up" type="button" aria-label="More workers" disabled={props.prefs.workers >= ORCHESTRATE_WORKERS[1]} onClick={() => props.setPrefs({ workers: props.prefs.workers + 1 })}>
+              <Icon name="chevron" size={14} />
+            </button>
+          </span>
+          <span class="stepper">
+            Rounds
+            <button class="icon-btn icon-btn--sm" type="button" aria-label="Fewer rounds" disabled={props.prefs.rounds <= ORCHESTRATE_ROUNDS[0]} onClick={() => props.setPrefs({ rounds: props.prefs.rounds - 1 })}>
+              <Icon name="chevron" size={14} />
+            </button>
+            <span class="mono stepper__value" data-testid="orchestrate-rounds">
+              {props.prefs.rounds}
+            </span>
+            <button class="icon-btn icon-btn--sm stepper__up" type="button" aria-label="More rounds" disabled={props.prefs.rounds >= ORCHESTRATE_ROUNDS[1]} onClick={() => props.setPrefs({ rounds: props.prefs.rounds + 1 })}>
+              <Icon name="chevron" size={14} />
+            </button>
+          </span>
+        </Show>
         <button class="btn btn--tertiary btn--sm" type="button" onClick={() => props.onOpenPrompt()} data-press>
           <Icon name="code" size={14} />
           <span class="btn__label">System prompt</span>
@@ -250,6 +282,9 @@ export function Composer(props: {
         {props.levels[props.prefs.effort].passes ? `, ${props.levels[props.prefs.effort].passes} review pass${props.levels[props.prefs.effort].passes > 1 ? "es" : ""}` : ""}.
         <For each={props.notes}>{(n) => <> {n}</>}</For> <kbd>Enter</kbd> sends, <kbd>Shift</kbd>+<kbd>Enter</kbd> new line, <kbd>Esc</kbd> stops.
       </p>
+      <Show when={props.prefs.orchestrate}>
+        <p class="composer__hint composer__hint--orchestrate">Several instances of this model plan, split the work and check each other through a shared ledger. Slower, often better on hard problems.</p>
+      </Show>
     </div>
   );
 }
