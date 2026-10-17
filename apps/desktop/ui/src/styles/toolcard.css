@@ -153,3 +153,86 @@
     animation: none;
   }
 }
+
+/* Questions (ask_user), plans (exit_plan_mode) and task lists (todo_write). */
+.toolcard[data-state="question"],
+.toolcard[data-state="plan"] {
+  border-color: var(--color-accent);
+}
+
+.toolcard__chip--question,
+.toolcard__chip--plan {
+  color: var(--color-accent-text);
+  background: var(--color-accent-muted);
+}
+
+.toolcard__question,
+.toolcard__plan {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.toolcard__fieldset {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.toolcard__option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.toolcard__other,
+.toolcard__feedback {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 34px;
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-small);
+}
+
+.toolcard__plan-body {
+  max-height: 420px;
+  overflow: auto;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-1);
+  color: var(--color-text-primary);
+}
+
+.toolcard__todos {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--color-text-primary);
+}
+
+.toolcard__todos li {
+  display: flex;
+  gap: var(--space-2);
+  overflow-wrap: anywhere;
+}
+
+.toolcard__todos li[data-status="completed"] {
+  color: var(--color-text-muted);
+  text-decoration: line-through;
+}
+
+.toolcard__todos li[data-status="in_progress"] {
+  font-weight: 600;
+}
+
+.toolcard__todo-mark {
+  flex: none;
+  width: 1.2em;
+  color: var(--color-accent-text);
+}

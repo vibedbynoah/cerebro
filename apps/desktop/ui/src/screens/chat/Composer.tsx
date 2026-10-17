@@ -242,6 +242,10 @@ export function Composer(props: {
           <input type="checkbox" checked={!props.prefs.addInstructions} onChange={(e) => props.setPrefs({ addInstructions: !e.currentTarget.checked })} />
           <span>No added prompt</span>
         </label>
+        <label class="composer__check" title="The model looks around without changing anything, then shows you a plan to approve.">
+          <input type="checkbox" checked={props.prefs.planMode} onChange={(e) => props.setPrefs({ planMode: e.currentTarget.checked })} />
+          <span>Plan first</span>
+        </label>
         <label class="composer__check">
           <input type="checkbox" checked={props.prefs.orchestrate} onChange={(e) => props.setPrefs({ orchestrate: e.currentTarget.checked })} />
           <span>Orchestrate</span>

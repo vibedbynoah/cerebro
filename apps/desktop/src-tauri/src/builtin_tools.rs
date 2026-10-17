@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
-use crate::engine::{ToolContext, ToolHost};
+use crate::engine::{Access, ToolContext, ToolHost};
 use crate::toolcall::ToolSpec;
 
 /// The server name the model sees these tools under (Chat shows "from cerebro").
@@ -231,13 +231,131 @@ pub fn tools_json() -> serde_json::Value {
 pub struct BuiltinTools {
     mcp: Arc<dyn ToolHost>,
     folders: Arc<WorkspaceFolders>,
+    /// What each file looked like when a tool last read or wrote it (read-before-write).
+    observed: Observed,
+    /// A folder read_file may open besides the workspace: where long tool results are saved whole.
+    spill_dir: Option<PathBuf>,
 }
 
 impl BuiltinTools {
     pub fn new(mcp: Arc<dyn ToolHost>, folders: Arc<WorkspaceFolders>) -> Self {
-        Self { mcp, folders }
+        Self { mcp, folders, observed: Observed::default(), spill_dir: None }
+    }
+
+    pub fn with_spill_dir(mut self, dir: PathBuf) -> Self {
+        self.spill_dir = Some(dir);
+        self
     }
 }
+
+/// Deletes saved tool results older than `age` (called at start-up).
+pub fn prune_spills(dir: &Path, age: Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|el| el > age);
+        if old && e.path().extension().is_some_and(|x| x == "txt") {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// A file's version as last seen by a tool: its size and modification time (or absent).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Seen {
+    Absent,
+    Present(u64, Option<std::time::SystemTime>),
+}
+
+fn seen_now(path: &Path) -> Seen {
+    match std::fs::metadata(path) {
+        Ok(m) => Seen::Present(m.len(), m.modified().ok()),
+        Err(_) => Seen::Absent,
+    }
+}
+
+/// Files the tools have read or written this session, by normalized path.
+#[derive(Default)]
+pub struct Observed(Mutex<std::collections::HashMap<String, Seen>>);
+
+impl Observed {
+    fn record(&self, path: &Path) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).insert(norm(path), seen_now(path));
+    }
+
+    /// May `path` be changed now? A new file may always be created; an existing one must have been
+    /// read, and not have changed since. The error texts end in the step that fixes them.
+    fn check_write(&self, path: &Path) -> Result<(), String> {
+        let now = seen_now(path);
+        if now == Seen::Absent {
+            return Ok(());
+        }
+        match self.0.lock().unwrap_or_else(|e| e.into_inner()).get(&norm(path)) {
+            None => Err(format!("Changing \"{}\" requires reading it first — read the file, then retry.", display(path))),
+            Some(seen) if *seen != now => Err(format!("\"{}\" changed since it was read — re-read the file, then retry.", display(path))),
+            Some(_) => Ok(()),
+        }
+    }
+}
+
+/// Everything a built-in tool needs for one call.
+struct Scope<'a> {
+    folders: &'a [PathBuf],
+    ctx: ToolContext,
+    observed: Option<&'a Observed>,
+    extra_read: Option<&'a Path>,
+}
+
+impl Scope<'_> {
+    /// The path a tool may use: inside the workspace folders (or, for reads, the results folder),
+    /// or anywhere when access is full.
+    fn reach(&self, raw: &str, write: bool) -> Result<PathBuf, String> {
+        if write && self.ctx.access == Access::ReadOnly {
+            return Err(SANDBOX_READ_ONLY.to_owned());
+        }
+        if self.ctx.access == Access::Full {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return Err("A path is required.".to_owned());
+            }
+            let input = Path::new(raw);
+            let joined = if input.is_absolute() {
+                input.to_path_buf()
+            } else {
+                self.folders.first().ok_or_else(|| format!("{raw} is relative and no workspace folder is set; give a full path."))?.join(input)
+            };
+            return resolve_ancestor(&joined);
+        }
+        match confined(self.folders, raw) {
+            Ok(p) => Ok(p),
+            Err(e) => {
+                if let (false, Some(extra)) = (write, self.extra_read) {
+                    let resolved = resolve_ancestor(Path::new(raw.trim()))?;
+                    let root = std::fs::canonicalize(extra).unwrap_or_else(|_| extra.to_path_buf());
+                    if is_within(&resolved, &root) {
+                        return Ok(resolved);
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    fn before_write(&self, path: &Path) -> Result<(), String> {
+        match (self.ctx.read_before_write, self.observed) {
+            (true, Some(o)) => o.check_write(path),
+            _ => Ok(()),
+        }
+    }
+
+    fn saw(&self, path: &Path) {
+        if let Some(o) = self.observed {
+            o.record(path);
+        }
+    }
+}
+
+/// The refusal a write gets under read-only access, worded so a model knows not to retry.
+const SANDBOX_READ_ONLY: &str = "[sandbox: file access denied under read-only mode] Tool access is Read only (Tools screen): files cannot be changed and commands cannot run. Do not retry; tell the user what you would change.";
 
 impl ToolHost for BuiltinTools {
     fn tools(&self) -> Vec<ToolSpec> {
@@ -248,22 +366,24 @@ impl ToolHost for BuiltinTools {
 
     fn call(&self, server: &str, tool: &str, arguments: serde_json::Value, ctx: ToolContext) -> Result<String, String> {
         if server == SERVER {
-            return run(tool, &arguments, &self.folders.paths(), ctx);
+            let folders = self.folders.paths();
+            let scope = Scope { folders: &folders, ctx, observed: Some(&self.observed), extra_read: self.spill_dir.as_deref() };
+            return run(tool, &arguments, &scope);
         }
         self.mcp.call(server, tool, arguments, ctx)
     }
 }
 
-/// One built-in tool by name. `folders` is the workspace folder list, current at call time.
-fn run(tool: &str, args: &serde_json::Value, folders: &[PathBuf], ctx: ToolContext) -> Result<String, String> {
+/// One built-in tool by name, with the workspace folders current at call time.
+fn run(tool: &str, args: &serde_json::Value, scope: &Scope) -> Result<String, String> {
     match tool {
-        "read_file" => read_file(folders, args),
-        "list_directory" => list_directory(folders, args),
-        "search_files" => search_files(folders, args),
-        "write_file" => write_file(folders, args),
-        "edit_file" => edit_file(folders, args),
-        "run_command" => run_command(folders, args, COMMAND_TIMEOUT),
-        "fetch_url" => fetch_url(args, ctx.offline, ctx.allow_local_fetch),
+        "read_file" => read_file(scope, args),
+        "list_directory" => list_directory(scope, args),
+        "search_files" => search_files(scope, args),
+        "write_file" => write_file(scope, args),
+        "edit_file" => edit_file(scope, args),
+        "run_command" => run_command(scope, args, COMMAND_TIMEOUT),
+        "fetch_url" => fetch_url(args, scope.ctx.offline, scope.ctx.allow_local_fetch),
         other => Err(format!("There is no built-in tool named {other}.")),
     }
 }
@@ -404,9 +524,10 @@ fn read_limited(path: &Path, max: usize) -> Result<(String, bool), String> {
     Ok((String::from_utf8_lossy(bytes).into_owned(), cut))
 }
 
-fn read_file(folders: &[PathBuf], args: &serde_json::Value) -> Result<String, String> {
-    let path = confined(folders, &text_arg(args, "path")?)?;
+fn read_file(scope: &Scope, args: &serde_json::Value) -> Result<String, String> {
+    let path = scope.reach(&text_arg(args, "path")?, false)?;
     let (text, cut) = read_limited(&path, MAX_FILE_BYTES)?;
+    scope.saw(&path);
     let mut out = text;
     if cut {
         out.push_str("\n[... cut at 128 KB]");
@@ -414,8 +535,8 @@ fn read_file(folders: &[PathBuf], args: &serde_json::Value) -> Result<String, St
     Ok(out)
 }
 
-fn list_directory(folders: &[PathBuf], args: &serde_json::Value) -> Result<String, String> {
-    let path = confined(folders, &text_arg(args, "path")?)?;
+fn list_directory(scope: &Scope, args: &serde_json::Value) -> Result<String, String> {
+    let path = scope.reach(&text_arg(args, "path")?, false)?;
     let entries = std::fs::read_dir(&path).map_err(|e| format!("Could not list {}: {e}.", display(&path)))?;
     let mut names: Vec<String> = Vec::new();
     for entry in entries.flatten() {
@@ -435,13 +556,12 @@ fn list_directory(folders: &[PathBuf], args: &serde_json::Value) -> Result<Strin
     Ok(names.join("\n"))
 }
 
-fn search_files(folders: &[PathBuf], args: &serde_json::Value) -> Result<String, String> {
-    if folders.is_empty() {
-        return Err(NO_FOLDER.to_owned());
-    }
+fn search_files(scope: &Scope, args: &serde_json::Value) -> Result<String, String> {
+    let folders = scope.folders;
     let pattern = text_arg(args, "pattern")?;
     let roots = match args.get("path").and_then(serde_json::Value::as_str) {
-        Some(p) if !p.trim().is_empty() => vec![confined(folders, p)?],
+        Some(p) if !p.trim().is_empty() => vec![scope.reach(p, false)?],
+        _ if folders.is_empty() => return Err(NO_FOLDER.to_owned()),
         _ => folders.to_vec(),
     };
     let mut budget = MAX_SEARCH_BYTES;
@@ -493,20 +613,23 @@ fn search_files(folders: &[PathBuf], args: &serde_json::Value) -> Result<String,
     Ok(hits.join("\n"))
 }
 
-fn write_file(folders: &[PathBuf], args: &serde_json::Value) -> Result<String, String> {
-    let path = confined(folders, &text_arg(args, "path")?)?;
+fn write_file(scope: &Scope, args: &serde_json::Value) -> Result<String, String> {
+    let path = scope.reach(&text_arg(args, "path")?, true)?;
     let content = raw_text_arg(args, "content")?;
+    scope.before_write(&path)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("Could not create {}: {e}.", display(parent)))?;
     }
     std::fs::write(&path, content.as_bytes()).map_err(|e| format!("Could not write {}: {e}.", display(&path)))?;
+    scope.saw(&path);
     Ok(format!("Wrote {} bytes to {}.", content.len(), display(&path)))
 }
 
-fn edit_file(folders: &[PathBuf], args: &serde_json::Value) -> Result<String, String> {
-    let path = confined(folders, &text_arg(args, "path")?)?;
+fn edit_file(scope: &Scope, args: &serde_json::Value) -> Result<String, String> {
+    let path = scope.reach(&text_arg(args, "path")?, true)?;
     let old = text_arg(args, "old_text")?;
     let new = raw_text_arg(args, "new_text")?;
+    scope.before_write(&path)?;
     let (text, cut) = read_limited(&path, MAX_FILE_BYTES)?;
     if cut {
         return Err(format!("{} is larger than 128 KB, too large to edit precisely.", display(&path)));
@@ -518,6 +641,7 @@ fn edit_file(folders: &[PathBuf], args: &serde_json::Value) -> Result<String, St
     }
     let updated = text.replacen(&old, &new, 1);
     std::fs::write(&path, updated.as_bytes()).map_err(|e| format!("Could not write {}: {e}.", display(&path)))?;
+    scope.saw(&path);
     Ok(format!("Edited {}.", display(&path)))
 }
 
@@ -573,12 +697,17 @@ fn spawn_reader<R: Read + Send + 'static>(mut pipe: R, out: Arc<PipeOut>) {
 /// Runs one PowerShell command. The `timeout` is a parameter (not only the constant above) so the
 /// tests can exercise the kill path quickly.
 #[cfg(windows)]
-fn run_command(folders: &[PathBuf], args: &serde_json::Value, timeout: Duration) -> Result<String, String> {
+fn run_command(scope: &Scope, args: &serde_json::Value, timeout: Duration) -> Result<String, String> {
     use std::os::windows::process::CommandExt;
 
-    if folders.is_empty() {
-        return Err(NO_FOLDER.to_owned());
+    if scope.ctx.access == Access::ReadOnly {
+        return Err(SANDBOX_READ_ONLY.to_owned());
     }
+    let cwd = match (scope.folders.first(), scope.ctx.access) {
+        (Some(f), _) => f.clone(),
+        (None, Access::Full) => std::env::var_os("USERPROFILE").map(PathBuf::from).ok_or_else(|| NO_FOLDER.to_owned())?,
+        (None, _) => return Err(NO_FOLDER.to_owned()),
+    };
     let command = text_arg(args, "command")?;
     // Windows PowerShell writes redirected output in the console code page unless told otherwise;
     // UTF-8 without BOM keeps non-ASCII text intact for the model.
@@ -588,12 +717,19 @@ fn run_command(folders: &[PathBuf], args: &serde_json::Value, timeout: Duration)
         .arg("-NonInteractive")
         .arg("-Command")
         .arg(&script)
-        .current_dir(&folders[0])
+        .current_dir(&cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         // CREATE_NO_WINDOW: no console window may flash while the engine runs a command.
         .creation_flags(0x0800_0000);
+    if scope.ctx.scrub_env {
+        for (k, _) in std::env::vars_os() {
+            if k.to_str().is_some_and(looks_secret) {
+                cmd.env_remove(&k);
+            }
+        }
+    }
     let job = cerebro_job::Job::create().map_err(|e| format!("Could not create the process containment job: {e}."))?;
     let mut child = cmd.spawn().map_err(|e| format!("Could not start the command: {e}"))?;
     if let Err(e) = job.assign(&child) {
@@ -654,15 +790,20 @@ fn run_command(folders: &[PathBuf], args: &serde_json::Value, timeout: Duration)
     Ok(text)
 }
 
+/// Environment variable names that usually hold credentials (API keys, tokens, passwords). A
+/// command a model runs does not inherit them unless the user turns "Hide secrets from tools" off.
+pub fn looks_secret(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    ["KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH", "PRIVATE", "SESSION", "COOKIE"].iter().any(|w| n.contains(w))
+}
+
 #[cfg(not(windows))]
-fn run_command(_folders: &[PathBuf], _args: &serde_json::Value, _timeout: Duration) -> Result<String, String> {
+fn run_command(_scope: &Scope, _args: &serde_json::Value, _timeout: Duration) -> Result<String, String> {
     Err("Running commands is available on Windows only.".to_owned())
 }
 
 // ---- fetch_url ----------------------------------------------------------------------------------
 
-/// Fetches one http(s) page as text: non-text pages are refused, HTML is reduced to readable text,
-/// and the body is capped. Offline mode refuses before any connection is made.
 /// An address a model's fetch may reach: the public internet only, unless the user allowed local
 /// ones. Loopback, private, link-local (cloud metadata), CGNAT, unique-local and unspecified
 /// addresses are this computer or its network.
@@ -697,6 +838,8 @@ fn checked_address(url: &reqwest::Url, allow_local: bool) -> Result<std::net::So
     Ok(first)
 }
 
+/// Fetches one http(s) page as text: non-text pages are refused, HTML is reduced to readable text,
+/// and the body is capped. Offline mode refuses before any connection is made.
 fn fetch_url(args: &serde_json::Value, offline: bool, allow_local: bool) -> Result<String, String> {
     if offline {
         return Err("Offline mode is on, so no web page can be fetched.".to_owned());
@@ -911,6 +1054,11 @@ fn decode_entities(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Default settings, no read-before-write bookkeeping: the tools' own behaviour.
+    fn ws(folders: &[PathBuf]) -> Scope<'_> {
+        Scope { folders, ctx: ToolContext::default(), observed: None, extra_read: None }
+    }
+
     /// A unique temp folder, removed on drop.
     struct TempDir(PathBuf);
 
@@ -975,14 +1123,14 @@ mod tests {
     fn write_list_read_roundtrip() {
         let root = TempDir::new("roundtrip");
         let folders = [root.0.clone()];
-        let wrote = write_file(&folders, &serde_json::json!({ "path": "notes/hello.txt", "content": "héllo world" })).unwrap();
+        let wrote = write_file(&ws(&folders), &serde_json::json!({ "path": "notes/hello.txt", "content": "héllo world" })).unwrap();
         assert!(wrote.starts_with("Wrote 12 bytes to"), "{wrote}");
-        let listed = list_directory(&folders, &serde_json::json!({ "path": "notes" })).unwrap();
+        let listed = list_directory(&ws(&folders), &serde_json::json!({ "path": "notes" })).unwrap();
         assert_eq!(listed, "hello.txt");
-        let read = read_file(&folders, &serde_json::json!({ "path": "notes/hello.txt" })).unwrap();
+        let read = read_file(&ws(&folders), &serde_json::json!({ "path": "notes/hello.txt" })).unwrap();
         assert_eq!(read, "héllo world");
         std::fs::create_dir(root.0.join("empty")).unwrap();
-        assert_eq!(list_directory(&folders, &serde_json::json!({ "path": "empty" })).unwrap(), "(empty folder)");
+        assert_eq!(list_directory(&ws(&folders), &serde_json::json!({ "path": "empty" })).unwrap(), "(empty folder)");
     }
 
     #[test]
@@ -990,11 +1138,11 @@ mod tests {
         let root = TempDir::new("edit");
         let folders = [root.0.clone()];
         std::fs::write(root.0.join("a.txt"), "one two one").unwrap();
-        let err = edit_file(&folders, &serde_json::json!({ "path": "a.txt", "old_text": "one", "new_text": "1" })).unwrap_err();
+        let err = edit_file(&ws(&folders), &serde_json::json!({ "path": "a.txt", "old_text": "one", "new_text": "1" })).unwrap_err();
         assert!(err.contains("2 times"), "{err}");
-        let err = edit_file(&folders, &serde_json::json!({ "path": "a.txt", "old_text": "zero", "new_text": "1" })).unwrap_err();
+        let err = edit_file(&ws(&folders), &serde_json::json!({ "path": "a.txt", "old_text": "zero", "new_text": "1" })).unwrap_err();
         assert!(err.contains("was not found"), "{err}");
-        let ok = edit_file(&folders, &serde_json::json!({ "path": "a.txt", "old_text": "two", "new_text": "2" })).unwrap();
+        let ok = edit_file(&ws(&folders), &serde_json::json!({ "path": "a.txt", "old_text": "two", "new_text": "2" })).unwrap();
         assert!(ok.starts_with("Edited"), "{ok}");
         assert_eq!(std::fs::read_to_string(root.0.join("a.txt")).unwrap(), "one 2 one");
     }
@@ -1006,10 +1154,10 @@ mod tests {
         std::fs::write(root.0.join("a.txt"), "alpha\nneedle here\n").unwrap();
         std::fs::create_dir(root.0.join("sub")).unwrap();
         std::fs::write(root.0.join("sub").join("b.txt"), "no match\nanother needle\n").unwrap();
-        let out = search_files(&folders, &serde_json::json!({ "pattern": "needle" })).unwrap();
+        let out = search_files(&ws(&folders), &serde_json::json!({ "pattern": "needle" })).unwrap();
         assert!(out.contains("a.txt:2: needle here"), "{out}");
         assert!(out.contains("sub/b.txt:2: another needle"), "{out}");
-        assert_eq!(search_files(&folders, &serde_json::json!({ "pattern": "zzz" })).unwrap(), "No line matches \"zzz\".");
+        assert_eq!(search_files(&ws(&folders), &serde_json::json!({ "pattern": "zzz" })).unwrap(), "No line matches \"zzz\".");
     }
 
     #[test]
@@ -1017,7 +1165,7 @@ mod tests {
         let root = TempDir::new("cut");
         let folders = [root.0.clone()];
         std::fs::write(root.0.join("big.txt"), "a".repeat(MAX_FILE_BYTES + 1)).unwrap();
-        let read = read_file(&folders, &serde_json::json!({ "path": "big.txt" })).unwrap();
+        let read = read_file(&ws(&folders), &serde_json::json!({ "path": "big.txt" })).unwrap();
         assert!(read.ends_with("[... cut at 128 KB]"), "{}", read.len());
     }
 
@@ -1026,12 +1174,12 @@ mod tests {
     fn run_command_output_exit_code_cwd_and_utf8() {
         let root = TempDir::new("cmd");
         let folders = [root.0.clone()];
-        let out = run_command(&folders, &serde_json::json!({ "command": "Write-Output 'hello'; Write-Output 'café'" }), Duration::from_secs(30)).unwrap();
+        let out = run_command(&ws(&folders), &serde_json::json!({ "command": "Write-Output 'hello'; Write-Output 'café'" }), Duration::from_secs(30)).unwrap();
         assert!(out.contains("hello"), "{out}");
         assert!(out.contains("café"), "UTF-8 must survive the pipe: {out}");
-        let fail = run_command(&folders, &serde_json::json!({ "command": "Write-Output 'bad'; exit 3" }), Duration::from_secs(30)).unwrap();
+        let fail = run_command(&ws(&folders), &serde_json::json!({ "command": "Write-Output 'bad'; exit 3" }), Duration::from_secs(30)).unwrap();
         assert!(fail.contains("bad") && fail.contains("[exit code 3]"), "{fail}");
-        let cwd = run_command(&folders, &serde_json::json!({ "command": "(Get-Location).Path" }), Duration::from_secs(30)).unwrap();
+        let cwd = run_command(&ws(&folders), &serde_json::json!({ "command": "(Get-Location).Path" }), Duration::from_secs(30)).unwrap();
         let want = display(&root.0).to_lowercase();
         assert!(cwd.to_lowercase().contains(&want), "{cwd} vs {want}");
     }
@@ -1045,7 +1193,7 @@ mod tests {
         // survives; the parent then sleeps for two minutes.
         let cmd = "Start-Process cmd -ArgumentList '/c','ping -n 5 127.0.0.1 >nul & echo done> marker.txt' -WindowStyle Hidden; Start-Sleep 120";
         let started = Instant::now();
-        let err = run_command(&folders, &serde_json::json!({ "command": cmd }), Duration::from_secs(2)).unwrap_err();
+        let err = run_command(&ws(&folders), &serde_json::json!({ "command": cmd }), Duration::from_secs(2)).unwrap_err();
         assert!(err.contains("did not finish"), "{err}");
         assert!(started.elapsed() < Duration::from_secs(15), "the timeout must kill the tree, not wait for it");
         std::thread::sleep(Duration::from_secs(5));
@@ -1056,8 +1204,9 @@ mod tests {
     fn fetch_url_offline_and_bad_urls_fail_without_network() {
         let err = fetch_url(&serde_json::json!({ "url": "https://example.com" }), true, false).unwrap_err();
         assert!(err.contains("Offline mode"), "{err}");
-        let offline = ToolContext { offline: true, allow_local_fetch: false };
-        assert!(run("fetch_url", &serde_json::json!({ "url": "https://example.com" }), &[], offline).unwrap_err().contains("Offline mode"));
+        let offline = ToolContext { offline: true, ..ToolContext::default() };
+        let scope = Scope { folders: &[], ctx: offline, observed: None, extra_read: None };
+        assert!(run("fetch_url", &serde_json::json!({ "url": "https://example.com" }), &scope).unwrap_err().contains("Offline mode"));
         let err = fetch_url(&serde_json::json!({ "url": "ftp://example.com/x" }), false, false).unwrap_err();
         assert!(err.contains("not an http"), "{err}");
         let err = fetch_url(&serde_json::json!({ "url": "no spaces allowed" }), false, false).unwrap_err();
@@ -1096,6 +1245,81 @@ mod tests {
         let url = format!("http://127.0.0.1:{port}/");
         assert!(fetch_url(&serde_json::json!({ "url": url }), false, false).is_err());
         assert_eq!(fetch_url(&serde_json::json!({ "url": url }), false, true).unwrap(), "local");
+    }
+
+    #[test]
+    fn read_only_refuses_every_change_and_full_reaches_outside() {
+        let root = TempDir::new("ro");
+        let outside = TempDir::new("ro-outside");
+        std::fs::write(outside.0.join("o.txt"), "outside").unwrap();
+        let folders = vec![root.0.clone()];
+        let ro = Scope { folders: &folders, ctx: ToolContext { access: Access::ReadOnly, ..ToolContext::default() }, observed: None, extra_read: None };
+        for (tool, args) in [
+            ("write_file", serde_json::json!({ "path": "a.txt", "content": "x" })),
+            ("edit_file", serde_json::json!({ "path": "a.txt", "old_text": "x", "new_text": "y" })),
+            ("run_command", serde_json::json!({ "command": "Write-Output hi" })),
+        ] {
+            assert!(run(tool, &args, &ro).unwrap_err().starts_with("[sandbox: file access denied under read-only mode]"), "{tool}");
+        }
+        assert!(!root.0.join("a.txt").exists());
+        let outside_path = outside.0.join("o.txt").to_string_lossy().into_owned();
+        assert!(read_file(&ws(&folders), &serde_json::json!({ "path": outside_path })).is_err(), "workspace access stays inside");
+        let full = Scope { folders: &folders, ctx: ToolContext { access: Access::Full, ..ToolContext::default() }, observed: None, extra_read: None };
+        assert_eq!(read_file(&full, &serde_json::json!({ "path": outside_path })).unwrap(), "outside");
+    }
+
+    #[test]
+    fn writes_need_a_fresh_read_first() {
+        let root = TempDir::new("rbw");
+        let folders = vec![root.0.clone()];
+        let observed = Observed::default();
+        let scope = Scope { folders: &folders, ctx: ToolContext::default(), observed: Some(&observed), extra_read: None };
+        // A new file may be created without reading; then it counts as seen.
+        write_file(&scope, &serde_json::json!({ "path": "new.txt", "content": "one" })).unwrap();
+        edit_file(&scope, &serde_json::json!({ "path": "new.txt", "old_text": "one", "new_text": "two" })).unwrap();
+        // A file nobody read may not be replaced or edited.
+        std::fs::write(root.0.join("old.txt"), "keep").unwrap();
+        let err = write_file(&scope, &serde_json::json!({ "path": "old.txt", "content": "lost" })).unwrap_err();
+        assert!(err.ends_with("— read the file, then retry."), "{err}");
+        assert_eq!(std::fs::read_to_string(root.0.join("old.txt")).unwrap(), "keep");
+        read_file(&scope, &serde_json::json!({ "path": "old.txt" })).unwrap();
+        // Changed by someone else after the read.
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(root.0.join("old.txt"), "keep, edited elsewhere").unwrap();
+        let err = edit_file(&scope, &serde_json::json!({ "path": "old.txt", "old_text": "keep", "new_text": "x" })).unwrap_err();
+        assert!(err.ends_with("— re-read the file, then retry."), "{err}");
+        read_file(&scope, &serde_json::json!({ "path": "old.txt" })).unwrap();
+        edit_file(&scope, &serde_json::json!({ "path": "old.txt", "old_text": "keep", "new_text": "kept" })).unwrap();
+        assert_eq!(std::fs::read_to_string(root.0.join("old.txt")).unwrap(), "kept, edited elsewhere");
+        // The protection is a setting.
+        std::fs::write(root.0.join("free.txt"), "a").unwrap();
+        let off = Scope { ctx: ToolContext { read_before_write: false, ..ToolContext::default() }, ..scope };
+        write_file(&off, &serde_json::json!({ "path": "free.txt", "content": "b" })).unwrap();
+    }
+
+    #[test]
+    fn results_folder_is_readable_but_not_writable() {
+        let root = TempDir::new("spill-ws");
+        let spill = TempDir::new("spill-dir");
+        std::fs::write(spill.0.join("r1.txt"), "whole result").unwrap();
+        let folders = vec![root.0.clone()];
+        let scope = Scope { folders: &folders, ctx: ToolContext::default(), observed: None, extra_read: Some(&spill.0) };
+        let p = spill.0.join("r1.txt").to_string_lossy().into_owned();
+        assert_eq!(read_file(&scope, &serde_json::json!({ "path": p })).unwrap(), "whole result");
+        assert!(write_file(&scope, &serde_json::json!({ "path": p, "content": "x" })).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn commands_do_not_inherit_secrets_unless_allowed() {
+        let root = TempDir::new("env");
+        let folders = vec![root.0.clone()];
+        std::env::set_var("CEREBRO_TEST_API_KEY", "sk-should-not-leak");
+        let cmd = serde_json::json!({ "command": "Write-Output \"[$env:CEREBRO_TEST_API_KEY]\"" });
+        assert_eq!(run_command(&ws(&folders), &cmd, Duration::from_secs(30)).unwrap(), "[]");
+        let shown = Scope { folders: &folders, ctx: ToolContext { scrub_env: false, ..ToolContext::default() }, observed: None, extra_read: None };
+        assert_eq!(run_command(&shown, &cmd, Duration::from_secs(30)).unwrap(), "[sk-should-not-leak]");
+        assert!(looks_secret("GITHUB_TOKEN") && looks_secret("aws_secret_access_key") && !looks_secret("PATH") && !looks_secret("USERPROFILE"));
     }
 
     #[test]

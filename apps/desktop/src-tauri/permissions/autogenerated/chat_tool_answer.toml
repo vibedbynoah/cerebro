@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-chat-tool-answer"
+description = "Enables the chat_tool_answer command without any pre-configured scope."
+commands.allow = ["chat_tool_answer"]
+
+[[permission]]
+identifier = "deny-chat-tool-answer"
+description = "Denies the chat_tool_answer command without any pre-configured scope."
+commands.deny = ["chat_tool_answer"]

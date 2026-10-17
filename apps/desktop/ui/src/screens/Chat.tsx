@@ -27,7 +27,8 @@ import { useService } from "../service/context";
 import type { LibraryModel } from "../service/types";
 import { Composer } from "./chat/Composer";
 import { MessageView } from "./chat/Message";
-import type { ToolDecision } from "./chat/ToolCard";
+import type { ToolAnswer, ToolDecision } from "./chat/ToolCard";
+import { recordToolActivity, summarizeArgs } from "../lib/tool-activity";
 
 const MAX_THINKING = 32768;
 
@@ -119,7 +120,8 @@ export function Chat(): JSX.Element {
       const all = [...builtins, ...mcp];
       if (!all.length) return null;
       const rules = chatToolRules(loadPolicy(), all.map((t) => mcpToolKey(t.server, t.name)), app.settings()?.permissionPrompts ?? true);
-      return { ...rules, offline: app.settings()?.offlineMode === true, allowLocalFetch: app.settings()?.blockLocalFetch === false };
+      const s = app.settings();
+      return { ...rules, offline: s?.offlineMode === true, allowLocalFetch: s?.blockLocalFetch === false, showSecrets: s?.hideSecretsFromTools === false, blindWrites: s?.readBeforeWrite === false, planMode: prefs().planMode };
     } catch {
       return null;
     }
@@ -136,6 +138,17 @@ export function Chat(): JSX.Element {
       notify("Always allowed", `${tool.name} from ${tool.server} now runs without asking. Change it on the Tools screen.`, "success");
     }
     void service.chatToolDecide(id, decision !== "deny").then((ok) => {
+      if (!ok) notify("That request already ended", "The reply stopped before your answer arrived.", "info");
+    });
+  };
+
+  /** An answer to a question or a plan review on a tool card. An approved plan ends plan mode. */
+  const answerTool = (id: string, answer: ToolAnswer) => {
+    if ("approved" in answer && answer.approved && prefs().planMode) {
+      setPrefs({ planMode: false });
+      notify("Plan approved", "Plan first is off; the model carries the plan out now.", "success");
+    }
+    void service.chatToolAnswer(id, answer as Record<string, unknown>).then((ok) => {
       if (!ok) notify("That request already ended", "The reply stopped before your answer arrived.", "info");
     });
   };
@@ -208,6 +221,10 @@ export function Chat(): JSX.Element {
                 else m.tools.push(t);
               });
               if (e.state === "approval") notify("A tool needs your approval", `${e.name} from ${e.server}. Answer in the chat.`, "info");
+              if (e.state === "question") notify("The model has a question", "Answer it in the chat.", "info");
+              if (e.state === "plan") notify("A plan is ready", "Approve it, or say what to change, in the chat.", "info");
+              if (e.state === "done" || e.state === "denied" || e.state === "error")
+                recordToolActivity({ at: Date.now(), toolId: mcpToolKey(e.server, e.name), summary: summarizeArgs(e.name, e.arguments), outcome: e.state === "done" ? "ran" : e.state === "denied" ? "deny" : "failed" });
               break;
             }
             case "ledger":
@@ -364,8 +381,10 @@ export function Chat(): JSX.Element {
 
         <div class="chat-thread" ref={thread} role="log" aria-live="polite" aria-relevant="additions">
           <Show when={current()?.messages.length} fallback={<Empty onPick={(t) => send(t, [])} />}>
+            {/* The transcript's own heading: replies' Markdown headings (h3, h4) nest under it. */}
+            <h2 class="sr-only">Conversation</h2>
             <For each={current()!.messages}>
-              {(m, i) => <MessageView m={m} last={i() === current()!.messages.length - 1} onRegenerate={regenerate} onMore={more} onToolDecide={(id, d) => decideTool(currentId(), m.id, id, d)} />}
+              {(m, i) => <MessageView m={m} last={i() === current()!.messages.length - 1} onRegenerate={regenerate} onMore={more} onToolDecide={(id, d) => decideTool(currentId(), m.id, id, d)} onToolAnswer={answerTool} />}
             </For>
           </Show>
         </div>

@@ -147,9 +147,13 @@ function isOrchestrateRequest(o) {
 const TOOL_RULES = new Set(["allow", "ask", "deny"]);
 /** Chat's tool rules: { rules: { "server/tool": allow|ask|deny }, defaultRule, offline? }. @param {unknown} t */
 function isToolsRequest(t) {
-  if (!isPlain(t) || !hasOnlyKeys(t, ["rules", "defaultRule"], ["offline", "allowLocalFetch"]) || !TOOL_RULES.has(/** @type {string} */ (t.defaultRule)) || !isPlain(t.rules)) return false;
+  if (!isPlain(t) || !hasOnlyKeys(t, ["rules", "defaultRule"], ["offline", "allowLocalFetch", "access", "showSecrets", "blindWrites", "planMode"]) || !TOOL_RULES.has(/** @type {string} */ (t.defaultRule)) || !isPlain(t.rules)) return false;
   if (t.offline !== undefined && typeof t.offline !== "boolean") return false;
   if (t.allowLocalFetch !== undefined && typeof t.allowLocalFetch !== "boolean") return false;
+  if (t.access !== undefined && !["read-only", "workspace", "full"].includes(/** @type {string} */ (t.access))) return false;
+  if (t.showSecrets !== undefined && typeof t.showSecrets !== "boolean") return false;
+  if (t.blindWrites !== undefined && typeof t.blindWrites !== "boolean") return false;
+  if (t.planMode !== undefined && typeof t.planMode !== "boolean") return false;
   const entries = Object.entries(t.rules);
   return entries.length <= 4096 && entries.every(([k, v]) => k.length <= 200 && typeof v === "string" && TOOL_RULES.has(v));
 }
@@ -183,6 +187,8 @@ const WITH_ARGS = {
     Number.isSafeInteger(p.sessionDays) &&
     p.sessionDays >= 0 &&
     p.sessionDays <= 3650,
+  chat_tool_answer: (p) =>
+    isPlain(p) && hasOnlyKeys(p, ["id", "answer"]) && typeof p.id === "string" && /^t\d{1,16}-\d{1,3}$/.test(p.id) && isPlain(p.answer) && JSON.stringify(p.answer).length <= 65536,
   chat_tool_decide: (p) => isPlain(p) && hasOnlyKeys(p, ["id", "allow"]) && typeof p.id === "string" && /^t\d{1,16}-\d{1,3}$/.test(p.id) && typeof p.allow === "boolean",
   builtin_folders_set: (p) =>
     isPlain(p) && hasOnlyKeys(p, ["folders"]) && Array.isArray(p.folders) && p.folders.length <= 32 && p.folders.every((f) => typeof f === "string" && f.length > 0 && f.length <= 1024),

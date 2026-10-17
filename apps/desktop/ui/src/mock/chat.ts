@@ -129,6 +129,7 @@ export function createMockChat(options: MockChatOptions = {}) {
   const tps = options.tokPerSec ?? 24;
   const orchestrateSpeed = options.orchestrateSpeed && options.orchestrateSpeed > 0 ? options.orchestrateSpeed : speed;
   const pendingDecisions = new Map<string, (allow: boolean) => void>();
+  const pendingAnswers = new Map<string, (value: Record<string, unknown> | null) => void>();
 
   async function orchestrate(req: ChatRequest, onEvent: (e: ChatEvent) => void, signal: AbortSignal, ttftMs: number): Promise<void> {
     const goal = [...req.turns].reverse().find((t) => t.role === "user")?.text.trim() ?? "";
@@ -179,6 +180,7 @@ export function createMockChat(options: MockChatOptions = {}) {
     onEvent({ type: "start", ttftMs });
 
     if (req.orchestrate) return orchestrate(req, onEvent, signal, ttftMs);
+    if (req.tools && (req.tools.planMode || /\bask me\b/i.test(req.turns[req.turns.length - 1]?.text ?? ""))) return agentTurn(req, onEvent, signal, ttftMs, started);
 
     // A request with tools that asks about files: the model calls the mock files server's
     // list_directory first, following the rule the UI sent (allow / ask / deny), as the engine does.
@@ -257,6 +259,58 @@ export function createMockChat(options: MockChatOptions = {}) {
     onEvent({ type: "done", stats });
   }
 
+  /** Plan mode (a task list, then a plan to review) or a question for the user, as the engine runs
+   *  them: each waits for the answer from the chat, then the reply goes on. */
+  async function agentTurn(req: ChatRequest, onEvent: (e: ChatEvent) => void, signal: AbortSignal, ttftMs: number, started: number): Promise<void> {
+    const waitAnswer = (id: string) =>
+      new Promise<Record<string, unknown> | null>((resolve) => {
+        pendingAnswers.set(id, resolve);
+        signal.addEventListener("abort", () => resolve(null), { once: true });
+      });
+    const say = async (text: string) => {
+      for (const w of tokenize(text)) {
+        if (signal.aborted) break;
+        onEvent({ type: "token", text: w });
+        await wait(1000 / tps / speed, signal);
+      }
+      return tokenize(text).length;
+    };
+    let out = 0;
+    const base = { server: "cerebro", result: null, error: null };
+    if (req.tools?.planMode) {
+      const todos = { todos: [{ content: "Read the config loader", status: "completed" }, { content: "Draft the change", status: "in_progress" }, { content: "Add a test", status: "pending" }] };
+      onEvent({ type: "tool", id: `t${Date.now()}-0`, name: "todo_write", arguments: todos, ...base, state: "done", result: "Updated todo list: 1 pending, 1 in progress, 1 completed." });
+      await wait(200 / speed, signal);
+      const id = `t${Date.now()}-1`;
+      const plan = { plan: "## Plan\n\n1. Return an error from `load()` instead of panicking.\n2. Show the error on the Settings screen.\n3. Add a test for a missing file." };
+      onEvent({ type: "tool", id, name: "exit_plan_mode", arguments: plan, ...base, state: "plan" });
+      const a = await waitAnswer(id);
+      pendingAnswers.delete(id);
+      const approved = a?.approved === true;
+      const reply = a === null ? "The user did not answer." : approved ? "The user approved the plan." : `The user wants changes: ${String(a.feedback ?? "")}`;
+      onEvent({ type: "tool", id, name: "exit_plan_mode", arguments: plan, ...base, state: "done", result: reply });
+      out += await say(a === null ? "Stopped before the plan was reviewed." : approved ? "Starting with step 1: `load()` now returns an error." : `Revising the plan: ${String(a.feedback ?? "")}`);
+    } else {
+      const id = `t${Date.now()}-0`;
+      const q = { questions: [{ question: "Which database should the app use?", options: ["SQLite (recommended)", "Postgres"], multi: false }] };
+      onEvent({ type: "tool", id, name: "ask_user", arguments: q, ...base, state: "question" });
+      const a = await waitAnswer(id);
+      pendingAnswers.delete(id);
+      const answers = (a?.answers as Array<{ answer: unknown }> | undefined) ?? [];
+      const choice = answers.length ? String(answers[0]!.answer) : "";
+      onEvent({ type: "tool", id, name: "ask_user", arguments: q, ...base, state: a ? "done" : "error", result: a ? JSON.stringify({ answers }) : null, error: a ? null : "The user did not answer." });
+      out += await say(choice ? `Going with ${choice}.` : "I will ask again later.");
+    }
+    onEvent({ type: "done", stats: { outputTokens: out, thinkingTokens: 0, tokPerSec: tps, ttftMs, totalMs: Math.round(performance.now() - started), extraMs: 0, stopped: signal.aborted } });
+  }
+
+  async function answer(id: string, value: Record<string, unknown>): Promise<boolean> {
+    const resolve = pendingAnswers.get(id);
+    if (!resolve) return false;
+    resolve(value);
+    return true;
+  }
+
   async function decide(id: string, allow: boolean): Promise<boolean> {
     const resolve = pendingDecisions.get(id);
     if (!resolve) return false;
@@ -270,5 +324,5 @@ export function createMockChat(options: MockChatOptions = {}) {
     return "How much graphics memory do I need for a 30B mixture-of-experts model?";
   }
 
-  return { chat, transcribe, decide };
+  return { chat, transcribe, decide, answer };
 }

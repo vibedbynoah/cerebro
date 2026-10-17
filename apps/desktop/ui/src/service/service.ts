@@ -182,6 +182,8 @@ export interface CerebroService {
   chat(request: ChatRequest, onEvent: (e: ChatEvent) => void, signal: AbortSignal): Promise<void>;
   /** Answers a tool call that waits for approval in Chat. False when nothing was waiting. */
   chatToolDecide(id: string, allow: boolean): Promise<boolean>;
+  /** The user's answer to a question (ask_user) or plan (exit_plan_mode); false if nothing waited. */
+  chatToolAnswer(id: string, answer: Record<string, unknown>): Promise<boolean>;
   /** Transcribes a push-to-talk recording on this machine. */
   transcribe(seconds: number): Promise<string>;
 

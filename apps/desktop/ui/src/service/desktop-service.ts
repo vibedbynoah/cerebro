@@ -234,6 +234,7 @@ export function createDesktopService(local: CerebroService): CerebroService {
       }
     },
     chatToolDecide: (id, allow) => invoke<boolean>("chat_tool_decide", { id, allow }),
+    chatToolAnswer: (id, answer) => invoke<boolean>("chat_tool_answer", { id, answer }),
     transcribe: () => NOT_YET("Speech to text"),
 
     hubSearch: (query) => invoke<HubRepo[]>("hub_search", { query }),

@@ -175,9 +175,11 @@ export interface ChatPrefs {
   workers: number;
   /** Rounds of manage -> workers before the result is finalized, 1-8. */
   rounds: number;
+  /** Plan mode: investigate read-only, then present a plan for approval before changing anything. */
+  planMode: boolean;
 }
 
-export const DEFAULT_PREFS: ChatPrefs = { effort: "medium", verbosity: "brief", source: "native", addInstructions: true, base: DEFAULT_BASE_PROMPT, memoryOn: true, orchestrate: false, workers: 3, rounds: 3 };
+export const DEFAULT_PREFS: ChatPrefs = { effort: "medium", verbosity: "brief", source: "native", addInstructions: true, base: DEFAULT_BASE_PROMPT, memoryOn: true, orchestrate: false, workers: 3, rounds: 3, planMode: false };
 
 const isOneOf = <T extends string>(list: readonly T[], v: unknown): v is T => typeof v === "string" && (list as readonly string[]).includes(v);
 
@@ -203,6 +205,7 @@ export function parsePrefs(raw: string | null): ChatPrefs {
     orchestrate: typeof v.orchestrate === "boolean" ? v.orchestrate : DEFAULT_PREFS.orchestrate,
     workers: inRange(v.workers, 1, 6, DEFAULT_PREFS.workers),
     rounds: inRange(v.rounds, 1, 8, DEFAULT_PREFS.rounds),
+    planMode: typeof v.planMode === "boolean" ? v.planMode : DEFAULT_PREFS.planMode,
   };
 }
 

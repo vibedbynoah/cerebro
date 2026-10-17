@@ -135,8 +135,8 @@ function parseMessage(v: unknown): ChatMessage | null {
             const server = str(x.server, 200);
             if (id === null || name === null || server === null) return [];
             // A call still waiting or running when the app closed did not finish.
-            const state = oneOf(x.state, ["approval", "running", "done", "denied", "error"] as const, "error");
-            const live = state === "approval" || state === "running";
+            const state = oneOf(x.state, ["approval", "question", "plan", "running", "done", "denied", "error"] as const, "error");
+            const live = state === "approval" || state === "question" || state === "plan" || state === "running";
             return [{ id, name, server, arguments: x.arguments ?? {}, state: live ? "error" : state, result: str(x.result, 20000), error: live ? "Interrupted." : str(x.error, 2000) }];
           })
           .slice(0, 32)

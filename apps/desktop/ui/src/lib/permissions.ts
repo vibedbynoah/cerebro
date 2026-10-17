@@ -46,15 +46,27 @@ export const TOOLS: readonly ToolDef[] = [
 export type Decision = "allow-once" | "allow-session" | "always" | "deny";
 export const DECISION_LABELS: Readonly<Record<Decision, string>> = { "allow-once": "Allowed once", "allow-session": "Allowed for session", always: "Always allowed", deny: "Denied" };
 
+/** How far Cerebro's built-in tools reach (engine.rs Access). */
+export type Access = "read-only" | "workspace" | "full";
+export const ACCESS: readonly Access[] = ["read-only", "workspace", "full"];
+export const ACCESS_LABELS: Readonly<Record<Access, string>> = { "read-only": "Read only", workspace: "Workspace folders", full: "Full access" };
+export const ACCESS_NOTES: Readonly<Record<Access, string>> = {
+  "read-only": "Tools can read inside your workspace folders. Nothing can be changed and no command runs.",
+  workspace: "Tools can read and change files inside your workspace folders. Commands start there, but are not confined to them by Windows.",
+  full: "Tools can read and change any file your Windows account can.",
+};
+
 export interface Policy {
   defaultRule: Rule;
   rules: Record<string, Rule>;
+  access: Access;
 }
 
 /** Safe defaults: reading is always allowed, the tools that change files or run commands ask, and
  *  everything else follows the default rule. */
 export const DEFAULT_POLICY: Policy = {
   defaultRule: "ask",
+  access: "workspace",
   rules: {
     [builtinKey("read_file")]: "always",
     [builtinKey("list_directory")]: "always",
@@ -77,7 +89,8 @@ export function parsePolicy(raw: string | null): Policy {
     if (v && typeof v.rules === "object" && v.rules) {
       for (const [k, r] of Object.entries(v.rules as Record<string, unknown>)) if ((TOOL_IDS.has(k) || MCP_KEY.test(k)) && isRule(r)) rules[k] = r;
     }
-    return { defaultRule: isRule(v?.defaultRule) ? v.defaultRule : DEFAULT_POLICY.defaultRule, rules };
+    const access = (ACCESS as readonly unknown[]).includes(v?.access) ? (v.access as Access) : DEFAULT_POLICY.access;
+    return { defaultRule: isRule(v?.defaultRule) ? v.defaultRule : DEFAULT_POLICY.defaultRule, rules, access };
   } catch {
     return structuredClone(DEFAULT_POLICY);
   }
@@ -91,11 +104,49 @@ const MCP_KEY = /^[A-Za-z0-9 ._-]{1,64}\/[^\s/]{1,128}$/;
 export const SESSION_GRANTS = new Set<string>();
 
 /** Chat's per-request tool rules: every known tool resolved to allow / ask / deny now. */
-export function chatToolRules(p: Policy, keys: readonly string[], promptsOn: boolean): { rules: Record<string, Verdict>; defaultRule: Verdict } {
+export function chatToolRules(p: Policy, keys: readonly string[], promptsOn: boolean): { rules: Record<string, Verdict>; defaultRule: Verdict; access: Access } {
   const rules: Record<string, Verdict> = {};
   for (const k of keys) rules[k] = resolve(p, k, SESSION_GRANTS, promptsOn);
   const d = p.defaultRule === "deny" ? "deny" : !promptsOn || p.defaultRule === "always" || p.defaultRule === "session" ? "allow" : "ask";
-  return { rules, defaultRule: d };
+  return { rules, defaultRule: d, access: p.access };
+}
+
+// ---- Presets: one choice that sets the access level and the built-in tools' rules together ------
+
+export type PresetId = "read-only" | "ask" | "auto-edit" | "full-auto";
+export interface Preset {
+  id: PresetId;
+  label: string;
+  note: string;
+  access: Access;
+  defaultRule: Rule;
+  rules: Record<string, Rule>;
+}
+
+const READS = ["read_file", "list_directory", "search_files"].map(builtinKey);
+const WRITES = ["write_file", "edit_file"].map(builtinKey);
+const RUN = builtinKey("run_command");
+const NET = builtinKey("fetch_url");
+const all = (keys: readonly string[], r: Rule): Record<string, Rule> => Object.fromEntries(keys.map((k) => [k, r]));
+
+export const PRESETS: readonly Preset[] = [
+  { id: "read-only", label: "Read only", note: "The model looks but never changes anything.", access: "read-only", defaultRule: "deny", rules: { ...all(READS, "always"), ...all(WRITES, "deny"), [RUN]: "deny", [NET]: "ask" } },
+  { id: "ask", label: "Ask before changes", note: "Reading is free; every change, command and web fetch asks you first.", access: "workspace", defaultRule: "ask", rules: { ...all(READS, "always"), ...all(WRITES, "ask"), [RUN]: "ask", [NET]: "ask" } },
+  { id: "auto-edit", label: "Auto-edit", note: "Files in your workspace folders change without asking; commands and web fetches still ask.", access: "workspace", defaultRule: "ask", rules: { ...all(READS, "always"), ...all(WRITES, "always"), [RUN]: "ask", [NET]: "ask" } },
+  { id: "full-auto", label: "Full auto", note: "Everything runs without asking, anywhere on this computer.", access: "full", defaultRule: "always", rules: { ...all(READS, "always"), ...all(WRITES, "always"), [RUN]: "always", [NET]: "always" } },
+];
+
+/** The preset a policy matches exactly (access, default and every built-in rule), or null. */
+export function presetOf(p: Policy): PresetId | null {
+  const builtin = [...READS, ...WRITES, RUN, NET];
+  const hit = PRESETS.find((x) => x.access === p.access && x.defaultRule === p.defaultRule && builtin.every((k) => (p.rules[k] ?? p.defaultRule) === x.rules[k]));
+  return hit?.id ?? null;
+}
+
+/** A policy with the preset applied; rules for MCP tools the user set are kept. */
+export function applyPreset(p: Policy, id: PresetId): Policy {
+  const x = PRESETS.find((q) => q.id === id) ?? PRESETS[1]!;
+  return { access: x.access, defaultRule: x.defaultRule, rules: { ...p.rules, ...x.rules } };
 }
 
 export function loadPolicy(): Policy {
@@ -126,7 +177,7 @@ export function resolve(p: Policy, toolId: string, sessionGrants: ReadonlySet<st
 /** Applies a dialog decision: the new policy and session grants. */
 export function applyDecision(p: Policy, grants: ReadonlySet<string>, toolId: string, d: Decision): { policy: Policy; grants: Set<string> } {
   const next = new Set(grants);
-  const policy: Policy = { defaultRule: p.defaultRule, rules: { ...p.rules } };
+  const policy: Policy = { defaultRule: p.defaultRule, rules: { ...p.rules }, access: p.access };
   if (d === "allow-session") next.add(toolId);
   if (d === "always") policy.rules[toolId] = "always";
   return { policy, grants: next };
@@ -170,7 +221,8 @@ export interface LogEntry {
   at: number;
   toolId: string;
   summary: string;
-  outcome: Decision | "auto-allowed" | "auto-denied";
+  /** "ran" and "failed" are real calls from Chat; the rest come from the approval dialog. */
+  outcome: Decision | "auto-allowed" | "auto-denied" | "ran" | "failed";
 }
 
 export function summarize(p: Preview): string {

@@ -47,6 +47,8 @@ const SETTING_KEYS: ReadonlyArray<keyof Settings> = [
   "integrityCheck",
   "permissionPrompts",
   "blockLocalFetch",
+  "hideSecretsFromTools",
+  "readBeforeWrite",
   "loopbackOnly",
   "offlineMode",
   "allowModelDownloads",

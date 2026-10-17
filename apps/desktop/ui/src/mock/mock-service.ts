@@ -837,6 +837,7 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
 
     chat: (request, onEvent, signal) => chatEngine.chat(request, onEvent, signal),
     chatToolDecide: (id, allow) => chatEngine.decide(id, allow),
+    chatToolAnswer: (id, answer) => chatEngine.answer(id, answer),
 
     transcribe: (seconds) => chatEngine.transcribe(seconds),
   };

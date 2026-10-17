@@ -5,7 +5,14 @@ import { Icon } from "../components/icons";
 import { ScreenHeader, Section } from "../components/Screen";
 import { hrefFor } from "../lib/routes";
 import {
+  ACCESS,
+  ACCESS_LABELS,
+  ACCESS_NOTES,
   applyDecision,
+  applyPreset,
+  PRESETS,
+  presetOf,
+  type Access,
   DECISION_LABELS,
   loadPolicy,
   mcpToolKey,
@@ -27,6 +34,7 @@ import { notify } from "../lib/toast";
 import { useService } from "../service/context";
 import type { McpTool } from "../service/types";
 import { useAppState } from "../state";
+import { toolActivity } from "../lib/tool-activity";
 import { McpServers } from "./tools/McpServers";
 
 /**
@@ -126,9 +134,11 @@ export function Tools(): JSX.Element {
   };
 
   const toolName = (id: string) => TOOLS.find((t) => t.id === id)?.name ?? id;
+  // Real calls from Chat this session, with the preview's sample calls, newest first.
+  const allLog = () => [...toolActivity(), ...log()].sort((a, b) => b.at - a.at);
   const shown = () => {
     const s = q().toLowerCase().trim();
-    return s ? log().filter((e) => `${toolName(e.toolId)} ${e.summary} ${e.outcome}`.toLowerCase().includes(s)) : log();
+    return s ? allLog().filter((e) => `${toolName(e.toolId)} ${e.summary} ${e.outcome}`.toLowerCase().includes(s)) : allLog();
   };
 
   return (
@@ -150,6 +160,34 @@ export function Tools(): JSX.Element {
           </span>
         </p>
       </Show>
+
+      <Section id="tool-presets" title="How much the model may do" description="One choice sets the access level and the rules for Cerebro's own tools together. Change any single rule below and the choice shows as Custom.">
+        <fieldset class="segmented tools-presets">
+          <legend class="sr-only">Preset</legend>
+          <For each={PRESETS}>
+            {(x) => (
+              <label class="segmented__option" data-press>
+                <input type="radio" name="tool-preset" value={x.id} checked={presetOf(policy()) === x.id} onChange={() => setPolicy(applyPreset(policy(), x.id))} />
+                <span>{x.label}</span>
+              </label>
+            )}
+          </For>
+        </fieldset>
+        <p class="hint" data-testid="preset-note">
+          {PRESETS.find((x) => x.id === presetOf(policy()))?.note ?? "Custom: your own mix of rules."}
+        </p>
+        <label class="tools-access">
+          <span>Access</span>
+          <span class="select">
+            <select class="input" aria-label="Tool access" value={policy().access} onChange={(e) => setPolicy({ ...policy(), access: e.currentTarget.value as Access })}>
+              <For each={ACCESS}>{(a) => <option value={a}>{ACCESS_LABELS[a]}</option>}</For>
+            </select>
+          </span>
+        </label>
+        <p class="hint" data-testid="access-note">
+          {ACCESS_NOTES[policy().access]}
+        </p>
+      </Section>
 
       <McpServers />
       <Section id="default-rule" title="Default for tools without a rule">
@@ -233,14 +271,14 @@ export function Tools(): JSX.Element {
       <Section id="tool-log" title="Activity" description="Every tool call and what happened to it, newest first.">
         <input class="tools-search" type="search" placeholder="Search calls" aria-label="Search tool activity" value={q()} onInput={(e) => setQ(e.currentTarget.value)} />
         <ol class="tools-log" role="list">
-          <For each={shown()} fallback={<li class="hint">{log().length ? "Nothing matches." : __DESKTOP__ ? "No tool calls yet. They appear here as models use tools in Chat." : "No tool calls yet. Try one above."}</li>}>
+          <For each={shown()} fallback={<li class="hint">{allLog().length ? "Nothing matches." : __DESKTOP__ ? "No tool calls yet. They appear here as models use tools in Chat." : "No tool calls yet. Try one above."}</li>}>
             {(e) => (
               <li data-outcome={e.outcome}>
                 <span class="mono tools-log__at">{new Date(e.at).toLocaleTimeString()}</span>
                 <span class="tools-log__tool">{toolName(e.toolId)}</span>
                 <span class="mono tools-log__sum">{e.summary}</span>
-                <span class="chip" data-tone={e.outcome === "deny" || e.outcome === "auto-denied" ? "off" : "on"}>
-                  {e.outcome === "auto-allowed" ? "Ran (rule)" : e.outcome === "auto-denied" ? "Blocked (rule)" : DECISION_LABELS[e.outcome]}
+                <span class="chip" data-tone={e.outcome === "deny" || e.outcome === "auto-denied" || e.outcome === "failed" ? "off" : "on"}>
+                  {e.outcome === "auto-allowed" ? "Ran (rule)" : e.outcome === "auto-denied" ? "Blocked (rule)" : e.outcome === "ran" ? "Ran" : e.outcome === "failed" ? "Failed" : DECISION_LABELS[e.outcome]}
                 </span>
               </li>
             )}

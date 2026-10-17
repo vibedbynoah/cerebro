@@ -22,6 +22,7 @@ mod toolcall;
 mod orchestrate;
 mod commands;
 mod builtin_tools;
+mod agent_tools;
 mod trainer;
 mod engine;
 mod hub;
@@ -77,6 +78,7 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::remote_pair,
             commands::remote_revoke,
             commands::chat_tool_decide,
+            commands::chat_tool_answer,
             commands::builtin_tools,
             commands::builtin_folders_get,
             commands::builtin_folders_set,
@@ -106,10 +108,14 @@ pub fn run() -> Result<(), tauri::Error> {
                 // Tools screen; the composite host lists them under "cerebro" beside the MCP tools.
                 let workspace = std::sync::Arc::new(builtin_tools::WorkspaceFolders::load(app.handle()));
                 app.manage(std::sync::Arc::clone(&workspace));
-                app.state::<engine::Engine>().set_tool_host(std::sync::Arc::new(builtin_tools::BuiltinTools::new(
-                    std::sync::Arc::new(commands::McpToolHost(app.handle().clone())),
-                    std::sync::Arc::clone(&workspace),
-                )));
+                // Long tool results are kept whole under <app data>\spills (a week at most).
+                let mut tools = builtin_tools::BuiltinTools::new(std::sync::Arc::new(commands::McpToolHost(app.handle().clone())), std::sync::Arc::clone(&workspace));
+                if let Ok(dir) = app.path().app_data_dir() {
+                    let spills = dir.join("spills");
+                    builtin_tools::prune_spills(&spills, std::time::Duration::from_secs(7 * 24 * 3600));
+                    tools = tools.with_spill_dir(spills);
+                }
+                app.state::<engine::Engine>().set_tool_host(std::sync::Arc::new(tools));
                 if let Ok(dir) = app.path().app_data_dir() {
                     app.state::<engine::Engine>().set_ledger_root(dir);
                 }

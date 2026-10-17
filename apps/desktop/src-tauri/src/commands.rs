@@ -849,6 +849,15 @@ impl crate::local_api::ApiBackend for ApiEngineBackend {
     }
 }
 
+/// The user's answer to a question (ask_user) or plan (exit_plan_mode) waiting in the chat.
+#[tauri::command]
+pub fn chat_tool_answer(engine: State<'_, Engine>, id: String, answer: serde_json::Value) -> bool {
+    if id.len() > 64 || !answer.is_object() || answer.to_string().len() > 64 * 1024 {
+        return false;
+    }
+    engine.answer(&id, answer)
+}
+
 type LocalApiState<'a> = State<'a, Arc<crate::local_api::LocalApi>>;
 
 #[tauri::command(async)]

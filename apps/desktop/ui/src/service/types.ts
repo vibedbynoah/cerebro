@@ -71,6 +71,10 @@ export interface Settings {
   permissionPrompts: boolean;
   /** Web fetches by a model may not reach this computer or the local network. */
   blockLocalFetch: boolean;
+  /** Commands a model runs do not inherit environment variables that look like secrets. */
+  hideSecretsFromTools: boolean;
+  /** A model must read a file (and it must be unchanged since) before changing it. */
+  readBeforeWrite: boolean;
   /** Serve the API on 127.0.0.1 only. Off lets other devices on the network reach it. */
   loopbackOnly: boolean;
   /** Block every network feature (model downloads, plugin installs). */

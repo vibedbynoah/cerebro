@@ -46,6 +46,7 @@
     "allow-remote-pair",
     "allow-remote-revoke",
     "allow-chat-tool-decide",
+    "allow-chat-tool-answer",
     "allow-builtin-tools",
     "allow-builtin-folders-get",
     "allow-builtin-folders-set",

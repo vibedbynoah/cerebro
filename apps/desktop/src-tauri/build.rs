@@ -43,6 +43,7 @@ const COMMANDS: &[&str] = &[
     "remote_pair",
     "remote_revoke",
     "chat_tool_decide",
+    "chat_tool_answer",
     "builtin_tools",
     "builtin_folders_get",
     "builtin_folders_set",

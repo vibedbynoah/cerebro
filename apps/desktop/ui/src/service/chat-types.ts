@@ -51,11 +51,20 @@ export interface ChatTools {
   defaultRule: ToolRuleNow;
   /** Settings > Protections "Keep web fetches off this network" is off. */
   allowLocalFetch?: boolean;
+  /** How far the built-in tools reach (Tools screen). */
+  access?: "read-only" | "workspace" | "full";
+  /** Settings > Protections "Hide secrets from tools" is off. */
+  showSecrets?: boolean;
+  /** Settings > Protections "Read before write" is off. */
+  blindWrites?: boolean;
+  /** Plan mode: the model investigates read-only, then presents a plan for approval. */
+  planMode?: boolean;
   /** The user's Offline mode setting: built-in tools that touch the network must refuse. */
   offline: boolean;
 }
 
-export type ToolState = "approval" | "running" | "done" | "denied" | "error";
+/** "question" (ask_user) and "plan" (exit_plan_mode) wait for the user's answer in the chat. */
+export type ToolState = "approval" | "question" | "plan" | "running" | "done" | "denied" | "error";
 
 /** One tool call in a reply, as Chat shows and stores it. */
 export interface ToolActivity {

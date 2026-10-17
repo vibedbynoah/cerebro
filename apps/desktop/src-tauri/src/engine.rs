@@ -298,6 +298,43 @@ pub struct ToolsRequest {
     /// The user turned off "Keep web fetches off this network" (Settings > Protections).
     #[serde(default)]
     pub allow_local_fetch: bool,
+    /// What the built-in tools may touch: "read-only", "workspace" (default) or "full".
+    #[serde(default)]
+    pub access: Access,
+    /// Settings > Protections "Hide secrets from tools" is off.
+    #[serde(default)]
+    pub show_secrets: bool,
+    /// Settings > Protections "Read before write" is off.
+    #[serde(default)]
+    pub blind_writes: bool,
+    /// Plan mode (Chat): investigate read-only, then hand a plan over with exit_plan_mode.
+    #[serde(default)]
+    pub plan_mode: bool,
+}
+
+/// How far the built-in tools reach. Commands are contained (Job Object, time limit) but not
+/// confined to the folders by the operating system, which is why read-only refuses them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Access {
+    /// Reading inside the workspace folders only: no writes, edits or commands.
+    ReadOnly,
+    /// Reading and writing inside the workspace folders; commands run in the first folder.
+    #[default]
+    Workspace,
+    /// Any path this Windows account can reach.
+    Full,
+}
+
+impl Access {
+    /// One factual sentence for the system prompt, so the model knows its bounds before it tries.
+    pub fn statement(self) -> &'static str {
+        match self {
+            Access::ReadOnly => "Tool access is read-only: you can read files in the workspace folders, but you cannot change files or run commands.",
+            Access::Workspace => "Tool access is workspace: you can read and change files only inside the workspace folders; commands run in the first workspace folder.",
+            Access::Full => "Tool access is full: you can read and change files anywhere this user can.",
+        }
+    }
 }
 
 impl ToolsRequest {
@@ -307,12 +344,32 @@ impl ToolsRequest {
 }
 
 /// What a tool call needs to know about the user's settings for this turn.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct ToolContext {
     /// Offline mode is on (Settings): the tool must not touch the network.
     pub offline: bool,
     /// A fetch may reach loopback, private and link-local addresses.
     pub allow_local_fetch: bool,
+    pub access: Access,
+    /// Variables that look like secrets are removed from a command's environment.
+    pub scrub_env: bool,
+    /// A file must have been read (and be unchanged since) before it is edited or replaced.
+    pub read_before_write: bool,
+}
+
+impl Default for ToolContext {
+    fn default() -> Self {
+        ToolContext { offline: false, allow_local_fetch: false, access: Access::Workspace, scrub_env: true, read_before_write: true }
+    }
+}
+
+impl ToolContext {
+    pub fn from_request(t: Option<&ToolsRequest>) -> Self {
+        match t {
+            Some(t) => ToolContext { offline: t.offline, allow_local_fetch: t.allow_local_fetch, access: t.access, scrub_env: !t.show_secrets, read_before_write: !t.blind_writes },
+            None => ToolContext::default(),
+        }
+    }
 }
 
 /// Where tool calls go: the MCP client and the built-in tools (commands.rs). Blocking; called from
@@ -483,10 +540,14 @@ pub struct Engine {
     pub library: Arc<Mutex<Vec<LibraryModel>>>,
     /// Tool calls waiting for the user, by call id; `decide` answers them.
     approvals: Arc<Mutex<std::collections::HashMap<String, Sender<bool>>>>,
+    /// Questions and plans waiting for the user, by call id; `answer` replies.
+    answers: Answers,
     tool_host: Arc<Mutex<Option<Arc<dyn ToolHost>>>>,
     /// Where Orchestrate mode keeps its ledgers (the app's data folder).
     ledger_root: Arc<Mutex<Option<PathBuf>>>,
 }
+
+type Answers = Arc<Mutex<std::collections::HashMap<String, Sender<serde_json::Value>>>>;
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
@@ -507,11 +568,12 @@ impl Engine {
         let status = Arc::new(Mutex::new(Status { activity: "idle", totals: Totals { since: now_ms(), ..Default::default() }, ..Default::default() }));
         let cancel = Arc::new(AtomicBool::new(false));
         let approvals: Arc<Mutex<std::collections::HashMap<String, Sender<bool>>>> = Arc::default();
+        let answers: Answers = Arc::default();
         let tool_host: Arc<Mutex<Option<Arc<dyn ToolHost>>>> = Arc::default();
         let st = status.clone();
         let cn = cancel.clone();
         let ledger_root: Arc<Mutex<Option<PathBuf>>> = Arc::default();
-        let (ap, th, lr) = (approvals.clone(), tool_host.clone(), ledger_root.clone());
+        let (ap, th, lr, an) = (approvals.clone(), tool_host.clone(), ledger_root.clone(), answers.clone());
         std::thread::Builder::new()
             .name("cerebro-engine".into())
             .spawn(move || {
@@ -555,7 +617,8 @@ impl Engine {
                                 }
                                 Some(l) if l.info.id == req.model_id => {
                                     let host = th.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                                    run_chat(l, &req, &events, &st, &cn, Tooling { host, approvals: &ap });
+                                    let spill_dir = lr.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|d| d.join("spills"));
+                                    run_chat(l, &req, &events, &st, &cn, Tooling { host, approvals: &ap, answers: &an, spill_dir });
                                 }
                                 _ => {
                                     events(ChatEvent::Error { message: "Load this model first (Models screen).".into() });
@@ -587,7 +650,7 @@ impl Engine {
                 s.history.pop_front();
             }
         });
-        Self { tx: Arc::new(Mutex::new(tx)), status, cancel, library: Arc::new(Mutex::new(Vec::new())), approvals, tool_host, ledger_root }
+        Self { tx: Arc::new(Mutex::new(tx)), status, cancel, library: Arc::new(Mutex::new(Vec::new())), approvals, answers, tool_host, ledger_root }
     }
 
     /// A handle that can move into a blocking task.
@@ -609,6 +672,12 @@ impl Engine {
     pub fn decide(&self, id: &str, allow: bool) -> bool {
         let tx = self.approvals.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
         tx.is_some_and(|tx| tx.send(allow).is_ok())
+    }
+
+    /// The user's answer to a question or plan waiting in the chat. False if nothing was waiting.
+    pub fn answer(&self, id: &str, value: serde_json::Value) -> bool {
+        let tx = self.answers.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+        tx.is_some_and(|tx| tx.send(value).is_ok())
     }
 
     fn send(&self, job: Job) -> Result<(), String> {
@@ -677,10 +746,48 @@ fn save_profile(l: &Loaded) {
     }
 }
 
-/// What run_chat needs to run tools: the MCP host (if any) and the approvals waiting for the user.
+/// What run_chat needs to run tools: the MCP host (if any), the approvals waiting for the user, and
+/// where long results are kept whole.
 struct Tooling<'a> {
     host: Option<Arc<dyn ToolHost>>,
     approvals: &'a Arc<Mutex<std::collections::HashMap<String, Sender<bool>>>>,
+    answers: &'a Answers,
+    spill_dir: Option<PathBuf>,
+}
+
+/// Waits for the user's answer to call `id` (registered by the caller) until it arrives, the reply
+/// is stopped, or the approval timeout passes. None means no answer.
+fn wait_answer(answers: &Answers, id: &str, rx: std::sync::mpsc::Receiver<serde_json::Value>, cancel: &AtomicBool) -> Option<serde_json::Value> {
+    let deadline = Instant::now() + APPROVAL_TIMEOUT;
+    let out = loop {
+        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(v) => break Some(v),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if !cancel.load(Ordering::SeqCst) && Instant::now() < deadline => continue,
+            Err(_) => break None,
+        }
+    };
+    answers.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+    out
+}
+
+/// A tool result longer than `max` characters: the whole text goes to `<spill>/<call>.txt` and the
+/// model gets its start and end plus the file's path (which read_file may open). Without a spill
+/// folder, or if writing fails, the result is cut instead; the call itself never fails over this.
+pub fn spill_or_truncate(text: &str, max: usize, spill: Option<&Path>, call_id: &str) -> String {
+    let total = text.chars().count();
+    if total <= max {
+        return text.to_owned();
+    }
+    let Some(dir) = spill else { return crate::toolcall::truncate_result(text, max) };
+    let path = dir.join(format!("{}.txt", call_id.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "_")));
+    if std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&path, text)).is_err() {
+        return crate::toolcall::truncate_result(text, max);
+    }
+    let head_n = max * 3 / 4;
+    let tail_n = max - head_n;
+    let head: String = text.chars().take(head_n).collect();
+    let tail: String = text.chars().skip(total - tail_n).collect();
+    format!("{head}\n[... {} characters omitted; full output: {}]\n{tail}", total - head_n - tail_n, path.display())
 }
 
 /// One round's output: what the user saw, the raw text (tool markup included) for the history, and
@@ -694,11 +801,18 @@ struct Round {
 fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex<Status>>, cancel: &Arc<AtomicBool>, tooling: Tooling<'_>) {
     use crate::toolcall::{self, Piece, Scanner};
     let think = req.native.is_some();
-    let ctx = ToolContext { offline: req.tools.as_ref().is_some_and(|t| t.offline), allow_local_fetch: req.tools.as_ref().is_some_and(|t| t.allow_local_fetch) };
+    let plan_mode = req.client_tools.is_none() && req.tools.as_ref().is_some_and(|t| t.plan_mode);
+    let mut ctx = ToolContext::from_request(req.tools.as_ref());
+    if plan_mode {
+        // Nothing changes until the plan is approved.
+        ctx.access = Access::ReadOnly;
+    }
     // Tools the model may call: the host's list, names made unique across servers ("server__tool").
     let tools: Vec<(String, toolcall::ToolSpec)> = match (&req.client_tools, &req.tools, &tooling.host) {
         (Some(ct), _, _) => ct.iter().map(|t| (t.name.clone(), t.clone())).collect(),
-        (None, Some(_), Some(h)) => {
+        (None, Some(tr), host) if host.is_none() => crate::agent_tools::specs(crate::builtin_tools::SERVER, tr.plan_mode).into_iter().map(|t| (t.name.clone(), t)).collect(),
+        (None, Some(tr), Some(h)) => {
+            let plan_mode = tr.plan_mode;
             let specs = h.tools();
             let mut seen = std::collections::HashMap::<String, usize>::new();
             for t in &specs {
@@ -706,6 +820,7 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
             }
             specs
                 .into_iter()
+                .chain(crate::agent_tools::specs(crate::builtin_tools::SERVER, plan_mode))
                 .map(|t| {
                     let exposed = if seen.get(&t.name).copied().unwrap_or(0) > 1 { format!("{}__{}", t.server, t.name) } else { t.name.clone() };
                     (exposed.clone(), toolcall::ToolSpec { name: exposed, ..t })
@@ -722,6 +837,14 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
                 sys.push_str("\n\n");
             }
             sys.push_str(&toolcall::tools_prompt(l.dialect, &specs));
+            if req.client_tools.is_none() {
+                sys.push_str("\n\n");
+                sys.push_str(ctx.access.statement());
+            }
+            if plan_mode {
+                sys.push_str("\n\n");
+                sys.push_str(crate::agent_tools::PLAN_PROMPT);
+            }
         }
         sys
     };
@@ -905,6 +1028,42 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
                 result,
                 error,
             };
+            if server == crate::builtin_tools::SERVER && crate::agent_tools::is_agent_tool(&tool) {
+                use crate::agent_tools as at;
+                let reply: Result<String, String> = match tool.as_str() {
+                    at::TODO => at::todo(&call.arguments),
+                    at::ASK | at::EXIT_PLAN => {
+                        let shown = if tool == at::ASK { at::questions(&call.arguments) } else { at::plan(&call.arguments).map(|p| serde_json::json!({ "plan": p })) };
+                        match shown {
+                            Err(e) => Err(e),
+                            Ok(args) => {
+                                let (tx, rx) = channel::<serde_json::Value>();
+                                tooling.answers.lock().unwrap_or_else(|e| e.into_inner()).insert(call_id.clone(), tx);
+                                let state = if tool == at::ASK { "question" } else { "plan" };
+                                events(ChatEvent::Tool { id: call_id.clone(), server: server.clone(), name: tool.clone(), arguments: args, state, result: None, error: None });
+                                set(st, |s| s.activity = "waiting");
+                                match wait_answer(tooling.answers, &call_id, rx, cancel) {
+                                    None => Err("The user did not answer. Continue without the answer, or say what you need.".to_owned()),
+                                    Some(a) if tool == at::ASK => at::answers_text(&a).ok_or_else(|| "The answer could not be read.".to_owned()),
+                                    Some(a) => Ok(at::plan_reply(&a)),
+                                }
+                            }
+                        }
+                    }
+                    _ => Err("Unknown tool.".to_owned()),
+                };
+                match reply {
+                    Ok(text) => {
+                        events(tool_ev("done", Some(text.clone()), None));
+                        responses.push(toolcall::tool_response(&text));
+                    }
+                    Err(e) => {
+                        events(tool_ev("error", None, Some(e.clone())));
+                        responses.push(toolcall::tool_response(&format!("Error: {e}")));
+                    }
+                }
+                continue;
+            }
             let rule = req.tools.as_ref().map_or("deny", |t| t.rule(&server, &tool));
             let allowed = match rule {
                 "allow" => true,
@@ -936,7 +1095,8 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
             let Some(host) = tooling.host.as_ref() else { break };
             match host.call(&server, &tool, call.arguments.clone(), ctx) {
                 Ok(text) => {
-                    let text = toolcall::truncate_result(&text, MAX_TOOL_RESULT_CHARS);
+                    let spill = tooling.spill_dir.as_deref();
+                    let text = spill_or_truncate(&text, MAX_TOOL_RESULT_CHARS, spill, &call_id);
                     events(tool_ev("done", Some(text.clone()), None));
                     responses.push(toolcall::tool_response(&text));
                 }
@@ -1168,6 +1328,26 @@ fn original_name(server: &str, exposed: &str) -> String {
 }
 
 #[cfg(test)]
+mod spill_tests {
+    use super::spill_or_truncate;
+
+    #[test]
+    fn long_results_are_kept_whole_in_a_file() {
+        let dir = std::env::temp_dir().join(format!("cerebro-spill-{}", std::process::id()));
+        let text: String = (0..5000).map(|i| format!("line {i}\n")).collect();
+        let out = spill_or_truncate(&text, 1000, Some(&dir), "t1-0");
+        assert!(out.starts_with("line 0\n"), "head kept");
+        assert!(out.trim_end().ends_with("line 4999"), "tail kept");
+        let path = dir.join("t1-0.txt");
+        assert!(out.contains(&path.display().to_string()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "the whole result is on disk");
+        assert_eq!(spill_or_truncate("short", 1000, Some(&dir), "t2"), "short");
+        assert!(spill_or_truncate(&text, 1000, None, "t3").contains("[... truncated"), "no folder: cut instead");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
 mod tool_loop_tests {
     use super::*;
 
@@ -1216,7 +1396,7 @@ mod tool_loop_tests {
             turns: vec![ChatTurn { role: "user".into(), text: "What is the weather in Paris right now? Use the tool.".into() }],
             sampler: ChatSampler { temperature: 0.0, top_p: 1.0, min_p: 0.0, top_k: 1, repeat_penalty: 1.0, max_tokens: 400 },
             native: None,
-            tools: Some(ToolsRequest { rules: Default::default(), default_rule: "ask".into(), offline: false, allow_local_fetch: false }),
+            tools: Some(ToolsRequest { rules: Default::default(), default_rule: "ask".into(), offline: false, allow_local_fetch: false, access: Access::Workspace, show_secrets: false, blind_writes: false, plan_mode: false }),
             orchestrate: None,
             client_tools: None,
         };

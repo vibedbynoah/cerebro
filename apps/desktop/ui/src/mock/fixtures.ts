@@ -95,6 +95,8 @@ export const DEFAULT_SETTINGS: Settings = {
   integrityCheck: true,
   permissionPrompts: true,
   blockLocalFetch: true,
+  hideSecretsFromTools: true,
+  readBeforeWrite: true,
   loopbackOnly: true,
   offlineMode: false,
   allowModelDownloads: true,

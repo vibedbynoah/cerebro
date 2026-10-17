@@ -56,6 +56,20 @@ export const SETTINGS_META: readonly SettingMeta[] = [
     limits: "Does not filter what public websites a model can read.",
   },
   {
+    key: "hideSecretsFromTools",
+    group: "protections",
+    label: "Hide secrets from tools",
+    note: "Commands a model runs do not see environment variables that look like keys, tokens or passwords.",
+    limits: "Files on disk that hold secrets are covered by the tool access level, not by this.",
+  },
+  {
+    key: "readBeforeWrite",
+    group: "protections",
+    label: "Read before write",
+    note: "A model must read a file before changing it, and again if it changed, so it never overwrites unseen work.",
+    limits: "New files can be created without reading.",
+  },
+  {
     key: "loopbackOnly",
     group: "protections",
     label: "API on loopback only",
