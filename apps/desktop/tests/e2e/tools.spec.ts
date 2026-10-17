@@ -71,3 +71,30 @@ test.describe("tools and permissions", () => {
     });
   }
 });
+
+test.describe("MCP servers", () => {
+  test("the Add form saves a web address server and shows it running", async ({ page }) => {
+    await openScreen(page, "tools");
+    const mcp = page.getByTestId("mcp-servers");
+    await mcp.getByRole("radio", { name: "Web address" }).click();
+    await expect(mcp.getByLabel("Server command")).toHaveCount(0);
+    await mcp.getByLabel("Server name").fill("webdocs");
+    await mcp.getByLabel("Server address").fill("https://example.com/mcp");
+    await mcp.getByLabel("Headers, one KEY=VALUE per line").fill("Authorization=Bearer token123");
+    await mcp.getByRole("button", { name: "Add server" }).click();
+    const item = mcp.getByTestId("mcp-server-webdocs");
+    await expect(item.locator(".mcp__command")).toHaveText("https://example.com/mcp");
+    await expect(item.locator(".pill")).toHaveText("running");
+  });
+
+  test("a web address without http(s) is refused", async ({ page }) => {
+    await openScreen(page, "tools");
+    const mcp = page.getByTestId("mcp-servers");
+    await mcp.getByRole("radio", { name: "Web address" }).click();
+    await mcp.getByLabel("Server name").fill("badweb");
+    await mcp.getByLabel("Server address").fill("example.com/mcp");
+    await mcp.getByRole("button", { name: "Add server" }).click();
+    await expect(page.getByText("A web address must start with http:// or https://")).toBeVisible();
+    await expect(mcp.getByTestId("mcp-server-badweb")).toHaveCount(0);
+  });
+});

@@ -77,20 +77,29 @@ const isGguf = (v) => typeof v === "string" && v.length <= 300 && /^[A-Za-z0-9._
 /** An MCP server name in mcp.json. @param {unknown} v */
 const isServerName = (v) => typeof v === "string" && /^[A-Za-z0-9 ._-]{1,64}$/.test(v);
 
-/** mcp.json: { mcpServers: { name: { command, args[], env{}, disabled } } }. @param {unknown} c */
+/** One mcp.json server: a local program (command, args, env) or a web address (url, headers). @param {unknown} s */
+function isMcpServer(s) {
+  if (!isPlain(s) || !hasOnlyKeys(s, [], ["command", "args", "env", "url", "headers", "disabled"])) return false;
+  if (s.disabled !== undefined && typeof s.disabled !== "boolean") return false;
+  if (s.command !== undefined && s.url === undefined) {
+    if (typeof s.command !== "string" || s.command.length === 0 || s.command.length > 512) return false;
+    if (s.args !== undefined && !(Array.isArray(s.args) && s.args.length <= 64 && s.args.every((a) => typeof a === "string" && a.length <= 1024))) return false;
+    if (s.env !== undefined && !(isPlain(s.env) && Object.values(s.env).every((v) => typeof v === "string"))) return false;
+    return true;
+  }
+  if (s.url !== undefined && s.command === undefined) {
+    if (typeof s.url !== "string" || s.url.length > 2048 || !/^https?:\/\/\S+$/.test(s.url)) return false;
+    if (s.headers !== undefined && !(isPlain(s.headers) && Object.entries(s.headers).every(([k, v]) => k.length > 0 && k.length <= 128 && typeof v === "string" && v.length <= 2048))) return false;
+    return true;
+  }
+  return false;
+}
+
+/** mcp.json: { mcpServers: { name: { command, args[], env{} } | { url, headers{} } (+ disabled) } }. @param {unknown} c */
 function isMcpConfig(c) {
   if (!isPlain(c) || !hasOnlyKeys(c, ["mcpServers"]) || !isPlain(c.mcpServers)) return false;
   const servers = Object.entries(c.mcpServers);
-  return (
-    servers.length <= 64 &&
-    servers.every(([name, s]) => {
-      if (!isServerName(name) || !isPlain(s) || !hasOnlyKeys(s, ["command"], ["args", "env", "disabled"])) return false;
-      if (typeof s.command !== "string" || s.command.length === 0 || s.command.length > 512) return false;
-      if (s.args !== undefined && !(Array.isArray(s.args) && s.args.length <= 64 && s.args.every((a) => typeof a === "string" && a.length <= 1024))) return false;
-      if (s.env !== undefined && !(isPlain(s.env) && Object.values(s.env).every((v) => typeof v === "string"))) return false;
-      return s.disabled === undefined || typeof s.disabled === "boolean";
-    })
-  );
+  return servers.length <= 64 && servers.every(([name, s]) => isServerName(name) && isMcpServer(s));
 }
 
 /** @param {unknown} r */

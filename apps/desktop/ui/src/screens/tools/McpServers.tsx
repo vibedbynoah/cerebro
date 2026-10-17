@@ -2,7 +2,14 @@ import { createEffect, createSignal, For, onCleanup, Show, type JSX } from "soli
 import { Section } from "../../components/Screen";
 import { notify } from "../../lib/toast";
 import { useService } from "../../service/context";
-import type { McpCallResult, McpConfig, McpServerStatus, McpTool } from "../../service/types";
+import type { McpCallResult, McpConfig, McpServerConfig, McpServerStatus, McpTool } from "../../service/types";
+
+/** The two ways a server can be reached (mcp.json entry shape). */
+const ADD_KINDS = [
+  { value: "command" as const, label: "Local program", note: "Starts a program on this machine and talks to it over standard input and output." },
+  { value: "url" as const, label: "Web address", note: "Talks to an MCP server at a web address, with headers for anything it asks for (like a token)." },
+];
+type AddKind = (typeof ADD_KINDS)[number]["value"];
 
 /** MCP servers: configure, monitor and try the servers that give your models tools (screens/Tools.tsx, id="mcp"). */
 export function McpServers(): JSX.Element {
@@ -17,8 +24,10 @@ export function McpServers(): JSX.Element {
 
   const [toolSignature, setToolSignature] = createSignal("");
 
+  const [addKind, setAddKind] = createSignal<AddKind>("command");
   const [addName, setAddName] = createSignal("");
   const [addCommand, setAddCommand] = createSignal("");
+  const [addUrl, setAddUrl] = createSignal("");
   const [addArgs, setAddArgs] = createSignal("");
   const [addEnv, setAddEnv] = createSignal("");
 
@@ -147,8 +156,6 @@ export function McpServers(): JSX.Element {
     const current = config();
     if (!current) return;
     const name = addName().trim();
-    const command = addCommand().trim();
-    const args = splitArguments(addArgs());
     if (!name) {
       notify("A server needs a name", "Enter a name before saving.", "warning");
       return;
@@ -157,16 +164,27 @@ export function McpServers(): JSX.Element {
       notify(`"${name}" already exists`, "Pick another name, or turn the existing server off.", "warning");
       return;
     }
-    if (!command) {
-      notify("A server needs a command", "For example: npx -y @modelcontextprotocol/server-filesystem", "warning");
-      return;
+    let entry: McpServerConfig;
+    if (addKind() === "command") {
+      const command = addCommand().trim();
+      if (!command) {
+        notify("A server needs a command", "For example: npx -y @modelcontextprotocol/server-filesystem", "warning");
+        return;
+      }
+      entry = { command, args: splitArguments(addArgs()), env: parseEnv(addEnv()), disabled: false };
+    } else {
+      const url = addUrl().trim();
+      if (!/^https?:\/\/\S+$/.test(url)) {
+        notify("A web address must start with http:// or https://", "For example: https://example.com/mcp", "warning");
+        return;
+      }
+      entry = { url, headers: parseEnv(addEnv()), disabled: false };
     }
     try {
-      await save({
-        mcpServers: { ...current.mcpServers, [name]: { command, args, env: parseEnv(addEnv()), disabled: false } },
-      });
+      await save({ mcpServers: { ...current.mcpServers, [name]: entry } });
       setAddName("");
       setAddCommand("");
+      setAddUrl("");
       setAddArgs("");
       setAddEnv("");
     } catch (e) {
@@ -199,6 +217,7 @@ export function McpServers(): JSX.Element {
   ];
 
   const applyPreset = (preset: Preset) => {
+    setAddKind("command");
     setAddName(preset.label.toLowerCase());
     setAddCommand(preset.command);
     setAddArgs(preset.args);
@@ -210,6 +229,9 @@ export function McpServers(): JSX.Element {
     const state = status?.state ?? "stopped";
     return { label: state, pill: `pill pill--${state}` };
   };
+
+  /** How a server entry reads in the list: its address, or its program and arguments. */
+  const serverLine = (s: McpServerConfig): string => s.url ?? [s.command, ...(s.args ?? [])].filter(Boolean).join(" ");
 
   const currentTool = () => tools().find((t) => toolKey(t) === selectedTool());
 
@@ -260,7 +282,7 @@ export function McpServers(): JSX.Element {
                       {(s) => <span class="mcp__server-tools">{s().tools} tools</span>}
                     </Show>
                   </div>
-                  <code class="mcp__command">{[server.command, ...server.args].join(" ")}</code>
+                  <code class="mcp__command">{serverLine(server)}</code>
                   <Show when={status()?.error}>
                     {(error) => <p class="mcp__error">{error()}</p>}
                   </Show>
@@ -287,38 +309,77 @@ export function McpServers(): JSX.Element {
 
         <form class="mcp__form" onSubmit={addServer}>
           <h3 class="mcp__form-title">Add a server</h3>
-          <div class="mcp__presets" role="group" aria-label="Server presets">
-            <For each={PRESETS}>
-              {(preset) => (
-                <button class="btn btn--ghost btn--sm" type="button" onClick={() => applyPreset(preset)}>
-                  {preset.label}
-                </button>
+          <fieldset class="segmented segmented--sm" aria-describedby="mcp-add-note">
+            <legend class="sr-only">How the server runs</legend>
+            <For each={ADD_KINDS}>
+              {(kind) => (
+                <label class="segmented__option" data-press>
+                  <input type="radio" name="mcp-add-kind" value={kind.value} checked={addKind() === kind.value} onChange={() => setAddKind(kind.value)} />
+                  <span>{kind.label}</span>
+                </label>
               )}
             </For>
-          </div>
+          </fieldset>
+          <p class="hint" id="mcp-add-note">
+            {ADD_KINDS.find((kind) => kind.value === addKind())!.note}
+          </p>
+          <Show when={addKind() === "command"}>
+            <div class="mcp__presets" role="group" aria-label="Server presets">
+              <For each={PRESETS}>
+                {(preset) => (
+                  <button class="btn btn--ghost btn--sm" type="button" onClick={() => applyPreset(preset)}>
+                    {preset.label}
+                  </button>
+                )}
+              </For>
+            </div>
+          </Show>
           <label class="mcp__field">
             <span>Name</span>
             <input class="input" aria-label="Server name" value={addName()} onInput={(e) => setAddName(e.currentTarget.value)} placeholder="files" />
           </label>
-          <label class="mcp__field">
-            <span>Command</span>
-            <input class="input" aria-label="Server command" value={addCommand()} onInput={(e) => setAddCommand(e.currentTarget.value)} placeholder="npx" />
-          </label>
-          <label class="mcp__field">
-            <span>Arguments</span>
-            <input class="input" aria-label="Server arguments, quoted parts stay together" value={addArgs()} onInput={(e) => setAddArgs(e.currentTarget.value)} placeholder="C:\my\folder" />
-          </label>
-          <label class="mcp__field">
-            <span>Environment</span>
-            <textarea
-              class="input mcp__env"
-              aria-label="Environment variables, one KEY=VALUE per line"
-              rows={3}
-              value={addEnv()}
-              onInput={(e) => setAddEnv(e.currentTarget.value)}
-              placeholder={"KEY=VALUE\nOTHER_KEY=OTHER_VALUE"}
-            />
-          </label>
+          <Show
+            when={addKind() === "command"}
+            fallback={
+              <>
+                <label class="mcp__field">
+                  <span>Address</span>
+                  <input class="input" aria-label="Server address" value={addUrl()} onInput={(e) => setAddUrl(e.currentTarget.value)} placeholder="https://example.com/mcp" />
+                </label>
+                <label class="mcp__field">
+                  <span>Headers</span>
+                  <textarea
+                    class="input mcp__env"
+                    aria-label="Headers, one KEY=VALUE per line"
+                    rows={3}
+                    value={addEnv()}
+                    onInput={(e) => setAddEnv(e.currentTarget.value)}
+                    placeholder={"Authorization=Bearer <token>"}
+                  />
+                </label>
+              </>
+            }
+          >
+            <label class="mcp__field">
+              <span>Command</span>
+              <input class="input" aria-label="Server command" value={addCommand()} onInput={(e) => setAddCommand(e.currentTarget.value)} placeholder="npx" />
+            </label>
+            <label class="mcp__field">
+              <span>Arguments</span>
+              <input class="input" aria-label="Server arguments, quoted parts stay together" value={addArgs()} onInput={(e) => setAddArgs(e.currentTarget.value)} placeholder="C:\my\folder" />
+            </label>
+            <label class="mcp__field">
+              <span>Environment</span>
+              <textarea
+                class="input mcp__env"
+                aria-label="Environment variables, one KEY=VALUE per line"
+                rows={3}
+                value={addEnv()}
+                onInput={(e) => setAddEnv(e.currentTarget.value)}
+                placeholder={"KEY=VALUE\nOTHER_KEY=OTHER_VALUE"}
+              />
+            </label>
+          </Show>
           <button class="btn btn--primary btn--sm" type="submit">
             Add server
           </button>
