@@ -76,6 +76,7 @@ const wait = (ms: number, signal: AbortSignal) =>
 export function createMockChat(options: MockChatOptions = {}) {
   const speed = options.speed && options.speed > 0 ? options.speed : 1;
   const tps = options.tokPerSec ?? 24;
+  const pendingDecisions = new Map<string, (allow: boolean) => void>();
 
   async function chat(req: ChatRequest, onEvent: (e: ChatEvent) => void, signal: AbortSignal): Promise<void> {
     if (!req || typeof req.systemPrompt !== "string" || !Array.isArray(req.turns) || req.turns.length === 0) throw new TypeError("Malformed chat request");
@@ -84,6 +85,40 @@ export function createMockChat(options: MockChatOptions = {}) {
     const ttftMs = Math.round(180 + promptChars / 40);
     await wait(ttftMs / speed, signal);
     onEvent({ type: "start", ttftMs });
+
+    // A request with tools that asks about files: the model calls the mock files server's
+    // list_directory first, following the rule the UI sent (allow / ask / deny), as the engine does.
+    if (req.tools && /\b(files?|folder|directory)\b/i.test(req.turns[req.turns.length - 1]?.text ?? "") && !signal.aborted) {
+      const id = `t${Date.now()}-0`;
+      const base = { id, server: "files", name: "list_directory", arguments: { path: "C:/Users/me/Projects" } };
+      const rule = req.tools.rules["files/list_directory"] ?? req.tools.defaultRule;
+      let allowed = rule === "allow";
+      if (rule === "ask") {
+        onEvent({ type: "tool", ...base, state: "approval", result: null, error: null });
+        allowed = await new Promise<boolean>((resolve) => {
+          pendingDecisions.set(id, resolve);
+          signal.addEventListener("abort", () => resolve(false), { once: true });
+        });
+        pendingDecisions.delete(id);
+      }
+      if (allowed) {
+        onEvent({ type: "tool", ...base, state: "running", result: null, error: null });
+        await wait(300 / speed, signal);
+        onEvent({ type: "tool", ...base, state: "done", result: "[DIR] cerebro\n[DIR] notes\n[FILE] todo.md", error: null });
+      } else onEvent({ type: "tool", ...base, state: "denied", result: null, error: null });
+      if (signal.aborted) {
+        onEvent({ type: "done", stats: { outputTokens: 0, thinkingTokens: 0, tokPerSec: tps, ttftMs, totalMs: 0, extraMs: 0, stopped: true } });
+        return;
+      }
+      const text = allowed ? "Your Projects folder has two folders, cerebro and notes, and one file, todo.md." : "I could not look at the folder because the tool was not allowed.";
+      for (const w of tokenize(text)) {
+        if (signal.aborted) break;
+        onEvent({ type: "token", text: w });
+        await wait(1000 / tps / speed, signal);
+      }
+      onEvent({ type: "done", stats: { outputTokens: tokenize(text).length, thinkingTokens: 0, tokPerSec: tps, ttftMs, totalMs: Math.round(performance.now() - started), extraMs: 0, stopped: signal.aborted } });
+      return;
+    }
 
     const reply = pick(req);
     let thinkingTokens = 0;
@@ -128,11 +163,18 @@ export function createMockChat(options: MockChatOptions = {}) {
     onEvent({ type: "done", stats });
   }
 
+  async function decide(id: string, allow: boolean): Promise<boolean> {
+    const resolve = pendingDecisions.get(id);
+    if (!resolve) return false;
+    resolve(allow);
+    return true;
+  }
+
   async function transcribe(seconds: number): Promise<string> {
     if (typeof seconds !== "number" || !(seconds > 0) || seconds > 120) throw new TypeError("Recording length out of range");
     await new Promise((r) => setTimeout(r, 300 / speed));
     return "How much graphics memory do I need for a 30B mixture-of-experts model?";
   }
 
-  return { chat, transcribe };
+  return { chat, transcribe, decide };
 }

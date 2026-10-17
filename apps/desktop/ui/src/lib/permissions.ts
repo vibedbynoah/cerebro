@@ -58,12 +58,27 @@ export function parsePolicy(raw: string | null): Policy {
     const v = JSON.parse(raw) as Record<string, unknown>;
     const rules: Record<string, Rule> = {};
     if (v && typeof v.rules === "object" && v.rules) {
-      for (const [k, r] of Object.entries(v.rules as Record<string, unknown>)) if (TOOL_IDS.has(k) && isRule(r)) rules[k] = r;
+      for (const [k, r] of Object.entries(v.rules as Record<string, unknown>)) if ((TOOL_IDS.has(k) || MCP_KEY.test(k)) && isRule(r)) rules[k] = r;
     }
     return { defaultRule: isRule(v?.defaultRule) ? v.defaultRule : DEFAULT_POLICY.defaultRule, rules };
   } catch {
     return structuredClone(DEFAULT_POLICY);
   }
+}
+
+/** An MCP tool's key in the policy: "server/tool" (server names as mcp.json allows them). */
+export const mcpToolKey = (server: string, tool: string): string => `${server}/${tool}`;
+const MCP_KEY = /^[A-Za-z0-9 ._-]{1,64}\/[^\s/]{1,128}$/;
+
+/** Tools allowed "for this session" (until Cerebro restarts), shared by Chat and the Tools screen. */
+export const SESSION_GRANTS = new Set<string>();
+
+/** Chat's per-request tool rules: every known tool resolved to allow / ask / deny now. */
+export function chatToolRules(p: Policy, keys: readonly string[], promptsOn: boolean): { rules: Record<string, Verdict>; defaultRule: Verdict } {
+  const rules: Record<string, Verdict> = {};
+  for (const k of keys) rules[k] = resolve(p, k, SESSION_GRANTS, promptsOn);
+  const d = p.defaultRule === "deny" ? "deny" : !promptsOn || p.defaultRule === "always" || p.defaultRule === "session" ? "allow" : "ask";
+  return { rules, defaultRule: d };
 }
 
 export function loadPolicy(): Policy {

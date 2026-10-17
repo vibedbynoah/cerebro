@@ -41,6 +41,7 @@ const COMMANDS: &[&str] = &[
     "remote_options",
     "remote_pair",
     "remote_revoke",
+    "chat_tool_decide",
 ];
 
 fn main() {

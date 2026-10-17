@@ -319,7 +319,7 @@ export function McpServers(): JSX.Element {
               placeholder={"KEY=VALUE\nOTHER_KEY=OTHER_VALUE"}
             />
           </label>
-          <button class="btn btn--sm" type="submit">
+          <button class="btn btn--primary btn--sm" type="submit">
             Add server
           </button>
         </form>
@@ -368,7 +368,7 @@ export function McpServers(): JSX.Element {
               onInput={(e) => setCallArgs(e.currentTarget.value)}
             />
           </label>
-          <button class="btn btn--sm" type="button" onClick={() => void runTool()}>
+          <button class="btn btn--primary btn--sm" type="button" onClick={() => void runTool()}>
             Run
           </button>
           <Show when={callResult()}>

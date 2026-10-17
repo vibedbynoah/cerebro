@@ -18,12 +18,15 @@ import {
   type ChatMessage,
   type Conversation,
 } from "../lib/chat/store";
+import { chatToolRules, loadPolicy, mcpToolKey, savePolicy } from "../lib/permissions";
 import { notify } from "../lib/toast";
-import { DEFAULT_SAMPLER, type ChatTurn, type Sampler } from "../service/chat-types";
+import { useAppState } from "../state";
+import { DEFAULT_SAMPLER, type ChatTools, type ChatTurn, type Sampler, type ToolActivity } from "../service/chat-types";
 import { useService } from "../service/context";
 import type { LibraryModel } from "../service/types";
 import { Composer } from "./chat/Composer";
 import { MessageView } from "./chat/Message";
+import type { ToolDecision } from "./chat/ToolCard";
 
 const MAX_THINKING = 32768;
 
@@ -35,6 +38,7 @@ const MAX_THINKING = 32768;
  */
 export function Chat(): JSX.Element {
   const service = useService();
+  const app = useAppState();
   const [library] = createResource(() => service.listLibrary().catch(() => [] as LibraryModel[]));
   const models = createMemo(() => (library() ?? []).filter((m) => m.kind === "text" || m.kind === "vision"));
   const [modelId, setModelId] = createSignal<string>("");
@@ -106,16 +110,43 @@ export function Chat(): JSX.Element {
       produce(fn),
     );
 
+  /** The MCP tools the model may call this turn, each resolved against the Tools rules now. */
+  const toolsForRequest = async (): Promise<ChatTools | null> => {
+    try {
+      const list = await service.mcpTools();
+      if (!list.length) return null;
+      return chatToolRules(loadPolicy(), list.map((t) => mcpToolKey(t.server, t.name)), app.settings()?.permissionPrompts ?? true);
+    } catch {
+      return null;
+    }
+  };
+
+  /** Allow once / Always allow / Deny on a tool card. "Always" is saved as the tool's rule. */
+  const decideTool = (cid: string, mid: string, id: string, decision: ToolDecision) => {
+    const msg = state.list.find((c) => c.id === cid)?.messages.find((m) => m.id === mid);
+    const tool = msg?.tools.find((t) => t.id === id);
+    if (tool && decision === "always") {
+      const p = loadPolicy();
+      p.rules[mcpToolKey(tool.server, tool.name)] = "always";
+      savePolicy(p);
+      notify("Always allowed", `${tool.name} from ${tool.server} now runs without asking. Change it on the Tools screen.`, "success");
+    }
+    void service.chatToolDecide(id, decision !== "deny").then((ok) => {
+      if (!ok) notify("That request already ended", "The reply stopped before your answer arrived.", "info");
+    });
+  };
+
   const run = async (cid: string) => {
     const conv = state.list.find((c) => c.id === cid);
     if (!conv || !modelId()) return;
+    const tools = await toolsForRequest();
     const req = built();
     const p = prefs();
     const turns: ChatTurn[] = conv.messages
       .filter((m) => !m.streaming && !m.error)
       .map((m) => ({ role: m.role, text: m.text, ...(m.attachments.length ? { attachments: m.attachments.map(({ name, type, bytes }) => ({ name, type, bytes })) } : {}) }));
     const mid = newId();
-    const reply: ChatMessage = { id: mid, role: "assistant", text: "", thinking: "", checks: [], image: null, attachments: [], stats: null, effort: p.effort, verbosity: p.verbosity, source: p.source, streaming: true, error: null };
+    const reply: ChatMessage = { id: mid, role: "assistant", text: "", thinking: "", checks: [], image: null, tools: [], attachments: [], stats: null, effort: p.effort, verbosity: p.verbosity, source: p.source, streaming: true, error: null };
     setState("list", (c) => c.id === cid, "messages", (l) => [...l, reply]);
     abort = new AbortController();
     let tokens = 0;
@@ -132,7 +163,7 @@ export function Chat(): JSX.Element {
     };
     try {
       await service.chat(
-        { modelId: modelId(), systemPrompt: req.systemPrompt, turns, sampler: sampler(), native: req.native, passes: req.passes, effort: p.effort, verbosity: p.verbosity, source: p.source },
+        { modelId: modelId(), systemPrompt: req.systemPrompt, turns, sampler: sampler(), native: req.native, passes: req.passes, effort: p.effort, verbosity: p.verbosity, source: p.source, tools },
         (e) => {
           switch (e.type) {
             case "start":
@@ -151,6 +182,18 @@ export function Chat(): JSX.Element {
             case "check":
               updateMsg(cid, mid, (m) => void m.checks.push(e.text));
               break;
+            case "tool": {
+              cancelAnimationFrame(frame);
+              flush();
+              const t: ToolActivity = { id: e.id, server: e.server, name: e.name, arguments: e.arguments, state: e.state, result: e.result, error: e.error };
+              updateMsg(cid, mid, (m) => {
+                const i = m.tools.findIndex((x) => x.id === t.id);
+                if (i >= 0) m.tools[i] = t;
+                else m.tools.push(t);
+              });
+              if (e.state === "approval") notify("A tool needs your approval", `${e.name} from ${e.server}. Answer in the chat.`, "info");
+              break;
+            }
             case "image":
               updateMsg(cid, mid, (m) => void (m.image = { prompt: e.prompt, seed: e.seed }));
               break;
@@ -199,7 +242,7 @@ export function Chat(): JSX.Element {
       if (!conv.messages.length) setState("list", (c) => c.id === cid, "title", titleFrom(text || atts[0]?.name || ""));
       setState("list", (c) => c.id === cid, "messages", (l) => [
         ...l,
-        { id: newId(), role: "user", text, thinking: "", checks: [], image: null, attachments: atts, stats: null, effort: prefs().effort, verbosity: prefs().verbosity, source: prefs().source, streaming: false, error: null } satisfies ChatMessage,
+        { id: newId(), role: "user", text, thinking: "", checks: [], image: null, tools: [], attachments: atts, stats: null, effort: prefs().effort, verbosity: prefs().verbosity, source: prefs().source, streaming: false, error: null } satisfies ChatMessage,
       ]);
     });
     void run(cid);
@@ -296,7 +339,7 @@ export function Chat(): JSX.Element {
         <div class="chat-thread" ref={thread} role="log" aria-live="polite" aria-relevant="additions">
           <Show when={current()?.messages.length} fallback={<Empty onPick={(t) => send(t, [])} />}>
             <For each={current()!.messages}>
-              {(m, i) => <MessageView m={m} last={i() === current()!.messages.length - 1} onRegenerate={regenerate} onMore={more} />}
+              {(m, i) => <MessageView m={m} last={i() === current()!.messages.length - 1} onRegenerate={regenerate} onMore={more} onToolDecide={(id, d) => decideTool(currentId(), m.id, id, d)} />}
             </For>
           </Show>
         </div>

@@ -1,5 +1,5 @@
 import "../styles/tools.css";
-import { createSignal, For, Show, type JSX } from "solid-js";
+import { createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { ApprovalDialog } from "../components/ApprovalDialog";
 import { Icon } from "../components/icons";
 import { ScreenHeader, Section } from "../components/Screen";
@@ -8,6 +8,7 @@ import {
   applyDecision,
   DECISION_LABELS,
   loadPolicy,
+  mcpToolKey,
   resolve,
   RISK_LABELS,
   RULE_LABELS,
@@ -23,6 +24,8 @@ import {
   type ToolCall,
 } from "../lib/permissions";
 import { notify } from "../lib/toast";
+import { useService } from "../service/context";
+import type { McpTool } from "../service/types";
 import { useAppState } from "../state";
 import { McpServers } from "./tools/McpServers";
 
@@ -33,7 +36,40 @@ import { McpServers } from "./tools/McpServers";
  */
 export function Tools(): JSX.Element {
   const app = useAppState();
+  const service = useService();
   const promptsOn = () => app.settings()?.permissionPrompts ?? true;
+
+  // The tools the MCP servers offer, refreshed each second; replaced only when the list changes, so
+  // an open rule menu is never rebuilt under the pointer.
+  const [mcpTools, setMcpTools] = createSignal<McpTool[]>([]);
+  let mcpSig = "";
+  let mcpInFlight = false;
+  const loadMcpTools = () => {
+    if (mcpInFlight || document.visibilityState === "hidden") return;
+    mcpInFlight = true;
+    service
+      .mcpTools()
+      .then((list) => {
+        const sig = list.map((t) => `${t.server}/${t.name}/${t.description ?? ""}`).join("|");
+        if (sig !== mcpSig) {
+          mcpSig = sig;
+          setMcpTools(list);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        mcpInFlight = false;
+      });
+  };
+  loadMcpTools();
+  const mcpPoll = setInterval(loadMcpTools, 1000);
+  onCleanup(() => clearInterval(mcpPoll));
+
+  /** One row per tool: the MCP servers' tools, plus (browser preview only) the built-in examples. */
+  const rows = () => [
+    ...mcpTools().map((t) => ({ id: mcpToolKey(t.server, t.name), name: t.name, chip: t.server, risk: null, description: t.description ?? "" })),
+    ...(__DESKTOP__ ? [] : TOOLS.map((t) => ({ id: t.id, name: t.name, chip: t.source === "plugin" ? (t.plugin ?? "Plugin") : "Built-in", risk: t.risk, description: t.description }))),
+  ];
   const [policy, setPolicyS] = createSignal<Policy>(loadPolicy());
   const [grants, setGrants] = createSignal<Set<string>>(new Set());
   const [pending, setPending] = createSignal<ToolCall | null>(null);
@@ -103,7 +139,7 @@ export function Tools(): JSX.Element {
         </fieldset>
       </Section>
 
-      <Section id="tool-rules" title="Tools" description="Built-in tools and tools from installed plugins. Change any rule; Default follows the setting above.">
+      <Section id="tool-rules" title="Tools" description={__DESKTOP__ ? "Every tool your MCP servers offer. Change any rule; Default follows the setting above." : "Built-in tools and tools from installed plugins. Change any rule; Default follows the setting above."}>
         <table class="tools-table">
           <thead>
             <tr>
@@ -116,7 +152,7 @@ export function Tools(): JSX.Element {
             </tr>
           </thead>
           <tbody>
-            <For each={TOOLS}>
+            <For each={rows()} fallback={<tr><td colspan="4" class="hint">No tools yet. Add an MCP server above and its tools appear here.</td></tr>}>
               {(t) => {
                 // Sample calls are a browser-preview demo; the desktop app logs only real calls.
                 const call = __DESKTOP__ ? undefined : SAMPLE_CALLS.find((c) => c.toolId === t.id);
@@ -125,13 +161,17 @@ export function Tools(): JSX.Element {
                     <th scope="row">
                       <span class="tools-table__name">{t.name}</span>
                       <span class="chip" data-tone="neutral">
-                        {t.source === "plugin" ? t.plugin : "Built-in"}
+                        {t.chip}
                       </span>
                     </th>
                     <td>
-                      <span class="tools-table__risk" data-risk={t.risk}>
-                        {RISK_LABELS[t.risk]}
-                      </span>
+                      <Show when={t.risk}>
+                        {(r) => (
+                          <span class="tools-table__risk" data-risk={r()}>
+                            {RISK_LABELS[r()]}
+                          </span>
+                        )}
+                      </Show>
                       <span class="hint">{t.description}</span>
                     </td>
                     <td>

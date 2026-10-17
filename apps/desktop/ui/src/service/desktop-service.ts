@@ -207,6 +207,7 @@ export function createDesktopService(local: CerebroService): CerebroService {
         signal.removeEventListener("abort", stop);
       }
     },
+    chatToolDecide: (id, allow) => invoke<boolean>("chat_tool_decide", { id, allow }),
     transcribe: () => NOT_YET("Speech to text"),
 
     hubSearch: (query) => invoke<HubRepo[]>("hub_search", { query }),

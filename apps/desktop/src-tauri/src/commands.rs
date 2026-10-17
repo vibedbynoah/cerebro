@@ -480,13 +480,15 @@ impl crate::remote::Backend for PhoneBackend {
             // Qwen's recommended non-thinking sampler; min_p keeps long replies from looping.
             sampler: crate::engine::ChatSampler { temperature: 0.7, top_p: 0.8, min_p: 0.05, top_k: 20, repeat_penalty: 1.0, max_tokens: 4096 },
             native: None,
+            // A phone never drives tools: approvals belong at the computer.
+            tools: None,
         };
         let out: crate::engine::ChatSink = std::sync::Arc::new(move |e| match e {
             ChatEvent::Token { text } => sink(PhoneEvent::Token(text)),
             ChatEvent::Thinking { text } => sink(PhoneEvent::Thinking(text)),
             ChatEvent::Done { stats } => sink(PhoneEvent::Done { tokens: stats.output_tokens as u64, tps: stats.tok_per_sec }),
             ChatEvent::Error { message } => sink(PhoneEvent::Error(message)),
-            ChatEvent::Start { .. } => {}
+            ChatEvent::Start { .. } | ChatEvent::Tool { .. } => {}
         });
         engine.handle().chat(request, out)
     }
@@ -530,4 +532,67 @@ pub fn remote_pair(remote: RemoteState<'_>) -> Result<serde_json::Value, String>
 pub fn remote_revoke(remote: RemoteState<'_>, id: String) -> serde_json::Value {
     remote.revoke(&id);
     remote.view()
+}
+
+// ---- Tools in Chat (engine.rs ToolHost over the MCP client) ----
+
+/// Chat's tool calls go to the MCP servers on the Tools screen.
+pub struct McpToolHost(pub tauri::AppHandle);
+
+impl crate::engine::ToolHost for McpToolHost {
+    fn tools(&self) -> Vec<crate::toolcall::ToolSpec> {
+        let mcp = self.0.state::<crate::mcp::Mcp>();
+        let list = mcp.tools_json();
+        list.as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|t| {
+                        Some(crate::toolcall::ToolSpec {
+                            server: t["server"].as_str()?.to_owned(),
+                            name: t["name"].as_str()?.to_owned(),
+                            description: t["description"].as_str().unwrap_or("").to_owned(),
+                            input_schema: if t["input_schema"].is_object() { t["input_schema"].clone() } else { serde_json::json!({ "type": "object", "properties": {} }) },
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn call(&self, server: &str, tool: &str, arguments: serde_json::Value) -> Result<String, String> {
+        let mcp = self.0.state::<crate::mcp::Mcp>();
+        let v = mcp.call_tool(server, tool, arguments)?;
+        Ok(mcp_result_text(&v))
+    }
+}
+
+/// An MCP tools/call result as text for the model: text parts joined, other parts named, and an
+/// error result marked as one.
+pub fn mcp_result_text(v: &serde_json::Value) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for c in v["content"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
+        match c["type"].as_str() {
+            Some("text") => parts.push(c["text"].as_str().unwrap_or("").to_owned()),
+            Some("resource") => parts.push(c["resource"]["text"].as_str().map_or_else(|| format!("[resource {}]", c["resource"]["uri"].as_str().unwrap_or("")), str::to_owned)),
+            Some(kind) => parts.push(format!("[{kind} content not shown]")),
+            None => {}
+        }
+    }
+    if parts.is_empty() {
+        if let Some(sc) = v.get("structuredContent") {
+            parts.push(sc.to_string());
+        }
+    }
+    let text = parts.join("\n");
+    if v["isError"].as_bool() == Some(true) {
+        format!("Error: {text}")
+    } else {
+        text
+    }
+}
+
+/// The user's answer to a tool call waiting in Chat.
+#[tauri::command(async)]
+pub fn chat_tool_decide(engine: State<'_, Engine>, id: String, allow: bool) -> bool {
+    engine.decide(&id, allow)
 }

@@ -4,6 +4,7 @@ import { parseMarkdown, plainText } from "../../lib/chat/markdown";
 import { EFFORT_LABELS, REASONING_LABELS } from "../../lib/chat/prompt";
 import type { ChatMessage } from "../../lib/chat/store";
 import { Markdown } from "./Markdown";
+import { ToolCard, type ToolDecision } from "./ToolCard";
 
 const ms = (n: number) => (n < 1000 ? `${Math.round(n)} ms` : `${(n / 1000).toFixed(1)} s`);
 
@@ -12,6 +13,7 @@ export function MessageView(props: {
   last: boolean;
   onRegenerate: () => void;
   onMore: () => void;
+  onToolDecide?: (id: string, decision: ToolDecision) => void;
 }): JSX.Element {
   return (
     <Show when={props.m.role === "assistant"} fallback={<UserMessage m={props.m} />}>
@@ -42,7 +44,7 @@ function UserMessage(props: { m: ChatMessage }): JSX.Element {
   );
 }
 
-function AssistantMessage(props: { m: ChatMessage; last: boolean; onRegenerate: () => void; onMore: () => void }): JSX.Element {
+function AssistantMessage(props: { m: ChatMessage; last: boolean; onRegenerate: () => void; onMore: () => void; onToolDecide?: (id: string, decision: ToolDecision) => void }): JSX.Element {
   const m = () => props.m;
   const [speaking, setSpeaking] = createSignal(false);
   const [copied, setCopied] = createSignal(false);
@@ -80,7 +82,12 @@ function AssistantMessage(props: { m: ChatMessage; last: boolean; onRegenerate: 
           <p class="msg__thinking">{m().thinking}</p>
         </details>
       </Show>
-      <Show when={m().text} fallback={<Show when={m().streaming}><p class="msg__typing" aria-label="Writing">●●●</p></Show>}>
+      <Show when={m().tools.length}>
+        <div class="msg__tools">
+          <For each={m().tools}>{(t) => <ToolCard tool={t} onDecide={props.onToolDecide} />}</For>
+        </div>
+      </Show>
+      <Show when={m().text} fallback={<Show when={m().streaming && !m().tools.some((t) => t.state === "approval")}><p class="msg__typing" aria-label="Writing">●●●</p></Show>}>
         <Markdown text={m().text} />
       </Show>
       <Show when={m().image}>{(img) => <ImageCard prompt={img().prompt} seed={img().seed} />}</Show>

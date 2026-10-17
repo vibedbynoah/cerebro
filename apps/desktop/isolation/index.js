@@ -94,7 +94,15 @@ function isMcpConfig(c) {
 /** @param {unknown} r */
 function isChatRequest(r) {
   if (!isPlain(r) || !isModelId(r.modelId) || typeof r.systemPrompt !== "string" || !Array.isArray(r.turns) || !isPlain(r.sampler)) return false;
-  return r.turns.every((t) => isPlain(t) && (t.role === "user" || t.role === "assistant") && typeof t.text === "string");
+  return r.turns.every((t) => isPlain(t) && (t.role === "user" || t.role === "assistant") && typeof t.text === "string") && (r.tools === undefined || r.tools === null || isToolsRequest(r.tools));
+}
+
+const TOOL_RULES = new Set(["allow", "ask", "deny"]);
+/** Chat's tool rules: { rules: { "server/tool": allow|ask|deny }, defaultRule }. @param {unknown} t */
+function isToolsRequest(t) {
+  if (!isPlain(t) || !hasOnlyKeys(t, ["rules", "defaultRule"]) || !TOOL_RULES.has(/** @type {string} */ (t.defaultRule)) || !isPlain(t.rules)) return false;
+  const entries = Object.entries(t.rules);
+  return entries.length <= 4096 && entries.every(([k, v]) => k.length <= 200 && typeof v === "string" && TOOL_RULES.has(v));
 }
 
 /** Commands with arguments, each with its own shape check. @type {Record<string, (p: unknown) => boolean>} */
@@ -119,6 +127,7 @@ const WITH_ARGS = {
     Number.isSafeInteger(p.sessionDays) &&
     p.sessionDays >= 0 &&
     p.sessionDays <= 3650,
+  chat_tool_decide: (p) => isPlain(p) && hasOnlyKeys(p, ["id", "allow"]) && typeof p.id === "string" && /^t\d{1,16}-\d{1,3}$/.test(p.id) && typeof p.allow === "boolean",
   remote_revoke: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && typeof p.id === "string" && /^(\*|[A-Za-z0-9_-]{1,32})$/.test(p.id),
   mcp_call: (p) => isPlain(p) && hasOnlyKeys(p, ["server", "tool", "arguments"]) && isServerName(p.server) && typeof p.tool === "string" && p.tool.length > 0 && p.tool.length <= 128 && (p.arguments === null || isPlain(p.arguments)),
   chat_send: (p) => isPlain(p) && hasOnlyKeys(p, ["request", "onEvent"]) && isChatRequest(p.request) && isChannel(p.onEvent),

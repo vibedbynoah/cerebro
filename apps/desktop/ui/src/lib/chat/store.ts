@@ -1,4 +1,4 @@
-import type { ChatStats } from "../../service/chat-types";
+import type { ChatStats, ToolActivity } from "../../service/chat-types";
 import { readPref, writePref } from "../storage";
 import type { Effort, Memory, ReasoningSource, Verbosity } from "./prompt";
 
@@ -23,6 +23,8 @@ export interface ChatMessage {
   thinking: string;
   checks: string[];
   image: { prompt: string; seed: number } | null;
+  /** Tool calls the model made in this reply, in order. */
+  tools: ToolActivity[];
   attachments: Attachment[];
   stats: ChatStats | null;
   effort: Effort;
@@ -93,6 +95,22 @@ function parseMessage(v: unknown): ChatMessage | null {
     thinking: str(m.thinking) ?? "",
     checks: Array.isArray(m.checks) ? m.checks.flatMap((c) => (str(c, 2000) !== null ? [c as string] : [])).slice(0, 2) : [],
     image: img && str(img.prompt, 400) !== null ? { prompt: img.prompt as string, seed: num(img.seed) } : null,
+    tools: Array.isArray(m.tools)
+      ? m.tools
+          .flatMap((t): ToolActivity[] => {
+            if (!t || typeof t !== "object") return [];
+            const x = t as Record<string, unknown>;
+            const id = str(x.id, 64);
+            const name = str(x.name, 200);
+            const server = str(x.server, 200);
+            if (id === null || name === null || server === null) return [];
+            // A call still waiting or running when the app closed did not finish.
+            const state = oneOf(x.state, ["approval", "running", "done", "denied", "error"] as const, "error");
+            const live = state === "approval" || state === "running";
+            return [{ id, name, server, arguments: x.arguments ?? {}, state: live ? "error" : state, result: str(x.result, 20000), error: live ? "Interrupted." : str(x.error, 2000) }];
+          })
+          .slice(0, 32)
+      : [],
     attachments: atts.slice(0, 10),
     stats: s
       ? { outputTokens: num(s.outputTokens), thinkingTokens: num(s.thinkingTokens), tokPerSec: num(s.tokPerSec), ttftMs: num(s.ttftMs), totalMs: num(s.totalMs), extraMs: num(s.extraMs), stopped: s.stopped === true }

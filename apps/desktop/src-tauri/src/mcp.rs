@@ -420,7 +420,7 @@ impl Mcp {
         v
     }
 
-    fn tools_json(&self) -> Value {
+    pub(crate) fn tools_json(&self) -> Value {
         let mut arr = Vec::new();
         for (name, s) in self.snapshot() {
             s.refresh_tools();
@@ -437,7 +437,7 @@ impl Mcp {
         Value::Array(arr)
     }
 
-    fn call_tool(&self, server_name: &str, tool: &str, arguments: Value) -> Result<Value, String> {
+    pub(crate) fn call_tool(&self, server_name: &str, tool: &str, arguments: Value) -> Result<Value, String> {
         let s = self.inner.lock().unwrap_or_else(|e| e.into_inner()).get(server_name).cloned().ok_or_else(|| "unknown server".to_owned())?;
         let state = s.state.lock().unwrap_or_else(|e| e.into_inner());
         if !matches!(&*state, ServerState::Running) {

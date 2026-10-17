@@ -120,6 +120,10 @@ export function pillView(live: MetricsLive | null, reachable: boolean): PillView
       return { tone: "reading", text: live.promptTotal > 0 ? `Reading prompt ${Math.floor(pct(live.promptRead, live.promptTotal))}%` : "Reading prompt", queued };
     case "generating":
       return { tone: "generating", text: ok(live.decodeTps) ? `Generating ${F1.format(live.decodeTps)} tok/s` : "Generating", queued };
+    case "waiting":
+      return { tone: "loading", text: "Waiting for your approval", queued };
+    case "tool":
+      return { tone: "reading", text: "Running a tool", queued };
     default:
       return { tone: "idle", text: "Idle", queued };
   }
@@ -135,6 +139,8 @@ export interface StateView {
 
 export function stateView(live: MetricsLive, last: RequestSummary | undefined): StateView {
   if (live.state === "loading") return { label: "Loading model", detail: "Reading the model file into memory", progress: 0, progressLabel: "Loading" };
+  if (live.state === "waiting") return { label: "Waiting for you", detail: "A tool call needs your approval in Chat", progress: 0, progressLabel: "Waiting" };
+  if (live.state === "tool") return { label: "Running a tool", detail: "The model asked for a tool; its result goes back to the model", progress: 0, progressLabel: "Tool" };
   if (live.state === "reading") {
     const p = pct(live.promptRead, live.promptTotal);
     const reused = live.promptReused > 0 ? ` · ${compact(live.promptReused)} reused` : "";

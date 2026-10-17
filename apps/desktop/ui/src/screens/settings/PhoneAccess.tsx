@@ -248,7 +248,7 @@ export function PhoneAccess(): JSX.Element {
         <button class="btn btn--tertiary btn--sm" type="button" onClick={generate}>
           Generate
         </button>
-        <button class="btn btn--sm" type="submit" disabled={savingPassword()} aria-busy={savingPassword()}>
+        <button class="btn btn--primary btn--sm" type="submit" disabled={savingPassword()} aria-busy={savingPassword()}>
           {submitLabel}
         </button>
       </div>
@@ -313,7 +313,7 @@ export function PhoneAccess(): JSX.Element {
         <Show when={view()?.running}>
           <div class="phone__pair">
             <div class="phone__pair-actions">
-              <button class="btn btn--sm" type="button" onClick={() => void pairPhone()} disabled={pairing()} aria-busy={pairing()}>
+              <button class="btn btn--primary btn--sm" type="button" onClick={() => void pairPhone()} disabled={pairing()} aria-busy={pairing()}>
                 Pair a phone
               </button>
               <Show when={pair()}>

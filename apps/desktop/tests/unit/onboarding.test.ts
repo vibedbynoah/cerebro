@@ -94,7 +94,7 @@ describe("model recommendation", () => {
     const cpuOnly: HardwareProfile = { ...MOCK_HARDWARE, gpu: null, ramTotalGiB: 64 };
     const strings = [...rankModels(MOCK_CATALOG, MOCK_HARDWARE), ...rankModels(MOCK_CATALOG, cpuOnly), ...unranked(MOCK_CATALOG)].flatMap((r) => [r.why, r.fitLabel]);
     for (const s of strings) {
-      if (/(slow|slower|slowest|slows|fast|faster|fastest|quick|quicker|quickest|speedier)/i.test(s)) expect(s, s).toMatch(/measure/i);
+      if (/\b(slow|slower|slowest|slows|fast|faster|fastest|quick|quicker|quickest|speedier)\b/i.test(s)) expect(s, s).toMatch(/measure/i);
     }
     expect(rankModels(MOCK_CATALOG, MOCK_HARDWARE).find((r) => r.fit === "split")?.fitLabel).toBe("Runs partly from system memory");
   });

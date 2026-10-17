@@ -29,6 +29,27 @@ export interface ChatRequest {
   effort: Effort;
   verbosity: Verbosity;
   source: ReasoningSource;
+  /** MCP tools the model may call, with the user's rule per "server/tool"; null = no tools. */
+  tools?: ChatTools | null;
+}
+
+export type ToolRuleNow = "allow" | "ask" | "deny";
+export interface ChatTools {
+  rules: Record<string, ToolRuleNow>;
+  defaultRule: ToolRuleNow;
+}
+
+export type ToolState = "approval" | "running" | "done" | "denied" | "error";
+
+/** One tool call in a reply, as Chat shows and stores it. */
+export interface ToolActivity {
+  id: string;
+  server: string;
+  name: string;
+  arguments: unknown;
+  state: ToolState;
+  result: string | null;
+  error: string | null;
 }
 
 export type ChatEvent =
@@ -37,6 +58,7 @@ export type ChatEvent =
   | { type: "token"; text: string }
   | { type: "check"; pass: 1 | 2; text: string }
   | { type: "image"; prompt: string; seed: number; width: number; height: number }
+  | { type: "tool"; id: string; server: string; name: string; arguments: unknown; state: ToolState; result: string | null; error: string | null }
   | { type: "done"; stats: ChatStats }
   | { type: "error"; message: string };
 

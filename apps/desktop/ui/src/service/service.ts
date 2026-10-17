@@ -152,6 +152,8 @@ export interface CerebroService {
    *  (or `error`). Aborting the signal stops generation; `done` still arrives with `stopped: true`
    *  and the text so far is kept. Rejects a malformed request before streaming. */
   chat(request: ChatRequest, onEvent: (e: ChatEvent) => void, signal: AbortSignal): Promise<void>;
+  /** Answers a tool call that waits for approval in Chat. False when nothing was waiting. */
+  chatToolDecide(id: string, allow: boolean): Promise<boolean>;
   /** Transcribes a push-to-talk recording on this machine. */
   transcribe(seconds: number): Promise<string>;
 

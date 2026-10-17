@@ -8,7 +8,8 @@ import type { Provenance } from "./types";
  */
 
 /** What the engine is doing now. `loading` is a model being read into memory. */
-export type EngineActivity = "idle" | "loading" | "reading" | "generating";
+/** "waiting": a tool call waits for the user's approval; "tool": a tool is running. */
+export type EngineActivity = "idle" | "loading" | "reading" | "generating" | "waiting" | "tool";
 
 export interface MetricsLive {
   state: EngineActivity;

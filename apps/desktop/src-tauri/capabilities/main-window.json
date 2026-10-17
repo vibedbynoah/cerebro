@@ -44,6 +44,7 @@
     "allow-remote-options",
     "allow-remote-pair",
     "allow-remote-revoke",
+    "allow-chat-tool-decide",
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize"
   ]
