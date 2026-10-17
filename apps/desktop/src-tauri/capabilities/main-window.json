@@ -29,6 +29,15 @@
     "allow-model-load",
     "allow-library-list",
     "allow-hw-detect",
+    "allow-switches-list",
+    "allow-switch-set",
+    "allow-switches-reset",
+    "allow-mcp-config-get",
+    "allow-mcp-config-save",
+    "allow-mcp-status",
+    "allow-mcp-restart",
+    "allow-mcp-tools",
+    "allow-mcp-call",
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize"
   ]

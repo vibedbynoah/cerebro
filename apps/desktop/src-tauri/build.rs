@@ -26,6 +26,15 @@ const COMMANDS: &[&str] = &[
     "hub_files",
     "hub_download",
     "hub_cancel",
+    "switches_list",
+    "switch_set",
+    "switches_reset",
+    "mcp_config_get",
+    "mcp_config_save",
+    "mcp_status",
+    "mcp_restart",
+    "mcp_tools",
+    "mcp_call",
 ];
 
 fn main() {

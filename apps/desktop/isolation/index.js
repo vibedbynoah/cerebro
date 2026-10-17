@@ -23,6 +23,11 @@ const ALLOWED = new Set([
   "chat_stop",
   "live_stats",
   "metrics",
+  "switches_list",
+  "switches_reset",
+  "mcp_config_get",
+  "mcp_status",
+  "mcp_tools",
   // Tauri's own drag-region script (data-tauri-drag-region on the title bar).
   "plugin:window|start_dragging",
   "plugin:window|internal_toggle_maximize",
@@ -65,6 +70,25 @@ const isRepo = (v) => typeof v === "string" && /^[A-Za-z0-9._-]{1,96}\/[A-Za-z0-
 /** A .gguf path inside a repository, no traversal. @param {unknown} v */
 const isGguf = (v) => typeof v === "string" && v.length <= 300 && /^[A-Za-z0-9._+-]+(\/[A-Za-z0-9._+-]+)*\.gguf$/.test(v) && !v.includes("..");
 
+/** An MCP server name in mcp.json. @param {unknown} v */
+const isServerName = (v) => typeof v === "string" && /^[A-Za-z0-9 ._-]{1,64}$/.test(v);
+
+/** mcp.json: { mcpServers: { name: { command, args[], env{}, disabled } } }. @param {unknown} c */
+function isMcpConfig(c) {
+  if (!isPlain(c) || !hasOnlyKeys(c, ["mcpServers"]) || !isPlain(c.mcpServers)) return false;
+  const servers = Object.entries(c.mcpServers);
+  return (
+    servers.length <= 64 &&
+    servers.every(([name, s]) => {
+      if (!isServerName(name) || !isPlain(s) || !hasOnlyKeys(s, ["command"], ["args", "env", "disabled"])) return false;
+      if (typeof s.command !== "string" || s.command.length === 0 || s.command.length > 512) return false;
+      if (s.args !== undefined && !(Array.isArray(s.args) && s.args.length <= 64 && s.args.every((a) => typeof a === "string" && a.length <= 1024))) return false;
+      if (s.env !== undefined && !(isPlain(s.env) && Object.values(s.env).every((v) => typeof v === "string"))) return false;
+      return s.disabled === undefined || typeof s.disabled === "boolean";
+    })
+  );
+}
+
 /** @param {unknown} r */
 function isChatRequest(r) {
   if (!isPlain(r) || !isModelId(r.modelId) || typeof r.systemPrompt !== "string" || !Array.isArray(r.turns) || !isPlain(r.sampler)) return false;
@@ -78,6 +102,10 @@ const WITH_ARGS = {
   hub_files: (p) => isPlain(p) && hasOnlyKeys(p, ["repo"]) && isRepo(p.repo),
   hub_download: (p) => isPlain(p) && hasOnlyKeys(p, ["repo", "file", "parts", "total", "onEvent"]) && isRepo(p.repo) && isGguf(p.file) && Array.isArray(p.parts) && p.parts.length > 0 && p.parts.length <= 64 && p.parts.every(isGguf) && Number.isSafeInteger(p.total) && isChannel(p.onEvent),
   hub_cancel: (p) => isPlain(p) && hasOnlyKeys(p, ["repo", "file"]) && isRepo(p.repo) && isGguf(p.file),
+  switch_set: (p) => isPlain(p) && hasOnlyKeys(p, ["id", "value"]) && typeof p.id === "string" && /^[a-z0-9_]{1,48}$/.test(p.id) && Number.isSafeInteger(p.value),
+  mcp_config_save: (p) => isPlain(p) && hasOnlyKeys(p, ["config"]) && isMcpConfig(p.config),
+  mcp_restart: (p) => isPlain(p) && hasOnlyKeys(p, ["name"]) && isServerName(p.name),
+  mcp_call: (p) => isPlain(p) && hasOnlyKeys(p, ["server", "tool", "arguments"]) && isServerName(p.server) && typeof p.tool === "string" && p.tool.length > 0 && p.tool.length <= 128 && (p.arguments === null || isPlain(p.arguments)),
   chat_send: (p) => isPlain(p) && hasOnlyKeys(p, ["request", "onEvent"]) && isChatRequest(p.request) && isChannel(p.onEvent),
 };
 

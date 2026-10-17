@@ -44,8 +44,10 @@ const buildRs = read("src-tauri/build.rs");
 const libRs = read("src-tauri/src/lib.rs");
 const isolationJs = read("isolation/index.js");
 const tauriTs = read("ui/src/platform/tauri.ts");
+const desktopTs = read("ui/src/service/desktop-service.ts");
 
-const APP_COMMANDS = ["window_minimize", "window_toggle_maximize", "window_is_maximized", "window_close", "app_info"];
+/** build.rs is the single list; every other declaration must match it. */
+const APP_COMMANDS = [...(/const COMMANDS[^;]+;/.exec(buildRs)?.[0] ?? "").matchAll(/"([a-z_]+)"/g)].map((m) => m[1] as string);
 const CORE_COMMANDS = ["plugin:window|start_dragging", "plugin:window|internal_toggle_maximize"];
 
 describe("tauri.conf.json", () => {
@@ -136,13 +138,15 @@ describe("IPC surface", () => {
   it("declares the same commands in build.rs, generate_handler!, the isolation hook and the UI", () => {
     const quoted = (src: string) => [...src.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
     const acl = quoted(/const COMMANDS[^;]+;/.exec(buildRs)?.[0] ?? "");
-    const handler = [...(/generate_handler!\[([^\]]+)\]/.exec(libRs)?.[1] ?? "").matchAll(/commands::([a-z_]+)/g)].map((m) => m[1]);
-    const isolation = [...(/new Set\(\[([\s\S]*?)\]\)/.exec(isolationJs)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1]);
-    const invoked = [...tauriTs.matchAll(/invoke(?:<[^>]+>)?\("([a-z_]+)"/g)].map((m) => m[1]);
+    const handler = [...(/generate_handler!\[([^\]]+)\]/.exec(libRs)?.[1] ?? "").matchAll(/(?:commands|mcp)::([a-z_]+)/g)].map((m) => m[1]);
+    const noArgs = [...(/new Set\(\[([\s\S]*?)\]\)/.exec(isolationJs)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+    const withArgs = [...(/const WITH_ARGS = \{([\s\S]*?)\n\};/.exec(isolationJs)?.[1] ?? "").matchAll(/^ {2}([a-z_]+): \(p\) =>/gm)].map((m) => m[1]);
+    const invoked = new Set([...(tauriTs + desktopTs).matchAll(/invoke(?:<[^>]+>)?\("([a-z_]+)"/g)].map((m) => m[1]));
+    expect(APP_COMMANDS.length).toBeGreaterThan(5);
     expect(acl).toEqual(APP_COMMANDS);
-    expect(handler).toEqual(APP_COMMANDS);
-    expect(isolation.sort()).toEqual([...APP_COMMANDS, ...CORE_COMMANDS].sort());
-    expect(invoked.sort()).toEqual([...APP_COMMANDS].sort());
+    expect([...handler].sort()).toEqual([...APP_COMMANDS].sort());
+    expect([...noArgs, ...withArgs].sort()).toEqual([...APP_COMMANDS, ...CORE_COMMANDS].sort());
+    expect([...invoked].sort()).toEqual([...APP_COMMANDS].sort());
   });
 });
 
@@ -152,11 +156,29 @@ describe("isolation hook", () => {
   const hook = win["__TAURI_ISOLATION_HOOK__"] as (m: unknown) => unknown;
 
   it("passes allowlisted commands with no arguments through unchanged", () => {
-    for (const cmd of [...APP_COMMANDS, ...CORE_COMMANDS]) {
+    const noArgs = [...(/new Set\(\[([\s\S]*?)\]\)/.exec(isolationJs)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1] as string);
+    expect(noArgs).toEqual(expect.arrayContaining(CORE_COMMANDS));
+    for (const cmd of noArgs) {
       const message = { cmd, callback: 1, error: 2, payload: {} };
       expect(hook(message)).toBe(message);
     }
     expect(hook({ cmd: "app_info", callback: 1, error: 2 })).toBeTruthy();
+  });
+
+  it("checks the shape of engine-switch and MCP arguments", () => {
+    const ok = (cmd: string, payload: unknown) => expect(() => hook({ cmd, callback: 1, error: 2, payload })).not.toThrow();
+    const no = (cmd: string, payload: unknown) => expect(() => hook({ cmd, callback: 1, error: 2, payload })).toThrow();
+    ok("switch_set", { id: "gpu_mma_matmul", value: 0 });
+    no("switch_set", { id: "gpu_mma_matmul", value: 0.5 });
+    no("switch_set", { id: "../x", value: 1 });
+    ok("mcp_restart", { name: "files" });
+    no("mcp_restart", { name: "a;b" });
+    ok("mcp_call", { server: "files", tool: "read_file", arguments: { path: "a.txt" } });
+    no("mcp_call", { server: "files", tool: "", arguments: {} });
+    const server = { command: "npx", args: ["-y", "pkg"], env: { K: "V" }, disabled: false };
+    ok("mcp_config_save", { config: { mcpServers: { files: server } } });
+    no("mcp_config_save", { config: { mcpServers: { files: { ...server, extra: 1 } } } });
+    no("mcp_config_save", { config: { mcpServers: { files: { ...server, args: [1] } } } });
   });
 
   it("refuses every other command, and any argument smuggled into an allowed one", () => {

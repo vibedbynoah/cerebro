@@ -58,7 +58,6 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::switches_reset,
             mcp::mcp_config_get,
             mcp::mcp_config_save,
-            mcp::mcp_start_all,
             mcp::mcp_status,
             mcp::mcp_restart,
             mcp::mcp_tools,
