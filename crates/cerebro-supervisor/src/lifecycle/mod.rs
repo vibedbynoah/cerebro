@@ -2895,7 +2895,7 @@ mod tests {
             reason.err()
         );
         let governed_transient = crate::preflight::PreflightError::BackendDirUnauditable {
-            dir: r"C:".into(),
+            dir: r"C:\b".into(),
             cause: "audit could not complete".into(),
         };
         let reason = launch_outcome(Ok(Err(LaunchError::Preflight(governed_transient))));
