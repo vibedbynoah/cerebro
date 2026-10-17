@@ -320,13 +320,13 @@ export function McpServers(): JSX.Element {
                     <pre class="mcp__log-output">{status()?.stderr_tail.join("\n") ?? ""}</pre>
                   </details>
                   <div class="mcp__server-actions">
-                    <button class="btn btn--ghost btn--sm" type="button" onClick={() => void restart(name)}>
+                    <button class="btn btn--tertiary btn--sm" type="button" onClick={() => void restart(name)}>
                       Restart
                     </button>
-                    <button class="btn btn--ghost btn--sm" type="button" onClick={() => void toggle(name, !server.disabled)}>
+                    <button class="btn btn--tertiary btn--sm" type="button" onClick={() => void toggle(name, !server.disabled)}>
                       {server.disabled ? "On" : "Off"}
                     </button>
-                    <button class="btn btn--ghost btn--sm" type="button" onClick={() => void remove(name)}>
+                    <button class="btn btn--tertiary btn--sm" type="button" onClick={() => void remove(name)}>
                       Remove
                     </button>
                   </div>
@@ -400,7 +400,7 @@ export function McpServers(): JSX.Element {
                       when={"command" in entry.install}
                       fallback={<span class="hint">Signs in through your browser (OAuth), which Cerebro does not support yet.</span>}
                     >
-                      <button class="btn btn--ghost btn--sm" type="button" aria-label={`Add ${entry.name}`} onClick={() => chooseFromCatalogue(entry)}>
+                      <button class="btn btn--tertiary btn--sm" type="button" aria-label={`Add ${entry.name}`} onClick={() => chooseFromCatalogue(entry)}>
                         Add
                       </button>
                     </Show>
@@ -434,7 +434,7 @@ export function McpServers(): JSX.Element {
                   <span>
                     From the catalogue: <strong>{entry().name}</strong>
                   </span>
-                  <button class="btn btn--ghost btn--sm" type="button" onClick={clearChosen}>
+                  <button class="btn btn--tertiary btn--sm" type="button" onClick={clearChosen}>
                     Clear
                   </button>
                 </div>
@@ -528,7 +528,7 @@ export function McpServers(): JSX.Element {
             value={jsonDraft()}
             onInput={(e) => setJsonDraft(e.currentTarget.value)}
           />
-          <button class="btn btn--ghost btn--sm" type="button" onClick={() => void saveJson()}>
+          <button class="btn btn--tertiary btn--sm" type="button" onClick={() => void saveJson()}>
             Save mcp.json
           </button>
         </details>

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-trainer-status"
+description = "Enables the trainer_status command without any pre-configured scope."
+commands.allow = ["trainer_status"]
+
+[[permission]]
+identifier = "deny-trainer-status"
+description = "Denies the trainer_status command without any pre-configured scope."
+commands.deny = ["trainer_status"]

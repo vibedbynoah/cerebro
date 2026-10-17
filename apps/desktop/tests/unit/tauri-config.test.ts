@@ -138,7 +138,7 @@ describe("IPC surface", () => {
   it("declares the same commands in build.rs, generate_handler!, the isolation hook and the UI", () => {
     const quoted = (src: string) => [...src.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
     const acl = quoted(/const COMMANDS[^;]+;/.exec(buildRs)?.[0] ?? "");
-    const handler = [...(/generate_handler!\[([^\]]+)\]/.exec(libRs)?.[1] ?? "").matchAll(/(?:commands|mcp)::([a-z_]+)/g)].map((m) => m[1]);
+    const handler = [...(/generate_handler!\[([^\]]+)\]/.exec(libRs)?.[1] ?? "").matchAll(/(?:commands|mcp|trainer)::([a-z_]+)/g)].map((m) => m[1]);
     const noArgs = [...(/new Set\(\[([\s\S]*?)\]\)/.exec(isolationJs)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1]);
     const withArgs = [...(/const WITH_ARGS = \{([\s\S]*?)\n\};/.exec(isolationJs)?.[1] ?? "").matchAll(/^ {2}([a-z_]+): \(p\) =>/gm)].map((m) => m[1]);
     const invoked = new Set([...(tauriTs + desktopTs).matchAll(/invoke(?:<[^>]+>)?\("([a-z_]+)"/g)].map((m) => m[1]));

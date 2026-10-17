@@ -35,6 +35,7 @@ const Tools = named(() => import("./screens/Tools"), "Tools");
 const ModelHub = named(() => import("./screens/Hub"), "ModelHub");
 const Monitor = named(() => import("./screens/Monitor"), "Monitor");
 const Settings = named(() => import("./screens/Settings"), "Settings");
+const Train = named(() => import("./screens/Train"), "Train");
 const Tune = named(() => import("./screens/Tune"), "Tune");
 const Turbo = named(() => import("./screens/Turbo"), "Turbo");
 
@@ -232,6 +233,9 @@ function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Eleme
             </Match>
             <Match when={router.route() === "documents"}>
               <Documents />
+            </Match>
+            <Match when={router.route() === "train"}>
+              <Train />
             </Match>
             <Match when={router.route() === "plugins"}>
               <Plugins />

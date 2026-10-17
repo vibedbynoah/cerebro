@@ -3,6 +3,7 @@ import { draftCandidates, hasErrors, validateLoadParams } from "../lib/load-para
 import { activeTweakCount, applyTweaks, contextCeiling, EMPTY_TWEAKS, profileNameError, sanitizeTweaks } from "../lib/tweaks";
 import type { CerebroService, Unsubscribe } from "../service/service";
 import { createMockChat } from "./chat";
+import { createMockTrainer } from "./mock-train";
 import type {
   EngineSwitch,
   McpServerView,
@@ -76,6 +77,8 @@ export interface MockServiceOptions {
   chatSpeed?: number;
   /** Orchestrate playback speed multiplier (tests use 1: the steps are visible). */
   orchestrateSpeed?: number;
+  /** Milliseconds per simulated training step (tests use small values). */
+  trainStepMs?: number;
   /** Clock for the Monitor's simulation (epoch ms). Default Date.now. */
   now?: () => number;
 }
@@ -83,6 +86,7 @@ export interface MockServiceOptions {
 /** Every failure or test state a web/test build can ask the mock for, by `?mock=` value. */
 const MOCK_FAILURES: Readonly<Record<string, MockServiceOptions>> = {
   "fail-hw": { failHardware: Number.POSITIVE_INFINITY },
+  "fast-train": { trainStepMs: 15 },
   "fail-hw-once": { failHardware: 1 },
   "bad-hw": { malformedHardware: true },
   "fail-catalog": { failCatalog: true },
@@ -262,6 +266,7 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
   };
   // The folders the built-in tools may touch (Settings > Tools); illustrative in web mode.
   let folders: string[] = ["C:\\Users\\me\\Projects"];
+  const trainer = createMockTrainer(options.trainStepMs !== undefined ? { stepMs: options.trainStepMs } : {});
   const chatEngine = createMockChat({ ...(options.chatSpeed !== undefined ? { speed: options.chatSpeed } : {}), ...(options.orchestrateSpeed !== undefined ? { orchestrateSpeed: options.orchestrateSpeed } : {}) });
   const tickMs = options.tickMs !== undefined && Number.isFinite(options.tickMs) && options.tickMs > 0 ? options.tickMs : 1000;
   const random = options.random ?? Math.random;
@@ -769,6 +774,7 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
         return [...folders];
       }),
 
+    ...trainer,
     mcpServerGet: () => later(0, () => ({ ...mcpSrv })),
     mcpServerEnable: (on) =>
       later(0, () => {

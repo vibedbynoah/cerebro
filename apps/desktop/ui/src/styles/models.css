@@ -10,25 +10,6 @@
 }
 
 /* Shared small sizes at app density */
-.btn--xs {
-  min-height: 30px;
-  padding: var(--space-1) var(--space-3);
-  font-size: var(--text-small);
-  gap: var(--space-1);
-}
-
-.btn--icon.btn--xs {
-  width: 30px;
-  height: 30px;
-  min-height: 30px;
-  padding: 0;
-}
-
-.btn--icon.btn--xs svg {
-  width: 14px;
-  height: 14px;
-}
-
 .input--sm,
 .select--sm > select.input {
   min-height: 34px;

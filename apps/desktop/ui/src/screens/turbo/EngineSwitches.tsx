@@ -68,7 +68,7 @@ export function EngineSwitches(): JSX.Element {
         <Show when={level === "advanced"}>
           <code class="switches__env">{s.env}</code>
           <Show when={s.value !== s.default}>
-            <button class="btn btn--ghost btn--sm" type="button" onClick={() => update(s, s.default)}>
+            <button class="btn btn--tertiary btn--sm" type="button" onClick={() => update(s, s.default)}>
               Default
             </button>
           </Show>
@@ -141,7 +141,7 @@ export function EngineSwitches(): JSX.Element {
             )}
           </For>
           <div class="switches__footer">
-            <button class="btn btn--ghost" type="button" onClick={resetAll}>
+            <button class="btn btn--tertiary" type="button" onClick={resetAll}>
               Restore all defaults
             </button>
           </div>

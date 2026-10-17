@@ -52,6 +52,10 @@
     "allow-mcp-server-get",
     "allow-mcp-server-enable",
     "allow-mcp-server-rotate-token",
+    "allow-trainer-status",
+    "allow-trainer-setup",
+    "allow-trainer-start",
+    "allow-trainer-cancel",
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize"
   ]

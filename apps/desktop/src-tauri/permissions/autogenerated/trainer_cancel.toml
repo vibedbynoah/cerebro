@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-trainer-cancel"
+description = "Enables the trainer_cancel command without any pre-configured scope."
+commands.allow = ["trainer_cancel"]
+
+[[permission]]
+identifier = "deny-trainer-cancel"
+description = "Denies the trainer_cancel command without any pre-configured scope."
+commands.deny = ["trainer_cancel"]

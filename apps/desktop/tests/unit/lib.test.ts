@@ -70,6 +70,7 @@ describe("routing", () => {
       "Chat",
       "Image Studio",
       "Documents",
+      "Train",
       "Plugins",
       "Tools",
       "Settings",

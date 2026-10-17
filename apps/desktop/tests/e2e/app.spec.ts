@@ -10,6 +10,7 @@ const TITLES: Record<(typeof ROUTE_IDS)[number], string> = {
   chat: "Chat",
   images: "Image Studio",
   documents: "Documents",
+  train: "Train",
   plugins: "Plugins",
   tools: "Tools",
   settings: "Settings",

@@ -21,6 +21,7 @@ mod toolcall;
 mod orchestrate;
 mod commands;
 mod builtin_tools;
+mod trainer;
 mod engine;
 mod hub;
 pub mod navigation;
@@ -81,11 +82,16 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::mcp_server_get,
             commands::mcp_server_enable,
             commands::mcp_server_rotate_token,
+            trainer::trainer_status,
+            trainer::trainer_setup,
+            trainer::trainer_start,
+            trainer::trainer_cancel,
         ])
         .manage(engine::Engine::start())
         .manage(hub::Downloads::default())
         .manage(mcp::Mcp::default())
         .manage(commands::Telemetry::default())
+        .manage(trainer::Trainer::default())
         .setup(|app| {
             commands::load_switches(app.handle());
             {

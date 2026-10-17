@@ -1,3 +1,4 @@
+import "../../styles/sparkline.css";
 import { createMemo, createSignal, createUniqueId, Index, Show, type JSX } from "solid-js";
 import { agoLabel, sampleTime, seriesStats, sparkGeometry } from "../../lib/monitor";
 

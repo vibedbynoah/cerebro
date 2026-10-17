@@ -67,7 +67,7 @@ export function WorkspaceFolders(): JSX.Element {
                 {(folder) => (
                   <li class="folders__item">
                     <code class="folders__path">{folder}</code>
-                    <button class="btn btn--ghost btn--sm" type="button" disabled={saving()} aria-label={`Remove ${folder}`} onClick={() => remove(folder)}>
+                    <button class="btn btn--tertiary btn--sm" type="button" disabled={saving()} aria-label={`Remove ${folder}`} onClick={() => remove(folder)}>
                       Remove
                     </button>
                   </li>

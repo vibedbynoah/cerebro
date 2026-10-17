@@ -167,7 +167,7 @@ export function Spark(props: { samples: ReadonlyArray<{ rep: number; tps: number
     return pts.map((s, i) => `${i ? "L" : "M"}${((i / (pts.length - 1)) * (W - 2) + 1).toFixed(1)} ${(H - 2 - (s.tps / max) * (H - 4)).toFixed(1)}`).join("");
   });
   return (
-    <svg class="spark" width={W} height={H} viewBox={`0 0 ${W} ${H}`} aria-hidden="true">
+    <svg class="tune-spark" width={W} height={H} viewBox={`0 0 ${W} ${H}`} aria-hidden="true">
       <path d={d()} />
     </svg>
   );

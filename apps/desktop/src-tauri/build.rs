@@ -49,6 +49,10 @@ const COMMANDS: &[&str] = &[
     "mcp_server_get",
     "mcp_server_enable",
     "mcp_server_rotate_token",
+    "trainer_status",
+    "trainer_setup",
+    "trainer_start",
+    "trainer_cancel",
 ];
 
 fn main() {

@@ -34,6 +34,8 @@ const ALLOWED = new Set([
   "mcp_tools",
   "builtin_tools",
   "builtin_folders_get",
+  "trainer_status",
+  "trainer_cancel",
   // Tauri's own drag-region script (data-tauri-drag-region on the title bar).
   "plugin:window|start_dragging",
   "plugin:window|internal_toggle_maximize",
@@ -69,6 +71,25 @@ const isModelId = (v) => typeof v === "string" && /^[A-Za-z0-9]{1,64}$/.test(v);
 
 /** A Tauri channel, as serialized for IPC ("__CHANNEL__:<id>") or still as its object. @param {unknown} v */
 const isChannel = (v) => (typeof v === "string" && /^__CHANNEL__:\d+$/.test(v)) || (typeof v === "object" && v !== null && typeof (/** @type {{id?: unknown}} */ (v)).id === "number");
+const TRAIN_QUANTS = new Set(["q4_k_m", "q5_k_m", "q8_0", "f16"]);
+/** @param {unknown} v @param {number} lo @param {number} hi */
+const isNum = (v, lo, hi) => typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi;
+/** @param {unknown} v @param {number} lo @param {number} hi */
+const isInt = (v, lo, hi) => typeof v === "number" && Number.isSafeInteger(v) && v >= lo && v <= hi;
+/** @param {unknown} v */
+const isHfId = (v) => typeof v === "string" && /^[A-Za-z0-9._-]{1,96}\/[A-Za-z0-9._-]{1,96}$/.test(v);
+/** A training job (trainer.rs TrainJob::check repeats every check). @param {unknown} j */
+const isTrainJob = (j) =>
+  isPlain(j) &&
+  hasOnlyKeys(j, ["name", "model", "datasetPath", "datasetHf", "format", "method", "rank", "alpha", "lr", "epochs", "maxSteps", "maxSeqLen", "batch", "gradAccum", "export"]) &&
+  typeof j.name === "string" && j.name.length > 0 && j.name.length <= 64 &&
+  isHfId(j.model) &&
+  ((typeof j.datasetPath === "string" && j.datasetPath.length > 0 && j.datasetPath.length <= 1024 && j.datasetHf === null) || (j.datasetPath === null && isHfId(j.datasetHf))) &&
+  ["auto", "alpaca", "chatml", "sharegpt"].includes(/** @type {string} */ (j.format)) &&
+  ["qlora", "lora"].includes(/** @type {string} */ (j.method)) &&
+  isInt(j.rank, 1, 256) && isInt(j.alpha, 1, 512) && isNum(j.lr, 1e-8, 0.01) && isNum(j.epochs, 0.01, 50) &&
+  isInt(j.maxSteps, 0, 100000) && isInt(j.maxSeqLen, 128, 32768) && isInt(j.batch, 1, 64) && isInt(j.gradAccum, 1, 256) &&
+  Array.isArray(j.export) && j.export.length <= 4 && j.export.every((q) => typeof q === "string" && TRAIN_QUANTS.has(q));
 
 /** A Hugging Face "owner/name". @param {unknown} v */
 const isRepo = (v) => typeof v === "string" && /^[A-Za-z0-9._-]{1,96}\/[A-Za-z0-9._-]{1,96}$/.test(v) && !v.includes("..");
@@ -143,6 +164,8 @@ const WITH_ARGS = {
   mcp_config_save: (p) => isPlain(p) && hasOnlyKeys(p, ["config"]) && isMcpConfig(p.config),
   mcp_restart: (p) => isPlain(p) && hasOnlyKeys(p, ["name"]) && isServerName(p.name),
   remote_set_password: (p) => isPlain(p) && hasOnlyKeys(p, ["password"]) && typeof p.password === "string" && p.password.length >= 8 && p.password.length <= 1024,
+  trainer_setup: (p) => isPlain(p) && hasOnlyKeys(p, ["onEvent"]) && isChannel(p.onEvent),
+  trainer_start: (p) => isPlain(p) && hasOnlyKeys(p, ["job", "onEvent"]) && isChannel(p.onEvent) && isTrainJob(p.job),
   mcp_server_enable: (p) => isPlain(p) && hasOnlyKeys(p, ["on"]) && typeof p.on === "boolean",
   remote_enable: (p) => isPlain(p) && hasOnlyKeys(p, ["on"]) && typeof p.on === "boolean",
   remote_options: (p) =>

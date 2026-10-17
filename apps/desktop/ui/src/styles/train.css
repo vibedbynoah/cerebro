@@ -1,0 +1,206 @@
+/* Train screen (screens/Train.tsx). Built only from design-system tokens. */
+
+.train-setup {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-3);
+}
+
+.train-log {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  margin: 0;
+  padding: var(--space-3);
+  list-style: none;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-2);
+  color: var(--color-text-secondary);
+  font-size: var(--text-small);
+  overflow-wrap: anywhere;
+}
+
+.train-ready {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.train-form {
+  display: grid;
+  gap: var(--space-4);
+  max-width: 720px;
+}
+
+.train-field {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: var(--color-text-secondary);
+  font-size: 0.8125rem;
+}
+
+/* Fields fill their column and never push past it (the design-system input is content-box). */
+.train-field > .input,
+.train-field > .select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+}
+
+.train-field legend {
+  margin-bottom: var(--space-1);
+  padding: 0;
+}
+
+.train-field .input[aria-invalid="true"] {
+  border-color: var(--color-danger);
+}
+
+.train-field__err,
+.train-error {
+  color: var(--color-danger);
+  font-size: var(--text-small);
+}
+
+.train-error {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.train-dataset {
+  gap: var(--space-2);
+}
+
+.train-seg,
+.train-quants {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+  color: var(--color-text-primary);
+}
+
+.train-seg label,
+.train-quants label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+}
+
+.train-row {
+  display: grid;
+  align-items: start;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-4);
+}
+
+.train-advanced > summary {
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  font-size: 0.8125rem;
+}
+
+.train-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: var(--space-3) var(--space-4);
+  margin-top: var(--space-3);
+}
+
+.train-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.train-run {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.train-run__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.train-run__stop {
+  margin-left: auto;
+}
+
+.train-progress {
+  display: block;
+  height: 6px;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-2);
+}
+
+.train-progress span {
+  display: block;
+  height: 100%;
+  background: var(--color-accent);
+  transform-origin: left;
+  transition: transform var(--duration-fast) var(--ease-standard);
+}
+
+.train-figures {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-4);
+  margin: 0;
+}
+
+.train-figures dt {
+  color: var(--color-text-secondary);
+  font-size: var(--text-small);
+}
+
+.train-figures dd {
+  margin: 0;
+  color: var(--color-text-primary);
+  font-size: var(--text-title);
+}
+
+.train-run > .btn {
+  justify-self: start;
+}
+
+.train-models {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.train-models li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  overflow-wrap: anywhere;
+}
+
+.train-tail {
+  max-height: 320px;
+  margin: var(--space-2) 0 0;
+  padding: var(--space-3);
+  overflow: auto;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-2);
+  font-size: var(--text-small);
+  white-space: pre-wrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .train-progress span {
+    transition: none;
+  }
+}

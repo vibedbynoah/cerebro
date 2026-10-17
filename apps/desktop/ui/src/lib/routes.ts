@@ -10,6 +10,7 @@ export type RouteId =
   | "chat"
   | "images"
   | "documents"
+  | "train"
   | "plugins"
   | "tools"
   | "settings"
@@ -38,6 +39,7 @@ export const ROUTES: readonly RouteDef[] = [
   { id: "chat", label: "Chat", icon: "chat", group: "Run", summary: "Talk to a local model. Nothing leaves this computer.", keywords: "conversation prompt assistant agent coding" },
   { id: "images", label: "Image Studio", icon: "images", group: "Create", summary: "Generate and edit images with local models.", keywords: "picture generate diffusion" },
   { id: "documents", label: "Documents", icon: "documents", group: "Create", summary: "Search your own files by meaning, on this machine.", keywords: "rag search files knowledge pdf" },
+  { id: "train", label: "Train", icon: "chip", group: "Create", summary: "Fine-tune a model on your own examples and add it to your library.", keywords: "fine-tune finetune lora qlora dataset training adapter" },
   { id: "plugins", label: "Plugins", icon: "plugins", group: "Extend", summary: "Add capabilities. Installing needs a network; installed plugins run offline.", keywords: "extensions addons install" },
   { id: "tools", label: "Tools", icon: "tools", group: "Extend", summary: "Actions a model may take, each behind your permission.", keywords: "functions actions agent" },
   { id: "settings", label: "Settings", icon: "settings", group: "System", summary: "Theme, protections and network features. You can change all of it.", keywords: "preferences options config theme" },

@@ -13,6 +13,7 @@ import type { ChatEvent, ChatRequest } from "./chat-types";
 import type { HistoryRange, MetricsSeries, MetricsSnapshot, RequestDetail } from "./monitor-types";
 import type { CatalogModel, GpuInfo, HardwareProfile, LibraryModel, LiveStats, LoadedModel, LoadParams, ModelDetail, ModelSummary, NetworkState } from "./types";
 import { CURRENT_CATALOG } from "./catalog";
+import type { TrainerStatus, TrainEvent, TrainInstalled } from "./train-types";
 import type { ActivePatch, EngineSwitch, McpServerView, RemotePairing, RemoteView, McpCallResult, McpConfig, McpServerStatus, McpTool, HubDownloadEvent, HubFile, HubFileMeta, HubRepo, LoadPreset, PatchProfile } from "./types";
 import { EMPTY_TWEAKS, profileNameError, sanitizeTweaks } from "../lib/tweaks";
 
@@ -192,6 +193,19 @@ export function createDesktopService(local: CerebroService): CerebroService {
     builtinFoldersGet: () => invoke<string[]>("builtin_folders_get"),
     builtinFoldersSet: (folders) => invoke<string[]>("builtin_folders_set", { folders }),
 
+    trainerStatus: () => invoke<TrainerStatus>("trainer_status"),
+    async trainerSetup(onEvent) {
+      const channel = new Channel<TrainEvent>();
+      channel.onmessage = onEvent;
+      return invoke<TrainInstalled>("trainer_setup", { onEvent: channel });
+    },
+    async trainerStart(job, onEvent) {
+      const channel = new Channel<TrainEvent>();
+      channel.onmessage = onEvent;
+      await invoke<void>("trainer_start", { job, onEvent: channel });
+      library = [];
+    },
+    trainerCancel: () => invoke<boolean>("trainer_cancel"),
     mcpServerGet: () => invoke<McpServerView>("mcp_server_get"),
     mcpServerEnable: (on) => invoke<McpServerView>("mcp_server_enable", { on }),
     mcpServerRotateToken: () => invoke<McpServerView>("mcp_server_rotate_token"),

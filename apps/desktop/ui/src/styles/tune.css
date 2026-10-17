@@ -10,13 +10,6 @@
   max-width: 72rem;
 }
 
-.btn--sm {
-  min-height: 34px;
-  padding: var(--space-1) var(--space-4);
-  font-size: var(--text-small);
-  gap: var(--space-2);
-}
-
 .chip[data-tone="danger"] {
   background: var(--color-danger-muted);
   color: var(--color-danger);
@@ -944,11 +937,11 @@
   text-overflow: ellipsis;
 }
 
-.spark {
+.tune-spark {
   display: block;
 }
 
-.spark path {
+.tune-spark path {
   fill: none;
   stroke: var(--color-text-secondary);
   stroke-width: 1.5;
@@ -956,8 +949,8 @@
   stroke-linecap: round;
 }
 
-.cand--active .spark path,
-.cand--win .spark path {
+.cand--active .tune-spark path,
+.cand--win .tune-spark path {
   stroke: var(--color-accent-text);
 }
 
@@ -1511,7 +1504,7 @@
   .cand__head {
     grid-template-columns: 24px minmax(0, 1fr) 7rem auto 16px;
   }
-  .cand__head .spark {
+  .cand__head .tune-spark {
     display: none;
   }
 }

@@ -1,3 +1,4 @@
+import type { TrainerStatus, TrainEvent, TrainInstalled, TrainJob } from "./train-types";
 import type { EngineSwitch, McpServerView, RemoteOptions, RemotePairing, RemoteView, McpCallResult, McpConfig, McpServerStatus, McpTool,
   ActivePatch,
   CatalogModel,
@@ -144,6 +145,15 @@ export interface CerebroService {
   builtinFoldersGet(): Promise<string[]>;
   /** Validates, saves and returns the new list; rejects when a path does not exist or is not a folder. */
   builtinFoldersSet(folders: string[]): Promise<string[]>;
+
+  // ---- Train: fine-tune with LoRA in a managed Python environment, export GGUF to the library. ----
+  trainerStatus(): Promise<TrainerStatus>;
+  /** Builds the training environment (several GB, once). Streams "setup" events. */
+  trainerSetup(onEvent: (e: TrainEvent) => void): Promise<TrainInstalled>;
+  /** Runs one job to the end; rejects with the reason when it fails. */
+  trainerStart(job: TrainJob, onEvent: (e: TrainEvent) => void): Promise<void>;
+  /** Stops the running job at its next step; what it learned so far is still saved. */
+  trainerCancel(): Promise<boolean>;
 
   // ---- Phone access: off by default; LAN only, QR pairing plus password. ----
   // ---- Cerebro as an MCP server: 127.0.0.1 only, bearer token. ----
