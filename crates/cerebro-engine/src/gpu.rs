@@ -441,6 +441,10 @@ impl GpuState {
             let g = [1, 2, 4, 8].into_iter().find(|&g| g >= c.n_head / c.n_kv).unwrap_or(8);
             f.attn_gqa = Some(lf(&format!("attn_decode_gqa_{}_{g}", c.head_dim))?);
         }
+        // Qwen3.8 hybrids (Gated DeltaNet + gated attention) run on the CPU until their GPU kernels land.
+        if c.ssm.is_some() || c.attn_gate || c.rope_dim != c.head_dim {
+            return Err(Error::Unsupported("Gated DeltaNet hybrid layers on the GPU".into()));
+        }
         if c.head_dim > 256 || c.head_dim % 64 != 0 || c.dim > 8192 {
             return Err(Error::Unsupported(format!("head size {} / width {} on the GPU", c.head_dim, c.dim)));
         }

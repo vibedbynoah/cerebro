@@ -499,6 +499,52 @@ unsafe fn dot_q8_0_q8_x4_vnni(row: &[u8], a: [&QAct; 4]) -> [f32; 4] {
     out
 }
 
+/// Four Q8_0 rows times one activation vector (decode matvec): each activation block is loaded once
+/// for four rows, the four accumulators are independent (no single FMA chain to wait on), and the
+/// four block scales convert in one F16C instruction. Each row's arithmetic is the same, in the same
+/// order, as `dot_q8_0_q8`, so the results are bit-identical. None when AVX-VNNI or F16C is missing.
+pub fn dot_q8_0_q8_rows4(rows: [&[u8]; 4], a: &QAct) -> Option<[f32; 4]> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avxvnni") && std::arch::is_x86_feature_detected!("f16c") {
+            // SAFETY: AVX-VNNI (implies AVX2) and F16C were checked at run time just above.
+            return Some(unsafe { dot_q8_0_q8_rows4_vnni(rows, a) });
+        }
+    }
+    let _ = (rows, a);
+    None
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,avxvnni,f16c")]
+unsafe fn dot_q8_0_q8_rows4_vnni(rows: [&[u8]; 4], a: &QAct) -> [f32; 4] {
+    use std::arch::x86_64::*;
+    let mut acc = [_mm256_setzero_ps(); 4];
+    let p = [rows[0].as_ptr(), rows[1].as_ptr(), rows[2].as_ptr(), rows[3].as_ptr()];
+    for (bi, d) in a.d.iter().enumerate() {
+        let off = bi * 34;
+        let x = _mm256_loadu_si256(a.q.as_ptr().add(bi * 32) as *const __m256i);
+        // The four rows' f16 scales, converted together (exact, like f16_to_f32).
+        let h = _mm_set_epi16(0, 0, 0, 0, (p[3].add(off) as *const i16).read_unaligned(), (p[2].add(off) as *const i16).read_unaligned(), (p[1].add(off) as *const i16).read_unaligned(), (p[0].add(off) as *const i16).read_unaligned());
+        let mut wd = [0f32; 4];
+        _mm_storeu_ps(wd.as_mut_ptr(), _mm_cvtph_ps(h));
+        for k in 0..4 {
+            let w = _mm256_loadu_si256(p[k].add(off + 2) as *const __m256i);
+            let p32 = _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), _mm256_sign_epi8(w, w), _mm256_sign_epi8(x, w));
+            acc[k] = _mm256_fmadd_ps(_mm256_cvtepi32_ps(p32), _mm256_set1_ps(wd[k] * d), acc[k]);
+        }
+    }
+    let mut out = [0f32; 4];
+    for k in 0..4 {
+        let hi = _mm256_extractf128_ps(acc[k], 1);
+        let s = _mm_add_ps(hi, _mm256_castps256_ps128(acc[k]));
+        let s = _mm_add_ps(s, _mm_movehl_ps(s, s));
+        let s = _mm_add_ss(s, _mm_shuffle_ps(s, s, 1));
+        out[k] = _mm_cvtss_f32(s);
+    }
+    out
+}
+
 /// AVX-VNNI (Alder Lake and newer): one vpdpbusd replaces maddubs + madd per 32 values.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma,avxvnni")]
@@ -969,6 +1015,37 @@ mod tests {
         // SAFETY: feature checked above.
         let (v, w) = unsafe { (dot_q8_0_q8_vnni(&row, &a), dot_q8_0_q8_avx2(&row, &a)) };
         assert!((v - w).abs() <= 1e-3 * w.abs().max(1.0), "{v} vs {w}");
+    }
+
+    /// The four-row kernel gives exactly the one-row results, scales of every kind included
+    /// (normal, subnormal, zero, negative).
+    #[test]
+    fn rows4_is_bit_identical_to_one_row() {
+        let nb = 32;
+        let mut seed = 0x9E3779B97F4A7C15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let rows: Vec<Vec<u8>> = (0..4)
+            .map(|k| {
+                let mut r: Vec<u8> = (0..nb * 34).map(|_| next() as u8).collect();
+                for b in 0..nb {
+                    let scale: u16 = match (b + k) % 5 { 0 => 0x0001, 1 => 0x0000, 2 => 0xb800, 3 => 0x2c00, _ => (next() as u16) & 0x7bff };
+                    r[b * 34..b * 34 + 2].copy_from_slice(&scale.to_le_bytes());
+                }
+                r
+            })
+            .collect();
+        let x: Vec<f32> = (0..nb * 32).map(|i| (i as f32 * 0.37).sin() * 3.0).collect();
+        let mut a = QAct::new(x.len());
+        a.quantize(&x);
+        let Some(four) = dot_q8_0_q8_rows4([&rows[0], &rows[1], &rows[2], &rows[3]], &a) else { return };
+        for k in 0..4 {
+            assert_eq!(four[k].to_bits(), dot_q8_0_q8(&rows[k], &a).to_bits(), "row {k}");
+        }
     }
 
     #[test]

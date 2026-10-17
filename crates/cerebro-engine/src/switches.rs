@@ -63,6 +63,9 @@ pub struct State {
 fn on() -> i64 {
     1
 }
+fn off() -> i64 {
+    0
+}
 fn zero() -> i64 {
     0
 }
@@ -80,6 +83,7 @@ pub const GPU_MMA_MATMUL: &str = "gpu_mma_matmul";
 pub const GPU_MMA_ATTENTION: &str = "gpu_mma_attention";
 pub const GPU_DECODE_GQA: &str = "gpu_decode_gqa";
 pub const CPU_BATCH_PREFILL: &str = "cpu_batch_prefill";
+pub const CPU_ROWS4: &str = "cpu_rows4";
 pub const CPU_THREADS: &str = "cpu_threads";
 pub const CPU_CHUNK_DIV: &str = "cpu_chunk_div";
 pub const PREFAULT: &str = "prefault";
@@ -124,6 +128,18 @@ fn registry() -> &'static [Switch] {
                 advanced: "Decode attention with one block per KV head serving its whole query group (K/V read once per group), one cached position per lane, splits sized to the GPU and derived from the position at run time. Group size up to 8, head size up to 256.",
                 env: "CEREBRO_NO_DECODE_GQA",
                 default: on,
+            },
+            Switch {
+                id: CPU_ROWS4,
+                name: "Four-row writing on the processor",
+                group: "CPU",
+                kind: Kind::Toggle,
+                channel: Channel::Beta,
+                applies: Applies::Live,
+                beginner: "Works on four rows of the model at once on the processor. Off until it is measured faster on this machine.",
+                advanced: "Q8_0 decode matvec computes four rows per call: one activation load per block for four rows, four independent FMA chains, block scales via F16C. Bit-identical to the one-row kernel. Needs AVX-VNNI and F16C.",
+                env: "CEREBRO_NO_ROWS4",
+                default: off,
             },
             Switch {
                 id: CPU_BATCH_PREFILL,
