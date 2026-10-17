@@ -14,6 +14,7 @@
 
 #![forbid(unsafe_code)]
 
+mod mcp;
 mod commands;
 mod engine;
 mod hub;
@@ -55,11 +56,23 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::switches_list,
             commands::switch_set,
             commands::switches_reset,
+            mcp::mcp_config_get,
+            mcp::mcp_config_save,
+            mcp::mcp_start_all,
+            mcp::mcp_status,
+            mcp::mcp_restart,
+            mcp::mcp_tools,
+            mcp::mcp_call,
         ])
         .manage(engine::Engine::start())
         .manage(hub::Downloads::default())
+        .manage(mcp::Mcp::default())
         .setup(|app| {
             commands::load_switches(app.handle());
+            {
+                use tauri::Manager;
+                mcp::mcp_start_all(app.handle().clone(), app.state::<mcp::Mcp>());
+            }
             // Declared in tauri.conf.json with `create: false` and built here, so the navigation and
             // new-window guards are attached before the window loads anything.
             let config = app
