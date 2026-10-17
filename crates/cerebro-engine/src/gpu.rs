@@ -12,6 +12,7 @@
 //! rebalanced towards the most-used experts as generation runs, and the counts are saved next to the
 //! model so the next session starts with the right experts resident.
 
+use crate::switches;
 use std::sync::Arc;
 
 use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
@@ -390,10 +391,12 @@ impl GpuState {
         let stream = ctx.new_stream().map_err(gerr)?;
         let module = ctx.load_module(Ptx::from_src(PTX)).map_err(gerr)?;
         let lf = |n: &str| module.load_function(n).map_err(gerr);
-        let mma_ok = ctx.compute_capability().map_err(gerr)?.0 >= 8 && std::env::var_os("CEREBRO_NO_MMA").is_none();
-        let (matmul_mma, attn_mma) = if mma_ok {
+        let cc8 = ctx.compute_capability().map_err(gerr)?.0 >= 8;
+        let (mm_on, at_on) = (cc8 && switches::enabled(switches::GPU_MMA_MATMUL), cc8 && switches::enabled(switches::GPU_MMA_ATTENTION));
+        let (matmul_mma, attn_mma) = if mm_on || at_on {
             let m = ctx.load_module(Ptx::from_src(PTX_MMA)).map_err(gerr)?;
-            (Some(m.load_function("matmul_q8_mma").map_err(gerr)?), if std::env::var_os("CEREBRO_NO_MMA_ATTN").is_none() { Some(m.load_function("attn_prefill_mma").map_err(gerr)?) } else { None })
+            let f = |on: bool, n: &str| if on { m.load_function(n).map(Some).map_err(gerr) } else { Ok(None) };
+            (f(mm_on, "matmul_q8_mma")?, f(at_on, "attn_prefill_mma")?)
         } else {
             (None, None)
         };
@@ -568,7 +571,8 @@ impl GpuState {
         let total = c.n_layer * c.n_expert;
         let (free, _) = ctx.mem_get_info().map_err(gerr)?;
         let mut budget = free.saturating_sub(600 << 20);
-        if let Some(mb) = std::env::var("CEREBRO_EXPERT_VRAM_MB").ok().and_then(|v| v.parse::<usize>().ok()) {
+        let mb = switches::get(switches::EXPERT_VRAM_MB) as usize;
+        if mb > 0 {
             budget = budget.min(mb << 20);
         }
         let slot_bytes = kinds.iter().flatten().map(|k| k.iter().map(|m| m.bytes).sum::<usize>()).max().unwrap_or(0).div_ceil(256).max(1) * 256;
@@ -642,7 +646,7 @@ impl GpuState {
         // the rest.
         let mut cpu_side: Vec<usize> = (0..total).filter(|&k| mg.slot_of[k].is_none()).collect();
         cpu_side.sort_by(|&a, &b| mg.counts[b].total_cmp(&mg.counts[a]));
-        let mut room = if std::env::var("CEREBRO_PREFAULT").as_deref() == Ok("0") { 0 } else { (crate::gguf::available_ram() as f64 * 0.85) as usize };
+        let mut room = if !switches::enabled(switches::PREFAULT) { 0 } else { (crate::gguf::available_ram() as f64 * 0.85) as usize };
         let (mut touch, mut ahead) = (Vec::new(), Vec::new());
         for k in cpu_side {
             let r = MoeGpu::expert_ranges(model, k / c.n_expert, k % c.n_expert);

@@ -217,7 +217,7 @@ impl Model {
         let pool = crate::pool::global();
         // Small items keep the slowest core (an E-core) from holding up the end of each job.
         static DIV: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-        let div = *DIV.get_or_init(|| std::env::var("CEREBRO_CHUNK_DIV").ok().and_then(|v| v.parse().ok()).unwrap_or(4));
+        let div = *DIV.get_or_init(|| crate::switches::get(crate::switches::CPU_CHUNK_DIV).max(1) as usize);
         let chunk = (total / (pool.threads() * div)).clamp(4, 512);
         // Each work item is (job index, first row, row count); outputs are disjoint slices.
         let mut items = Vec::with_capacity(total / chunk + jobs.len());
@@ -563,7 +563,7 @@ impl Session {
     /// (see `Gguf::touch`); `CEREBRO_PREFAULT=0` turns that off.
     pub fn new(m: &Model, max_ctx: usize) -> Self {
         let g = m.gguf();
-        if std::env::var("CEREBRO_PREFAULT").as_deref() != Ok("0") {
+        if crate::switches::enabled(crate::switches::PREFAULT) {
             // As much of the file as available RAM holds (all of it when it fits).
             let room = (crate::gguf::available_ram() as f64 * 0.9) as usize;
             let t = Instant::now();

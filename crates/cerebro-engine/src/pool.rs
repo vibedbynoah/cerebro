@@ -169,10 +169,7 @@ impl Drop for Pool {
 pub fn global() -> &'static Pool {
     static P: OnceLock<Pool> = OnceLock::new();
     P.get_or_init(|| {
-        let n = std::env::var("CEREBRO_THREADS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()).saturating_sub(4).max(1));
+        let n = crate::switches::get(crate::switches::CPU_THREADS).max(1) as usize;
         Pool::new(n)
     })
 }

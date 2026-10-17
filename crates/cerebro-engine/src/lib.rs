@@ -13,6 +13,7 @@ pub mod pool;
 pub mod quant;
 mod quant_more;
 pub mod sample;
+pub mod switches;
 pub mod tokenizer;
 
 #[derive(Debug, thiserror::Error)]
