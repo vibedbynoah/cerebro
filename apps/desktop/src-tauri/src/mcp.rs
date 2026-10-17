@@ -133,6 +133,8 @@ fn sse_event(data: &str, id: u64, server: &Server) -> Option<Value> {
 }
 
 /// Reads SSE events until the reply with `id` (the spec's alternative to a JSON body).
+const MAX_SSE_EVENT: usize = 16 << 20;
+
 fn read_sse<R: BufRead>(mut reader: R, id: u64, server: &Server) -> Result<Value, String> {
     let mut data = String::new();
     loop {
@@ -154,6 +156,10 @@ fn read_sse<R: BufRead>(mut reader: R, id: u64, server: &Server) -> Result<Value
                 data.push('\n');
             }
             data.push_str(rest.strip_prefix(' ').unwrap_or(rest));
+            // One event larger than this is not an MCP reply; stop instead of growing without end.
+            if data.len() > MAX_SSE_EVENT {
+                return Err("the server sent an event over 16 MB".to_owned());
+            }
         }
     }
 }
@@ -439,6 +445,8 @@ fn http_client() -> Result<reqwest::blocking::Client, String> {
         .user_agent(concat!("cerebro/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(CALL_TIMEOUT)
+        // A few redirects (http -> https, a moved path); reqwest drops auth headers across hosts.
+        .redirect(reqwest::redirect::Policy::limited(3))
         .build()
         .map_err(|_| "Could not start the network client.".to_owned())
 }
