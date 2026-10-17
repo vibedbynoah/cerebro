@@ -663,9 +663,28 @@ body {
 
 .hud-item {
   display: inline-flex;
+  flex: none;
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
+}
+
+/* Only the model name gives way when the bar is narrow; everything else keeps its width so no two
+   readouts paint over each other. */
+.hud-item[data-hud="model"] {
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+
+.hud-item[data-hud="model"] .hud-item__value--truncate {
+  min-width: 0;
+}
+
+@media (max-width: 1000px) {
+  .hud-item[data-hud="backend"] .hud-item__meta,
+  .hud-item[data-hud="network"] > span {
+    display: none;
+  }
 }
 
 .hud-item .icon {
