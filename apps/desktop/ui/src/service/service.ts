@@ -1,4 +1,4 @@
-import type { EngineSwitch,
+import type { EngineSwitch, McpCallResult, McpConfig, McpServerStatus, McpTool,
   ActivePatch,
   CatalogModel,
   DedupeResult,
@@ -128,6 +128,14 @@ export interface CerebroService {
   /** Resolves to the stored value (clamped to the switch's range). */
   setSwitch(id: string, value: number): Promise<number>;
   resetSwitches(): Promise<EngineSwitch[]>;
+
+  // ---- MCP servers. The config is saved as mcp.json; saving restarts servers to match. ----
+  mcpConfig(): Promise<McpConfig>;
+  mcpSaveConfig(config: McpConfig): Promise<void>;
+  mcpStatus(): Promise<McpServerStatus[]>;
+  mcpRestart(name: string): Promise<void>;
+  mcpTools(): Promise<McpTool[]>;
+  mcpCall(server: string, tool: string, args: unknown): Promise<McpCallResult>;
 
   // ---- Chat. One reply streams at a time per conversation. ----
 

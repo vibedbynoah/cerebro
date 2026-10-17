@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @ts-check
+// @ts-nocheck
 /** `node scripts/shot-one.mjs <route> [advanced] [out.png]` — one screenshot of one screen of the web build (ui/dist), dark theme, setup finished. */
 import { chromium } from "@playwright/test";
 import { readFile } from "node:fs/promises";

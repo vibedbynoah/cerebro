@@ -545,3 +545,32 @@ export interface EngineSwitch {
   value: number;
   default: number;
 }
+
+/** MCP servers (mcp.json, standard format). */
+export interface McpServerConfig {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  disabled: boolean;
+}
+export interface McpConfig {
+  mcpServers: Record<string, McpServerConfig>;
+}
+export interface McpServerStatus {
+  name: string;
+  state: "starting" | "running" | "error" | "stopped";
+  error: string | null;
+  tools: number;
+  stderr_tail: string[];
+  server_info: unknown;
+}
+export interface McpTool {
+  server: string;
+  name: string;
+  description: string | null;
+  input_schema: unknown;
+}
+export interface McpCallResult {
+  content?: Array<{ type: string; text?: string }>;
+  isError?: boolean;
+}

@@ -5,6 +5,9 @@ import type { CerebroService, Unsubscribe } from "../service/service";
 import { createMockChat } from "./chat";
 import type {
   EngineSwitch,
+  McpConfig,
+  McpServerStatus,
+  McpTool,
   ActivePatch,
   CatalogModel,
   DuplicateGroup,
@@ -225,6 +228,9 @@ const IMAGE_TYPE = /^image\/(png|jpeg|webp|gif)$/;
  */
 export function createMockService(options: MockServiceOptions = {}): CerebroService {
   const switches: EngineSwitch[] = MOCK_SWITCHES.map((x) => ({ ...x }));
+  let mcp: McpConfig = {
+    mcpServers: { files: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "C:/Users/me/Projects"], env: {}, disabled: false } },
+  };
   const chatEngine = createMockChat(options.chatSpeed !== undefined ? { speed: options.chatSpeed } : {});
   const tickMs = options.tickMs !== undefined && Number.isFinite(options.tickMs) && options.tickMs > 0 ? options.tickMs : 1000;
   const random = options.random ?? Math.random;
@@ -699,6 +705,29 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
         for (const x of switches) x.value = x.default;
         return switches.map((x) => ({ ...x }));
       }),
+
+    mcpConfig: () => later(0, () => structuredClone(mcp)),
+    mcpSaveConfig: (config) =>
+      later(0, () => {
+        mcp = structuredClone(config);
+      }),
+    mcpStatus: () =>
+      later(0, () =>
+        Object.entries(mcp.mcpServers)
+          .filter(([, c]) => !c.disabled)
+          .map(([name]): McpServerStatus => ({ name, state: "running", error: null, tools: name === "files" ? 2 : 0, stderr_tail: [], server_info: { name } })),
+      ),
+    mcpRestart: () => later(0, () => undefined),
+    mcpTools: () =>
+      later(0, (): McpTool[] =>
+        mcp.mcpServers.files && !mcp.mcpServers.files.disabled
+          ? [
+              { server: "files", name: "read_file", description: "Read a file in the allowed folder", input_schema: {} },
+              { server: "files", name: "list_directory", description: "List a folder", input_schema: {} },
+            ]
+          : [],
+      ),
+    mcpCall: (_server, tool) => later(0, () => ({ content: [{ type: "text", text: `Mock result of ${tool}` }], isError: false })),
 
     chat: (request, onEvent, signal) => chatEngine.chat(request, onEvent, signal),
 

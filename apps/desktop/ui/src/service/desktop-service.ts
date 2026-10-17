@@ -13,7 +13,7 @@ import type { ChatEvent, ChatRequest } from "./chat-types";
 import type { HistoryRange, MetricsSeries, MetricsSnapshot, RequestDetail } from "./monitor-types";
 import type { CatalogModel, GpuInfo, HardwareProfile, LibraryModel, LiveStats, LoadedModel, LoadParams, ModelDetail, ModelSummary, NetworkState } from "./types";
 import { CURRENT_CATALOG } from "./catalog";
-import type { ActivePatch, EngineSwitch, HubDownloadEvent, HubFile, HubRepo, LoadPreset, PatchProfile } from "./types";
+import type { ActivePatch, EngineSwitch, McpCallResult, McpConfig, McpServerStatus, McpTool, HubDownloadEvent, HubFile, HubRepo, LoadPreset, PatchProfile } from "./types";
 import { EMPTY_TWEAKS, profileNameError, sanitizeTweaks } from "../lib/tweaks";
 
 const NOT_YET = (what: string) => Promise.reject(new Error(`${what} is not available in this build yet.`));
@@ -171,6 +171,13 @@ export function createDesktopService(local: CerebroService): CerebroService {
     listSwitches: () => invoke<EngineSwitch[]>("switches_list"),
     setSwitch: (id, value) => invoke<number>("switch_set", { id, value }),
     resetSwitches: () => invoke<EngineSwitch[]>("switches_reset"),
+
+    mcpConfig: () => invoke<McpConfig>("mcp_config_get"),
+    mcpSaveConfig: (config) => invoke<void>("mcp_config_save", { config }),
+    mcpStatus: () => invoke<McpServerStatus[]>("mcp_status"),
+    mcpRestart: (name) => invoke<void>("mcp_restart", { name }),
+    mcpTools: () => invoke<McpTool[]>("mcp_tools"),
+    mcpCall: (server, tool, args) => invoke<McpCallResult>("mcp_call", { server, tool, arguments: args }),
 
     async chat(request: ChatRequest, onEvent: (e: ChatEvent) => void, signal: AbortSignal) {
       const channel = new Channel<ChatEvent>();

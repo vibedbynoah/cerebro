@@ -180,3 +180,46 @@
   font-size: 0.8em;
   opacity: 0.8;
 }
+
+/* MCP servers */
+.mcp { display: grid; gap: var(--space-6); }
+.mcp__servers { display: grid; gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
+.mcp__server {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md, 10px);
+  background: var(--color-surface-1);
+}
+.mcp__server-head { display: flex; align-items: center; gap: var(--space-3); }
+.mcp__server-name { font-weight: var(--weight-medium); }
+.mcp__server-tools { color: var(--color-text-muted); font-size: 0.8125rem; }
+.mcp__command { overflow-wrap: anywhere; color: var(--color-text-secondary); font-size: 0.8125rem; }
+.mcp__error { margin: 0; color: var(--color-danger); font-size: 0.8125rem; }
+.mcp__log summary, .mcp__advanced summary { cursor: pointer; color: var(--color-text-secondary); font-size: 0.8125rem; }
+.mcp__log-output, .mcp__output {
+  max-height: 240px;
+  margin: var(--space-2) 0 0;
+  padding: var(--space-3);
+  overflow: auto;
+  border-radius: 8px;
+  background: var(--color-surface-2);
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+}
+.mcp__output[data-error="true"] { border: 1px solid var(--color-danger); }
+.mcp__server-actions, .mcp__presets { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.mcp__form, .mcp__try { display: grid; gap: var(--space-3); max-width: 720px; }
+.mcp__form-title, .mcp__try-title { margin: 0; font-size: 0.9375rem; }
+.mcp__field { display: grid; gap: var(--space-1); color: var(--color-text-secondary); font-size: 0.8125rem; }
+.mcp__json, .mcp__args, .mcp__env { font-family: var(--font-mono, monospace); font-size: 0.8125rem; }
+.mcp__json { width: 100%; min-height: 200px; margin-top: var(--space-2); }
+.mcp .pill { padding: 1px 8px; border-radius: var(--radius-pill); border: 1px solid var(--color-border); font-size: 0.6875rem; text-transform: capitalize; }
+.mcp .pill--running { border-color: var(--color-success); color: var(--color-success); }
+.mcp .pill--starting { border-color: var(--color-accent); color: var(--color-accent-text); }
+.mcp .pill--error { border-color: var(--color-danger); color: var(--color-danger); }
+.mcp .pill--stopped, .mcp .pill--off { color: var(--color-text-muted); }
+.mcp input.input { height: 38px; padding: 0 var(--space-3); }
+.mcp textarea.input { height: auto; padding: var(--space-2) var(--space-3); }
+.mcp select { height: 38px; }

@@ -24,6 +24,7 @@ import {
 } from "../lib/permissions";
 import { notify } from "../lib/toast";
 import { useAppState } from "../state";
+import { McpServers } from "./tools/McpServers";
 
 /**
  * Tools: every action a model may take, each behind a rule the user sets. The approval dialog
@@ -87,6 +88,7 @@ export function Tools(): JSX.Element {
         </p>
       </Show>
 
+      <McpServers />
       <Section id="default-rule" title="Default for tools without a rule">
         <fieldset class="segmented">
           <legend class="sr-only">Default rule</legend>
