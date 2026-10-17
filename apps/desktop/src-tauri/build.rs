@@ -24,6 +24,7 @@ const COMMANDS: &[&str] = &[
     "metrics",
     "hub_search",
     "hub_files",
+    "hub_file_meta",
     "hub_download",
     "hub_cancel",
     "switches_list",

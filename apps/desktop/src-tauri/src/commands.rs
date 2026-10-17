@@ -278,7 +278,7 @@ pub fn metrics(engine: State<'_, Engine>, tele: State<'_, Telemetry>) -> serde_j
 
 // ---- Model Hub (network: huggingface.co only) ----
 
-use crate::hub::{self, DownloadEvent, Downloads, HubFile, HubRepo};
+use crate::hub::{self, DownloadEvent, Downloads, HubFile, HubFileMeta, HubRepo};
 
 /// Searches Hugging Face for repositories with GGUF files.
 #[tauri::command]
@@ -290,6 +290,13 @@ pub async fn hub_search(query: String) -> Result<Vec<HubRepo>, String> {
 #[tauri::command]
 pub async fn hub_files(repo: String) -> Result<Vec<HubFile>, String> {
     tauri::async_runtime::spawn_blocking(move || hub::files(&repo)).await.map_err(|_| "Listing the files failed.".to_owned())?
+}
+
+/// The architecture numbers and real size of one file's GGUF header (metadata only), so the Hub can
+/// size the KV cache and memory for it before anything is downloaded.
+#[tauri::command]
+pub async fn hub_file_meta(repo: String, file: String) -> Result<HubFileMeta, String> {
+    tauri::async_runtime::spawn_blocking(move || hub::file_meta(&repo, &file)).await.map_err(|_| "Reading the file header failed.".to_owned())?
 }
 
 /// Downloads one model file (all its parts) into Cerebro's model folder, streaming progress.

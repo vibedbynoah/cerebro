@@ -19,6 +19,7 @@
     "allow-hub-cancel",
     "allow-hub-download",
     "allow-hub-files",
+    "allow-hub-file-meta",
     "allow-hub-search",
     "allow-metrics",
     "allow-live-stats",

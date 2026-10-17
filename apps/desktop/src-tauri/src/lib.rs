@@ -55,6 +55,7 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::metrics,
             commands::hub_search,
             commands::hub_files,
+            commands::hub_file_meta,
             commands::hub_download,
             commands::hub_cancel,
             commands::switches_list,

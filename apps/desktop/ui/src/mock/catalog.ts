@@ -64,6 +64,9 @@ export const MOCK_CATALOG: readonly CatalogModel[] = [
     goodFor: "Vision in, 128K context",
     provenance: "illustrative",
     layers: 48,
+    kvHeads: 8,
+    headDim: 256,
+    embedding: 3840,
     contextMax: 131072,
     sampler: { temperature: 1.0, topP: 0.95, topK: 64, minP: 0 },
     quants: [
@@ -85,6 +88,9 @@ export const MOCK_CATALOG: readonly CatalogModel[] = [
     goodFor: "Vision and audio in, low memory",
     provenance: "illustrative",
     layers: 42,
+    kvHeads: 4,
+    headDim: 256,
+    embedding: 2560,
     contextMax: 131072,
     sampler: { temperature: 1.0, topP: 0.95, topK: 64, minP: 0 },
     quants: [
@@ -106,6 +112,9 @@ export const MOCK_CATALOG: readonly CatalogModel[] = [
     goodFor: "Reasoning with adjustable effort, tool calls",
     provenance: "illustrative",
     layers: 24,
+    kvHeads: 8,
+    headDim: 64,
+    embedding: 2880,
     contextMax: 131072,
     sampler: { temperature: 1.0, topP: 1.0, topK: 0, minP: 0 },
     quants: [
@@ -126,6 +135,9 @@ export const MOCK_CATALOG: readonly CatalogModel[] = [
     goodFor: "Vision in, 256K context",
     provenance: "illustrative",
     layers: 30,
+    kvHeads: 8,
+    headDim: 256,
+    embedding: 4096,
     contextMax: 262144,
     sampler: { temperature: 1.0, topP: 0.95, topK: 64, minP: 0 },
     quants: [
@@ -147,6 +159,9 @@ export const MOCK_CATALOG: readonly CatalogModel[] = [
     goodFor: "Agentic coding, 256K context",
     provenance: "illustrative",
     layers: 40,
+    kvHeads: 4,
+    headDim: 256,
+    embedding: 2048,
     contextMax: 262144,
     sampler: { temperature: 0.7, topP: 0.95, topK: 40, minP: 0 },
     quants: [
@@ -167,6 +182,9 @@ export const MOCK_CATALOG: readonly CatalogModel[] = [
     goodFor: "Coding agent, vision in, 256K context",
     provenance: "illustrative",
     layers: 64,
+    kvHeads: 8,
+    headDim: 128,
+    embedding: 5120,
     contextMax: 262144,
     sampler: { temperature: 1.0, topP: 0.95, topK: 20, minP: 0 },
     quants: [
@@ -189,6 +207,9 @@ export const MOCK_CATALOG: readonly CatalogModel[] = [
     goodFor: "Coding and reasoning, 256K context",
     provenance: "illustrative",
     layers: 88,
+    kvHeads: 8,
+    headDim: 128,
+    embedding: 8192,
     contextMax: 262144,
     sampler: { temperature: 0.7, topP: 0.95, topK: 40, minP: 0 },
     quants: [

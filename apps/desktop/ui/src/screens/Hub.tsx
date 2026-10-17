@@ -2,18 +2,28 @@ import "../styles/hub.css";
 import { createMemo, createResource, createSignal, createUniqueId, For, Show, type JSX } from "solid-js";
 import { CodeBlock } from "../components/CodeBlock";
 import { Icon } from "../components/icons";
-import { QuantTable } from "../components/QuantTable";
+import { memoryNeeds, QuantTable } from "../components/QuantTable";
 import { IllustrativeFlag, ScreenHeader, Section } from "../components/Screen";
 import { Term } from "../components/Term";
 import { CHANNEL_LABELS, type Channel, type ExperienceLevel } from "../lib/experience";
+import { estimateFor, recommend, type MemoryModel } from "../lib/memory-estimate";
 import { availability, FORMAT_LABELS, FORMAT_NOTES, qualityKept } from "../lib/quants";
 import { hrefFor } from "../lib/routes";
 import { contextLabel, pickQuant } from "../onboarding/autoconfig";
 import { rankModels, unranked, type Recommendation } from "../onboarding/recommend";
 import { useService } from "../service/context";
-import type { HardwareProfile } from "../service/types";
+import type { CatalogModel, CatalogQuant, HardwareProfile, KvCacheType } from "../service/types";
 import { useAppState } from "../state";
 import { LiveHub } from "./hub/LiveHub";
+
+/** The Hub sizes every file with a full-precision KV cache unless the user says otherwise. */
+const HUB_KV: KvCacheType = "f16";
+/** Context the slider offers: 2K up to 128K, in 2K steps. */
+const CTX_MIN = 2048;
+const CTX_MAX = 131072;
+
+/** A catalogue model's architecture, for the memory estimate. */
+const memoryModel = (m: CatalogModel): MemoryModel => ({ architecture: m.architecture, layers: m.layers, kvHeads: m.kvHeads, headDim: m.headDim, embedding: m.embedding, contextMax: m.contextMax });
 
 /**
  * Model Hub: the catalogue of current models, each with every quantised file side by side by
@@ -31,12 +41,24 @@ export function ModelHub(): JSX.Element {
   const [hw] = createResource(() => service.detectHardware().catch(() => undefined));
   const offline = () => app.settings()?.offlineMode === true || app.network() !== "online";
   const downloadsOff = () => app.settings()?.allowModelDownloads === false;
+  const [ctx, setCtx] = createSignal(8192);
+  const ctxLabel = () => contextLabel(ctx());
 
   const recs = createMemo<Recommendation[]>(() => {
     const list = catalog.error ? undefined : catalog();
     if (!list) return [];
     const h = hw.error ? undefined : hw();
     return h ? rankModels(list, h) : unranked(list);
+  });
+
+  const best = createMemo(() => {
+    const list = catalog.error ? undefined : catalog();
+    const h = hw.error ? undefined : hw();
+    if (!list || !h) return [];
+    const candidates = list.flatMap((m) =>
+      m.quants.filter((q) => availability(q, app.channel()) === "runs").map((q) => ({ model: memoryModel(m), quant: { label: q.label, sizeGiB: q.sizeGiB }, display: m })),
+    );
+    return recommend(candidates, h, ctx(), HUB_KV, 3);
   });
 
   return (
@@ -52,6 +74,57 @@ export function ModelHub(): JSX.Element {
           </p>
         </div>
       </Show>
+
+      <Section
+        id="best"
+        title="Best for this computer"
+        description={
+          <>
+            Ranked by how each file fits this machine's video and system memory, then by quantisation tier. The context slider re-sizes the <Term k="kvCache">KV cache</Term> live; every figure is an
+            estimate from the file's real size and architecture, and Cerebro measures the real thing after download.
+          </>
+        }
+      >
+        <div class="hub-best">
+          <label class="hub-best__ctx" for="hub-context">
+            <span>Context</span>
+            <input
+              id="hub-context"
+              class="hub-slider"
+              type="range"
+              min={CTX_MIN}
+              max={CTX_MAX}
+              step={CTX_MIN}
+              value={ctx()}
+              data-ctx-slider
+              aria-valuetext={`${ctxLabel()} tokens`}
+              onInput={(e) => setCtx(e.currentTarget.valueAsNumber)}
+            />
+            <span class="mono hub-best__ctx-num">{ctxLabel()}</span>
+          </label>
+          <Show when={best().length > 0} fallback={<p class="hint">Reading this machine and the catalogue…</p>}>
+            <ol class="hub-best__list">
+              <For each={best()}>
+                {(p) => (
+                  <li class="hub-best__pick" data-best={p.quant.label}>
+                    <span class="hub-best__rank mono" aria-hidden="true">
+                      {p.rank}
+                    </span>
+                    <span class="hub-best__name">{p.display.name}</span>
+                    <span class="hub-best__file mono">
+                      {p.quant.label} · {p.quant.sizeGiB.toFixed(1)} GiB
+                    </span>
+                    <span class="hub-best__why">{p.why}</span>
+                    <span class="mono hub-best__needs" data-estimate={p.quant.label}>
+                      {memoryNeeds(p.estimate, ctxLabel())}
+                    </span>
+                  </li>
+                )}
+              </For>
+            </ol>
+          </Show>
+        </div>
+      </Section>
 
       <Section
         id="catalog"
@@ -80,7 +153,7 @@ export function ModelHub(): JSX.Element {
               <IllustrativeFlag />
             </div>
             <ol class="hub-list">
-              <For each={recs()}>{(r) => <HubCard rec={r} hw={hw.error ? undefined : hw()} level={app.level()} channel={app.channel()} />}</For>
+              <For each={recs()}>{(r) => <HubCard rec={r} hw={hw.error ? undefined : hw()} level={app.level()} channel={app.channel()} ctx={ctx()} ctxLabel={ctxLabel()} />}</For>
             </ol>
           </Show>
         </Show>
@@ -101,13 +174,17 @@ function SettingsLink(props: { children: JSX.Element }): JSX.Element {
   );
 }
 
-function HubCard(props: { rec: Recommendation; hw: HardwareProfile | undefined; level: ExperienceLevel; channel: Channel }): JSX.Element {
+function HubCard(props: { rec: Recommendation; hw: HardwareProfile | undefined; level: ExperienceLevel; channel: Channel; ctx: number; ctxLabel: string }): JSX.Element {
   const id = createUniqueId();
   const [open, setOpen] = createSignal(false);
   const m = () => props.rec.model;
   const pick = createMemo(() => pickQuant(m(), props.hw, props.channel));
   const runnable = () => m().quants.filter((q) => availability(q, props.channel) === "runs").length;
   const showTable = () => props.level === "advanced" || open();
+  const memory = () => {
+    const h = props.hw;
+    return h ? { ctxLabel: props.ctxLabel, of: (q: CatalogQuant) => estimateFor(memoryModel(m()), { label: q.label, sizeGiB: q.sizeGiB }, props.ctx, HUB_KV, h) } : undefined;
+  };
   return (
     <li class="hub-card card" data-model={m().id} data-fit={props.rec.fit} aria-labelledby={`${id}-name`}>
       <div class="hub-card__head">
@@ -167,7 +244,7 @@ function HubCard(props: { rec: Recommendation; hw: HardwareProfile | undefined; 
 
       <div id={`${id}-files`} class="hub-card__files" hidden={!showTable()}>
         <Show when={showTable()}>
-          <QuantTable quants={m().quants} channel={props.channel} caption={`Files for ${m().name}`} />
+          <QuantTable quants={m().quants} channel={props.channel} caption={`Files for ${m().name}`} memory={memory()} />
         </Show>
       </div>
     </li>

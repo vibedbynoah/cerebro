@@ -112,6 +112,11 @@ export interface CatalogModel {
   provenance: Provenance;
   /** Transformer blocks, for offload arithmetic (as published). */
   layers: number;
+  /** Attention heads and the size of each, for the KV cache (as published). */
+  kvHeads: number;
+  headDim: number;
+  /** Residual width, for the compute buffers (as published). */
+  embedding: number;
   /** Longest context the model was trained for, tokens (as published). */
   contextMax: number;
   /** The publisher's recommended sampler values, Beginner's starting point. */
@@ -528,6 +533,28 @@ export type HubDownloadEvent =
   | { type: "progress"; done: number; total: number; bytesPerSec: number }
   | { type: "done"; path: string }
   | { type: "error"; message: string };
+
+/** The architecture numbers and real size the Hub reads from a GGUF header (hub_file_meta). */
+export interface HubFileMeta {
+  /** Bytes of the whole file. */
+  size: number;
+  /** `general.architecture`, e.g. "qwen3moe". */
+  architecture: string;
+  layers: number;
+  kvHeads: number;
+  headDim: number;
+  embedding: number;
+  /** MoE only: experts per layer, or null for a dense model. */
+  experts: number | null;
+  /** MoE only: experts used per token. */
+  activeExperts: number | null;
+  /** Longest context the model was trained for, tokens. */
+  contextMax: number;
+  /** Layers with a KV cache (fewer than `layers` for Qwen3.5/3.8 hybrids). */
+  attentionLayers: number;
+  /** Quant label from the file name, e.g. "UD-Q4_K_XL". */
+  quant: string;
+}
 
 /** One engine optimisation the user can change (engine switches registry, Turbo screen). */
 export type SwitchKind = { type: "toggle" } | { type: "number"; min: number; max: number; zero_auto: boolean; unit: string };

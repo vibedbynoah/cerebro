@@ -1,6 +1,7 @@
 import "../styles/quants.css";
 import { createMemo, For, Show, type JSX } from "solid-js";
 import { CHANNEL_LABELS, type Channel } from "../lib/experience";
+import type { MemoryEstimate } from "../lib/memory-estimate";
 import { availability, BACKEND_LABELS, bestAtSize, fmtKl, FORMAT_LABELS, qualityPerGiB } from "../lib/quants";
 import { pct } from "../onboarding/recommend";
 import type { CatalogQuant } from "../service/types";
@@ -8,6 +9,11 @@ import { IllustrativeFlag } from "./Screen";
 import { Term } from "./Term";
 
 const f1 = (n: number): string => (Math.round(n * 10) / 10).toFixed(1);
+
+/** "Needs 6.2 GiB VRAM + 1.4 GiB RAM at 8K context": the Hub's per-file memory line. */
+export function memoryNeeds(e: MemoryEstimate, ctxLabel: string): string {
+  return `Needs ${f1(e.vramGiB)} GiB VRAM + ${f1(e.ramGiB)} GiB RAM at ${ctxLabel} context`;
+}
 
 /**
  * Every file of one model side by side: format, engine, bits per weight, size, KL divergence and
@@ -22,6 +28,8 @@ export function QuantTable(props: {
   caption: string;
   /** Radio mode: the group's name and the chosen file. */
   pick?: { name: string; selected: string | null; onSelect: (id: string) => void };
+  /** Model Hub only: each file's memory at the chosen context, and the label for that context. */
+  memory?: { ctxLabel: string; of: (q: CatalogQuant) => MemoryEstimate | null } | undefined;
 }): JSX.Element {
   const best = createMemo(() => bestAtSize(props.quants, props.channel));
   const maxQpg = createMemo(() => Math.max(1e-9, ...props.quants.map((q) => qualityPerGiB(q))));
@@ -47,6 +55,11 @@ export function QuantTable(props: {
               <th scope="col" class="num">
                 Size
               </th>
+              <Show when={props.memory}>
+                <th scope="col" class="num">
+                  Memory
+                </th>
+              </Show>
               <th scope="col" class="num">
                 <abbr title="KL divergence against the unquantised weights. Lower is closer.">KL</abbr>
               </th>
@@ -102,6 +115,15 @@ export function QuantTable(props: {
                       {f1(q.sizeGiB)}
                       <span class="unit">GiB</span>
                     </td>
+                    <Show when={props.memory}>
+                      {(mem) => (
+                        <td class="num qrow__mem">
+                          <Show when={mem().of(q)} fallback={<span class="qrow__why">Header not read</span>}>
+                            {(e) => <span class="mono" data-estimate={q.id}>{memoryNeeds(e(), mem().ctxLabel)}</span>}
+                          </Show>
+                        </td>
+                      )}
+                    </Show>
                     <td class="num mono">{fmtKl(q.klDiv)}</td>
                     <td class="num mono">+{f1(q.pplDeltaPct)}%</td>
                     <td class="qrow__qpg">
