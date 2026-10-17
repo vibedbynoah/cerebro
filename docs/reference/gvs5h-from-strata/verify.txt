@@ -1,0 +1,33 @@
+﻿=== user settings: env + model + picker ===
+model      : qwen3.8-flash-next-ud-iq4_xs
+base_url   : http://127.0.0.1:8081
+anthropic_model: qwen3.8-flash-next-ud-iq4_xs
+picker rows: qwen3.8-flash-next-ud-iq4_xs
+replaceBuiltIn: True
+
+=== which claude binary / version ===
+C:\Users\noahm\AppData\Roaming\npm\claude.ps1
+2.1.296 (Claude Code)
+
+=== Does a plain 'claude' session reach Strata? ===
+Launching a plain claude -p with NO env overrides, asking it to report its own base URL.
+elapsed: 247.8s
+modelUsage keys: 
+unrecognized_model present: False
+api_error_status: 
+result: 
+127.0.0.1:8081 referenced in warnings: False
+
+=== Strata access log: did that request actually arrive? ===
+strata serve: KV streaming: 99.79% of 1618752 block reads hit VRAM, 13.4 MiB read from RAM
+strata serve: suffix drafts: 66 windows, 120 of 128 drafts accepted
+strata serve: prompt 1130 tokens = 1112 reused + 18 read in 6258 ms (2.9 tok/s), 404 generated in 227413 ms (1.8 tok/s), drafts accepted 246 of 327, 1 checkpoints
+strata serve: decode expert cache hit rate: 2.9% (6807 hits / 232800 lookups)
+strata serve: expert tiers: GPU 6807 hits this request; since the start RAM 0 blobs, files 0 blobs 64687791.0 MB read (the GGUF in place)
+strata serve: KV streaming: 99.87% of 3623232 block reads hit VRAM, 18.6 MiB read from RAM
+strata serve: suffix drafts: 59 windows, 110 of 122 drafts accepted
+strata serve: prompt 928 tokens = 0 reused + 928 read in 24465 ms (37.9 tok/s), 297 generated in 158856 ms (1.9 tok/s), drafts accepted 173 of 241, 1 checkpoints
+strata serve: decode expert cache hit rate: 3.8% (6713 hits / 175200 lookups)
+strata serve: expert tiers: GPU 6713 hits this request; since the start RAM 0 blobs, files 0 blobs 65051040.5 MB read (the GGUF in place)
+strata serve: KV streaming: 99.69% of 1179060 block reads hit VRAM, 14.8 MiB read from RAM
+strata serve: suffix drafts: 41 windows, 84 of 90 drafts accepted

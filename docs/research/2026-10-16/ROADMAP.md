@@ -18,7 +18,8 @@ Status: [x] done and measured, [ ] next. Numbers only from docs/measurements.
 ## App
 - [x] Turbo: real engine switches, beginner/advanced text, channel badges, saved per machine
 - [x] MCP client (stdio, mcp.json, tools/list, tools/call) + Tools screen section (status, logs, presets, try a tool)
-- [ ] Models call MCP tools from Chat (tool-call loop behind the Tools rules); Cerebro itself as an MCP server
+- [x] Models call MCP tools from Chat (tool-call loop behind the Tools rules) - real Qwen3-0.6B run passes
+- [ ] Cerebro itself as an MCP server (paper 2026-10-17/D part 5)
 - [x] Monitor: real GPU load/temp/power/PCIe/throttle, CPU load, driver (NVML at run time), 60 s history
 - [ ] Monitor: live prefill tok/s, per-tier memory %, disk read
 - [ ] Orchestrate mode (GVS5H, arXiv 2608.26480, github.com/slee-persis/GVS5H, MIT): a manager instance
@@ -26,7 +27,12 @@ Status: [x] done and measured, [ ] next. Numbers only from docs/measurements.
       ledger folder (plan, notes, current solution) in the user's workspace. Reported: local Qwen3.8-27B
       66.8% -> 92.4% pass@1 on 100 hard LiveCodeBench problems; some models gain nothing, so the app
       measures it per model before recommending it. Depends on continuous batching and the conversation cache.
-- [ ] Remove Security screen (owner 2026-10-09); protections stay in Settings
+- [x] Remove Security screen; protections stay in Settings
+- [x] Phone access: LAN-only HTTPS, QR + password, revocable phones
+- [x] Real data only on desktop; 3 Hz live polling (rates per second)
+- [x] GPU decode attention (GQA): 331/297/250 tok/s at 32/2048/4096 ctx, ahead of llama.cpp
+- [ ] CPU decode: 66.9 vs llama.cpp 72.5 (t=16) on 0.6B - next engine item
+- [ ] Duplicate Flash-Next copy in Strata-data (~132 GB): verify byte-for-byte, then remove
 
 ## Drafting policy (credits)
 Boilerplate drafted by free opencode models (`opencode run -m opencode/<model>-free`), reviewed and fixed
