@@ -560,7 +560,7 @@ impl crate::engine::ToolHost for McpToolHost {
             .unwrap_or_default()
     }
 
-    fn call(&self, server: &str, tool: &str, arguments: serde_json::Value) -> Result<String, String> {
+    fn call(&self, server: &str, tool: &str, arguments: serde_json::Value, _ctx: crate::engine::ToolContext) -> Result<String, String> {
         let mcp = self.0.state::<crate::mcp::Mcp>();
         let v = mcp.call_tool(server, tool, arguments)?;
         Ok(mcp_result_text(&v))
@@ -596,6 +596,31 @@ pub fn mcp_result_text(v: &serde_json::Value) -> String {
 #[tauri::command(async)]
 pub fn chat_tool_decide(engine: State<'_, Engine>, id: String, allow: bool) -> bool {
     engine.decide(&id, allow)
+}
+
+// ---- Built-in tools (builtin_tools.rs) ----
+
+type FoldersState<'a> = State<'a, Arc<crate::builtin_tools::WorkspaceFolders>>;
+
+/// The built-in tools' specs, in the same JSON shape as `mcp_tools`, for the Tools screen.
+#[tauri::command(async)]
+pub fn builtin_tools() -> serde_json::Value {
+    crate::builtin_tools::tools_json()
+}
+
+/// The workspace folders the built-in tools may touch, as display strings.
+#[tauri::command(async)]
+pub fn builtin_folders_get(folders: FoldersState<'_>) -> Vec<String> {
+    folders.list()
+}
+
+/// Replaces the workspace folders: validates, saves, then swaps them in. Returns the saved list.
+#[tauri::command(async)]
+pub fn builtin_folders_set<R: Runtime>(app: tauri::AppHandle<R>, workspace: FoldersState<'_>, folders: Vec<String>) -> Result<Vec<String>, String> {
+    let checked = crate::builtin_tools::WorkspaceFolders::checked(&folders)?;
+    crate::builtin_tools::save_folders(&app, &checked)?;
+    workspace.replace(checked);
+    Ok(workspace.list())
 }
 
 // ---- Cerebro as an MCP server (mcp_server.rs) ----

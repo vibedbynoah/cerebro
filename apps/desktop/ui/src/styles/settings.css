@@ -90,3 +90,64 @@
 .settings label.btn:focus-within {
   box-shadow: var(--focus-ring);
 }
+
+/* Settings > Workspace folders (settings/WorkspaceFolders.tsx). */
+.folders {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.folders > *,
+.folders__list > *,
+.folders__form > * {
+  min-width: 0;
+}
+
+.folders__list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.folders__item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+}
+
+.folders__path {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.folders__form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+
+.folders__field {
+  display: grid;
+  flex: 1;
+  gap: var(--space-1);
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.folders__field > span {
+  font-weight: 500;
+  color: var(--color-text-primary);
+}

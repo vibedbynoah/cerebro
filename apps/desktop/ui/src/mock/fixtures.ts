@@ -94,6 +94,7 @@ export const DEFAULT_SETTINGS: Settings = {
   cleanEnvironment: true,
   integrityCheck: true,
   permissionPrompts: true,
+  blockLocalFetch: true,
   loopbackOnly: true,
   offlineMode: false,
   allowModelDownloads: true,

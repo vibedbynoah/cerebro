@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-builtin-tools"
+description = "Enables the builtin_tools command without any pre-configured scope."
+commands.allow = ["builtin_tools"]
+
+[[permission]]
+identifier = "deny-builtin-tools"
+description = "Denies the builtin_tools command without any pre-configured scope."
+commands.deny = ["builtin_tools"]

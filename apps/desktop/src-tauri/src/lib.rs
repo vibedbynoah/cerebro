@@ -20,6 +20,7 @@ mod mcp_server;
 mod toolcall;
 mod orchestrate;
 mod commands;
+mod builtin_tools;
 mod engine;
 mod hub;
 pub mod navigation;
@@ -73,6 +74,9 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::remote_pair,
             commands::remote_revoke,
             commands::chat_tool_decide,
+            commands::builtin_tools,
+            commands::builtin_folders_get,
+            commands::builtin_folders_set,
             commands::mcp_server_get,
             commands::mcp_server_enable,
             commands::mcp_server_rotate_token,
@@ -86,7 +90,14 @@ pub fn run() -> Result<(), tauri::Error> {
             {
                 use tauri::Manager;
                 mcp::mcp_start_all(app.handle().clone(), app.state::<mcp::Mcp>());
-                app.state::<engine::Engine>().set_tool_host(std::sync::Arc::new(commands::McpToolHost(app.handle().clone())));
+                // Built-in tools (builtin_tools.rs) run only inside the folders the user added on the
+                // Tools screen; the composite host lists them under "cerebro" beside the MCP tools.
+                let workspace = std::sync::Arc::new(builtin_tools::WorkspaceFolders::load(app.handle()));
+                app.manage(std::sync::Arc::clone(&workspace));
+                app.state::<engine::Engine>().set_tool_host(std::sync::Arc::new(builtin_tools::BuiltinTools::new(
+                    std::sync::Arc::new(commands::McpToolHost(app.handle().clone())),
+                    std::sync::Arc::clone(&workspace),
+                )));
                 if let Ok(dir) = app.path().app_data_dir() {
                     app.state::<engine::Engine>().set_ledger_root(dir);
                 }

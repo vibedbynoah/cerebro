@@ -37,6 +37,10 @@ export type ToolRuleNow = "allow" | "ask" | "deny";
 export interface ChatTools {
   rules: Record<string, ToolRuleNow>;
   defaultRule: ToolRuleNow;
+  /** Settings > Protections "Keep web fetches off this network" is off. */
+  allowLocalFetch?: boolean;
+  /** The user's Offline mode setting: built-in tools that touch the network must refuse. */
+  offline: boolean;
 }
 
 export type ToolState = "approval" | "running" | "done" | "denied" | "error";

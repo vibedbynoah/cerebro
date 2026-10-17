@@ -23,16 +23,21 @@ export interface ToolDef {
   description: string;
 }
 
+/** The server name the engine lists the built-in tools under (src-tauri/src/builtin_tools.rs SERVER);
+ *  their policy keys are "cerebro/<tool>", the same "server/tool" shape as an MCP tool's. */
+export const BUILTIN_SERVER = "cerebro";
+const builtinKey = (tool: string): string => `${BUILTIN_SERVER}/${tool}`;
+
 export const TOOLS: readonly ToolDef[] = [
-  { id: "read_file", name: "Read file", source: "built-in", risk: "read", description: "Reads a file you point it at." },
-  { id: "list_dir", name: "List folder", source: "built-in", risk: "read", description: "Lists the files in a folder." },
-  { id: "search_files", name: "Search files", source: "built-in", risk: "read", description: "Searches file contents in a folder." },
-  { id: "edit_file", name: "Edit file", source: "built-in", risk: "write", description: "Changes a file, shown as a diff first." },
-  { id: "write_file", name: "Create file", source: "built-in", risk: "write", description: "Creates a new file." },
-  { id: "run_command", name: "Run command", source: "built-in", risk: "run", description: "Runs a terminal command in a folder you choose." },
-  { id: "run_tests", name: "Run tests", source: "built-in", risk: "run", description: "Runs your project's test command." },
-  { id: "fetch_url", name: "Fetch web page", source: "built-in", risk: "network", description: "Downloads one web page. Off while offline mode is on." },
-  { id: "generate_image", name: "Generate image", source: "built-in", risk: "write", description: "Makes an image with a local image model and saves it." },
+  { id: builtinKey("read_file"), name: "Read file", source: "built-in", risk: "read", description: "Reads a file you point it at." },
+  { id: builtinKey("list_directory"), name: "List folder", source: "built-in", risk: "read", description: "Lists the files in a folder." },
+  { id: builtinKey("search_files"), name: "Search files", source: "built-in", risk: "read", description: "Searches file contents in a folder." },
+  { id: builtinKey("edit_file"), name: "Edit file", source: "built-in", risk: "write", description: "Changes a file, shown as a diff first." },
+  { id: builtinKey("write_file"), name: "Create file", source: "built-in", risk: "write", description: "Creates a new file." },
+  { id: builtinKey("run_command"), name: "Run command", source: "built-in", risk: "run", description: "Runs a terminal command in a folder you choose." },
+  { id: builtinKey("run_tests"), name: "Run tests", source: "built-in", risk: "run", description: "Runs your project's test command." },
+  { id: builtinKey("fetch_url"), name: "Fetch web page", source: "built-in", risk: "network", description: "Downloads one web page. Off while offline mode is on." },
+  { id: builtinKey("generate_image"), name: "Generate image", source: "built-in", risk: "write", description: "Makes an image with a local image model and saves it." },
   { id: "web_search", name: "Web search", source: "plugin", plugin: "Search", risk: "network", description: "Searches the web through the installed search plugin." },
   { id: "git_commit", name: "Git commit", source: "plugin", plugin: "Git", risk: "write", description: "Commits staged changes in a repository." },
   { id: "send_email", name: "Send email", source: "plugin", plugin: "Mail", risk: "network", description: "Sends an email from your configured account." },
@@ -46,7 +51,19 @@ export interface Policy {
   rules: Record<string, Rule>;
 }
 
-export const DEFAULT_POLICY: Policy = { defaultRule: "ask", rules: { read_file: "always", list_dir: "always", search_files: "always" } };
+/** Safe defaults: reading is always allowed, the tools that change files or run commands ask, and
+ *  everything else follows the default rule. */
+export const DEFAULT_POLICY: Policy = {
+  defaultRule: "ask",
+  rules: {
+    [builtinKey("read_file")]: "always",
+    [builtinKey("list_directory")]: "always",
+    [builtinKey("search_files")]: "always",
+    [builtinKey("run_command")]: "ask",
+    [builtinKey("write_file")]: "ask",
+    [builtinKey("edit_file")]: "ask",
+  },
+};
 export const POLICY_KEY = "cerebro-tool-policy";
 
 const isRule = (v: unknown): v is Rule => typeof v === "string" && (RULES as readonly string[]).includes(v);
@@ -130,10 +147,10 @@ export interface ToolCall {
 }
 
 export const SAMPLE_CALLS: readonly ToolCall[] = [
-  { id: "call-cmd", toolId: "run_command", preview: { kind: "command", cwd: "C:\\Users\\you\\code\\app", command: "cargo test --workspace" } },
+  { id: "call-cmd", toolId: builtinKey("run_command"), preview: { kind: "command", cwd: "C:\\Users\\you\\code\\app", command: "cargo test --workspace" } },
   {
     id: "call-diff",
-    toolId: "edit_file",
+    toolId: builtinKey("edit_file"),
     preview: {
       kind: "diff",
       path: "src/config.rs",
@@ -145,7 +162,7 @@ export const SAMPLE_CALLS: readonly ToolCall[] = [
       ],
     },
   },
-  { id: "call-url", toolId: "fetch_url", preview: { kind: "url", method: "GET", url: "https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct" } },
+  { id: "call-url", toolId: builtinKey("fetch_url"), preview: { kind: "url", method: "GET", url: "https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct" } },
   { id: "call-plugin", toolId: "git_commit", preview: { kind: "plugin", plugin: "Git", action: "Commit", details: 'Commit 2 staged files with message "Fix config error handling"' } },
 ];
 

@@ -137,6 +137,13 @@ export interface CerebroService {
   mcpTools(): Promise<McpTool[]>;
   mcpCall(server: string, tool: string, args: unknown): Promise<McpCallResult>;
 
+  // ---- Built-in tools: always offered to the model (server "cerebro"), limited to the folders the
+  // user added on the Tools screen. Empty folder list means every built-in tool refuses. ----
+  builtinTools(): Promise<McpTool[]>;
+  builtinFoldersGet(): Promise<string[]>;
+  /** Validates, saves and returns the new list; rejects when a path does not exist or is not a folder. */
+  builtinFoldersSet(folders: string[]): Promise<string[]>;
+
   // ---- Phone access: off by default; LAN only, QR pairing plus password. ----
   // ---- Cerebro as an MCP server: 127.0.0.1 only, bearer token. ----
   mcpServerGet(): Promise<McpServerView>;

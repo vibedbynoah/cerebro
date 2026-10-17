@@ -182,6 +182,17 @@ const MULTI_GPUS = [
   { name: "Example workstation GPU", vramGiB: 24, powerLimitW: 350 },
 ];
 
+/** The built-in tools (src-tauri/src/builtin_tools.rs) as the Tools screen reads them. Illustrative. */
+const MOCK_BUILTIN_TOOLS: readonly McpTool[] = [
+  { server: "cerebro", name: "read_file", description: "Read a text file from a workspace folder.", input_schema: {} },
+  { server: "cerebro", name: "list_directory", description: "List the entries of a folder in the workspace.", input_schema: {} },
+  { server: "cerebro", name: "search_files", description: "Find lines containing a pattern in the workspace files.", input_schema: {} },
+  { server: "cerebro", name: "write_file", description: "Write (create or replace) a text file in a workspace folder.", input_schema: {} },
+  { server: "cerebro", name: "edit_file", description: "Replace one exact occurrence of old_text in a file.", input_schema: {} },
+  { server: "cerebro", name: "run_command", description: "Run a PowerShell command in the first workspace folder.", input_schema: {} },
+  { server: "cerebro", name: "fetch_url", description: "Fetch a web page as text.", input_schema: {} },
+];
+
 /** The loaded model as the Monitor's simulation needs it: placement and memory from the fit
  *  estimate of its tuned settings, speeds from its (illustrative) tune result. */
 function simModelFor(m: LibraryModel, loadedParams: LoadParams | null, vramGiB: number): SimModel | null {
@@ -245,6 +256,8 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
   let mcp: McpConfig = {
     mcpServers: { files: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "C:/Users/me/Projects"], env: {}, disabled: false } },
   };
+  // The folders the built-in tools may touch (Settings > Tools); illustrative in web mode.
+  let folders: string[] = ["C:\\Users\\me\\Projects"];
   const chatEngine = createMockChat(options.chatSpeed !== undefined ? { speed: options.chatSpeed } : {});
   const tickMs = options.tickMs !== undefined && Number.isFinite(options.tickMs) && options.tickMs > 0 ? options.tickMs : 1000;
   const random = options.random ?? Math.random;
@@ -742,6 +755,15 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
           : [],
       ),
     mcpCall: (_server, tool) => later(0, () => ({ content: [{ type: "text", text: `Mock result of ${tool}` }], isError: false })),
+
+    builtinTools: () => later(0, () => MOCK_BUILTIN_TOOLS.map((t) => ({ ...t }))),
+    builtinFoldersGet: () => later(0, () => [...folders]),
+    builtinFoldersSet: (list) =>
+      later(0, () => {
+        if (!Array.isArray(list) || list.length > 32 || !list.every((f) => typeof f === "string" && f.length > 0 && f.length <= 1024)) throw new TypeError("Invalid workspace folders");
+        folders = [...new Set(list)];
+        return [...folders];
+      }),
 
     mcpServerGet: () => later(0, () => ({ ...mcpSrv })),
     mcpServerEnable: (on) =>

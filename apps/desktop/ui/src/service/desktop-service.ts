@@ -187,6 +187,11 @@ export function createDesktopService(local: CerebroService): CerebroService {
     mcpTools: () => invoke<McpTool[]>("mcp_tools"),
     mcpCall: (server, tool, args) => invoke<McpCallResult>("mcp_call", { server, tool, arguments: args }),
 
+    // Built-in tools: specs in the same shape as mcp_tools; the folder list is saved by the app.
+    builtinTools: () => invoke<McpTool[]>("builtin_tools"),
+    builtinFoldersGet: () => invoke<string[]>("builtin_folders_get"),
+    builtinFoldersSet: (folders) => invoke<string[]>("builtin_folders_set", { folders }),
+
     mcpServerGet: () => invoke<McpServerView>("mcp_server_get"),
     mcpServerEnable: (on) => invoke<McpServerView>("mcp_server_enable", { on }),
     mcpServerRotateToken: () => invoke<McpServerView>("mcp_server_rotate_token"),
