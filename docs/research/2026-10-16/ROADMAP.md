@@ -19,7 +19,8 @@ Status: [x] done and measured, [ ] next. Numbers only from docs/measurements.
 - [x] Turbo: real engine switches, beginner/advanced text, channel badges, saved per machine
 - [x] MCP client (stdio, mcp.json, tools/list, tools/call) + Tools screen section (status, logs, presets, try a tool)
 - [x] Models call MCP tools from Chat (tool-call loop behind the Tools rules) - real Qwen3-0.6B run passes
-- [ ] Cerebro itself as an MCP server (paper 2026-10-17/D part 5)
+- [x] Cerebro itself as an MCP server (Streamable HTTP, loopback + token)
+- [x] Orchestrate mode backend (GVS5H ledger; real 0.6B run correct in 10.7 s)
 - [x] Monitor: real GPU load/temp/power/PCIe/throttle, CPU load, driver (NVML at run time), 60 s history
 - [ ] Monitor: live prefill tok/s, per-tier memory %, disk read
 - [ ] Orchestrate mode (GVS5H, arXiv 2608.26480, github.com/slee-persis/GVS5H, MIT): a manager instance
@@ -32,9 +33,19 @@ Status: [x] done and measured, [ ] next. Numbers only from docs/measurements.
 - [x] Real data only on desktop; 3 Hz live polling (rates per second)
 - [x] GPU decode attention (GQA): 331/297/250 tok/s at 32/2048/4096 ctx, ahead of llama.cpp
 - [ ] CPU decode: 66.9 vs llama.cpp 72.5 (t=16) on 0.6B - next engine item
-- [ ] Duplicate Flash-Next copy in Strata-data (~132 GB): verify byte-for-byte, then remove
+- [x] Duplicate Flash-Next copy removed after SHA-256 match (93.7 GB freed)
 
 ## Drafting policy (credits)
 Boilerplate drafted by free opencode models (`opencode run -m opencode/<model>-free`), reviewed and fixed
 here. Local Flash-Next on Strata reads prompts at 3.5 tok/s on this laptop when RAM is full, so it only
 takes short prompts.
+
+## DeepSeek queue (2026-10-17; prompts in docs/prompts/deepseek-v4.1.md, one worktree each)
+- [~] mcp-http (Streamable HTTP client)   - [~] builtin-tools   - [~] orchestrate-ui
+- [~] mcp-catalogue (from paper H)        - [~] memory-estimate (paper G s.3-4)   - [~] training v1 (Unsloth sidecar)
+- [ ] permissions: allow/ask/deny broker fail-closed, preset ladder, sandbox (paper I #1-2, #4)
+- [ ] tool hygiene: output bounds + spill files, read-before-write (paper I #5-6)
+- [ ] agent tools: todo, ask-user, plan mode (paper I #12, #14, #16)
+- [ ] local API: OpenAI /v1/chat/completions + Anthropic /v1/messages on one loopback port (paper G #18)
+- [ ] multimodal: mmproj loader, image input in Chat (paper G #14) - engine work, Claude
+- [ ] CPU decode: rows4 kernel written + bit-identical, benchmark on a quiet machine - Claude
