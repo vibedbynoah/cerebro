@@ -80,6 +80,16 @@ describe("effort and reasoning source (effort-levels.md)", () => {
     expect(parsePrefs("{bad")).toEqual(DEFAULT_PREFS);
     expect(parsePrefs(JSON.stringify({ effort: "ultra", source: "both", base: 5 }))).toEqual({ ...DEFAULT_PREFS, source: "both" });
   });
+  it("keeps the Orchestrate toggle and steppers in range, defaults 3 and 3", () => {
+    expect(DEFAULT_PREFS.orchestrate).toBe(false);
+    expect([DEFAULT_PREFS.workers, DEFAULT_PREFS.rounds]).toEqual([3, 3]);
+    const p = parsePrefs(JSON.stringify({ orchestrate: true, workers: 6, rounds: 8 }));
+    expect([p.orchestrate, p.workers, p.rounds]).toEqual([true, 6, 8]);
+    for (const bad of [{ workers: 0 }, { workers: 7 }, { workers: 2.5 }, { workers: "6" }, { rounds: 0 }, { rounds: 9 }]) {
+      const x = parsePrefs(JSON.stringify(bad));
+      expect([x.workers, x.rounds], JSON.stringify(bad)).toEqual([3, 3]);
+    }
+  });
 });
 
 // ---- Markdown: structure and the XSS corpus ----------------------------------------------------
@@ -189,6 +199,36 @@ describe("chat store", () => {
     expect(titleFrom("  hello   world ")).toBe("hello world");
     expect(titleFrom("x".repeat(80))).toHaveLength(48);
   });
+  it("keeps a reply's ledger through a reload, and drops anything foreign in it", () => {
+    const raw = JSON.stringify([
+      {
+        id: "c1",
+        title: "T",
+        updatedAt: 1,
+        messages: [
+          {
+            id: "m1",
+            role: "assistant",
+            text: "done",
+            ledger: {
+              dir: "C:\\ledgers\\r1",
+              step: { role: "worker 2", round: 1 },
+              files: { "plan.md": "the plan", "notes.md": 7, "tasks.json": "[]", "../evil": "x", "result.md": "r".repeat(21_000) },
+            },
+          },
+          { id: "m2", role: "assistant", text: "normal", ledger: { dir: "d", step: { role: "hacker", round: -1 }, files: "x" } },
+          { id: "m3", role: "assistant", text: "no ledger" },
+        ],
+      },
+    ]);
+    const [c] = parseConversations(raw);
+    const l = c!.messages[0]!.ledger!;
+    expect(l.dir).toBe("C:\\ledgers\\r1");
+    expect(l.step).toEqual({ role: "worker 2", round: 1 });
+    expect(Object.keys(l.files).sort()).toEqual(["plan.md", "tasks.json"]);
+    expect(c!.messages[1]!.ledger).toEqual({ dir: "d", step: null, files: {} });
+    expect(c!.messages[2]!.ledger).toBeNull();
+  });
 });
 
 describe("mock chat stream", () => {
@@ -229,6 +269,32 @@ describe("mock chat stream", () => {
     const ev2: ChatEvent[] = [];
     await createMockChat({ speed: 1000 }).chat(req("/echo **x**", { native: null, passes: 0 }), (e) => ev2.push(e), new AbortController().signal);
     expect(ev2.filter((e) => e.type === "token").map((e) => (e as { text: string }).text).join("")).toBe("**x**");
+  });
+  it("plays a whole Orchestrate run: ledger folder, steps, files, then the answer", async () => {
+    const events: ChatEvent[] = [];
+    await createMockChat({ speed: 1000, orchestrateSpeed: 1000 }).chat(req("What is 14 times 7?", { orchestrate: { workers: 2, rounds: 2 } }), (e) => events.push(e), new AbortController().signal);
+    const ledger = events.flatMap((e) => (e.type === "ledger" ? [e] : []));
+    expect(ledger[0]!.dir).toMatch(/orchestrate/);
+    expect(ledger.map((e) => e.step).filter(Boolean)).toEqual(["plan", "ideate", "manage", "worker 1", "worker 2", "manage", "finalize"]);
+    const files = ledger.flatMap((e) => (e.file ? [e.file] : []));
+    expect(files).toEqual(["plan.md", "notes.md", "tasks.json", "notes.md", "result.md", "tasks.json", "result.md"]);
+    expect(JSON.parse(ledger.find((e) => e.file === "tasks.json")!.content!).map((t: { status: string }) => t.status)).toContain("todo");
+    expect(events.some((e) => e.type === "thinking" && e.text.includes("worker"))).toBe(true);
+    const answer = events.filter((e) => e.type === "token").map((e) => (e as { text: string }).text).join("");
+    expect(answer).toMatch(/The same result comes from regrouping/);
+    const done = events.at(-1) as Extract<ChatEvent, { type: "done" }>;
+    expect(done.stats.stopped).toBe(false);
+  });
+  it("a stopped Orchestrate run keeps the partial ledger and sends no answer", async () => {
+    const ctl = new AbortController();
+    const events: ChatEvent[] = [];
+    await createMockChat({ speed: 1000, orchestrateSpeed: 1000 }).chat(req("a goal", { orchestrate: { workers: 2, rounds: 2 } }), (e) => (events.push(e), e.type === "ledger" && e.step === "worker 1" && ctl.abort()), ctl.signal);
+    const steps = events.flatMap((e) => (e.type === "ledger" && e.step ? [e.step] : []));
+    expect(steps).toEqual(["plan", "ideate", "manage", "worker 1"]);
+    expect(events.some((e) => e.type === "ledger" && e.file === "plan.md")).toBe(true);
+    expect(events.some((e) => e.type === "token")).toBe(false);
+    const done = events.at(-1) as Extract<ChatEvent, { type: "done" }>;
+    expect(done.stats.stopped).toBe(true);
   });
   it("rejects a malformed request", async () => {
     await expect(createMockChat().chat({ ...req("x"), turns: [] }, () => {}, new AbortController().signal)).rejects.toThrow();

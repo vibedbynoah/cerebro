@@ -74,6 +74,8 @@ export interface MockServiceOptions {
   failMetrics?: boolean;
   /** Chat playback speed multiplier (tests use 20). */
   chatSpeed?: number;
+  /** Orchestrate playback speed multiplier (tests use 1: the steps are visible). */
+  orchestrateSpeed?: number;
   /** Clock for the Monitor's simulation (epoch ms). Default Date.now. */
   now?: () => number;
 }
@@ -96,6 +98,8 @@ const MOCK_FAILURES: Readonly<Record<string, MockServiceOptions>> = {
   "monitor-multi-gpu": { multiGpu: true },
   "fail-metrics": { failMetrics: true },
   "fast-chat": { chatSpeed: 20 },
+  // Orchestrate at real speed: fast enough to test, slow enough to watch each role start.
+  orchestrate: { orchestrateSpeed: 1 },
   online: { network: "online" },
 };
 
@@ -245,7 +249,7 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
   let mcp: McpConfig = {
     mcpServers: { files: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "C:/Users/me/Projects"], env: {}, disabled: false } },
   };
-  const chatEngine = createMockChat(options.chatSpeed !== undefined ? { speed: options.chatSpeed } : {});
+  const chatEngine = createMockChat({ ...(options.chatSpeed !== undefined ? { speed: options.chatSpeed } : {}), ...(options.orchestrateSpeed !== undefined ? { orchestrateSpeed: options.orchestrateSpeed } : {}) });
   const tickMs = options.tickMs !== undefined && Number.isFinite(options.tickMs) && options.tickMs > 0 ? options.tickMs : 1000;
   const random = options.random ?? Math.random;
   const network: NetworkState = options.network ?? "offline";

@@ -31,7 +31,19 @@ export interface ChatRequest {
   source: ReasoningSource;
   /** MCP tools the model may call, with the user's rule per "server/tool"; null = no tools. */
   tools?: ChatTools | null;
+  /** Orchestrate mode: several instances of the model through a shared ledger; null = off. */
+  orchestrate?: OrchestrateRequest | null;
 }
+
+/** Workers per round (1-6) and rounds before the result is finalized (1-8). */
+export interface OrchestrateRequest {
+  workers: number;
+  rounds: number;
+}
+
+/** The ledger files Orchestrate mode writes, in the order the panel shows them. */
+export type LedgerFileName = "plan.md" | "notes.md" | "tasks.json" | "result.md";
+export const LEDGER_FILES: readonly LedgerFileName[] = ["plan.md", "notes.md", "tasks.json", "result.md"];
 
 export type ToolRuleNow = "allow" | "ask" | "deny";
 export interface ChatTools {
@@ -59,6 +71,8 @@ export type ChatEvent =
   | { type: "check"; pass: 1 | 2; text: string }
   | { type: "image"; prompt: string; seed: number; width: number; height: number }
   | { type: "tool"; id: string; server: string; name: string; arguments: unknown; state: ToolState; result: string | null; error: string | null }
+  /** Orchestrate mode: a role started (`step`), or a ledger file changed (`file` + whole new text). */
+  | { type: "ledger"; step: string | null; round: number; file: LedgerFileName | null; content: string | null; dir: string | null }
   | { type: "done"; stats: ChatStats }
   | { type: "error"; message: string };
 

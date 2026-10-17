@@ -165,9 +165,23 @@ describe("isolation hook", () => {
     expect(hook({ cmd: "app_info", callback: 1, error: 2 })).toBeTruthy();
   });
 
-  it("checks the shape of engine-switch and MCP arguments", () => {
+  it("checks the shape of engine-switch, MCP and Orchestrate arguments", () => {
     const ok = (cmd: string, payload: unknown) => expect(() => hook({ cmd, callback: 1, error: 2, payload })).not.toThrow();
     const no = (cmd: string, payload: unknown) => expect(() => hook({ cmd, callback: 1, error: 2, payload })).toThrow();
+    const chatReq = (extra: object) => ({
+      request: { modelId: "m1", systemPrompt: "s", turns: [{ role: "user", text: "hi" }], sampler: {}, ...extra },
+      onEvent: "__CHANNEL__:1",
+    });
+    ok("chat_send", chatReq({}));
+    ok("chat_send", chatReq({ orchestrate: null }));
+    ok("chat_send", chatReq({ orchestrate: { workers: 3, rounds: 3 } }));
+    no("chat_send", chatReq({ orchestrate: { workers: 0, rounds: 3 } }));
+    no("chat_send", chatReq({ orchestrate: { workers: 7, rounds: 3 } }));
+    no("chat_send", chatReq({ orchestrate: { workers: 3, rounds: 9 } }));
+    no("chat_send", chatReq({ orchestrate: { workers: 3.5, rounds: 3 } }));
+    no("chat_send", chatReq({ orchestrate: { workers: "3", rounds: 3 } }));
+    no("chat_send", chatReq({ orchestrate: { workers: 3, rounds: 3, extra: 1 } }));
+    no("chat_send", chatReq({ orchestrate: "on" }));
     ok("switch_set", { id: "gpu_mma_matmul", value: 0 });
     no("switch_set", { id: "gpu_mma_matmul", value: 0.5 });
     no("switch_set", { id: "../x", value: 1 });
