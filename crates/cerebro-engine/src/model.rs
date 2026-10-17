@@ -396,6 +396,40 @@ impl Model {
     fn embed_row(&self, token: u32, out: &mut [f32]) {
         dequant_row(self.embed.dtype, self.row(&self.embed, token as usize), out);
     }
+
+    /// out[t * rows + r] = M x_t for T tokens (`xs` token-major, `qas` the same rows quantised). Each
+    /// weight row is read once and dotted against every token while it is in L1, so weights cross the
+    /// memory bus once per batch instead of once per token.
+    fn matmul_batch(&self, m: &Mat, xs: &[f32], qas: &[QAct], out: &mut [f32]) {
+        let g: &Gguf = &self.gguf;
+        let (cols, rows, rb) = (m.cols, m.rows, m.row_bytes);
+        assert!(out.len() >= qas.len() * rows && xs.len() >= qas.len() * cols);
+        let pool = crate::pool::global();
+        let chunk = (rows / (pool.threads() * 4)).clamp(4, 256);
+        let o = SyncPtr(out.as_mut_ptr());
+        pool.run(rows.div_ceil(chunk), &|i| {
+            let all = g.bytes_at(m.offset, rows * rb);
+            for r in i * chunk..((i + 1) * chunk).min(rows) {
+                let row = &all[r * rb..(r + 1) * rb];
+                let mut t0 = 0;
+                if m.dtype == DType::Q8_0 {
+                    while t0 + 4 <= qas.len() {
+                        let v = crate::quant::dot_q8_0_q8_x4(row, [&qas[t0], &qas[t0 + 1], &qas[t0 + 2], &qas[t0 + 3]]);
+                        for (k, v) in v.into_iter().enumerate() {
+                            // SAFETY: as below.
+                            unsafe { *o.at((t0 + k) * rows + r) = v };
+                        }
+                        t0 += 4;
+                    }
+                }
+                for (t, qa) in qas.iter().enumerate().skip(t0) {
+                    let v = dot_any(m.dtype, row, &xs[t * cols..(t + 1) * cols], qa);
+                    // SAFETY: (t, r) is written by exactly this item; out holds qas.len() * rows values.
+                    unsafe { *o.at(t * rows + r) = v };
+                }
+            }
+        });
+    }
 }
 
 /// One weight row times the activations: integer kernels for Q8_0 and the K-quants, float otherwise.
@@ -429,6 +463,21 @@ impl MoeScratch {
 
 /// Positions per CPU attention work item.
 const ATT_SPAN: usize = 256;
+
+/// Tokens per batched CPU prefill step: a chunk's activations stay in L2 while each weight row is
+/// reused across them.
+const CPU_CHUNK: usize = 32;
+
+/// A raw output pointer shared by parallel work items that write disjoint elements.
+struct SyncPtr(*mut f32);
+// SAFETY: callers guarantee every element is written by at most one item.
+unsafe impl Sync for SyncPtr {}
+unsafe impl Send for SyncPtr {}
+impl SyncPtr {
+    fn at(&self, i: usize) -> *mut f32 {
+        self.0.wrapping_add(i)
+    }
+}
 
 /// Router: softmax over every expert's score, keep the top `k`, renormalise their weights to sum to 1
 /// (Qwen3 MoE). Writes (expert, weight) pairs into `chosen`.
@@ -632,8 +681,15 @@ impl Session {
             self.stats = Stats { prompt_tokens: prompt.len(), reused_tokens: common, prefill_ms: t0.elapsed().as_secs_f64() * 1000.0, ..Default::default() };
             return Ok(common);
         }
-        for &tok in &prompt[common..] {
-            self.step(m, tok);
+        let dense = m.layers.iter().all(|l| matches!(l.ffn, Ffn::Dense { .. }));
+        if dense && crate::switches::enabled(crate::switches::CPU_BATCH_PREFILL) {
+            for c in prompt[common..].chunks(CPU_CHUNK) {
+                self.step_batch(m, c);
+            }
+        } else {
+            for &tok in &prompt[common..] {
+                self.step(m, tok);
+            }
         }
         self.stats = Stats { prompt_tokens: prompt.len(), reused_tokens: common, prefill_ms: t0.elapsed().as_secs_f64() * 1000.0, ..Default::default() };
         Ok(common)
@@ -647,6 +703,128 @@ impl Session {
         s.max_ctx = max_ctx;
         s.gpu = Some(crate::gpu::GpuState::load(m, max_ctx)?);
         Ok(s)
+    }
+
+    /// Appends `toks` (dense models): the same math as `step` for a chunk of tokens, with every
+    /// matrix applied to the whole chunk at once (`Model::matmul_batch`). Writes logits for the last.
+    fn step_batch(&mut self, m: &Model, toks: &[u32]) {
+        let c = &m.cfg;
+        let (nt, dim, hd, ffn) = (toks.len(), c.dim, c.head_dim, c.ffn);
+        let (qd, kvd) = (c.n_head * hd, c.n_kv * hd);
+        let group = c.n_head / c.n_kv;
+        let scale = 1.0 / (hd as f32).sqrt();
+        let pos0 = self.tokens.len();
+        let mut x = vec![0f32; nt * dim];
+        let mut h = vec![0f32; nt * dim];
+        let mut q = vec![0f32; nt * qd];
+        let mut kb = vec![0f32; nt * kvd];
+        let mut vb = vec![0f32; nt * kvd];
+        let mut att = vec![0f32; nt * qd];
+        let mut tmp = vec![0f32; nt * dim];
+        let mut gt = vec![0f32; nt * ffn];
+        let mut ut = vec![0f32; nt * ffn];
+        let mut qa_dim: Vec<QAct> = (0..nt).map(|_| QAct::new(dim)).collect();
+        let mut qa_att: Vec<QAct> = (0..nt).map(|_| QAct::new(qd)).collect();
+        let mut qa_ffn: Vec<QAct> = (0..nt).map(|_| QAct::new(ffn)).collect();
+        for (t, &tok) in toks.iter().enumerate() {
+            m.embed_row(tok, &mut x[t * dim..(t + 1) * dim]);
+        }
+        let cs: Vec<Vec<(f32, f32)>> = (0..nt)
+            .map(|t| m.inv_freq.iter().map(|f| ((pos0 + t) as f32 * f).sin_cos()).map(|(s, c)| (c, s)).collect())
+            .collect();
+        let norm_quant = |x: &[f32], w: &[f32], h: &mut [f32], qa: &mut [QAct]| {
+            for t in 0..nt {
+                rmsnorm(&x[t * dim..(t + 1) * dim], w, c.eps, &mut h[t * dim..(t + 1) * dim]);
+                qa[t].quantize(&h[t * dim..(t + 1) * dim]);
+            }
+        };
+        for (li, l) in m.layers.iter().enumerate() {
+            norm_quant(&x, &l.attn_norm, &mut h, &mut qa_dim);
+            m.matmul_batch(&l.q, &h, &qa_dim, &mut q);
+            m.matmul_batch(&l.k, &h, &qa_dim, &mut kb);
+            m.matmul_batch(&l.v, &h, &qa_dim, &mut vb);
+            for t in 0..nt {
+                for hh in 0..c.n_head {
+                    let qh = &mut q[t * qd + hh * hd..t * qd + (hh + 1) * hd];
+                    if let Some(w) = &l.q_norm {
+                        rmsnorm_inplace(qh, w, c.eps);
+                    }
+                    rope(qh, &cs[t]);
+                }
+                for kh in 0..c.n_kv {
+                    let kk = &mut kb[t * kvd + kh * hd..t * kvd + (kh + 1) * hd];
+                    if let Some(w) = &l.k_norm {
+                        rmsnorm_inplace(kk, w, c.eps);
+                    }
+                    rope(kk, &cs[t]);
+                }
+                let p = pos0 + t;
+                self.k[li][p * kvd..(p + 1) * kvd].copy_from_slice(&kb[t * kvd..(t + 1) * kvd]);
+                self.v[li][p * kvd..(p + 1) * kvd].copy_from_slice(&vb[t * kvd..(t + 1) * kvd]);
+            }
+            // Causal attention, one work item per (token, query head).
+            let (kc, vc, qr) = (&self.k[li], &self.v[li], &q);
+            let out = SyncPtr(att.as_mut_ptr());
+            crate::pool::global().run(nt * c.n_head, &|item| {
+                let (t, hh) = (item / c.n_head, item % c.n_head);
+                let kvh = hh / group;
+                let len = pos0 + t + 1;
+                let qv = &qr[t * qd + hh * hd..t * qd + (hh + 1) * hd];
+                thread_local!(static SC: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) });
+                SC.with(|sc| {
+                    let mut sc = sc.borrow_mut();
+                    sc.resize(len, 0.0);
+                    let mut mx = f32::NEG_INFINITY;
+                    for p in 0..len {
+                        let v = crate::quant::dot_f32(qv, &kc[p * kvd + kvh * hd..p * kvd + (kvh + 1) * hd]) * scale;
+                        sc[p] = v;
+                        mx = mx.max(v);
+                    }
+                    let mut sum = 0.0;
+                    for v in sc.iter_mut() {
+                        *v = crate::quant::exp_fast(*v - mx);
+                        sum += *v;
+                    }
+                    // SAFETY: (t, hh) owns this head slice of att.
+                    let o = unsafe { std::slice::from_raw_parts_mut(out.at(t * qd + hh * hd), hd) };
+                    o.fill(0.0);
+                    for p in 0..len {
+                        crate::quant::axpy(o, sc[p], &vc[p * kvd + kvh * hd..p * kvd + (kvh + 1) * hd]);
+                    }
+                    // Normalise last, in the same order as `step`, so both paths give identical results.
+                    for v in o.iter_mut() {
+                        *v /= sum;
+                    }
+                });
+            });
+            for t in 0..nt {
+                qa_att[t].quantize(&att[t * qd..(t + 1) * qd]);
+            }
+            m.matmul_batch(&l.o, &att, &qa_att, &mut tmp);
+            for i in 0..nt * dim {
+                x[i] += tmp[i];
+            }
+            norm_quant(&x, &l.ffn_norm, &mut h, &mut qa_dim);
+            let Ffn::Dense { gate, up, down } = &l.ffn else { unreachable!("step_batch needs a dense model") };
+            m.matmul_batch(gate, &h, &qa_dim, &mut gt);
+            m.matmul_batch(up, &h, &qa_dim, &mut ut);
+            for i in 0..nt * ffn {
+                let g = gt[i];
+                gt[i] = g / (1.0 + crate::quant::exp_fast(-g)) * ut[i];
+            }
+            for t in 0..nt {
+                qa_ffn[t].quantize(&gt[t * ffn..(t + 1) * ffn]);
+            }
+            m.matmul_batch(down, &gt, &qa_ffn, &mut tmp);
+            for i in 0..nt * dim {
+                x[i] += tmp[i];
+            }
+        }
+        let last = &mut x[(nt - 1) * dim..nt * dim];
+        rmsnorm_inplace(last, &m.out_norm, c.eps);
+        self.qa_dim.quantize(last);
+        m.matvec(&m.output, last, &self.qa_dim, &mut self.logits);
+        self.tokens.extend_from_slice(toks);
     }
 
     pub fn step(&mut self, m: &Model, token: u32) {

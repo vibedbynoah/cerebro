@@ -459,6 +459,46 @@ unsafe fn dot_q8_0_q8_avx2(row: &[u8], a: &QAct) -> f32 {
     _mm_cvtss_f32(s)
 }
 
+/// Q8_0 row times four tokens' activations at once: each weight block is loaded and sign-split once
+/// and reused for the four tokens (batched prefill). Same per-token result as `dot_q8_0_q8`.
+pub fn dot_q8_0_q8_x4(row: &[u8], a: [&QAct; 4]) -> [f32; 4] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avxvnni") {
+            // SAFETY: AVX-VNNI (which implies AVX2) was checked at run time just above.
+            return unsafe { dot_q8_0_q8_x4_vnni(row, a) };
+        }
+    }
+    [dot_q8_0_q8(row, a[0]), dot_q8_0_q8(row, a[1]), dot_q8_0_q8(row, a[2]), dot_q8_0_q8(row, a[3])]
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,avxvnni")]
+unsafe fn dot_q8_0_q8_x4_vnni(row: &[u8], a: [&QAct; 4]) -> [f32; 4] {
+    use std::arch::x86_64::*;
+    let mut acc = [_mm256_setzero_ps(); 4];
+    for bi in 0..a[0].d.len() {
+        let b = row.as_ptr().add(bi * 34);
+        let wd = f16_to_f32(u16::from_le_bytes([*b, *b.add(1)]));
+        let w = _mm256_loadu_si256(b.add(2) as *const __m256i);
+        let aw = _mm256_sign_epi8(w, w);
+        for k in 0..4 {
+            let x = _mm256_loadu_si256(a[k].q.as_ptr().add(bi * 32) as *const __m256i);
+            let p32 = _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), aw, _mm256_sign_epi8(x, w));
+            acc[k] = _mm256_fmadd_ps(_mm256_cvtepi32_ps(p32), _mm256_set1_ps(wd * a[k].d[bi]), acc[k]);
+        }
+    }
+    let mut out = [0f32; 4];
+    for k in 0..4 {
+        let hi = _mm256_extractf128_ps(acc[k], 1);
+        let s = _mm_add_ps(hi, _mm256_castps256_ps128(acc[k]));
+        let s = _mm_add_ps(s, _mm_movehl_ps(s, s));
+        let s = _mm_add_ss(s, _mm_shuffle_ps(s, s, 1));
+        out[k] = _mm_cvtss_f32(s);
+    }
+    out
+}
+
 /// AVX-VNNI (Alder Lake and newer): one vpdpbusd replaces maddubs + madd per 32 values.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma,avxvnni")]
