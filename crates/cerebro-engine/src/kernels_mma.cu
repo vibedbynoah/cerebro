@@ -8,6 +8,8 @@
 // with cp.async. 4 warps in a 2x2 grid, each computing 32 rows x 32 tokens (2 x 4 MMA tiles).
 // Requires cols % 32 == 0; rows and T are arbitrary.
 
+#include <cuda_fp16.h>
+
 #define BM 64
 #define BN 64
 #define BK 128
@@ -135,4 +137,141 @@ extern "C" __global__ void __launch_bounds__(128) matmul_q8_mma(
                     *o = add ? *o + acc[i][j][e] : acc[i][j][e];
                 }
             }
+}
+
+// Causal flash attention for prompt processing on f16 tensor cores (head_dim 128). A block takes one
+// query head and 64 tokens (16 per warp). Per tile of 64 cached keys: S = Q K^T with m16n8k16 MMAs,
+// online softmax in registers (exp2 domain, scale folded into Q), then O += P V with P reused straight
+// from the S accumulators as the A operand and V fragments read with ldmatrix.trans.
+// Q rows come from the fused QKV buffer (f32, RoPE already applied); K/V from the f16 caches.
+#define FHD 128
+#define FKT 64
+#define FLD (FHD + 8) // padded smem row (272 bytes): conflict-free fragment loads and ldmatrix
+
+__device__ __forceinline__ unsigned pack_h2(float a, float b) {
+    __half2 h = __floats2half2_rn(a, b);
+    return *reinterpret_cast<unsigned*>(&h);
+}
+
+__device__ __forceinline__ void mma16816(float* c, const unsigned* a, unsigned b0, unsigned b1) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+        : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+
+extern "C" __global__ void __launch_bounds__(128) attn_prefill_mma(
+    const float* __restrict__ qkv, const __half* __restrict__ kc, const __half* __restrict__ vc,
+    float* __restrict__ out, int n_head, int n_kv, const int* __restrict__ posp, int group, float scale, int T) {
+    __shared__ __align__(16) __half ks[FKT * FLD];
+    __shared__ __align__(16) __half vs[FKT * FLD];
+    const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, tg = lane & 3;
+    const int h = blockIdx.x, kvh = h / group, t0 = blockIdx.y * 64;
+    const int pos0 = *posp;
+    const int row = n_head * FHD + 2 * n_kv * FHD, kvd = n_kv * FHD;
+    const int qa = t0 + warp * 16 + g, qb = qa + 8; // this thread's two query rows
+    const float qsc = scale * 1.4426950408889634f;
+
+    // Q fragments for 8 k-steps of 16 dims.
+    unsigned qf[8][4];
+    {
+        const float* ra = qkv + (size_t)min(qa, T - 1) * row + h * FHD;
+        const float* rb = qkv + (size_t)min(qb, T - 1) * row + h * FHD;
+        #pragma unroll
+        for (int k = 0; k < 8; ++k) {
+            int d = k * 16 + tg * 2;
+            float2 a0 = *reinterpret_cast<const float2*>(ra + d), a2 = *reinterpret_cast<const float2*>(ra + d + 8);
+            float2 b0 = *reinterpret_cast<const float2*>(rb + d), b2 = *reinterpret_cast<const float2*>(rb + d + 8);
+            qf[k][0] = pack_h2(a0.x * qsc, a0.y * qsc);
+            qf[k][1] = pack_h2(b0.x * qsc, b0.y * qsc);
+            qf[k][2] = pack_h2(a2.x * qsc, a2.y * qsc);
+            qf[k][3] = pack_h2(b2.x * qsc, b2.y * qsc);
+        }
+    }
+    float o[16][4];
+    #pragma unroll
+    for (int n = 0; n < 16; ++n) o[n][0] = o[n][1] = o[n][2] = o[n][3] = 0.f;
+    float ma = -1e30f, mb = -1e30f, la = 0.f, lb = 0.f;
+    const int lim_a = pos0 + qa, lim_b = pos0 + qb; // last key each row may see
+    const int nkeys = pos0 + min(T, t0 + 64);
+    const int warp_last = pos0 + t0 + warp * 16 + 15;
+
+    for (int k0 = 0; k0 < nkeys; k0 += FKT) {
+        __syncthreads();
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            int c = tid + i * 128, r = c >> 4, d = (c & 15) * 8, p = k0 + r;
+            bool ok = p < nkeys;
+            size_t src = ok ? (size_t)p * kvd + kvh * FHD + d : 0;
+            cp_async16(&ks[r * FLD + d], kc + src, ok);
+            cp_async16(&vs[r * FLD + d], vc + src, ok);
+        }
+        cp_commit();
+        cp_wait<0>();
+        __syncthreads();
+        if (k0 > warp_last) continue; // every key in this tile is in this warp's future
+
+        float s[8][4];
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            s[j][0] = s[j][1] = s[j][2] = s[j][3] = 0.f;
+            const __half* kr = &ks[(j * 8 + g) * FLD + tg * 2];
+            #pragma unroll
+            for (int k = 0; k < 8; ++k)
+                mma16816(s[j], qf[k], *reinterpret_cast<const unsigned*>(kr + k * 16),
+                         *reinterpret_cast<const unsigned*>(kr + k * 16 + 8));
+        }
+        // Causal mask and row maxima (each row's 64 scores live in the 4 threads of a quad).
+        float xa = -1e30f, xb = -1e30f;
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            int p = k0 + j * 8 + tg * 2;
+            if (p > lim_a) s[j][0] = -INFINITY;
+            if (p + 1 > lim_a) s[j][1] = -INFINITY;
+            if (p > lim_b) s[j][2] = -INFINITY;
+            if (p + 1 > lim_b) s[j][3] = -INFINITY;
+            xa = fmaxf(xa, fmaxf(s[j][0], s[j][1]));
+            xb = fmaxf(xb, fmaxf(s[j][2], s[j][3]));
+        }
+        xa = fmaxf(xa, __shfl_xor_sync(0xffffffff, xa, 1)); xa = fmaxf(xa, __shfl_xor_sync(0xffffffff, xa, 2));
+        xb = fmaxf(xb, __shfl_xor_sync(0xffffffff, xb, 1)); xb = fmaxf(xb, __shfl_xor_sync(0xffffffff, xb, 2));
+        float na = fmaxf(ma, xa), nb = fmaxf(mb, xb);
+        float ca = exp2f(ma - na), cb = exp2f(mb - nb);
+        ma = na; mb = nb;
+        float sa = 0.f, sb = 0.f;
+        unsigned pf[4][4]; // P as A fragments for 4 k-steps of 16 keys
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            float p0 = exp2f(s[j][0] - na), p1 = exp2f(s[j][1] - na), p2 = exp2f(s[j][2] - nb), p3 = exp2f(s[j][3] - nb);
+            sa += p0 + p1; sb += p2 + p3;
+            pf[j >> 1][(j & 1) * 2] = pack_h2(p0, p1);
+            pf[j >> 1][(j & 1) * 2 + 1] = pack_h2(p2, p3);
+        }
+        la = la * ca + sa; lb = lb * cb + sb; // per-thread partial sums; reduced across the quad at the end
+        #pragma unroll
+        for (int n = 0; n < 16; ++n) { o[n][0] *= ca; o[n][1] *= ca; o[n][2] *= cb; o[n][3] *= cb; }
+        // O += P V. ldmatrix.x4.trans: lanes 0-15 address keys kk*16 + (lane & 15) at dims n*8, lanes
+        // 16-31 the same keys at dims n*8 + 8: B fragments for two n-tiles per instruction.
+        #pragma unroll
+        for (int kk = 0; kk < 4; ++kk) {
+            #pragma unroll
+            for (int n = 0; n < 16; n += 2) {
+                const __half* vp = &vs[(kk * 16 + (lane & 15)) * FLD + n * 8 + (lane >> 4) * 8];
+                unsigned sp = (unsigned)__cvta_generic_to_shared(vp), b0, b1, b2, b3;
+                asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                             : "=r"(b0), "=r"(b1), "=r"(b2), "=r"(b3) : "r"(sp));
+                mma16816(o[n], pf[kk], b0, b1);
+                mma16816(o[n + 1], pf[kk], b2, b3);
+            }
+        }
+    }
+    la += __shfl_xor_sync(0xffffffff, la, 1); la += __shfl_xor_sync(0xffffffff, la, 2);
+    lb += __shfl_xor_sync(0xffffffff, lb, 1); lb += __shfl_xor_sync(0xffffffff, lb, 2);
+    float ia = la > 0.f ? 1.f / la : 0.f, ib = lb > 0.f ? 1.f / lb : 0.f;
+    #pragma unroll
+    for (int n = 0; n < 16; ++n) {
+        int d = n * 8 + tg * 2;
+        if (qa < T) *reinterpret_cast<float2*>(out + (size_t)qa * n_head * FHD + h * FHD + d) = make_float2(o[n][0] * ia, o[n][1] * ia);
+        if (qb < T) *reinterpret_cast<float2*>(out + (size_t)qb * n_head * FHD + h * FHD + d) = make_float2(o[n][2] * ib, o[n][3] * ib);
+    }
 }

@@ -83,6 +83,8 @@ struct Funcs {
     matmul_b: CudaFunction,
     /// Tensor-core prefill matmul (sm_80+); None on older GPUs or with CEREBRO_NO_MMA set.
     matmul_mma: Option<CudaFunction>,
+    /// Tensor-core flash attention for prefill, head size 128 (sm_80+).
+    attn_mma: Option<CudaFunction>,
     silu_b: CudaFunction,
     attn_pre: CudaFunction,
     moe_matvec: CudaFunction,
@@ -389,13 +391,15 @@ impl GpuState {
         let module = ctx.load_module(Ptx::from_src(PTX)).map_err(gerr)?;
         let lf = |n: &str| module.load_function(n).map_err(gerr);
         let mma_ok = ctx.compute_capability().map_err(gerr)?.0 >= 8 && std::env::var_os("CEREBRO_NO_MMA").is_none();
-        let matmul_mma = if mma_ok {
-            Some(ctx.load_module(Ptx::from_src(PTX_MMA)).map_err(gerr)?.load_function("matmul_q8_mma").map_err(gerr)?)
+        let (matmul_mma, attn_mma) = if mma_ok {
+            let m = ctx.load_module(Ptx::from_src(PTX_MMA)).map_err(gerr)?;
+            (Some(m.load_function("matmul_q8_mma").map_err(gerr)?), if std::env::var_os("CEREBRO_NO_MMA_ATTN").is_none() { Some(m.load_function("attn_prefill_mma").map_err(gerr)?) } else { None })
         } else {
-            None
+            (None, None)
         };
         let f = Funcs {
             matmul_mma,
+            attn_mma,
             matvec: lf("matvec_q8")?,
             rmsnorm_quant: lf("rmsnorm_quant")?,
             quant: lf("quantize_q8")?,
@@ -729,7 +733,11 @@ impl GpuState {
         let (n_head, n_kv, hd) = (sh.n_head as i32, sh.n_kv as i32, sh.hd as i32);
         let group = (sh.n_head / sh.n_kv) as i32;
         let scale = 1.0f32 / (sh.hd as f32).sqrt();
-        if sh.hd == 128 && sh.n_head / sh.n_kv <= 64 {
+        if let (Some(k), 128) = (&f.attn_mma, sh.hd) {
+            let ti = t as i32;
+            let cfg = LaunchConfig { grid_dim: (sh.n_head as u32, t.div_ceil(64) as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
+            unsafe { s.launch_builder(k).arg(qkv).arg(kc).arg(vc).arg(att).arg(&n_head).arg(&n_kv).arg(pos0).arg(&group).arg(&scale).arg(&ti).launch(cfg) }.map_err(gerr)?;
+        } else if sh.hd == 128 && sh.n_head / sh.n_kv <= 64 {
             let qt = (64 / (sh.n_head / sh.n_kv)).max(1);
             let (ti, qti) = (t as i32, qt as i32);
             let cfg = LaunchConfig { grid_dim: (sh.n_kv as u32, t.div_ceil(qt) as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
