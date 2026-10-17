@@ -5,6 +5,7 @@ import type { CerebroService, Unsubscribe } from "../service/service";
 import { createMockChat } from "./chat";
 import type {
   EngineSwitch,
+  McpServerView,
   RemoteView,
   McpConfig,
   McpServerStatus,
@@ -240,6 +241,7 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
     address: remote.addressChoice ?? "192.168.1.20",
     port: 51234,
   });
+  let mcpSrv: McpServerView = { enabled: false, running: false, url: null, port: 47811, token: "mock-token-0123456789abcdefghijklmnop", clients: [], error: null };
   let mcp: McpConfig = {
     mcpServers: { files: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "C:/Users/me/Projects"], env: {}, disabled: false } },
   };
@@ -741,6 +743,17 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
       ),
     mcpCall: (_server, tool) => later(0, () => ({ content: [{ type: "text", text: `Mock result of ${tool}` }], isError: false })),
 
+    mcpServerGet: () => later(0, () => ({ ...mcpSrv })),
+    mcpServerEnable: (on) =>
+      later(0, () => {
+        mcpSrv = { ...mcpSrv, enabled: on, running: on, url: on ? "http://127.0.0.1:47811/mcp" : null };
+        return { ...mcpSrv };
+      }),
+    mcpServerRotateToken: () =>
+      later(0, () => {
+        mcpSrv = { ...mcpSrv, token: `mock-${Math.random().toString(36).slice(2)}-token-0123456789abcdef`, clients: [] };
+        return { ...mcpSrv };
+      }),
     remoteGet: () => later(0, () => remoteView()),
     remoteSetPassword: (password) =>
       later(0, () => {

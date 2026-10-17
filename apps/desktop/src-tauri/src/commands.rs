@@ -596,3 +596,102 @@ pub fn mcp_result_text(v: &serde_json::Value) -> String {
 pub fn chat_tool_decide(engine: State<'_, Engine>, id: String, allow: bool) -> bool {
     engine.decide(&id, allow)
 }
+
+// ---- Cerebro as an MCP server (mcp_server.rs) ----
+
+use std::sync::{Arc, Mutex};
+
+/// The engine as other apps see it through MCP.
+pub struct McpEngineBackend(pub tauri::AppHandle);
+
+impl McpEngineBackend {
+    fn library(&self) -> Vec<LibraryModel> {
+        let engine = self.0.state::<Engine>();
+        let mut lib = engine.library.lock().unwrap_or_else(|e| e.into_inner());
+        if lib.is_empty() {
+            *lib = crate::engine::scan_library();
+        }
+        lib.clone()
+    }
+}
+
+impl crate::mcp_server::McpBackend for McpEngineBackend {
+    fn generate(&self, system: &str, turns: Vec<(String, String)>, max_tokens: usize, temperature: f32) -> Result<(String, u64, f64, String), String> {
+        let engine = self.0.state::<Engine>();
+        let (model_id, name) = engine.status.lock().unwrap_or_else(|e| e.into_inner()).loaded.as_ref().map(|l| (l.model.id.clone(), l.model.name.clone())).ok_or("No model is loaded in Cerebro. Call load_model first.")?;
+        let request = ChatRequest {
+            model_id,
+            system_prompt: system.to_owned(),
+            turns: turns.into_iter().map(|(role, text)| crate::engine::ChatTurn { role, text }).collect(),
+            sampler: crate::engine::ChatSampler { temperature, top_p: 0.8, min_p: 0.05, top_k: 20, repeat_penalty: 1.0, max_tokens },
+            native: None,
+            tools: None,
+        };
+        let out: Arc<Mutex<(String, u64, f64, Option<String>)>> = Arc::default();
+        let o = out.clone();
+        let sink: crate::engine::ChatSink = Arc::new(move |e| {
+            let mut g = o.lock().unwrap_or_else(|e| e.into_inner());
+            match e {
+                ChatEvent::Token { text } => g.0.push_str(&text),
+                ChatEvent::Done { stats } => {
+                    g.1 = stats.output_tokens as u64;
+                    g.2 = stats.tok_per_sec;
+                }
+                ChatEvent::Error { message } => g.3 = Some(message),
+                _ => {}
+            }
+        });
+        engine.handle().chat(request, sink)?;
+        let g = out.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(e) = &g.3 {
+            return Err(e.clone());
+        }
+        Ok((g.0.trim().to_owned(), g.1, g.2, name))
+    }
+
+    fn models(&self) -> serde_json::Value {
+        let loaded = self.0.state::<Engine>().status.lock().unwrap_or_else(|e| e.into_inner()).loaded.as_ref().map(|l| l.model.id.clone());
+        serde_json::Value::Array(
+            self.library()
+                .iter()
+                .map(|m| serde_json::json!({ "id": m.id, "name": m.name, "quant": m.quant, "params": m.params, "sizeGiB": m.size_gi_b, "contextMax": m.context_max, "supported": m.supported, "loaded": loaded.as_deref() == Some(m.id.as_str()) }))
+                .collect(),
+        )
+    }
+
+    fn load(&self, id: &str, context: Option<usize>) -> Result<String, String> {
+        self.library();
+        let engine = self.0.state::<Engine>();
+        let model = find_model(&engine, id)?;
+        let name = model.name.clone();
+        engine.handle().load(model, context.unwrap_or(8192))?;
+        Ok(format!("Loaded {name}."))
+    }
+
+    fn status(&self) -> serde_json::Value {
+        crate::remote::Backend::status(&PhoneBackend(self.0.clone()))
+    }
+}
+
+type McpServerState<'a> = State<'a, Arc<crate::mcp_server::McpServer>>;
+
+#[tauri::command(async)]
+pub fn mcp_server_get(server: McpServerState<'_>) -> serde_json::Value {
+    server.view()
+}
+
+#[tauri::command(async)]
+pub fn mcp_server_enable(server: McpServerState<'_>, on: bool) -> Result<serde_json::Value, String> {
+    server.set_enabled(on)?;
+    Ok(server.view())
+}
+
+#[tauri::command(async)]
+pub fn mcp_server_rotate_token(server: McpServerState<'_>) -> Result<serde_json::Value, String> {
+    server.rotate_token()?;
+    Ok(server.view())
+}
+
+pub fn mcp_server_file<R: Runtime>(app: &tauri::AppHandle<R>) -> Option<std::path::PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join("mcp-server.json"))
+}

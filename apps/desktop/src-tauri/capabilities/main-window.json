@@ -45,6 +45,9 @@
     "allow-remote-pair",
     "allow-remote-revoke",
     "allow-chat-tool-decide",
+    "allow-mcp-server-get",
+    "allow-mcp-server-enable",
+    "allow-mcp-server-rotate-token",
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize"
   ]

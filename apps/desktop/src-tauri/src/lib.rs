@@ -16,6 +16,7 @@
 
 mod mcp;
 mod remote;
+mod mcp_server;
 mod toolcall;
 mod commands;
 mod engine;
@@ -71,6 +72,9 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::remote_pair,
             commands::remote_revoke,
             commands::chat_tool_decide,
+            commands::mcp_server_get,
+            commands::mcp_server_enable,
+            commands::mcp_server_rotate_token,
         ])
         .manage(engine::Engine::start())
         .manage(hub::Downloads::default())
@@ -96,6 +100,20 @@ pub fn run() -> Result<(), tauri::Error> {
                 let phone = remote::Remote::new(settings, std::sync::Arc::new(commands::PhoneBackend(app.handle().clone())), Box::new(save));
                 app.manage(std::sync::Arc::clone(&phone));
                 phone.resume();
+                // Cerebro as an MCP server for other apps on this computer (off by default).
+                let path = commands::mcp_server_file(app.handle());
+                let settings = path.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+                let save = move |s: &mcp_server::Settings| {
+                    let Some(p) = &path else { return };
+                    let _ = std::fs::create_dir_all(p.parent().unwrap_or(p));
+                    let tmp = p.with_extension("json.tmp");
+                    if std::fs::write(&tmp, serde_json::to_vec_pretty(s).unwrap_or_default()).is_ok() {
+                        let _ = std::fs::rename(&tmp, p);
+                    }
+                };
+                let mcp_srv = mcp_server::McpServer::new(settings, std::sync::Arc::new(commands::McpEngineBackend(app.handle().clone())), Box::new(save));
+                app.manage(std::sync::Arc::clone(&mcp_srv));
+                mcp_srv.resume();
             }
             // Declared in tauri.conf.json with `create: false` and built here, so the navigation and
             // new-window guards are attached before the window loads anything.
@@ -125,6 +143,9 @@ pub fn run() -> Result<(), tauri::Error> {
                 use tauri::Manager;
                 if let Some(phone) = app.try_state::<std::sync::Arc<remote::Remote>>() {
                     phone.shutdown();
+                }
+                if let Some(srv) = app.try_state::<std::sync::Arc<mcp_server::McpServer>>() {
+                    srv.stop();
                 }
             }
         });

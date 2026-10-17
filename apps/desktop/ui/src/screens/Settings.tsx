@@ -1,6 +1,7 @@
 import "../styles/settings.css";
 import { createEffect, createResource, createSignal, For, Show, type JSX } from "solid-js";
 import { ChatSettings } from "./settings/ChatSettings";
+import { McpServerAccess } from "./settings/McpServerAccess";
 import { PhoneAccess } from "./settings/PhoneAccess";
 import { exportConfig, importConfig } from "../lib/config-file";
 import { Icon, type IconName } from "../components/icons";
@@ -209,6 +210,8 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
       </Section>
 
       <PhoneAccess />
+
+      <McpServerAccess />
 
       <Section id="about" title="About">
         <dl class="about">

@@ -29,6 +29,8 @@ const ALLOWED = new Set([
   "mcp_status",
   "remote_get",
   "remote_pair",
+  "mcp_server_get",
+  "mcp_server_rotate_token",
   "mcp_tools",
   // Tauri's own drag-region script (data-tauri-drag-region on the title bar).
   "plugin:window|start_dragging",
@@ -116,6 +118,7 @@ const WITH_ARGS = {
   mcp_config_save: (p) => isPlain(p) && hasOnlyKeys(p, ["config"]) && isMcpConfig(p.config),
   mcp_restart: (p) => isPlain(p) && hasOnlyKeys(p, ["name"]) && isServerName(p.name),
   remote_set_password: (p) => isPlain(p) && hasOnlyKeys(p, ["password"]) && typeof p.password === "string" && p.password.length >= 8 && p.password.length <= 1024,
+  mcp_server_enable: (p) => isPlain(p) && hasOnlyKeys(p, ["on"]) && typeof p.on === "boolean",
   remote_enable: (p) => isPlain(p) && hasOnlyKeys(p, ["on"]) && typeof p.on === "boolean",
   remote_options: (p) =>
     isPlain(p) &&

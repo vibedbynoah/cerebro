@@ -96,11 +96,11 @@ const MAX_PASSWORD: usize = 256;
 
 // ---- Small pure helpers (tested) -------------------------------------------------------------
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
-fn random_bytes<const N: usize>() -> Result<[u8; N], String> {
+pub(crate) fn random_bytes<const N: usize>() -> Result<[u8; N], String> {
     let mut b = [0u8; N];
     getrandom::fill(&mut b).map_err(|_| "The system random number generator failed.".to_owned())?;
     Ok(b)
@@ -227,13 +227,13 @@ pub struct Request {
 }
 
 impl Request {
-    fn header(&self, name: &str) -> Option<&str> {
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
         self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
     }
     fn cookie(&self, name: &str) -> Option<&str> {
         self.header("cookie")?.split(';').filter_map(|p| p.trim().split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v)
     }
-    fn keep_alive(&self) -> bool {
+    pub(crate) fn keep_alive(&self) -> bool {
         !self.header("connection").is_some_and(|c| c.eq_ignore_ascii_case("close"))
     }
 }
@@ -307,23 +307,23 @@ pub fn read_request<R: BufRead>(r: &mut R) -> Result<Request, HttpError> {
 }
 
 pub struct Response {
-    status: u16,
-    content_type: &'static str,
-    body: Vec<u8>,
-    extra: Vec<(&'static str, String)>,
+    pub(crate) status: u16,
+    pub(crate) content_type: &'static str,
+    pub(crate) body: Vec<u8>,
+    pub(crate) extra: Vec<(&'static str, String)>,
 }
 
 impl Response {
-    fn json(status: u16, v: Value) -> Self {
+    pub(crate) fn json(status: u16, v: Value) -> Self {
         Response { status, content_type: "application/json", body: v.to_string().into_bytes(), extra: Vec::new() }
     }
-    fn error(status: u16, msg: &str) -> Self {
+    pub(crate) fn error(status: u16, msg: &str) -> Self {
         Self::json(status, json!({ "error": msg }))
     }
     fn file(content_type: &'static str, body: &'static str) -> Self {
         Response { status: 200, content_type, body: body.as_bytes().to_vec(), extra: Vec::new() }
     }
-    fn with(mut self, k: &'static str, v: String) -> Self {
+    pub(crate) fn with(mut self, k: &'static str, v: String) -> Self {
         self.extra.push((k, v));
         self
     }
@@ -332,6 +332,7 @@ impl Response {
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        202 => "Accepted",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
@@ -343,6 +344,7 @@ fn reason(status: u16) -> &'static str {
         421 => "Misdirected Request",
         429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
+        500 => "Internal Server Error",
         505 => "HTTP Version Not Supported",
         _ => "Error",
     }
@@ -350,7 +352,7 @@ fn reason(status: u16) -> &'static str {
 
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
-fn write_response<W: Write>(w: &mut W, r: &Response, keep_alive: bool) -> std::io::Result<()> {
+pub(crate) fn write_response<W: Write>(w: &mut W, r: &Response, keep_alive: bool) -> std::io::Result<()> {
     let mut head = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: camera=(), microphone=(), geolocation=()\r\nContent-Security-Policy: {CSP}\r\n",
         r.status,

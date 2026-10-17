@@ -612,3 +612,14 @@ export interface RemoteOptions {
   address: string | null;
   sessionDays: number;
 }
+
+/** Cerebro as an MCP server for other apps on this computer (src-tauri/src/mcp_server.rs). */
+export interface McpServerView {
+  enabled: boolean;
+  running: boolean;
+  url: string | null;
+  port: number;
+  token: string;
+  clients: Array<{ name: string; version: string; lastSeenAt: number; calls: number }>;
+  error: string | null;
+}

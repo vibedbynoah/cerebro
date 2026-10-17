@@ -1,4 +1,4 @@
-import type { EngineSwitch, RemoteOptions, RemotePairing, RemoteView, McpCallResult, McpConfig, McpServerStatus, McpTool,
+import type { EngineSwitch, McpServerView, RemoteOptions, RemotePairing, RemoteView, McpCallResult, McpConfig, McpServerStatus, McpTool,
   ActivePatch,
   CatalogModel,
   DedupeResult,
@@ -138,6 +138,11 @@ export interface CerebroService {
   mcpCall(server: string, tool: string, args: unknown): Promise<McpCallResult>;
 
   // ---- Phone access: off by default; LAN only, QR pairing plus password. ----
+  // ---- Cerebro as an MCP server: 127.0.0.1 only, bearer token. ----
+  mcpServerGet(): Promise<McpServerView>;
+  mcpServerEnable(on: boolean): Promise<McpServerView>;
+  mcpServerRotateToken(): Promise<McpServerView>;
+
   remoteGet(): Promise<RemoteView>;
   remoteSetPassword(password: string): Promise<RemoteView>;
   remoteEnable(on: boolean): Promise<RemoteView>;

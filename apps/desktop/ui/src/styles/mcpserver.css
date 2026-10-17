@@ -1,0 +1,125 @@
+/*
+ * MCP server access (screens/settings/McpServerAccess.tsx). Design tokens only.
+ */
+
+.mcpsrv { display: grid; gap: var(--space-6); min-width: 0; }
+.mcpsrv > *,
+.mcpsrv__status-row > *,
+.mcpsrv__card > *,
+.mcpsrv__token-row > *,
+.mcpsrv__actions > *,
+.mcpsrv__segmented > *,
+.mcpsrv__client-list > *,
+.mcpsrv__client > *,
+.mcpsrv__client-text > *,
+.mcpsrv__tool-list > *,
+.mcpsrv__tool > * { min-width: 0; }
+
+/* Status */
+.mcpsrv__status-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
+.mcpsrv__status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--color-text-secondary);
+}
+.mcpsrv__dot { flex: none; width: 8px; height: 8px; border-radius: var(--radius-pill); background: var(--color-text-muted); }
+.mcpsrv__status[data-state="on"] { color: var(--color-success); }
+.mcpsrv__status[data-state="on"] .mcpsrv__dot { background: var(--color-success); }
+.mcpsrv__status[data-state="error"] { color: var(--color-danger); }
+.mcpsrv__status[data-state="error"] .mcpsrv__dot { background: var(--color-danger); }
+
+/* Cards, titles, hints */
+.mcpsrv__card {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-1);
+}
+.mcpsrv__title { margin: 0; font-size: 0.9375rem; font-weight: var(--weight-semibold); color: var(--color-text-primary); }
+.mcpsrv__warn { color: var(--color-warning); }
+.mcpsrv .btn--sm { min-height: 28px; padding-inline: var(--space-3); font-size: var(--text-small); }
+.mcpsrv__actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+
+/* Token */
+.mcpsrv__token-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
+.mcpsrv__token {
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  overflow-wrap: anywhere;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-2);
+  font-size: var(--text-small);
+}
+
+/* Segmented control */
+.mcpsrv__segmented { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.mcpsrv__segment {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-1);
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: var(--text-small);
+  cursor: pointer;
+}
+.mcpsrv__segment:hover { color: var(--color-text-primary); }
+.mcpsrv__segment:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.mcpsrv__segment[data-active] {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-text);
+  font-weight: var(--weight-medium);
+}
+
+/* Snippet */
+.mcpsrv__snippet {
+  min-width: 0;
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-2);
+  color: var(--color-text-primary);
+  font-family: var(--font-family-code);
+  font-size: var(--text-small);
+  line-height: 1.5;
+}
+
+/* Connected apps */
+.mcpsrv__client-list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.mcpsrv__client {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+}
+.mcpsrv__client-text { display: grid; gap: 2px; }
+.mcpsrv__client-name { font-weight: var(--weight-medium); color: var(--color-text-primary); }
+.mcpsrv__client-version { color: var(--color-text-secondary); font-size: var(--text-small); }
+.mcpsrv__client-calls { color: var(--color-text-secondary); font-size: var(--text-small); font-variant-numeric: tabular-nums; }
+
+/* Tools */
+.mcpsrv__tool-list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.mcpsrv__tool {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+  color: var(--color-text-secondary);
+  font-size: var(--text-small);
+}
+.mcpsrv__tool-name { color: var(--color-text-primary); font-size: var(--text-small); }

@@ -42,6 +42,9 @@ const COMMANDS: &[&str] = &[
     "remote_pair",
     "remote_revoke",
     "chat_tool_decide",
+    "mcp_server_get",
+    "mcp_server_enable",
+    "mcp_server_rotate_token",
 ];
 
 fn main() {
