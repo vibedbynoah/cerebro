@@ -129,7 +129,8 @@ fn file_type_name(t: u64) -> &'static str {
     }
 }
 
-const SUPPORTED_ARCHS: &[&str] = &["qwen3", "qwen3moe", "qwen2", "llama"];
+/// Architectures Cerebro Engine runs. qwen35 is the Qwen3.5/3.8 hybrid (Gated DeltaNet + gated attention).
+const SUPPORTED_ARCHS: &[&str] = &["qwen3", "qwen3moe", "qwen2", "llama", "qwen35"];
 
 /// A short, stable id from the path (FNV-1a).
 fn id_of(path: &Path) -> String {
