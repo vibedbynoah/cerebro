@@ -41,8 +41,12 @@ here. Local Flash-Next on Strata reads prompts at 3.5 tok/s on this laptop when 
 takes short prompts.
 
 ## DeepSeek queue (2026-10-17; prompts in docs/prompts/deepseek-v4.1.md, one worktree each)
-- [~] mcp-http (Streamable HTTP client)   - [~] builtin-tools   - [~] orchestrate-ui
-- [~] mcp-catalogue (from paper H)        - [~] memory-estimate (paper G s.3-4)   - [~] training v1 (Unsloth sidecar)
+- [x] mcp-http (Streamable HTTP client)   - [x] builtin-tools (+ SSRF guard, toggle)   - [x] orchestrate-ui
+- [x] mcp-catalogue (from paper H)        - [x] memory-estimate (paper G s.3-4)
+- [x] training v1: Unsloth sidecar, Train screen. Written by Claude after DeepSeek hit its rate limit. Verified end to end:
+      5-step Qwen3-0.6B -> Q4_K_M in 87 s, runs on Cerebro Engine. Pinned uv 0.12.22 + llama.cpp b11361 tools.
+- [ ] next: permission presets / sandbox ladder, todo/ask-user/plan tools, OpenAI/Anthropic-compatible local API,
+      mmproj multimodal, GPU kernels for qwen35 hybrid layers, rows4 benchmark on a quiet machine.
 - [ ] permissions: allow/ask/deny broker fail-closed, preset ladder, sandbox (paper I #1-2, #4)
 - [ ] tool hygiene: output bounds + spill files, read-before-write (paper I #5-6)
 - [ ] agent tools: todo, ask-user, plan mode (paper I #12, #14, #16)
