@@ -645,6 +645,24 @@ export interface RemoteOptions {
 }
 
 /** Cerebro as an MCP server for other apps on this computer (src-tauri/src/mcp_server.rs). */
+/** The local OpenAI/Anthropic-compatible API (src-tauri/src/local_api.rs). */
+export interface LocalApiView {
+  enabled: boolean;
+  running: boolean;
+  /** Base URL on this computer, ending in /v1. */
+  url: string | null;
+  /** Base URLs on the local network (when allowed and running). */
+  lanUrls: string[];
+  port: number;
+  key: string;
+  requireKey: boolean;
+  allowLan: boolean;
+  allowModelSwitch: boolean;
+  requests: number;
+  lastRequestAt: number | null;
+  error: string | null;
+}
+
 export interface McpServerView {
   enabled: boolean;
   running: boolean;

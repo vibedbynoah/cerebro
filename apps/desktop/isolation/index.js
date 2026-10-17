@@ -35,6 +35,8 @@ const ALLOWED = new Set([
   "builtin_tools",
   "builtin_folders_get",
   "trainer_status",
+  "local_api_get",
+  "local_api_rotate_key",
   "trainer_cancel",
   // Tauri's own drag-region script (data-tauri-drag-region on the title bar).
   "plugin:window|start_dragging",
@@ -164,6 +166,9 @@ const WITH_ARGS = {
   mcp_config_save: (p) => isPlain(p) && hasOnlyKeys(p, ["config"]) && isMcpConfig(p.config),
   mcp_restart: (p) => isPlain(p) && hasOnlyKeys(p, ["name"]) && isServerName(p.name),
   remote_set_password: (p) => isPlain(p) && hasOnlyKeys(p, ["password"]) && typeof p.password === "string" && p.password.length >= 8 && p.password.length <= 1024,
+  local_api_enable: (p) => isPlain(p) && hasOnlyKeys(p, ["on"]) && typeof p.on === "boolean",
+  local_api_options: (p) =>
+    isPlain(p) && hasOnlyKeys(p, ["requireKey", "allowLan", "allowModelSwitch"]) && typeof p.requireKey === "boolean" && typeof p.allowLan === "boolean" && typeof p.allowModelSwitch === "boolean",
   trainer_setup: (p) => isPlain(p) && hasOnlyKeys(p, ["onEvent"]) && isChannel(p.onEvent),
   trainer_start: (p) => isPlain(p) && hasOnlyKeys(p, ["job", "onEvent"]) && isChannel(p.onEvent) && isTrainJob(p.job),
   mcp_server_enable: (p) => isPlain(p) && hasOnlyKeys(p, ["on"]) && typeof p.on === "boolean",

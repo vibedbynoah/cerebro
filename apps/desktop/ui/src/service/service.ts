@@ -1,5 +1,5 @@
 import type { TrainerStatus, TrainEvent, TrainInstalled, TrainJob } from "./train-types";
-import type { EngineSwitch, McpServerView, RemoteOptions, RemotePairing, RemoteView, McpCallResult, McpConfig, McpServerStatus, McpTool,
+import type { EngineSwitch, LocalApiView, McpServerView, RemoteOptions, RemotePairing, RemoteView, McpCallResult, McpConfig, McpServerStatus, McpTool,
   ActivePatch,
   CatalogModel,
   DedupeResult,
@@ -157,6 +157,11 @@ export interface CerebroService {
 
   // ---- Phone access: off by default; LAN only, QR pairing plus password. ----
   // ---- Cerebro as an MCP server: 127.0.0.1 only, bearer token. ----
+  // ---- Local API: OpenAI + Anthropic formats on one port; off by default, every protection a switch. ----
+  localApiGet(): Promise<LocalApiView>;
+  localApiEnable(on: boolean): Promise<LocalApiView>;
+  localApiOptions(requireKey: boolean, allowLan: boolean, allowModelSwitch: boolean): Promise<LocalApiView>;
+  localApiRotateKey(): Promise<LocalApiView>;
   mcpServerGet(): Promise<McpServerView>;
   mcpServerEnable(on: boolean): Promise<McpServerView>;
   mcpServerRotateToken(): Promise<McpServerView>;

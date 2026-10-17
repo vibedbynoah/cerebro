@@ -17,6 +17,7 @@
 mod mcp;
 mod remote;
 mod mcp_server;
+mod local_api;
 mod toolcall;
 mod orchestrate;
 mod commands;
@@ -82,6 +83,10 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::mcp_server_get,
             commands::mcp_server_enable,
             commands::mcp_server_rotate_token,
+            commands::local_api_get,
+            commands::local_api_enable,
+            commands::local_api_options,
+            commands::local_api_rotate_key,
             trainer::trainer_status,
             trainer::trainer_setup,
             trainer::trainer_start,
@@ -136,6 +141,20 @@ pub fn run() -> Result<(), tauri::Error> {
                 let mcp_srv = mcp_server::McpServer::new(settings, std::sync::Arc::new(commands::McpEngineBackend(app.handle().clone())), Box::new(save));
                 app.manage(std::sync::Arc::clone(&mcp_srv));
                 mcp_srv.resume();
+                // The local OpenAI/Anthropic-compatible API (off by default).
+                let path = commands::local_api_file(app.handle());
+                let settings = path.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+                let save = move |s: &local_api::Settings| {
+                    let Some(p) = &path else { return };
+                    let _ = std::fs::create_dir_all(p.parent().unwrap_or(p));
+                    let tmp = p.with_extension("json.tmp");
+                    if std::fs::write(&tmp, serde_json::to_vec_pretty(s).unwrap_or_default()).is_ok() {
+                        let _ = std::fs::rename(&tmp, p);
+                    }
+                };
+                let api = local_api::LocalApi::new(settings, std::sync::Arc::new(commands::ApiEngineBackend(app.state::<engine::Engine>().handle())), Box::new(save));
+                app.manage(std::sync::Arc::clone(&api));
+                api.resume();
             }
             // Declared in tauri.conf.json with `create: false` and built here, so the navigation and
             // new-window guards are attached before the window loads anything.

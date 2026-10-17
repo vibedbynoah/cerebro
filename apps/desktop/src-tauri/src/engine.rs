@@ -271,6 +271,11 @@ pub struct ChatRequest {
     /// Orchestrate mode (GVS5H, orchestrate.rs): several instances of the model and a shared ledger.
     #[serde(default)]
     pub orchestrate: Option<OrchestrateRequest>,
+    /// Tools defined by a local API client (local_api.rs). The model sees them like any tool, but a
+    /// call is handed back to the client (`Tool` event, state "requested") instead of being run, and
+    /// the reply ends there. Never set by the window.
+    #[serde(skip)]
+    pub client_tools: Option<Vec<crate::toolcall::ToolSpec>>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -389,6 +394,9 @@ pub enum ChatEvent {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatStats {
+    pub prompt_tokens: usize,
+    /// The reply stopped because it reached max_tokens.
+    pub length: bool,
     pub output_tokens: usize,
     pub thinking_tokens: usize,
     pub tok_per_sec: f64,
@@ -456,6 +464,8 @@ pub struct LoadedInfo {
     pub experts: Option<(usize, usize, f64)>,
     pub context_used: usize,
     pub last_prefill_tps: Option<f64>,
+    /// How the model writes tool calls (for replaying a client's tool history, local_api.rs).
+    pub dialect: crate::toolcall::Dialect,
 }
 
 enum Job {
@@ -657,6 +667,7 @@ fn loaded_info(l: &Loaded, ctx: usize) -> LoadedInfo {
         experts: g.and_then(|g| g.expert_cache()),
         context_used: l.session.tokens.len(),
         last_prefill_tps: None,
+        dialect: l.dialect,
     }
 }
 
@@ -685,8 +696,9 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
     let think = req.native.is_some();
     let ctx = ToolContext { offline: req.tools.as_ref().is_some_and(|t| t.offline), allow_local_fetch: req.tools.as_ref().is_some_and(|t| t.allow_local_fetch) };
     // Tools the model may call: the host's list, names made unique across servers ("server__tool").
-    let tools: Vec<(String, toolcall::ToolSpec)> = match (&req.tools, &tooling.host) {
-        (Some(_), Some(h)) => {
+    let tools: Vec<(String, toolcall::ToolSpec)> = match (&req.client_tools, &req.tools, &tooling.host) {
+        (Some(ct), _, _) => ct.iter().map(|t| (t.name.clone(), t.clone())).collect(),
+        (None, Some(_), Some(h)) => {
             let specs = h.tools();
             let mut seen = std::collections::HashMap::<String, usize>::new();
             for t in &specs {
@@ -851,6 +863,18 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
         if stopped || cancel.load(Ordering::SeqCst) || (out.calls.is_empty() && out.bad.is_empty()) || specs.is_empty() {
             break;
         }
+        if req.client_tools.is_some() {
+            // The client runs its own tools: hand the calls over and end the reply. A call that could
+            // not be read goes back as the text the model wrote, so the client sees what happened.
+            for (raw, _) in &out.bad {
+                answer.push_str(raw);
+                events(ChatEvent::Token { text: raw.clone() });
+            }
+            for (i, call) in out.calls.iter().enumerate() {
+                events(ChatEvent::Tool { id: format!("call_{}_{i}", now_ms()), server: String::new(), name: call.name.clone(), arguments: call.arguments.clone(), state: "requested", result: None, error: None });
+            }
+            break;
+        }
         if round == MAX_TOOL_ROUNDS {
             events(ChatEvent::Token { text: format!("\n\n(Stopped after {MAX_TOOL_ROUNDS} rounds of tool calls.)") });
             break;
@@ -947,8 +971,9 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
     }
     let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
     let decode_tps = if decode_ms > 0.0 { out_tokens as f64 / (decode_ms / 1000.0) } else { 0.0 };
+    let length = !stopped && out_tokens >= cfg.max_tokens;
     events(ChatEvent::Done {
-        stats: ChatStats { output_tokens: out_tokens, thinking_tokens, tok_per_sec: decode_tps, ttft_ms, total_ms, extra_ms: 0.0, stopped },
+        stats: ChatStats { prompt_tokens, length, output_tokens: out_tokens, thinking_tokens, tok_per_sec: decode_tps, ttft_ms, total_ms, extra_ms: 0.0, stopped },
     });
     let info = loaded_info(l, l.session.max_ctx);
     set(st, |s| {
@@ -1115,7 +1140,7 @@ fn run_orchestrate(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Ar
     }
     let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
     let tps = if decode_ms > 0.0 { tokens as f64 / (decode_ms / 1000.0) } else { 0.0 };
-    events(ChatEvent::Done { stats: ChatStats { output_tokens: tokens, thinking_tokens: 0, tok_per_sec: tps, ttft_ms: ttft, total_ms, extra_ms: 0.0, stopped } });
+    events(ChatEvent::Done { stats: ChatStats { prompt_tokens: 0, length: false, output_tokens: tokens, thinking_tokens: 0, tok_per_sec: tps, ttft_ms: ttft, total_ms, extra_ms: 0.0, stopped } });
     set(st, |s| {
         s.last_decode_tps = Some(tps);
         s.live_decode_tps = None;
@@ -1193,6 +1218,7 @@ mod tool_loop_tests {
             native: None,
             tools: Some(ToolsRequest { rules: Default::default(), default_rule: "ask".into(), offline: false, allow_local_fetch: false }),
             orchestrate: None,
+            client_tools: None,
         };
         engine.chat(req, sink).unwrap();
         let events = events.lock().unwrap();
@@ -1229,6 +1255,7 @@ mod tool_loop_tests {
             native: None,
             tools: None,
             orchestrate: Some(OrchestrateRequest { workers: 2, rounds: 2 }),
+            client_tools: None,
         };
         let t = Instant::now();
         engine.chat(req, sink).unwrap();

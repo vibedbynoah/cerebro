@@ -14,7 +14,7 @@ import type { HistoryRange, MetricsSeries, MetricsSnapshot, RequestDetail } from
 import type { CatalogModel, GpuInfo, HardwareProfile, LibraryModel, LiveStats, LoadedModel, LoadParams, ModelDetail, ModelSummary, NetworkState } from "./types";
 import { CURRENT_CATALOG } from "./catalog";
 import type { TrainerStatus, TrainEvent, TrainInstalled } from "./train-types";
-import type { ActivePatch, EngineSwitch, McpServerView, RemotePairing, RemoteView, McpCallResult, McpConfig, McpServerStatus, McpTool, HubDownloadEvent, HubFile, HubFileMeta, HubRepo, LoadPreset, PatchProfile } from "./types";
+import type { ActivePatch, EngineSwitch, LocalApiView, McpServerView, RemotePairing, RemoteView, McpCallResult, McpConfig, McpServerStatus, McpTool, HubDownloadEvent, HubFile, HubFileMeta, HubRepo, LoadPreset, PatchProfile } from "./types";
 import { EMPTY_TWEAKS, profileNameError, sanitizeTweaks } from "../lib/tweaks";
 
 const NOT_YET = (what: string) => Promise.reject(new Error(`${what} is not available in this build yet.`));
@@ -206,6 +206,10 @@ export function createDesktopService(local: CerebroService): CerebroService {
       library = [];
     },
     trainerCancel: () => invoke<boolean>("trainer_cancel"),
+    localApiGet: () => invoke<LocalApiView>("local_api_get"),
+    localApiEnable: (on) => invoke<LocalApiView>("local_api_enable", { on }),
+    localApiOptions: (requireKey, allowLan, allowModelSwitch) => invoke<LocalApiView>("local_api_options", { requireKey, allowLan, allowModelSwitch }),
+    localApiRotateKey: () => invoke<LocalApiView>("local_api_rotate_key"),
     mcpServerGet: () => invoke<McpServerView>("mcp_server_get"),
     mcpServerEnable: (on) => invoke<McpServerView>("mcp_server_enable", { on }),
     mcpServerRotateToken: () => invoke<McpServerView>("mcp_server_rotate_token"),

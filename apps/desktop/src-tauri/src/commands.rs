@@ -490,6 +490,7 @@ impl crate::remote::Backend for PhoneBackend {
             // A phone never drives tools: approvals belong at the computer.
             tools: None,
             orchestrate: None,
+            client_tools: None,
         };
         let out: crate::engine::ChatSink = std::sync::Arc::new(move |e| match e {
             ChatEvent::Token { text } => sink(PhoneEvent::Token(text)),
@@ -660,6 +661,7 @@ impl crate::mcp_server::McpBackend for McpEngineBackend {
             native: None,
             tools: None,
             orchestrate: None,
+            client_tools: None,
         };
         let out: Arc<Mutex<(String, u64, f64, Option<String>)>> = Arc::default();
         let o = out.clone();
@@ -728,4 +730,202 @@ pub fn mcp_server_rotate_token(server: McpServerState<'_>) -> Result<serde_json:
 
 pub fn mcp_server_file<R: Runtime>(app: &tauri::AppHandle<R>) -> Option<std::path::PathBuf> {
     app.path().app_config_dir().ok().map(|d| d.join("mcp-server.json"))
+}
+
+// ---- Local API (local_api.rs) over the engine -----------------------------------------------------
+
+/// The local API's view of the engine.
+pub struct ApiEngineBackend(pub Engine);
+
+/// The app's conversation as chat turns in the loaded model's own words: an assistant turn that
+/// called tools carries the calls as the model writes them, and consecutive tool results become one
+/// user turn of `<tool_response>` blocks, the way the model was trained to read them.
+pub fn api_turns(messages: &[crate::local_api::Msg], dialect: crate::toolcall::Dialect) -> Vec<crate::engine::ChatTurn> {
+    use crate::local_api::Msg;
+    let mut out: Vec<crate::engine::ChatTurn> = Vec::new();
+    let mut tool_block: Vec<String> = Vec::new();
+    let flush = |out: &mut Vec<crate::engine::ChatTurn>, block: &mut Vec<String>| {
+        if !block.is_empty() {
+            out.push(crate::engine::ChatTurn { role: "user".into(), text: std::mem::take(block).join("\n") });
+        }
+    };
+    for m in messages {
+        match m {
+            Msg::Tool(t) => tool_block.push(crate::toolcall::tool_response(t)),
+            Msg::User(t) => {
+                flush(&mut out, &mut tool_block);
+                out.push(crate::engine::ChatTurn { role: "user".into(), text: t.clone() });
+            }
+            Msg::Assistant { text, calls } => {
+                flush(&mut out, &mut tool_block);
+                let mut parts: Vec<String> = Vec::new();
+                if !text.trim().is_empty() {
+                    parts.push(text.trim().to_owned());
+                }
+                parts.extend(calls.iter().map(|c| crate::toolcall::render_call(dialect, c)));
+                out.push(crate::engine::ChatTurn { role: "assistant".into(), text: parts.join("\n") });
+            }
+        }
+    }
+    flush(&mut out, &mut tool_block);
+    out
+}
+
+impl crate::local_api::ApiBackend for ApiEngineBackend {
+    fn models(&self) -> Vec<crate::local_api::ApiModel> {
+        let engine = &self.0;
+        let loaded = engine.status.lock().unwrap_or_else(|e| e.into_inner()).loaded.as_ref().map(|l| l.model.id.clone());
+        let mut lib = engine.library.lock().unwrap_or_else(|e| e.into_inner());
+        if lib.is_empty() {
+            *lib = crate::engine::scan_library();
+        }
+        lib.iter().filter(|m| m.supported).map(|m| crate::local_api::ApiModel { id: m.id.clone(), name: m.name.clone(), loaded: loaded.as_deref() == Some(m.id.as_str()) }).collect()
+    }
+
+    fn chat(&self, req: crate::local_api::ApiRequest, on: &mut dyn FnMut(crate::local_api::ApiEvent) -> bool) -> Result<crate::local_api::ApiDone, crate::local_api::ApiError> {
+        use crate::local_api::{ApiDone, ApiError, ApiEvent};
+        let engine = self.0.handle();
+        let unavailable = |m: String| ApiError { status: 503, message: m };
+        if let Some(id) = &req.load {
+            let model = find_model(&engine, id).map_err(unavailable)?;
+            let ctx = engine.status.lock().unwrap_or_else(|e| e.into_inner()).loaded.as_ref().map_or(16_384, |l| l.ctx);
+            engine.load(model, ctx).map_err(unavailable)?;
+        }
+        let (model_id, name, dialect) = engine
+            .status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .loaded
+            .as_ref()
+            .map(|l| (l.model.id.clone(), l.model.id.clone(), l.dialect))
+            .ok_or_else(|| unavailable("No model is loaded in Cerebro. Load one on the Models screen, or name one from /v1/models.".into()))?;
+        let request = ChatRequest {
+            model_id,
+            system_prompt: req.system.clone(),
+            turns: api_turns(&req.messages, dialect),
+            sampler: crate::engine::ChatSampler { temperature: req.temperature, top_p: req.top_p, min_p: 0.05, top_k: 20, repeat_penalty: 1.0, max_tokens: req.max_tokens },
+            native: req.think.then(|| serde_json::json!({})),
+            tools: None,
+            orchestrate: None,
+            client_tools: (!req.tools.is_empty()).then(|| req.tools.clone()),
+        };
+        // The engine writes into a channel from its own thread; this thread hands each piece to the
+        // connection and asks the engine to stop when the app has gone or a stop sequence was hit.
+        let (tx, rx) = std::sync::mpsc::channel::<ChatEvent>();
+        let sink: crate::engine::ChatSink = Arc::new(move |e| {
+            let _ = tx.send(e);
+        });
+        let runner = engine.handle();
+        let job = std::thread::spawn(move || runner.chat(request, sink));
+        let mut done: Option<crate::engine::ChatStats> = None;
+        let mut error: Option<String> = None;
+        let mut stopping = false;
+        for e in rx {
+            let keep = match e {
+                ChatEvent::Token { text } => stopping || on(ApiEvent::Text(text)),
+                ChatEvent::Thinking { text } => stopping || on(ApiEvent::Thinking(text)),
+                ChatEvent::Tool { name, arguments, state: "requested", .. } => stopping || on(ApiEvent::Call { name, arguments }),
+                ChatEvent::Done { stats } => {
+                    done = Some(stats);
+                    true
+                }
+                ChatEvent::Error { message } => {
+                    error = Some(message);
+                    true
+                }
+                _ => true,
+            };
+            if !keep && !stopping {
+                stopping = true;
+                engine.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        job.join().map_err(|_| ApiError { status: 500, message: "The engine stopped during the reply.".into() })?.map_err(|m| ApiError { status: 500, message: m })?;
+        if let Some(m) = error {
+            return Err(ApiError { status: 500, message: m });
+        }
+        let s = done.ok_or_else(|| ApiError { status: 500, message: "The reply ended without finishing.".into() })?;
+        Ok(ApiDone { model: name, prompt_tokens: s.prompt_tokens, output_tokens: s.output_tokens, length: s.length })
+    }
+}
+
+type LocalApiState<'a> = State<'a, Arc<crate::local_api::LocalApi>>;
+
+#[tauri::command(async)]
+pub fn local_api_get(api: LocalApiState<'_>) -> serde_json::Value {
+    api.view()
+}
+
+#[tauri::command(async)]
+pub fn local_api_enable(api: LocalApiState<'_>, on: bool) -> Result<serde_json::Value, String> {
+    api.set_enabled(on)?;
+    Ok(api.view())
+}
+
+#[tauri::command(async)]
+pub fn local_api_options(api: LocalApiState<'_>, require_key: bool, allow_lan: bool, allow_model_switch: bool) -> Result<serde_json::Value, String> {
+    api.set_options(require_key, allow_lan, allow_model_switch)?;
+    Ok(api.view())
+}
+
+#[tauri::command(async)]
+pub fn local_api_rotate_key(api: LocalApiState<'_>) -> Result<serde_json::Value, String> {
+    api.rotate_key()?;
+    Ok(api.view())
+}
+
+pub fn local_api_file<R: Runtime>(app: &tauri::AppHandle<R>) -> Option<std::path::PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join("local-api.json"))
+}
+
+#[cfg(test)]
+mod api_turn_tests {
+    use super::api_turns;
+    use crate::local_api::Msg;
+    use crate::toolcall::{Dialect, ToolCall};
+
+    #[test]
+    fn tool_history_becomes_the_models_own_turns() {
+        let call = ToolCall { name: "w".into(), arguments: serde_json::json!({ "city": "Oslo" }) };
+        let turns = api_turns(
+            &[Msg::User("weather?".into()), Msg::Assistant { text: "Checking.".into(), calls: vec![call.clone(), call] }, Msg::Tool("12 C".into()), Msg::Tool("13 C".into()), Msg::User("thanks".into())],
+            Dialect::Hermes,
+        );
+        let roles: Vec<&str> = turns.iter().map(|t| t.role.as_str()).collect();
+        assert_eq!(roles, ["user", "assistant", "user", "user"]);
+        assert!(turns[1].text.starts_with("Checking.\n<tool_call>\n{"));
+        assert_eq!(turns[1].text.matches("<tool_call>").count(), 2);
+        assert_eq!(turns[2].text, "<tool_response>\n12 C\n</tool_response>\n<tool_response>\n13 C\n</tool_response>");
+    }
+}
+
+#[cfg(test)]
+mod api_real_tests {
+    /// The local API with a real model, driven by the official OpenAI and Anthropic Python SDKs
+    /// (tests-py/api_sdks.py). Needs CEREBRO_SDK_PYTHON (a Python with `openai` and `anthropic`)
+    /// and Qwen3-0.6B-Q8_0.gguf in a library folder.
+    #[test]
+    #[ignore = "needs a model file and a Python with the SDKs"]
+    fn local_api_with_real_sdks() {
+        use std::sync::Arc;
+        let py = std::env::var("CEREBRO_SDK_PYTHON").expect("CEREBRO_SDK_PYTHON");
+        let engine = crate::engine::Engine::start();
+        let lib = crate::engine::scan_library();
+        let m = lib.iter().find(|m| m.path.ends_with("Qwen3-0.6B-Q8_0.gguf")).expect("Qwen3-0.6B-Q8_0.gguf in the library").clone();
+        *engine.library.lock().unwrap() = lib.clone();
+        engine.load(m, 8192).unwrap();
+        let api = crate::local_api::LocalApi::new(crate::local_api::Settings::default(), Arc::new(super::ApiEngineBackend(engine.handle())), Box::new(|_| {}));
+        api.set_enabled(true).unwrap();
+        let v = api.view();
+        let out = std::process::Command::new(py)
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests-py/api_sdks.py"))
+            .arg(v["url"].as_str().unwrap())
+            .arg(v["key"].as_str().unwrap())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        println!("{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && stdout.contains("ALL PASS"), "{stdout}");
+        api.set_enabled(false).unwrap();
+    }
 }

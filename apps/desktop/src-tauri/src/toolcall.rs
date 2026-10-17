@@ -74,6 +74,30 @@ pub fn tool_response(content: &str) -> String {
     format!("<tool_response>\n{content}\n</tool_response>")
 }
 
+/// A call as the model itself would have written it, for replaying an assistant turn that called
+/// tools (the local API receives these back in the history). The scanner reads it back unchanged.
+pub fn render_call(dialect: Dialect, call: &ToolCall) -> String {
+    match dialect {
+        Dialect::Hermes => format!("{OPEN}\n{}\n{CLOSE}", json!({ "name": call.name, "arguments": call.arguments })),
+        Dialect::QwenCoder => {
+            let mut s = format!("{OPEN}\n{FN_OPEN}{}>\n", call.name);
+            if let Some(args) = call.arguments.as_object() {
+                for (k, v) in args {
+                    let v = match v {
+                        Value::String(t) => t.clone(),
+                        other => other.to_string(),
+                    };
+                    s.push_str(&format!("<parameter={k}>\n{v}\n</parameter>\n"));
+                }
+            }
+            s.push_str(FN_CLOSE);
+            s.push('\n');
+            s.push_str(CLOSE);
+            s
+        }
+    }
+}
+
 /// Cuts a tool result to `max_chars` characters on a character boundary, saying how much went.
 pub fn truncate_result(s: &str, max_chars: usize) -> String {
     let total = s.chars().count();
@@ -401,6 +425,16 @@ mod tests {
         assert!(tools_prompt(Dialect::QwenCoder, &tools).contains("Do NOT omit the initial <tool_call> tag"));
         assert_eq!(dialect_from_template("{% if x %}<function={{ name }}>"), Dialect::QwenCoder);
         assert_eq!(dialect_from_template("<tool_call>\\n{{ tool | tojson }}"), Dialect::Hermes);
+    }
+
+    #[test]
+    fn rendered_calls_read_back_unchanged_in_both_dialects() {
+        let tools = [spec("search", json!({ "limit": { "type": "integer" }, "exact": { "type": "boolean" }, "filters": { "type": "object" }, "q": { "type": "string" } }))];
+        let call = ToolCall { name: "search".into(), arguments: json!({ "q": "two\nlines", "limit": 5, "exact": false, "filters": { "lang": "en" } }) };
+        for d in [Dialect::Hermes, Dialect::QwenCoder] {
+            let text = format!("Checking.\n{}", render_call(d, &call));
+            assert_eq!(run(d, &tools, &[&text]), vec![Piece::Text("Checking.\n".into()), Piece::Call(call.clone())], "{d:?}: {text}");
+        }
     }
 
     #[test]

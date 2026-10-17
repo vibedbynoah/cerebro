@@ -6,6 +6,7 @@ import { createMockChat } from "./chat";
 import { createMockTrainer } from "./mock-train";
 import type {
   EngineSwitch,
+  LocalApiView,
   McpServerView,
   RemoteView,
   McpConfig,
@@ -266,6 +267,8 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
   };
   // The folders the built-in tools may touch (Settings > Tools); illustrative in web mode.
   let folders: string[] = ["C:\\Users\\me\\Projects"];
+  let localApi: LocalApiView = { enabled: false, running: false, url: null, lanUrls: [], port: 47812, key: "sk-cerebro-mock0123456789abcdef0123456789abcdef", requireKey: true, allowLan: false, allowModelSwitch: true, requests: 0, lastRequestAt: null, error: null };
+  const apiView = (): LocalApiView => ({ ...localApi, lanUrls: localApi.running && localApi.allowLan ? ["http://192.168.1.20:47812/v1"] : [] });
   const trainer = createMockTrainer(options.trainStepMs !== undefined ? { stepMs: options.trainStepMs } : {});
   const chatEngine = createMockChat({ ...(options.chatSpeed !== undefined ? { speed: options.chatSpeed } : {}), ...(options.orchestrateSpeed !== undefined ? { orchestrateSpeed: options.orchestrateSpeed } : {}) });
   const tickMs = options.tickMs !== undefined && Number.isFinite(options.tickMs) && options.tickMs > 0 ? options.tickMs : 1000;
@@ -775,6 +778,22 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
       }),
 
     ...trainer,
+    localApiGet: () => later(0, apiView),
+    localApiEnable: (on) =>
+      later(0, () => {
+        localApi = { ...localApi, enabled: on, running: on, url: on ? "http://127.0.0.1:47812/v1" : null };
+        return apiView();
+      }),
+    localApiOptions: (requireKey, allowLan, allowModelSwitch) =>
+      later(0, () => {
+        localApi = { ...localApi, requireKey, allowLan, allowModelSwitch };
+        return apiView();
+      }),
+    localApiRotateKey: () =>
+      later(0, () => {
+        localApi = { ...localApi, key: `sk-cerebro-${Math.random().toString(16).slice(2).padEnd(40, "0")}` };
+        return apiView();
+      }),
     mcpServerGet: () => later(0, () => ({ ...mcpSrv })),
     mcpServerEnable: (on) =>
       later(0, () => {

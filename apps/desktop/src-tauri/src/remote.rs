@@ -248,6 +248,11 @@ pub enum HttpError {
 /// Reads one HTTP/1.1 request: at most MAX_HEAD bytes of request line and headers, a body only by
 /// Content-Length and at most MAX_BODY. Anything else is refused with a status code.
 pub fn read_request<R: BufRead>(r: &mut R) -> Result<Request, HttpError> {
+    read_request_limited(r, MAX_BODY)
+}
+
+/// [`read_request`] with a caller-chosen body limit (the local API takes whole conversations).
+pub fn read_request_limited<R: BufRead>(r: &mut R, max_body: usize) -> Result<Request, HttpError> {
     let mut head = 0usize;
     let mut line = Vec::new();
     let mut read_line = |r: &mut R, line: &mut Vec<u8>, first: bool| -> Result<String, HttpError> {
@@ -298,7 +303,7 @@ pub fn read_request<R: BufRead>(r: &mut R) -> Result<Request, HttpError> {
         None => 0,
         Some(v) => v.parse::<usize>().map_err(|_| HttpError::Bad(400))?,
     };
-    if len > MAX_BODY {
+    if len > max_body {
         return Err(HttpError::Bad(413));
     }
     req.body = vec![0; len];
@@ -345,6 +350,7 @@ fn reason(status: u16) -> &'static str {
         429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
+        503 => "Service Unavailable",
         505 => "HTTP Version Not Supported",
         _ => "Error",
     }
@@ -352,7 +358,7 @@ fn reason(status: u16) -> &'static str {
 
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
-pub(crate) fn write_response<W: Write>(w: &mut W, r: &Response, keep_alive: bool) -> std::io::Result<()> {
+pub(crate) fn write_response<W: Write + ?Sized>(w: &mut W, r: &Response, keep_alive: bool) -> std::io::Result<()> {
     let mut head = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: camera=(), microphone=(), geolocation=()\r\nContent-Security-Policy: {CSP}\r\n",
         r.status,

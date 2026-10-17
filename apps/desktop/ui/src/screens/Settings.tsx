@@ -1,6 +1,7 @@
 import "../styles/settings.css";
 import { createEffect, createResource, createSignal, For, Show, type JSX } from "solid-js";
 import { ChatSettings } from "./settings/ChatSettings";
+import { LocalApiAccess } from "./settings/LocalApiAccess";
 import { McpServerAccess } from "./settings/McpServerAccess";
 import { PhoneAccess } from "./settings/PhoneAccess";
 import { WorkspaceFolders } from "./settings/WorkspaceFolders";
@@ -213,6 +214,8 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
       <PhoneAccess />
 
       <McpServerAccess />
+
+      <LocalApiAccess />
 
       <WorkspaceFolders />
 
