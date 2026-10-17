@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-placement-preview"
+description = "Enables the placement_preview command without any pre-configured scope."
+commands.allow = ["placement_preview"]
+
+[[permission]]
+identifier = "deny-placement-preview"
+description = "Denies the placement_preview command without any pre-configured scope."
+commands.deny = ["placement_preview"]

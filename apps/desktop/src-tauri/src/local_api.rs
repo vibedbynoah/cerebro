@@ -977,12 +977,10 @@ mod tests {
 
     fn server(fake: Arc<Fake>, f: impl FnOnce(&mut Settings)) -> (Arc<LocalApi>, SocketAddr, String) {
         let api = LocalApi::new(Settings::default(), fake, Box::new(|_| {}));
-        let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = l.local_addr().unwrap().port();
-        drop(l);
         {
+            // Port 0: the OS picks a free port at bind time (picking one first races other tests).
             let mut s = api.settings();
-            s.port = port;
+            s.port = 0;
             f(&mut s);
         }
         api.set_enabled(true).unwrap();

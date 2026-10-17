@@ -53,6 +53,7 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::model_load,
             commands::model_unload,
             commands::models_loaded,
+            commands::placement_preview,
             commands::chat_send,
             commands::chat_stop,
             commands::live_stats,

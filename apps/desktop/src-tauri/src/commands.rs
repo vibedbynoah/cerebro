@@ -105,13 +105,37 @@ fn find_model(engine: &Engine, id: &str) -> Result<LibraryModel, String> {
 
 /// Loads a library model into the engine (replacing the one loaded). `context` in tokens.
 #[tauri::command]
-pub async fn model_load(engine: State<'_, Engine>, id: String, context: Option<u32>) -> Result<serde_json::Value, String> {
+pub async fn model_load(engine: State<'_, Engine>, id: String, context: Option<u32>, gpu_layers: Option<u32>) -> Result<serde_json::Value, String> {
     let model = find_model(&engine, &id)?;
     let ctx = context.unwrap_or(8192).clamp(512, 1 << 20) as usize;
+    // Every layer (or more) means "as many as fit"; fewer forces a split; 0 the processor only.
+    let force = gpu_layers.map(|n| n as usize).filter(|&n| n < model.arch.layers as usize);
     // The load runs on the engine thread; a blocking task waits for it.
     let eng = engine.inner().handle();
-    tauri::async_runtime::spawn_blocking(move || eng.load(model, ctx)).await.map_err(|_| "The load failed.".to_owned())??;
+    tauri::async_runtime::spawn_blocking(move || eng.load(model, ctx, force)).await.map_err(|_| "The load failed.".to_owned())??;
     Ok(loaded_json(&engine))
+}
+
+/// Where a model would go if loaded now: GPU layers, RAM, the drive, and an estimated speed. The
+/// model loaded now counts as freed (loading replaces it).
+#[tauri::command]
+pub async fn placement_preview(engine: State<'_, Engine>, id: String, context: Option<u32>, gpu_layers: Option<u32>) -> Result<serde_json::Value, String> {
+    let model = find_model(&engine, &id)?;
+    let ctx = context.unwrap_or(8192).clamp(512, 1 << 20) as usize;
+    let force = gpu_layers.map(|n| n as usize).filter(|&n| n < model.arch.layers as usize);
+    let held = engine.status.lock().unwrap_or_else(|e| e.into_inner()).loaded.as_ref().map_or(0, |l| l.vram_bytes as u64);
+    tauri::async_runtime::spawn_blocking(move || {
+        let m = cerebro_engine::model::Model::load(std::path::Path::new(&model.path)).map_err(|e| format!("Could not read the model: {e}"))?;
+        let vram = if force == Some(0) || !cerebro_engine::switches::enabled(cerebro_engine::switches::GPU_ENABLED) {
+            0
+        } else {
+            cerebro_engine::hw::gpus().first().map_or(0, |g| g.vram_free + held)
+        };
+        let plan = cerebro_engine::gpu::plan_for(&m, ctx.min(m.cfg.ctx_train.max(512)), vram, force.filter(|&n| n > 0)).map_err(|e| e.to_string())?;
+        serde_json::to_value(plan).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|_| "The preview failed.".to_owned())?
 }
 
 #[tauri::command]
@@ -129,7 +153,7 @@ pub fn models_loaded(engine: State<'_, Engine>) -> serde_json::Value {
 fn loaded_json(engine: &Engine) -> serde_json::Value {
     let s = engine.status.lock().unwrap_or_else(|e| e.into_inner());
     match &s.loaded {
-        Some(l) => serde_json::json!([{ "id": l.model.id, "slot": "llm", "params": null, "tuned": false }]),
+        Some(l) => serde_json::json!([{ "id": l.model.id, "slot": "llm", "params": null, "tuned": false, "placement": l.placement }]),
         None => serde_json::json!([]),
     }
 }
@@ -188,7 +212,8 @@ pub fn metrics(engine: State<'_, Engine>, tele: State<'_, Telemetry>) -> serde_j
             "id": l.model.id, "name": l.model.name, "quant": l.model.quant, "params": l.model.params,
             "architecture": l.model.architecture, "contextMax": l.ctx, "contextUsed": l.context_used,
             "kvType": if l.on_gpu { "f16" } else { "f32" }, "layers": l.model.arch.layers,
-            "gpuLayers": if l.on_gpu { l.model.arch.layers } else { 0 }, "expertLayersOnCpu": 0,
+            "gpuLayers": if l.on_gpu && l.experts.is_some() { l.model.arch.layers as usize } else { l.gpu_layers }, "expertLayersOnCpu": 0,
+            "placement": l.placement,
         })
     });
     let moe = s.loaded.as_ref().and_then(|l| {
@@ -700,7 +725,7 @@ impl crate::mcp_server::McpBackend for McpEngineBackend {
         let engine = self.0.state::<Engine>();
         let model = find_model(&engine, id)?;
         let name = model.name.clone();
-        engine.handle().load(model, context.unwrap_or(8192))?;
+        engine.handle().load(model, context.unwrap_or(8192), None)?;
         Ok(format!("Loaded {name}."))
     }
 
@@ -789,7 +814,7 @@ impl crate::local_api::ApiBackend for ApiEngineBackend {
         if let Some(id) = &req.load {
             let model = find_model(&engine, id).map_err(unavailable)?;
             let ctx = engine.status.lock().unwrap_or_else(|e| e.into_inner()).loaded.as_ref().map_or(16_384, |l| l.ctx);
-            engine.load(model, ctx).map_err(unavailable)?;
+            engine.load(model, ctx, None).map_err(unavailable)?;
         }
         let (model_id, name, dialect) = engine
             .status
@@ -922,7 +947,7 @@ mod api_real_tests {
         let lib = crate::engine::scan_library();
         let m = lib.iter().find(|m| m.path.ends_with("Qwen3-0.6B-Q8_0.gguf")).expect("Qwen3-0.6B-Q8_0.gguf in the library").clone();
         *engine.library.lock().unwrap() = lib.clone();
-        engine.load(m, 8192).unwrap();
+        engine.load(m, 8192, None).unwrap();
         let api = crate::local_api::LocalApi::new(crate::local_api::Settings::default(), Arc::new(super::ApiEngineBackend(engine.handle())), Box::new(|_| {}));
         api.set_enabled(true).unwrap();
         let v = api.view();

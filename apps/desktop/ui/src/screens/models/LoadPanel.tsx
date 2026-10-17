@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createResource, createSignal, createUniqueId, For, Show, type Accessor, type JSX } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, createUniqueId, For, onCleanup, Show, type Accessor, type JSX } from "solid-js";
 import { Icon } from "../../components/icons";
 import { SettingSwitch } from "../../components/SettingSwitch";
 import { Term } from "../../components/Term";
@@ -9,6 +9,7 @@ import { notify } from "../../lib/toast";
 import { profileNameError, tweakedFields } from "../../lib/tweaks";
 import { useService } from "../../service/context";
 import type { LibraryModel, LoadParams, LoadPreset, NgramStrategy, Tweaks } from "../../service/types";
+import { PlacementCard } from "./PlacementCard";
 import { useModels } from "./store";
 
 /** Plain-words names for the draft-free strategies (docs/CLAIMS.md lists the ids). */
@@ -57,6 +58,18 @@ export function LoadPanel(props: {
     return h ? estimateFit(m(), props.effective(), h, draftModel() ?? null) : null;
   });
   const baselineName = () => (m().tunedParams ? "tuned" : "starting");
+
+  // The engine's own placement for these settings (desktop): asked again 300 ms after the context
+  // or the GPU layer count stops changing.
+  const [placeKey, setPlaceKey] = createSignal<{ id: string; ctx: number; gpu: number } | null>(null);
+  let placeTimer: ReturnType<typeof setTimeout> | undefined;
+  createEffect(() => {
+    const key = { id: m().id, ctx: props.effective().contextLength, gpu: props.effective().gpuLayers };
+    clearTimeout(placeTimer);
+    placeTimer = setTimeout(() => setPlaceKey(key), 300);
+  });
+  onCleanup(() => clearTimeout(placeTimer));
+  const [placement] = createResource(placeKey, (k) => (service.placementPreview ? service.placementPreview(k.id, k.ctx, k.gpu).catch(() => null) : Promise.resolve(null)));
 
   // ---- Presets ----
   const [presets, { mutate }] = createResource(
@@ -203,6 +216,7 @@ export function LoadPanel(props: {
       >
         {(f) => <FitBar fit={f()} summary={summaryText()} />}
       </Show>
+      <Show when={placement()}>{(p) => <PlacementCard plan={p()} title="Where it would run" />}</Show>
 
       <Show when={props.tweakCount() > 0}>
         <p class="hint tweak-note">

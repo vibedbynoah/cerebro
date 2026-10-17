@@ -454,12 +454,8 @@ mod tests {
     #[test]
     fn full_session_over_a_real_socket() {
         let server = McpServer::new(Settings { enabled: false, port: 0, token: String::new() }, Arc::new(Fake), Box::new(|_| {}));
+        // Port 0: the OS picks a free port at bind time (picking one first races other tests).
         server.settings().port = 0;
-        // Port 0 in settings means "default"; use an ephemeral port for the test instead.
-        let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = l.local_addr().unwrap().port();
-        drop(l);
-        server.settings().port = port;
         server.set_enabled(true).unwrap();
         let addr = server.bound().unwrap();
         let token = server.settings().token.clone();

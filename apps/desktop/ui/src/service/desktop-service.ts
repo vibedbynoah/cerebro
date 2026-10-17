@@ -14,6 +14,7 @@ import type { HistoryRange, MetricsSeries, MetricsSnapshot, RequestDetail } from
 import type { CatalogModel, GpuInfo, HardwareProfile, LibraryModel, LiveStats, LoadedModel, LoadParams, ModelDetail, ModelSummary, NetworkState } from "./types";
 import { CURRENT_CATALOG } from "./catalog";
 import type { TrainerStatus, TrainEvent, TrainInstalled } from "./train-types";
+import type { Placement } from "./types";
 import type { ActivePatch, EngineSwitch, LocalApiView, McpServerView, RemotePairing, RemoteView, McpCallResult, McpConfig, McpServerStatus, McpTool, HubDownloadEvent, HubFile, HubFileMeta, HubRepo, LoadPreset, PatchProfile } from "./types";
 import { EMPTY_TWEAKS, profileNameError, sanitizeTweaks } from "../lib/tweaks";
 
@@ -100,7 +101,8 @@ export function createDesktopService(local: CerebroService): CerebroService {
       return { id, gguf: null, chatTemplate: null, quirks: [], author: { rope: null, sampler: null }, copy: null };
     },
     listLoaded: () => invoke<LoadedModel[]>("models_loaded"),
-    loadModel: (id: string, params: LoadParams | null) => invoke<LoadedModel[]>("model_load", { id, context: params?.contextLength ?? null }),
+    loadModel: (id: string, params: LoadParams | null) => invoke<LoadedModel[]>("model_load", { id, context: params?.contextLength ?? null, gpuLayers: params?.gpuLayers ?? null }),
+    placementPreview: (id, contextLength, gpuLayers) => invoke<Placement>("placement_preview", { id, context: contextLength, gpuLayers }),
     unloadModel: () => invoke<LoadedModel[]>("model_unload"),
     async listPresets(modelId) {
       known(modelId);

@@ -26,6 +26,7 @@
     "allow-chat-stop",
     "allow-chat-send",
     "allow-models-loaded",
+    "allow-placement-preview",
     "allow-model-unload",
     "allow-model-load",
     "allow-library-list",

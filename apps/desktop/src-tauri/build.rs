@@ -18,6 +18,7 @@ const COMMANDS: &[&str] = &[
     "model_load",
     "model_unload",
     "models_loaded",
+    "placement_preview",
     "chat_send",
     "chat_stop",
     "live_stats",

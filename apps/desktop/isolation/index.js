@@ -73,6 +73,8 @@ const isModelId = (v) => typeof v === "string" && /^[A-Za-z0-9]{1,64}$/.test(v);
 
 /** A Tauri channel, as serialized for IPC ("__CHANNEL__:<id>") or still as its object. @param {unknown} v */
 const isChannel = (v) => (typeof v === "string" && /^__CHANNEL__:\d+$/.test(v)) || (typeof v === "object" && v !== null && typeof (/** @type {{id?: unknown}} */ (v)).id === "number");
+/** Absent, null, or a whole number from `min` to 2^20. @param {unknown} v @param {number} min */
+const optCount = (v, min) => v === undefined || v === null || (typeof v === "number" && Number.isInteger(v) && v >= min && v <= 1 << 20);
 const TRAIN_QUANTS = new Set(["q4_k_m", "q5_k_m", "q8_0", "f16"]);
 /** @param {unknown} v @param {number} lo @param {number} hi */
 const isNum = (v, lo, hi) => typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi;
@@ -160,7 +162,8 @@ function isToolsRequest(t) {
 
 /** Commands with arguments, each with its own shape check. @type {Record<string, (p: unknown) => boolean>} */
 const WITH_ARGS = {
-  model_load: (p) => isPlain(p) && hasOnlyKeys(p, ["id"], ["context"]) && isModelId(p.id) && (p.context === undefined || p.context === null || (Number.isInteger(p.context) && /** @type {number} */ (p.context) > 0)),
+  model_load: (p) => isPlain(p) && hasOnlyKeys(p, ["id"], ["context", "gpuLayers"]) && isModelId(p.id) && optCount(p.context, 1) && optCount(p.gpuLayers, 0),
+  placement_preview: (p) => isPlain(p) && hasOnlyKeys(p, ["id"], ["context", "gpuLayers"]) && isModelId(p.id) && optCount(p.context, 1) && optCount(p.gpuLayers, 0),
   hub_search: (p) => isPlain(p) && hasOnlyKeys(p, ["query"]) && typeof p.query === "string" && p.query.length <= 120,
   hub_files: (p) => isPlain(p) && hasOnlyKeys(p, ["repo"]) && isRepo(p.repo),
   hub_file_meta: (p) => isPlain(p) && hasOnlyKeys(p, ["repo", "file"]) && isRepo(p.repo) && isGguf(p.file),

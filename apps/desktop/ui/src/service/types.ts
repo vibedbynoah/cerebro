@@ -288,6 +288,23 @@ export interface LoadedModel {
   params: LoadParams | null;
   /** True when it was loaded with the tuned settings unchanged. */
   tuned: boolean;
+  /** Where the engine put it (desktop). */
+  placement?: Placement | null;
+}
+
+/** Where a model's weights go (cerebro_engine::placement::Plan). Bytes; speeds are estimates. */
+export interface Placement {
+  layout: "gpu-int8" | "gpu-native" | "split" | "cpu";
+  gpuLayers: number;
+  totalLayers: number;
+  vramBytes: number;
+  /** Weights the processor reads per token, how many stay in RAM, and how many come from the drive. */
+  cpuBytes: number;
+  ramResident: number;
+  driveBytesPerToken: number;
+  estDecodeTps: number;
+  drive: "nvme" | "sata-ssd" | "hard-disk" | "removable" | "unknown";
+  notes: string[];
 }
 
 export interface LoadPreset {

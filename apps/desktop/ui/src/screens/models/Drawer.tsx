@@ -13,6 +13,7 @@ import { activeTweakCount, applyTweaks, contextCeiling, EMPTY_TWEAKS } from "../
 import { useService } from "../../service/context";
 import type { LibraryModel, LoadParams, TuneResult } from "../../service/types";
 import { LoadPanel } from "./LoadPanel";
+import { PlacementCard } from "./PlacementCard";
 import { Metadata } from "./Metadata";
 import { contextLabel, FitChip, ModalityBadges, publisherOf, Size, SOURCE_LABELS, Spinner, TuneChip } from "./parts";
 import { useModels } from "./store";
@@ -227,6 +228,7 @@ function DrawerBody(props: { model: LibraryModel }): JSX.Element {
                   <Overview model={m()} onReveal={() => void reveal()} />
                 </Match>
                 <Match when={t === "load"}>
+                  <Show when={store.loaded().find((l) => l.id === m().id)?.placement}>{(p) => <PlacementCard plan={p()} title="Where it runs now" />}</Show>
                   <LoadPanel model={m()} draft={draft} setDraft={setDraft} baseline={baseline} effective={effective} tweaks={tweaks} tweakCount={tweakCount} contextMax={ceiling} errors={errors} onTweaks={() => setTab("tweak")} />
                 </Match>
                 <Match when={t === "tweak"}>

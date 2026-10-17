@@ -523,10 +523,14 @@ pub struct LoadedInfo {
     pub last_prefill_tps: Option<f64>,
     /// How the model writes tool calls (for replaying a client's tool history, local_api.rs).
     pub dialect: crate::toolcall::Dialect,
+    /// Where the weights went: GPU layers, RAM, drive, and why (cerebro_engine::placement).
+    pub placement: Option<cerebro_engine::placement::Plan>,
+    /// Layers running on the GPU (all of them, some, or none).
+    pub gpu_layers: usize,
 }
 
 enum Job {
-    Load { model: LibraryModel, ctx: usize, reply: Sender<Result<(), String>> },
+    Load { model: LibraryModel, ctx: usize, gpu_layers: Option<usize>, reply: Sender<Result<(), String>> },
     Unload { reply: Sender<()> },
     Chat { req: ChatRequest, events: ChatSink, reply: Sender<()> },
 }
@@ -560,6 +564,7 @@ struct Loaded {
     info: LibraryModel,
     /// How this model writes tool calls, read from its chat template.
     dialect: crate::toolcall::Dialect,
+    placement: Option<cerebro_engine::placement::Plan>,
 }
 
 impl Engine {
@@ -580,7 +585,7 @@ impl Engine {
                 let mut loaded: Option<Loaded> = None;
                 while let Ok(job) = rx.recv() {
                     match job {
-                        Job::Load { model, ctx, reply } => {
+                        Job::Load { model, ctx, gpu_layers, reply } => {
                             if let Some(l) = loaded.take() {
                                 save_profile(&l);
                             }
@@ -588,7 +593,7 @@ impl Engine {
                                 s.loaded = None;
                                 s.activity = "loading";
                             });
-                            let r = load(&model, ctx);
+                            let r = load(&model, ctx, gpu_layers);
                             let msg = match r {
                                 Ok(l) => {
                                     let info = loaded_info(&l, ctx);
@@ -684,9 +689,11 @@ impl Engine {
         self.tx.lock().unwrap_or_else(|e| e.into_inner()).send(job).map_err(|_| "The engine has stopped.".to_owned())
     }
 
-    pub fn load(&self, model: LibraryModel, ctx: usize) -> Result<(), String> {
+    /// Loads `model`; `gpu_layers` forces how many layers run on the GPU (None: as many as fit,
+    /// Some(0): the processor only).
+    pub fn load(&self, model: LibraryModel, ctx: usize, gpu_layers: Option<usize>) -> Result<(), String> {
         let (reply, rx) = channel();
-        self.send(Job::Load { model, ctx, reply })?;
+        self.send(Job::Load { model, ctx, gpu_layers, reply })?;
         rx.recv().map_err(|_| "The engine stopped while loading.".to_owned())?
     }
 
@@ -708,22 +715,30 @@ fn set(st: &Arc<Mutex<Status>>, f: impl FnOnce(&mut Status)) {
     f(&mut s);
 }
 
-fn load(m: &LibraryModel, ctx: usize) -> Result<Loaded, String> {
+fn load(m: &LibraryModel, ctx: usize, gpu_layers: Option<usize>) -> Result<Loaded, String> {
     if !m.supported {
         return Err(format!("Cerebro Engine does not run the {} architecture yet.", m.arch_name));
     }
     let model = Model::load(Path::new(&m.path)).map_err(|e| format!("Could not load the model: {e}"))?;
     let tok = Tokenizer::from_gguf(model.gguf()).map_err(|e| format!("Could not read the tokenizer: {e}"))?;
     let ctx = ctx.clamp(512, model.cfg.ctx_train.max(512));
-    let session = match Session::new_gpu(&model, ctx) {
-        Ok(s) => s,
+    let (session, placement) = match Session::new_gpu_with(&model, ctx, gpu_layers) {
+        Ok(s) => {
+            let p = s.gpu.as_ref().map(|g| g.plan.clone());
+            (s, p)
+        }
         Err(e) => {
-            eprintln!("GPU unavailable for this model ({e}); running on the CPU");
-            Session::new(&model, ctx)
+            eprintln!("Running on the processor: {e}");
+            // The processor-only plan still says what RAM and the drive will do.
+            let mut p = cerebro_engine::gpu::plan_for(&model, ctx, 0, None).ok();
+            if let (Some(p), Some(0)) = (p.as_mut(), gpu_layers) {
+                p.notes[0] = "No layers on the graphics card (chosen when loading): everything runs on the processor.".to_owned();
+            }
+            (Session::new(&model, ctx), p)
         }
     };
     let dialect = crate::toolcall::dialect_from_template(model.gguf().str("tokenizer.chat_template").unwrap_or(""));
-    Ok(Loaded { model, session, tok, info: m.clone(), dialect })
+    Ok(Loaded { model, session, tok, info: m.clone(), dialect, placement })
 }
 
 fn loaded_info(l: &Loaded, ctx: usize) -> LoadedInfo {
@@ -737,6 +752,8 @@ fn loaded_info(l: &Loaded, ctx: usize) -> LoadedInfo {
         context_used: l.session.tokens.len(),
         last_prefill_tps: None,
         dialect: l.dialect,
+        placement: l.placement.clone(),
+        gpu_layers: g.map_or(0, |g| g.gpu_layers()),
     }
 }
 
@@ -1378,7 +1395,7 @@ mod tool_loop_tests {
         let Some(model) = describe(Path::new(&path), "test") else { panic!("model not readable: {path}") };
         let engine = Engine::start();
         engine.set_tool_host(Arc::new(Weather));
-        engine.load(model.clone(), 4096).unwrap();
+        engine.load(model.clone(), 4096, None).unwrap();
         let events: Arc<Mutex<Vec<ChatEvent>>> = Arc::default();
         let ev = events.clone();
         let decider = engine.handle();
@@ -1423,7 +1440,7 @@ mod tool_loop_tests {
         let engine = Engine::start();
         let root = std::env::temp_dir().join(format!("cerebro-orch-{}", std::process::id()));
         engine.set_ledger_root(root.clone());
-        engine.load(model.clone(), 8192).unwrap();
+        engine.load(model.clone(), 8192, None).unwrap();
         let events: Arc<Mutex<Vec<ChatEvent>>> = Arc::default();
         let ev = events.clone();
         let sink: ChatSink = Arc::new(move |e: ChatEvent| ev.lock().unwrap().push(e));

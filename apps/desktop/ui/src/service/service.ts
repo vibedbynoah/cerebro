@@ -1,4 +1,5 @@
 import type { TrainerStatus, TrainEvent, TrainInstalled, TrainJob } from "./train-types";
+import type { Placement } from "./types";
 import type { EngineSwitch, LocalApiView, McpServerView, RemoteOptions, RemotePairing, RemoteView, McpCallResult, McpConfig, McpServerStatus, McpTool,
   ActivePatch,
   CatalogModel,
@@ -199,4 +200,6 @@ export interface CerebroService {
   hubDownload?(repo: string, file: HubFile, onEvent: (e: HubDownloadEvent) => void): Promise<string>;
   /** Stops a download; the partial file resumes next time. */
   hubCancel?(repo: string, path: string): Promise<void>;
+  /** Where a model would go if loaded now with this context and GPU layer count (desktop). */
+  placementPreview?(id: string, contextLength: number, gpuLayers: number): Promise<Placement>;
 }

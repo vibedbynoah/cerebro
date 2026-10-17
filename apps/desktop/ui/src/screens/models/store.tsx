@@ -114,9 +114,12 @@ export function ModelsProvider(props: { children: JSX.Element }): JSX.Element {
       if (!m || pending().has(id)) return false;
       mark(id, true);
       try {
-        setLoaded(await service.loadModel(id, params));
+        const now = await service.loadModel(id, params);
+        setLoaded(now);
         const how = m.kind !== "text" && m.kind !== "vision" ? "in its own engine" : params ? "with your settings" : m.tunedParams ? "with its tuned settings" : "with starting settings";
-        notify(`${m.name} loaded`, `${m.quant}, ${how}.`, "success");
+        // Where it went (desktop): the planner's first note, e.g. "31 of 40 layers on the GPU…".
+        const where = now.find((l) => l.id === id)?.placement?.notes[0];
+        notify(`${m.name} loaded`, `${m.quant}, ${how}.${where ? ` ${where}` : ""}`, "success");
         return true;
       } catch {
         notify(`${m.name} did not load`, "Nothing changed. Check the load settings and try again.", "error");

@@ -778,6 +778,32 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
       }),
 
     ...trainer,
+    // Illustrative: the layer share that fits an 8 GB card, the rest in RAM (no drive reads).
+    placementPreview: (id, contextLength, gpuLayers) =>
+      later(0, () => {
+        const m = MOCK_LIBRARY.find((x) => x.id === id);
+        if (!m) throw new Error("No such model.");
+        const total = m.arch.layers;
+        const bytes = m.sizeGiB * 1024 ** 3;
+        const per = bytes / total;
+        const fit = Math.min(total, Math.floor((7.4 * 1024 ** 3 - contextLength * 1024) / per));
+        const layers = Math.max(0, Math.min(fit, gpuLayers));
+        const layout = layers === 0 ? "cpu" : layers >= total ? "gpu-int8" : "split";
+        const cpu = bytes - layers * per;
+        const est = 1 / ((layers * per) / 3e11 + cpu / 1.9e10);
+        return {
+          layout,
+          gpuLayers: layers,
+          totalLayers: total,
+          vramBytes: layers * per,
+          cpuBytes: cpu,
+          ramResident: cpu,
+          driveBytesPerToken: 0,
+          estDecodeTps: est,
+          drive: "nvme",
+          notes: [layout === "split" ? `${layers} of ${total} layers on the GPU, the rest on the processor.` : layout === "cpu" ? "Everything runs on the processor." : "Every layer fits on the GPU."],
+        } as const;
+      }),
     localApiGet: () => later(0, apiView),
     localApiEnable: (on) =>
       later(0, () => {
