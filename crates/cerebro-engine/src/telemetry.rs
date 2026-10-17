@@ -1,6 +1,7 @@
 //! Live hardware telemetry for the Monitor: CPU load and, per NVIDIA GPU, utilization, memory use,
-//! temperature, power, clocks and PCIe throughput — sampled about once per second, like nvidia-smi
-//! plus Task Manager. Read from the OS and the driver, never assumed: anything the machine will not
+//! temperature, power, clocks and PCIe throughput, like nvidia-smi plus Task Manager. Instant readings
+//! (load, temperature, power, clocks, VRAM) are fresh on every call, so the UI can poll at 3 Hz; rates
+//! (CPU %, PCIe and disk MB/s) are measured over a 1-second window and refresh once a second. Read from the OS and the driver, never assumed: anything the machine will not
 //! tell us comes back as `None`, never as an error and never as a panic.
 
 #[cfg(windows)]
@@ -9,6 +10,9 @@ use std::ffi::c_void;
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct GpuSample {
     pub index: u32,
+    pub name: Option<String>,
+    pub vram_used: Option<u64>,
+    pub vram_total: Option<u64>,
     pub util_pct: Option<f64>,
     pub mem_util_pct: Option<f64>,
     pub temp_c: Option<f64>,
@@ -27,14 +31,40 @@ pub struct GpuSample {
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Sample {
     pub cpu_pct: Option<f64>,
+    /// System-wide physical disk throughput over the last second (all disks).
+    pub disk_read_mbs: Option<f64>,
+    pub disk_write_mbs: Option<f64>,
     pub gpus: Vec<GpuSample>,
+    /// True when this call closed a new 1-second rate window; history appends exactly then.
+    pub new_second: bool,
 }
+
+/// Rates are re-measured when at least this long has passed (slack for timer jitter at 3 Hz polls).
+const RATE_WINDOW: std::time::Duration = std::time::Duration::from_millis(950);
 
 /// Holds the resolved NVML entry points (loaded once) and the previous CPU-time reading.
 pub struct Sampler {
     #[cfg(windows)]
     nvml: Option<Nvml>,
+    #[cfg(windows)]
+    disk: Option<Disk>,
     cpu: CpuTimes,
+    /// The last rate window: when it closed and what it measured.
+    rates_at: Option<std::time::Instant>,
+    rates: Rates,
+    /// Facts that do not change while the app runs, read once per GPU: (name, driver, max PCIe gen).
+    fixed: Vec<Fixed>,
+}
+
+type Fixed = (Option<String>, Option<String>, Option<u32>);
+
+#[derive(Clone, Default)]
+struct Rates {
+    cpu_pct: Option<f64>,
+    disk_read_mbs: Option<f64>,
+    disk_write_mbs: Option<f64>,
+    /// Per GPU: PCIe (rx, tx) MB/s.
+    pcie: Vec<(Option<f64>, Option<f64>)>,
 }
 
 impl Sampler {
@@ -43,18 +73,43 @@ impl Sampler {
         Sampler {
             #[cfg(windows)]
             nvml: Nvml::load(),
+            #[cfg(windows)]
+            disk: Disk::open(),
             cpu: CpuTimes::default(),
+            rates_at: None,
+            rates: Rates::default(),
+            fixed: Vec::new(),
         }
     }
 
-    /// One reading. Never panics; unreadable values are `None`.
+    /// One reading. Never panics; unreadable values are `None`. Cheap enough for 3 calls a second:
+    /// the slow PCIe counters (~20 ms each) only run when a rate window closes.
     pub fn sample(&mut self) -> Sample {
-        let cpu_pct = self.cpu.sample();
+        let now = std::time::Instant::now();
+        let new_second = self.rates_at.is_none_or(|t| now.duration_since(t) >= RATE_WINDOW);
         #[cfg(windows)]
-        let gpus = gpu_samples(self.nvml.as_ref());
+        let mut gpus = gpu_samples(self.nvml.as_ref(), &mut self.fixed);
         #[cfg(not(windows))]
-        let gpus = Vec::new();
-        Sample { cpu_pct, gpus }
+        let mut gpus: Vec<GpuSample> = Vec::new();
+        if new_second {
+            self.rates_at = Some(now);
+            #[cfg(windows)]
+            let (disk_read_mbs, disk_write_mbs) = self.disk.as_mut().map_or((None, None), |d| d.rates());
+            #[cfg(not(windows))]
+            let (disk_read_mbs, disk_write_mbs) = (None, None);
+            #[cfg(windows)]
+            let pcie = pcie_rates(self.nvml.as_ref(), gpus.len());
+            #[cfg(not(windows))]
+            let pcie = Vec::new();
+            // The first window has no previous reading, so CPU load starts on the second one.
+            let cpu_pct = self.cpu.sample();
+            self.rates = Rates { cpu_pct, disk_read_mbs, disk_write_mbs, pcie };
+        }
+        for (g, (rx, tx)) in gpus.iter_mut().zip(&self.rates.pcie) {
+            g.pcie_rx_mbs = *rx;
+            g.pcie_tx_mbs = *tx;
+        }
+        Sample { cpu_pct: self.rates.cpu_pct, disk_read_mbs: self.rates.disk_read_mbs, disk_write_mbs: self.rates.disk_write_mbs, gpus, new_second }
     }
 }
 
@@ -126,21 +181,36 @@ fn throttle_labels(bits: u64) -> Vec<&'static str> {
     v
 }
 
+/// Instant readings for every GPU; `fixed` caches the facts that never change.
 #[cfg(windows)]
-fn gpu_samples(nvml: Option<&Nvml>) -> Vec<GpuSample> {
+fn gpu_samples(nvml: Option<&Nvml>, fixed: &mut Vec<Fixed>) -> Vec<GpuSample> {
     let Some(nvml) = nvml else { return Vec::new() };
     let mut count = 0u32;
     if nvml.get_count(&mut count) != 0 {
         return Vec::new();
     }
-    let driver = nvml.driver_version();
     let mut out = Vec::with_capacity(count as usize);
     for index in 0..count {
         let mut dev = std::ptr::null_mut();
         if nvml.get_handle(index, &mut dev) != 0 || dev.is_null() {
             continue;
         }
-        let mut g = GpuSample { index, driver: driver.clone(), ..Default::default() };
+        let i = index as usize;
+        if fixed.len() <= i {
+            fixed.resize(i + 1, (None, None, None));
+        }
+        if fixed[i].0.is_none() {
+            let mut gen_max = 0u32;
+            let gen_max = (nvml.get_pcie_gen_max(dev, &mut gen_max) == 0).then_some(gen_max);
+            fixed[i] = (nvml.name(dev), nvml.driver_version(), gen_max);
+        }
+        let (name, driver, gen_max) = fixed[i].clone();
+        let mut g = GpuSample { index, name, driver, pcie_gen_max: gen_max, ..Default::default() };
+        let mut mem = MemInfo::default();
+        if nvml.get_memory(dev, &mut mem) == 0 {
+            g.vram_used = Some(mem.used);
+            g.vram_total = Some(mem.total);
+        }
 
         let mut util = Util::default();
         if nvml.get_utilization(dev, &mut util) == 0 {
@@ -162,20 +232,9 @@ fn gpu_samples(nvml: Option<&Nvml>) -> Vec<GpuSample> {
         if nvml.get_clock(dev, 1, &mut mhz) == 0 {
             g.sm_clock_mhz = Some(mhz as f64);
         }
-        // PCIe counters: 0 = TX, 1 = RX, both in KB/s. Each call costs ~20 ms.
-        let mut kbs = 0u32;
-        if nvml.get_pcie_throughput(dev, 0, &mut kbs) == 0 {
-            g.pcie_tx_mbs = Some(kbs as f64 / 1000.0);
-        }
-        if nvml.get_pcie_throughput(dev, 1, &mut kbs) == 0 {
-            g.pcie_rx_mbs = Some(kbs as f64 / 1000.0);
-        }
         let mut link = 0u32;
         if nvml.get_pcie_gen(dev, &mut link) == 0 {
             g.pcie_gen = Some(link);
-        }
-        if nvml.get_pcie_gen_max(dev, &mut link) == 0 {
-            g.pcie_gen_max = Some(link);
         }
         if nvml.get_pcie_width(dev, &mut link) == 0 {
             g.pcie_width = Some(link);
@@ -187,6 +246,91 @@ fn gpu_samples(nvml: Option<&Nvml>) -> Vec<GpuSample> {
         out.push(g);
     }
     out
+}
+
+/// PCIe (rx, tx) MB/s per GPU. NVML counters: 0 = TX, 1 = RX, in KB/s; each call costs ~20 ms,
+/// which is why this runs once per rate window, not on every poll.
+#[cfg(windows)]
+fn pcie_rates(nvml: Option<&Nvml>, count: usize) -> Vec<(Option<f64>, Option<f64>)> {
+    let Some(nvml) = nvml else { return Vec::new() };
+    (0..count as u32)
+        .map(|index| {
+            let mut dev = std::ptr::null_mut();
+            if nvml.get_handle(index, &mut dev) != 0 || dev.is_null() {
+                return (None, None);
+            }
+            let mut kbs = 0u32;
+            let tx = (nvml.get_pcie_throughput(dev, 0, &mut kbs) == 0).then(|| kbs as f64 / 1000.0);
+            let rx = (nvml.get_pcie_throughput(dev, 1, &mut kbs) == 0).then(|| kbs as f64 / 1000.0);
+            (rx, tx)
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Disk (PDH): system-wide physical disk bytes/s, the same counter Task Manager reads.
+// ---------------------------------------------------------------------------------------------
+
+#[cfg(windows)]
+struct Disk {
+    query: win::Handle,
+    read: win::Handle,
+    write: win::Handle,
+    primed: bool,
+}
+
+#[cfg(windows)]
+impl Disk {
+    fn open() -> Option<Disk> {
+        let mut query = std::ptr::null_mut();
+        // SAFETY: valid out-pointer; a NULL data source means live data.
+        if unsafe { win::PdhOpenQueryW(std::ptr::null(), 0, &mut query) } != 0 {
+            return None;
+        }
+        let add = |path: &str| -> Option<win::Handle> {
+            let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+            let mut counter = std::ptr::null_mut();
+            // SAFETY: query is open; wide is NUL-terminated; counter is a valid out-pointer.
+            (unsafe { win::PdhAddEnglishCounterW(query, wide.as_ptr(), 0, &mut counter) } == 0).then_some(counter)
+        };
+        let (Some(read), Some(write)) = (add(r"\PhysicalDisk(_Total)\Disk Read Bytes/sec"), add(r"\PhysicalDisk(_Total)\Disk Write Bytes/sec")) else {
+            // SAFETY: query is open and owned here.
+            unsafe { win::PdhCloseQuery(query) };
+            return None;
+        };
+        // SAFETY: open query. The first collection only primes the rate counters.
+        let primed = unsafe { win::PdhCollectQueryData(query) } == 0;
+        Some(Disk { query, read, write, primed })
+    }
+
+    /// (read, write) MB/s since the previous call.
+    fn rates(&mut self) -> (Option<f64>, Option<f64>) {
+        // SAFETY: open query.
+        let ok = unsafe { win::PdhCollectQueryData(self.query) } == 0;
+        let primed = std::mem::replace(&mut self.primed, ok);
+        if !ok || !primed {
+            return (None, None);
+        }
+        let value = |c: win::Handle| -> Option<f64> {
+            let mut v = win::PdhFmtCounterValue::default();
+            // SAFETY: c belongs to this query; v is a writable PDH_FMT_COUNTERVALUE.
+            let rc = unsafe { win::PdhGetFormattedCounterValue(c, win::PDH_FMT_DOUBLE, std::ptr::null_mut(), &mut v) };
+            (rc == 0 && v.status == 0).then(|| v.value / 1e6)
+        };
+        (value(self.read), value(self.write))
+    }
+}
+
+// SAFETY: the PDH query is only touched through &mut self, so one thread at a time.
+#[cfg(windows)]
+unsafe impl Send for Disk {}
+
+#[cfg(windows)]
+impl Drop for Disk {
+    fn drop(&mut self) {
+        // SAFETY: query is the handle we opened.
+        unsafe { win::PdhCloseQuery(self.query) };
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -219,6 +363,35 @@ mod win {
         pub fn FreeLibrary(module: Handle) -> i32;
         pub fn GetSystemTimes(idle: *mut FileTime, kernel: *mut FileTime, user: *mut FileTime) -> i32;
     }
+
+    pub const PDH_FMT_DOUBLE: u32 = 0x0000_0200;
+
+    /// PDH_FMT_COUNTERVALUE read through the double arm of its union.
+    #[repr(C)]
+    #[derive(Default)]
+    pub struct PdhFmtCounterValue {
+        pub status: u32,
+        pub value: f64,
+    }
+
+    #[link(name = "pdh")]
+    extern "system" {
+        pub fn PdhOpenQueryW(source: *const u16, user: usize, query: *mut Handle) -> u32;
+        pub fn PdhAddEnglishCounterW(query: Handle, path: *const u16, user: usize, counter: *mut Handle) -> u32;
+        pub fn PdhCollectQueryData(query: Handle) -> u32;
+        pub fn PdhGetFormattedCounterValue(counter: Handle, format: u32, kind: *mut u32, value: *mut PdhFmtCounterValue) -> u32;
+        pub fn PdhCloseQuery(query: Handle) -> u32;
+    }
+}
+
+/// nvmlMemory_t, in bytes.
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Default)]
+struct MemInfo {
+    total: u64,
+    free: u64,
+    used: u64,
 }
 
 #[cfg(windows)]
@@ -247,6 +420,8 @@ struct Nvml {
     get_pcie_width: unsafe extern "system" fn(*mut c_void, *mut u32) -> i32,
     get_throttle_reasons: unsafe extern "system" fn(*mut c_void, *mut u64) -> i32,
     get_driver_version: unsafe extern "system" fn(*mut u8, u32) -> i32,
+    get_memory: unsafe extern "system" fn(*mut c_void, *mut MemInfo) -> i32,
+    get_name: unsafe extern "system" fn(*mut c_void, *mut u8, u32) -> i32,
 }
 
 #[cfg(windows)]
@@ -295,6 +470,8 @@ impl Nvml {
             get_pcie_width: std::mem::transmute_copy(&sym("nvmlDeviceGetCurrPcieLinkWidth")?),
             get_throttle_reasons: std::mem::transmute_copy(&sym("nvmlDeviceGetCurrentClocksThrottleReasons")?),
             get_driver_version: std::mem::transmute_copy(&sym("nvmlSystemGetDriverVersion")?),
+            get_memory: std::mem::transmute_copy(&sym("nvmlDeviceGetMemoryInfo")?),
+            get_name: std::mem::transmute_copy(&sym("nvmlDeviceGetName")?),
         };
         Some(nvml)
     }
@@ -359,6 +536,21 @@ impl Nvml {
         unsafe { (self.get_throttle_reasons)(dev, out) }
     }
 
+    fn get_memory(&self, dev: *mut c_void, out: *mut MemInfo) -> i32 {
+        // SAFETY: stored entry point; dev is live; out is a writable nvmlMemory_t.
+        unsafe { (self.get_memory)(dev, out) }
+    }
+
+    fn name(&self, dev: *mut c_void) -> Option<String> {
+        let mut buf = [0u8; 96];
+        // SAFETY: stored entry point; dev is live; buf is writable for the length we pass.
+        if unsafe { (self.get_name)(dev, buf.as_mut_ptr(), buf.len() as u32) } != 0 {
+            return None;
+        }
+        let n = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        Some(String::from_utf8_lossy(&buf[..n]).into_owned())
+    }
+
     fn driver_version(&self) -> Option<String> {
         let mut buf = [0u8; 80];
         // SAFETY: buf is a valid writable buffer of the length we pass.
@@ -415,6 +607,18 @@ mod tests {
         let mut sampler = Sampler::new();
         let _ = sampler.sample();
         let _ = sampler.sample();
+    }
+
+    #[test]
+    fn rates_close_once_per_second() {
+        let mut sampler = Sampler::new();
+        assert!(sampler.sample().new_second, "the first call opens a window");
+        assert!(!sampler.sample().new_second, "a call right after reuses it");
+        std::thread::sleep(RATE_WINDOW);
+        let s = sampler.sample();
+        assert!(s.new_second);
+        #[cfg(windows)]
+        assert!(s.cpu_pct.is_some(), "a full window measures CPU load");
     }
 
     #[test]
