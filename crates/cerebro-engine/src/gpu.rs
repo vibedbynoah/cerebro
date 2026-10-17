@@ -398,6 +398,11 @@ fn repack(g: &Gguf, mats: &[&Mat]) -> (Vec<i8>, Vec<f32>, usize, usize) {
 
 impl GpuState {
     pub fn load(model: &Model, max_ctx: usize) -> Result<Self, Error> {
+        Self::load_with(model, max_ctx, None)
+    }
+
+    /// `load` with the number of GPU layers forced (None: the switch, or as many as fit).
+    pub fn load_with(model: &Model, max_ctx: usize, force_layers: Option<usize>) -> Result<Self, Error> {
         let ctx = CudaContext::new(0).map_err(gerr)?;
         // One stream, so the library's cross-stream event tracking is unnecessary (and it would
         // otherwise record events inside graph capture).
@@ -463,7 +468,8 @@ impl GpuState {
         let kvd = c.n_kv * c.head_dim;
         // Where everything goes (placement.rs). MoE models keep their K-quant weights native on
         // the GPU (about half the bytes of int8), leaving VRAM to the expert cache.
-        let plan = Self::plan(&ctx, model, max_ctx)?;
+        let (free, _) = ctx.mem_get_info().map_err(gerr)?;
+        let plan = plan_for(model, max_ctx, free as u64, force_layers)?;
         if plan.layout == crate::placement::Layout::Cpu {
             return Err(Error::Unsupported(plan.notes.join(" ")));
         }
@@ -606,13 +612,18 @@ impl GpuState {
         self.output.is_none()
     }
 
-    /// Placement for this model on this machine: VRAM free now, RAM available, the model's drive.
-    fn plan(ctx: &Arc<CudaContext>, model: &Model, max_ctx: usize) -> Result<crate::placement::Plan, Error> {
+}
+
+/// Placement for `model` with `vram_free` bytes of GPU memory (0: none), the RAM available now and
+/// the model's drive. `force_layers` overrides the GPU layer count (None: the switch, else as many
+/// as fit). Models whose layers have no GPU kernels yet plan as processor-only.
+pub fn plan_for(model: &Model, max_ctx: usize, vram_free: u64, force_layers: Option<usize>) -> Result<crate::placement::Plan, Error> {
+    {
         use crate::placement::{drive_of, plan_dense, plan_moe, LayerCost, Machine, ModelCost};
         let c = &model.cfg;
-        let (free, _) = ctx.mem_get_info().map_err(gerr)?;
         let (_, ram) = crate::hw::memory();
-        let mach = Machine::new(free as u64, ram, drive_of(&model.path));
+        let gpu_kernels = c.ssm.is_none() && !c.attn_gate && c.rope_dim == c.head_dim && c.head_dim <= 256 && c.head_dim % 64 == 0 && c.dim <= 8192;
+        let mach = Machine::new(if gpu_kernels { vram_free } else { 0 }, ram, drive_of(&model.path));
         let kvd = (c.n_kv * c.head_dim) as u64;
         let native_bytes = |m: &Mat| -> Option<u64> {
             let (bb, _) = gpu_block(m.dtype)?;
@@ -634,6 +645,20 @@ impl GpuState {
             let out = model.output_mat();
             dense += native_bytes(out).unwrap_or(int8_bytes(out));
             return Ok(plan_moe(dense, experts, c.n_used as f64 / c.n_expert.max(1) as f64, &mach));
+        }
+        if !gpu_kernels {
+            // Processor only: the layers' share of the file, evenly (DeltaNet layers have their own
+            // tensors, so the generic matrix walk below does not apply).
+            let file = model.gguf().len() as u64;
+            let head = (model.output_mat().rows * model.output_mat().row_bytes) as u64;
+            let per = file.saturating_sub(head) / c.n_layer.max(1) as u64;
+            let kv_cpu = 2 * max_ctx as u64 * kvd * 4;
+            let layers = (0..c.n_layer).map(|i| LayerCost { int8: per, native: per, kv_gpu: 0, kv_cpu: if model.layers()[i].delta.is_none() { kv_cpu } else { 0 }, native_ok: false }).collect();
+            let mut p = plan_dense(&ModelCost { layers, head_int8: head, head_native: head, scratch: 0, file }, &mach, None);
+            if vram_free > 0 {
+                p.notes[0] = "This model's layer type does not run on the graphics card yet: everything runs on the processor.".to_owned();
+            }
+            return Ok(p);
         }
         let mut layers = Vec::with_capacity(c.n_layer);
         for l in model.layers() {
@@ -657,12 +682,15 @@ impl GpuState {
         // In the native layout the embeddings are looked up on the CPU: nothing extra on the GPU.
         let _ = &mut head_native;
         let cost = ModelCost { layers, head_int8, head_native, scratch, file: model.gguf().len() as u64 };
-        let force = match crate::switches::get(crate::switches::GPU_LAYERS) {
+        let force = force_layers.or(match crate::switches::get(crate::switches::GPU_LAYERS) {
             n if n > 0 => Some(n as usize),
             _ => None,
-        };
+        });
         Ok(plan_dense(&cost, &mach, force))
     }
+}
+
+impl GpuState {
 
     /// Sets up the VRAM expert cache in the memory left after the dense weights and KV cache (minus a
     /// safety margin; `CEREBRO_EXPERT_VRAM_MB` caps it for placement experiments) and fills it from the

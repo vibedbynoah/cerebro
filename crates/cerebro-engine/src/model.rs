@@ -853,10 +853,19 @@ impl Session {
     /// A session whose whole forward pass runs on the first CUDA GPU.
     #[cfg(feature = "cuda")]
     pub fn new_gpu(m: &Model, max_ctx: usize) -> Result<Self, Error> {
+        Self::new_gpu_with(m, max_ctx, None)
+    }
+
+    /// `new_gpu` with the GPU layer count forced (Some(0) is refused: use `new` for the processor).
+    #[cfg(feature = "cuda")]
+    pub fn new_gpu_with(m: &Model, max_ctx: usize, force_layers: Option<usize>) -> Result<Self, Error> {
         if !crate::switches::enabled(crate::switches::GPU_ENABLED) {
             return Err(Error::Unsupported("the graphics card is switched off (Use the graphics card)".into()));
         }
-        let g = crate::gpu::GpuState::load(m, max_ctx)?;
+        if force_layers == Some(0) {
+            return Err(Error::Unsupported("no layers on the graphics card (chosen when loading)".into()));
+        }
+        let g = crate::gpu::GpuState::load_with(m, max_ctx, force_layers)?;
         // A split model keeps the KV cache of the CPU's layers here; a whole-GPU model keeps none.
         let mut s = Self::empty_from(m, max_ctx, g.gpu_layers());
         s.max_ctx = max_ctx;

@@ -66,10 +66,12 @@ pub struct Machine {
 }
 
 impl Machine {
-    /// Bandwidths measured on this project's reference laptop (docs/measurements): a 3070 Ti decodes
-    /// at ~390 GB/s effective, the CPU at ~19 GB/s. Callers with their own measurements override.
+    /// Bandwidths measured on this project's reference laptop (i9-12900H + 3070 Ti 8 GB): the GPU
+    /// decodes at ~300-390 GB/s effective; on Qwen3-14B Q4_K_M the CPU read 28 GB/s alone (3.2 tok/s)
+    /// and ~40 GB/s as the tail of a 31/40 split (11.8 tok/s measured, 9.2 estimated). Callers with
+    /// their own measurements override.
     pub fn new(vram_free: u64, ram_available: u64, drive: Drive) -> Self {
-        Machine { vram_free, ram_available, drive, gpu_bps: 3.0e11, ram_bps: 1.9e10 }
+        Machine { vram_free, ram_available, drive, gpu_bps: 3.0e11, ram_bps: 3.0e10 }
     }
 }
 

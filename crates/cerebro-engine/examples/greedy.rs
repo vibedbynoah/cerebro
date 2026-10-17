@@ -17,6 +17,14 @@ fn main() {
     let ids = tok.encode(&prompt);
     #[cfg(feature = "cuda")]
     let mut s = if gpu { Session::new_gpu(&model, 4096).expect("gpu session") } else { Session::new(&model, 4096) };
+    #[cfg(feature = "cuda")]
+    if let Some(g) = s.gpu.as_ref() {
+        let p = &g.plan;
+        eprintln!("placement: {:?}, {}/{} GPU layers, {:.2} GiB VRAM, estimate {:.1} tok/s", p.layout, p.gpu_layers, p.total_layers, p.vram_bytes as f64 / (1u64 << 30) as f64, p.est_decode_tps);
+        for n in &p.notes {
+            eprintln!("  {n}");
+        }
+    }
     #[cfg(not(feature = "cuda"))]
     let mut s = {
         let _ = gpu;
