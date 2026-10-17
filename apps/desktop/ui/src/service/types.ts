@@ -69,6 +69,8 @@ export interface Settings {
   integrityCheck: boolean;
   /** Ask before a tool or plugin performs an action. */
   permissionPrompts: boolean;
+  /** Web fetches by a model may not reach this computer or the local network. */
+  blockLocalFetch: boolean;
   /** Serve the API on 127.0.0.1 only. Off lets other devices on the network reach it. */
   loopbackOnly: boolean;
   /** Block every network feature (model downloads, plugin installs). */

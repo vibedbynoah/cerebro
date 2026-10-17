@@ -32,6 +32,8 @@ const ALLOWED = new Set([
   "mcp_server_get",
   "mcp_server_rotate_token",
   "mcp_tools",
+  "builtin_tools",
+  "builtin_folders_get",
   // Tauri's own drag-region script (data-tauri-drag-region on the title bar).
   "plugin:window|start_dragging",
   "plugin:window|internal_toggle_maximize",
@@ -120,9 +122,11 @@ function isOrchestrateRequest(o) {
 }
 
 const TOOL_RULES = new Set(["allow", "ask", "deny"]);
-/** Chat's tool rules: { rules: { "server/tool": allow|ask|deny }, defaultRule }. @param {unknown} t */
+/** Chat's tool rules: { rules: { "server/tool": allow|ask|deny }, defaultRule, offline? }. @param {unknown} t */
 function isToolsRequest(t) {
-  if (!isPlain(t) || !hasOnlyKeys(t, ["rules", "defaultRule"]) || !TOOL_RULES.has(/** @type {string} */ (t.defaultRule)) || !isPlain(t.rules)) return false;
+  if (!isPlain(t) || !hasOnlyKeys(t, ["rules", "defaultRule"], ["offline", "allowLocalFetch"]) || !TOOL_RULES.has(/** @type {string} */ (t.defaultRule)) || !isPlain(t.rules)) return false;
+  if (t.offline !== undefined && typeof t.offline !== "boolean") return false;
+  if (t.allowLocalFetch !== undefined && typeof t.allowLocalFetch !== "boolean") return false;
   const entries = Object.entries(t.rules);
   return entries.length <= 4096 && entries.every(([k, v]) => k.length <= 200 && typeof v === "string" && TOOL_RULES.has(v));
 }
@@ -152,6 +156,8 @@ const WITH_ARGS = {
     p.sessionDays >= 0 &&
     p.sessionDays <= 3650,
   chat_tool_decide: (p) => isPlain(p) && hasOnlyKeys(p, ["id", "allow"]) && typeof p.id === "string" && /^t\d{1,16}-\d{1,3}$/.test(p.id) && typeof p.allow === "boolean",
+  builtin_folders_set: (p) =>
+    isPlain(p) && hasOnlyKeys(p, ["folders"]) && Array.isArray(p.folders) && p.folders.length <= 32 && p.folders.every((f) => typeof f === "string" && f.length > 0 && f.length <= 1024),
   remote_revoke: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && typeof p.id === "string" && /^(\*|[A-Za-z0-9_-]{1,32})$/.test(p.id),
   mcp_call: (p) => isPlain(p) && hasOnlyKeys(p, ["server", "tool", "arguments"]) && isServerName(p.server) && typeof p.tool === "string" && p.tool.length > 0 && p.tool.length <= 128 && (p.arguments === null || isPlain(p.arguments)),
   chat_send: (p) => isPlain(p) && hasOnlyKeys(p, ["request", "onEvent"]) && isChatRequest(p.request) && isChannel(p.onEvent),

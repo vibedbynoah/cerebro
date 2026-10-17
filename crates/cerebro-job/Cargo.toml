@@ -1,0 +1,27 @@
+[package]
+name = "cerebro-job"
+description = "A Windows Job Object for one child process tree: kill-on-close containment and explicit termination, nothing else"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+# Only the Job Object calls (Win32_System_JobObjects) and what they need: HANDLE and CloseHandle
+# (Win32_Foundation), the SECURITY_ATTRIBUTES type CreateJobObjectW takes (Win32_Security), and
+# Win32_System_Threading, which JOBOBJECT_EXTENDED_LIMIT_INFORMATION sits behind (its IO counters
+# use threading types). No FFI outside those.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+[lints.rust]
+missing_docs = "warn"

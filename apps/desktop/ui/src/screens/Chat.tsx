@@ -111,12 +111,15 @@ export function Chat(): JSX.Element {
       produce(fn),
     );
 
-  /** The MCP tools the model may call this turn, each resolved against the Tools rules now. */
+  /** The tools the model may call this turn: the built-ins plus every MCP tool, each resolved
+   *  against the Tools rules now, with Offline mode passed so fetch_url can refuse. */
   const toolsForRequest = async (): Promise<ChatTools | null> => {
     try {
-      const list = await service.mcpTools();
-      if (!list.length) return null;
-      return chatToolRules(loadPolicy(), list.map((t) => mcpToolKey(t.server, t.name)), app.settings()?.permissionPrompts ?? true);
+      const [mcp, builtins] = await Promise.all([service.mcpTools(), service.builtinTools()]);
+      const all = [...builtins, ...mcp];
+      if (!all.length) return null;
+      const rules = chatToolRules(loadPolicy(), all.map((t) => mcpToolKey(t.server, t.name)), app.settings()?.permissionPrompts ?? true);
+      return { ...rules, offline: app.settings()?.offlineMode === true, allowLocalFetch: app.settings()?.blockLocalFetch === false };
     } catch {
       return null;
     }

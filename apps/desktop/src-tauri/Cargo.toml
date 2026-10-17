@@ -30,6 +30,9 @@ serde_json = { workspace = true }
 # Cerebro's own inference engine (CUDA kernels built with nvcc; needs the MSVC environment).
 cerebro-engine = { path = "../../../../cerebro-engine/crates/cerebro-engine" }
 cerebro-probe = { path = "../../../crates/cerebro-probe" }
+# Job Object for run_command's process tree (src/builtin_tools.rs): the desktop crate forbids
+# unsafe, so the kernel-object FFI lives in its own small crate.
+cerebro-job = { path = "../../../crates/cerebro-job" }
 # Model Hub only: HTTPS to huggingface.co (rustls, no OpenSSL).
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
 # 256-bit secrets from the OS CSPRNG and constant-time comparison (src/secret.rs). Vetted crates only;

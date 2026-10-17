@@ -38,6 +38,17 @@ export function Tools(): JSX.Element {
   const app = useAppState();
   const service = useService();
   const promptsOn = () => app.settings()?.permissionPrompts ?? true;
+  const offline = () => app.settings()?.offlineMode ?? false;
+
+  // The built-in tools are fixed at startup: the desktop app lists them beside the MCP servers'
+  // tools. The web preview has no engine, so it shows the example tools instead.
+  const [builtins, setBuiltins] = createSignal<McpTool[]>([]);
+  if (__DESKTOP__) {
+    service
+      .builtinTools()
+      .then(setBuiltins)
+      .catch(() => {});
+  }
 
   // The tools the MCP servers offer, refreshed each second; replaced only when the list changes, so
   // an open rule menu is never rebuilt under the pointer.
@@ -65,8 +76,16 @@ export function Tools(): JSX.Element {
   const mcpPoll = setInterval(loadMcpTools, 1000);
   onCleanup(() => clearInterval(mcpPoll));
 
-  /** One row per tool: the MCP servers' tools, plus (browser preview only) the built-in examples. */
+  /** One row per tool: the built-in tools (desktop), the MCP servers' tools, and, in the browser
+   *  preview only, the built-in and plugin examples. */
   const rows = () => [
+    ...(__DESKTOP__
+      ? builtins().map((t) => {
+          const id = mcpToolKey(t.server, t.name);
+          const def = TOOLS.find((d) => d.id === id);
+          return { id, name: def?.name ?? t.name, chip: "Built-in", risk: def?.risk ?? null, description: t.description ?? def?.description ?? "" };
+        })
+      : []),
     ...mcpTools().map((t) => ({ id: mcpToolKey(t.server, t.name), name: t.name, chip: t.server, risk: null, description: t.description ?? "" })),
     ...(__DESKTOP__ ? [] : TOOLS.map((t) => ({ id: t.id, name: t.name, chip: t.source === "plugin" ? (t.plugin ?? "Plugin") : "Built-in", risk: t.risk, description: t.description }))),
   ];
@@ -123,6 +142,14 @@ export function Tools(): JSX.Element {
           </span>
         </p>
       </Show>
+      <Show when={offline()}>
+        <p class="notice" role="status">
+          <Icon name="offline" size={18} />
+          <span>
+            Offline mode is on: Fetch web page refuses until you turn it off. <a class="text-link" href={hrefFor("settings")}>Settings</a>
+          </span>
+        </p>
+      </Show>
 
       <McpServers />
       <Section id="default-rule" title="Default for tools without a rule">
@@ -139,7 +166,7 @@ export function Tools(): JSX.Element {
         </fieldset>
       </Section>
 
-      <Section id="tool-rules" title="Tools" description={__DESKTOP__ ? "Every tool your MCP servers offer. Change any rule; Default follows the setting above." : "Built-in tools and tools from installed plugins. Change any rule; Default follows the setting above."}>
+      <Section id="tool-rules" title="Tools" description={__DESKTOP__ ? "Cerebro's built-in tools and every tool your MCP servers offer. Change any rule; Default follows the setting above." : "Built-in tools and tools from installed plugins. Change any rule; Default follows the setting above."}>
         <table class="tools-table">
           <thead>
             <tr>

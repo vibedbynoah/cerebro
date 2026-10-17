@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/cerebro-flags",
+    "crates/cerebro-job",
     "crates/cerebro-probe",
     "crates/cerebro-supervisor",
     "crates/cerebro-bench",

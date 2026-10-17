@@ -49,6 +49,13 @@ export const SETTINGS_META: readonly SettingMeta[] = [
     note: "Asks before a tool or plugin takes an action. Off lets them act without asking.",
   },
   {
+    key: "blockLocalFetch",
+    group: "protections",
+    label: "Keep web fetches off this network",
+    note: "A model fetching a web page may not reach this computer, your router or other devices on your network.",
+    limits: "Does not filter what public websites a model can read.",
+  },
+  {
     key: "loopbackOnly",
     group: "protections",
     label: "API on loopback only",

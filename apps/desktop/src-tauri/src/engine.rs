@@ -287,6 +287,12 @@ pub struct ToolsRequest {
     #[serde(default)]
     pub rules: std::collections::HashMap<String, String>,
     pub default_rule: String,
+    /// Offline mode is on (Settings): built-in tools that touch the network must refuse.
+    #[serde(default)]
+    pub offline: bool,
+    /// The user turned off "Keep web fetches off this network" (Settings > Protections).
+    #[serde(default)]
+    pub allow_local_fetch: bool,
 }
 
 impl ToolsRequest {
@@ -295,11 +301,21 @@ impl ToolsRequest {
     }
 }
 
-/// Where tool calls go: the MCP client (commands.rs). Blocking; called from the engine thread.
+/// What a tool call needs to know about the user's settings for this turn.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ToolContext {
+    /// Offline mode is on (Settings): the tool must not touch the network.
+    pub offline: bool,
+    /// A fetch may reach loopback, private and link-local addresses.
+    pub allow_local_fetch: bool,
+}
+
+/// Where tool calls go: the MCP client and the built-in tools (commands.rs). Blocking; called from
+/// the engine thread.
 pub trait ToolHost: Send + Sync {
     fn tools(&self) -> Vec<crate::toolcall::ToolSpec>;
     /// The tool's result as text for the model, or an error message.
-    fn call(&self, server: &str, tool: &str, arguments: serde_json::Value) -> Result<String, String>;
+    fn call(&self, server: &str, tool: &str, arguments: serde_json::Value, ctx: ToolContext) -> Result<String, String>;
 }
 
 /// Most tool rounds in one reply; a model that keeps calling tools past this is stopped.
@@ -667,6 +683,7 @@ struct Round {
 fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex<Status>>, cancel: &Arc<AtomicBool>, tooling: Tooling<'_>) {
     use crate::toolcall::{self, Piece, Scanner};
     let think = req.native.is_some();
+    let ctx = ToolContext { offline: req.tools.as_ref().is_some_and(|t| t.offline), allow_local_fetch: req.tools.as_ref().is_some_and(|t| t.allow_local_fetch) };
     // Tools the model may call: the host's list, names made unique across servers ("server__tool").
     let tools: Vec<(String, toolcall::ToolSpec)> = match (&req.tools, &tooling.host) {
         (Some(_), Some(h)) => {
@@ -893,7 +910,7 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
             events(tool_ev("running", None, None));
             set(st, |s| s.activity = "tool");
             let Some(host) = tooling.host.as_ref() else { break };
-            match host.call(&server, &tool, call.arguments.clone()) {
+            match host.call(&server, &tool, call.arguments.clone(), ctx) {
                 Ok(text) => {
                     let text = toolcall::truncate_result(&text, MAX_TOOL_RESULT_CHARS);
                     events(tool_ev("done", Some(text.clone()), None));
@@ -1139,7 +1156,7 @@ mod tool_loop_tests {
                 input_schema: serde_json::json!({ "type": "object", "properties": { "city": { "type": "string" } }, "required": ["city"] }),
             }]
         }
-        fn call(&self, _server: &str, tool: &str, args: serde_json::Value) -> Result<String, String> {
+        fn call(&self, _server: &str, tool: &str, args: serde_json::Value, _ctx: ToolContext) -> Result<String, String> {
             assert_eq!(tool, "get_weather");
             Ok(format!("{}: sunny, 21 degrees Celsius, wind 9 km/h", args["city"].as_str().unwrap_or("?")))
         }
@@ -1174,7 +1191,7 @@ mod tool_loop_tests {
             turns: vec![ChatTurn { role: "user".into(), text: "What is the weather in Paris right now? Use the tool.".into() }],
             sampler: ChatSampler { temperature: 0.0, top_p: 1.0, min_p: 0.0, top_k: 1, repeat_penalty: 1.0, max_tokens: 400 },
             native: None,
-            tools: Some(ToolsRequest { rules: Default::default(), default_rule: "ask".into() }),
+            tools: Some(ToolsRequest { rules: Default::default(), default_rule: "ask".into(), offline: false, allow_local_fetch: false }),
             orchestrate: None,
         };
         engine.chat(req, sink).unwrap();
