@@ -24,6 +24,9 @@ use crate::quant::{dequant_row, f16_to_f32, DType, QAct};
 use crate::Error;
 
 const PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
+/// Batches smaller than this use the dp4a kernel (an MMA tile of 64 tokens would be mostly padding).
+const MMA_MIN_T: usize = 8;
+const PTX_MMA: &str = include_str!(concat!(env!("OUT_DIR"), "/kernels_mma.ptx"));
 
 /// A weight matrix on the GPU: repacked to int8 (`Q8`), or kept in its K-quant format as row-stacked
 /// parts (`K`; fused Q/K/V can mix formats, e.g. Q4_K and Q6_K).
@@ -78,6 +81,8 @@ struct Funcs {
     embed_b: CudaFunction,
     norm_b: CudaFunction,
     matmul_b: CudaFunction,
+    /// Tensor-core prefill matmul (sm_80+); None on older GPUs or with CEREBRO_NO_MMA set.
+    matmul_mma: Option<CudaFunction>,
     silu_b: CudaFunction,
     attn_pre: CudaFunction,
     moe_matvec: CudaFunction,
@@ -383,7 +388,14 @@ impl GpuState {
         let stream = ctx.new_stream().map_err(gerr)?;
         let module = ctx.load_module(Ptx::from_src(PTX)).map_err(gerr)?;
         let lf = |n: &str| module.load_function(n).map_err(gerr);
+        let mma_ok = ctx.compute_capability().map_err(gerr)?.0 >= 8 && std::env::var_os("CEREBRO_NO_MMA").is_none();
+        let matmul_mma = if mma_ok {
+            Some(ctx.load_module(Ptx::from_src(PTX_MMA)).map_err(gerr)?.load_function("matmul_q8_mma").map_err(gerr)?)
+        } else {
+            None
+        };
         let f = Funcs {
+            matmul_mma,
             matvec: lf("matvec_q8")?,
             rmsnorm_quant: lf("rmsnorm_quant")?,
             quant: lf("quantize_q8")?,
@@ -1241,7 +1253,13 @@ impl GpuState {
         let mm = |m: &GMat, xq: &CudaSlice<i8>, xd: &CudaSlice<f32>, y: &mut CudaSlice<f32>, add: bool| -> Result<(), Error> {
             let (qs, ds, mrows, mcols) = m.q8();
             let (rows, cols, add) = (mrows as i32, mcols as i32, add as i32);
-            unsafe { s.launch_builder(&f.matmul_b).arg(qs).arg(ds).arg(xq).arg(xd).arg(y).arg(&rows).arg(&cols).arg(&ti).arg(&add).launch(rows_cfg(mrows)) }.map_err(gerr)?;
+            match &f.matmul_mma {
+                Some(k) if t >= MMA_MIN_T => {
+                    let cfg = LaunchConfig { grid_dim: ((mrows as u32).div_ceil(64), (t as u32).div_ceil(64), 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
+                    unsafe { s.launch_builder(k).arg(qs).arg(ds).arg(xq).arg(xd).arg(y).arg(&rows).arg(&cols).arg(&ti).arg(&add).launch(cfg) }.map_err(gerr)?;
+                }
+                _ => unsafe { s.launch_builder(&f.matmul_b).arg(qs).arg(ds).arg(xq).arg(xd).arg(y).arg(&rows).arg(&cols).arg(&ti).arg(&add).launch(rows_cfg(mrows)) }.map_err(gerr).map(|_| ())?,
+            }
             Ok(())
         };
         for l in &mut self.layers {
