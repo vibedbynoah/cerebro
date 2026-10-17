@@ -36,15 +36,21 @@ export function McpServers(): JSX.Element {
     }
   };
 
-  // Polled every 2 s: report a failure once, not on every poll.
+  // Polled 3 times a second (never overlapping, skipped while the window is hidden): report a
+  // failure once, not on every poll.
   let statusFailed = false;
+  let statusInFlight = false;
   const loadStatuses = async () => {
+    if (statusInFlight || document.visibilityState === "hidden") return;
+    statusInFlight = true;
     try {
       setStatuses(await service.mcpStatus());
       statusFailed = false;
     } catch (e) {
       if (!statusFailed) notify("Could not load server status", errMessage(e), "error");
       statusFailed = true;
+    } finally {
+      statusInFlight = false;
     }
   };
 
@@ -58,7 +64,7 @@ export function McpServers(): JSX.Element {
 
   void loadConfig();
   void loadStatuses();
-  const poll = setInterval(loadStatuses, 2000);
+  const poll = setInterval(() => void loadStatuses(), 333);
   onCleanup(() => clearInterval(poll));
 
   // Tool list follows the servers: refresh whenever reported tool counts change.

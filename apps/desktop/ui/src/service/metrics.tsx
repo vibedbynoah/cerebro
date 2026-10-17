@@ -4,8 +4,10 @@ import { notify } from "../lib/toast";
 import { useService } from "./context";
 import type { MetricsSnapshot } from "./monitor-types";
 
-/** The engine's /metrics snapshot, polled once a second for the whole app (header pill, Monitor,
- *  alerts), so every view shows the same sample. */
+/** The engine's metrics snapshot, polled three times a second for the whole app (header pill,
+ *  Monitor, alerts), so every view shows the same sample. Instant readings (load, temperature, power,
+ *  VRAM, request state) are fresh on each poll; rates (tok/s, CPU %, PCIe, disk) and the history
+ *  are measured by the backend over whole seconds and change once a second. */
 export interface MetricsFeed {
   snapshot: Accessor<MetricsSnapshot | null>;
   /** False after three polls in a row failed; true again on the next success. */
@@ -13,7 +15,9 @@ export interface MetricsFeed {
   alerts: Accessor<AlertTracker>;
 }
 
-export const POLL_MS = 1000;
+export const POLL_MS = 333;
+/** Alert rules count seconds, so alerts advance at most once per this many ms of sample time. */
+const ALERT_STEP_MS = 950;
 const FAILURES_BEFORE_UNREACHABLE = 3;
 /** One toast per kind of alert at most this often, however often it flaps. */
 const TOAST_COOLDOWN_MS = 120_000;
@@ -31,6 +35,7 @@ export function MetricsProvider(props: { children: JSX.Element }): JSX.Element {
     let inFlight = false;
     let failures = 0;
     const lastToast: Partial<Record<AlertKind, number>> = {};
+    let lastAlertStep = Number.NEGATIVE_INFINITY;
     const tick = () => {
       // A hidden window skips polls (nothing to draw); a slow answer is never overlapped.
       if (inFlight || document.visibilityState === "hidden") return;
@@ -42,6 +47,8 @@ export function MetricsProvider(props: { children: JSX.Element }): JSX.Element {
           failures = 0;
           setReachable(true);
           setSnapshot(s);
+          if (s.at - lastAlertStep < ALERT_STEP_MS) return;
+          lastAlertStep = s.at;
           const { tracker, raised } = stepAlerts(alerts(), s);
           setAlerts(tracker);
           for (const a of raised) {
@@ -62,9 +69,13 @@ export function MetricsProvider(props: { children: JSX.Element }): JSX.Element {
     };
     tick();
     const timer = setInterval(tick, POLL_MS);
+    // Back from a hidden window: refresh at once instead of waiting for the next tick.
+    const onVisible = () => document.visibilityState === "visible" && tick();
+    document.addEventListener("visibilitychange", onVisible);
     onCleanup(() => {
       alive = false;
       clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     });
   });
 

@@ -55,14 +55,22 @@ export function createDesktopService(local: CerebroService): CerebroService {
   const service: CerebroService = {
     getLiveStats: () => invoke<LiveStats>("live_stats"),
     subscribeLiveStats(listener): Unsubscribe {
+      // 3 Hz like the metrics feed: VRAM and state are instant, tok/s changes once a second in
+      // the backend. A slow answer is never overlapped and a hidden window skips polls.
       let alive = true;
+      let inFlight = false;
       const tick = () => {
+        if (inFlight || document.visibilityState === "hidden") return;
+        inFlight = true;
         invoke<LiveStats>("live_stats")
           .then((s) => alive && listener(s))
-          .catch(() => {});
+          .catch(() => {})
+          .finally(() => {
+            inFlight = false;
+          });
       };
       tick();
-      const timer = setInterval(tick, 1000);
+      const timer = setInterval(tick, 333);
       return () => {
         alive = false;
         clearInterval(timer);

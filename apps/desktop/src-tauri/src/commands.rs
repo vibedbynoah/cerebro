@@ -152,32 +152,34 @@ pub fn chat_stop(engine: State<'_, Engine>) {
 }
 
 /// The status bar's sample.
-#[tauri::command]
-pub fn live_stats(engine: State<'_, Engine>) -> serde_json::Value {
+// `async` runs these off the UI thread: a poll never stalls the window, even while NVML is slow.
+#[tauri::command(async)]
+pub fn live_stats(engine: State<'_, Engine>, tele: State<'_, Telemetry>) -> serde_json::Value {
+    let (live, _) = tele.tick();
     let s = engine.status.lock().unwrap_or_else(|e| e.into_inner());
-    let gpu = cerebro_engine::hw::gpus();
+    let gpu = live.gpus.first();
     let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
     serde_json::json!({
         "provenance": "measured",
         "model": s.loaded.as_ref().map(|l| l.model.name.clone()),
         "tokensPerSecond": s.live_decode_tps.or(s.last_decode_tps),
-        "vramUsedGiB": gpu.first().map_or(0.0, |g| gib(g.vram_total - g.vram_free)),
-        "vramTotalGiB": gpu.first().map_or(0.0, |g| gib(g.vram_total)),
+        "vramUsedGiB": gpu.and_then(|g| g.vram_used).map_or(0.0, gib),
+        "vramTotalGiB": gpu.and_then(|g| g.vram_total).map_or(0.0, gib),
         "backend": { "state": if s.loaded.is_some() { "running" } else { "stopped" }, "address": null, "build": concat!("cerebro-engine ", env!("CARGO_PKG_VERSION")) },
     })
 }
 
 /// The Monitor's snapshot (camelCase, matching ui/src/service/monitor-types.ts). Values the engine
 /// cannot read yet are null and show as a dash.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn metrics(engine: State<'_, Engine>, tele: State<'_, Telemetry>) -> serde_json::Value {
     let (live, th) = tele.tick();
     let gp = live.gpus.first().cloned().unwrap_or_default();
-    let hw = cerebro_engine::hw::machine();
+    let (ram_total, ram_available) = cerebro_engine::hw::memory();
+    let (cpu_name, cpu_threads) = machine_fixed();
     let s = engine.status.lock().unwrap_or_else(|e| e.into_inner());
     let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-    let g0 = hw.gpus.first();
     let model = s.loaded.as_ref().map(|l| {
         serde_json::json!({
             "id": l.model.id, "name": l.model.name, "quant": l.model.quant, "params": l.model.params,
@@ -230,24 +232,23 @@ pub fn metrics(engine: State<'_, Engine>, tele: State<'_, Telemetry>) -> serde_j
         },
         "hardware": {
             "gpuUtil": gp.util_pct,
-            "vramUsedGiB": g0.map(|g| gib(g.vram_total - g.vram_free)),
-            "vramTotalGiB": g0.map_or(0.0, |g| gib(g.vram_total)),
+            "vramUsedGiB": gp.vram_used.map(gib),
+            "vramTotalGiB": gp.vram_total.map_or(0.0, gib),
             "vram": null, "gpuTempC": gp.temp_c, "gpuPowerW": gp.power_w, "gpuPowerLimitW": gp.power_limit_w,
             "pcieRxMBs": gp.pcie_rx_mbs, "pcieTxMBs": gp.pcie_tx_mbs, "pcieGen": gp.pcie_gen, "pcieGenMax": gp.pcie_gen_max, "pcieWidth": gp.pcie_width,
             "cpu": live.cpu_pct,
-            "ramUsedGiB": gib(hw.ram_total - hw.ram_available), "ramTotalGiB": gib(hw.ram_total),
-            "ramPinnedGiB": null, "diskReadMBs": null, "diskWriteMBs": null, "throttle": gp.throttle_reasons.iter().filter(|r| **r != "idle").collect::<Vec<_>>(),
-            "gpus": hw.gpus.iter().enumerate().map(|(i, g)| serde_json::json!({
-                "index": i, "name": g.name, "util": live.gpus.get(i).and_then(|t| t.util_pct), "memUsedGiB": gib(g.vram_total - g.vram_free),
-                "memTotalGiB": gib(g.vram_total), "tempC": live.gpus.get(i).and_then(|t| t.temp_c),
-                "powerW": live.gpus.get(i).and_then(|t| t.power_w), "powerLimitW": live.gpus.get(i).and_then(|t| t.power_limit_w),
-                "pcieRxMBs": live.gpus.get(i).and_then(|t| t.pcie_rx_mbs),
+            "ramUsedGiB": gib(ram_total.saturating_sub(ram_available)), "ramTotalGiB": gib(ram_total),
+            "ramPinnedGiB": null, "diskReadMBs": live.disk_read_mbs, "diskWriteMBs": live.disk_write_mbs, "throttle": gp.throttle_reasons.iter().filter(|r| **r != "idle").collect::<Vec<_>>(),
+            "gpus": live.gpus.iter().map(|g| serde_json::json!({
+                "index": g.index, "name": g.name, "util": g.util_pct, "memUsedGiB": g.vram_used.map(gib),
+                "memTotalGiB": g.vram_total.map(gib), "tempC": g.temp_c,
+                "powerW": g.power_w, "powerLimitW": g.power_limit_w, "pcieRxMBs": g.pcie_rx_mbs,
             })).collect::<Vec<_>>(),
         },
         "hardwareStatic": {
-            "gpuName": g0.map(|g| g.name.clone()), "gpuCount": hw.gpus.len(), "driver": gp.driver,
-            "cpuName": hw.cpu_name, "cores": hw.cpu_threads, "threads": hw.cpu_threads,
-            "ramTotalGiB": gib(hw.ram_total), "gpuThrottleTempC": null,
+            "gpuName": gp.name, "gpuCount": live.gpus.len(), "driver": gp.driver,
+            "cpuName": cpu_name, "cores": cpu_threads, "threads": cpu_threads,
+            "ramTotalGiB": gib(ram_total), "gpuThrottleTempC": null,
         },
         "engine": {
             "version": env!("CARGO_PKG_VERSION"), "backend": "cerebro", "build": "cerebro-engine",
@@ -258,7 +259,7 @@ pub fn metrics(engine: State<'_, Engine>, tele: State<'_, Telemetry>) -> serde_j
             "series": {
                 "decodeTps": col(0), "prefillTps": col(1), "gpuUtil": th[0], "vramUsedGiB": col(3),
                 "gpuTempC": th[1], "gpuPowerW": th[2], "pcieRxMBs": th[3], "cpu": th[4],
-                "ramUsedGiB": col(4), "diskReadMBs": nulls, "expertHitPct": col(2), "draftAcceptPct": nulls,
+                "ramUsedGiB": col(4), "diskReadMBs": th[5], "expertHitPct": col(2), "draftAcceptPct": nulls,
             },
         },
         "totals": s.totals,
@@ -373,24 +374,53 @@ pub fn load_switches<R: Runtime>(app: &tauri::AppHandle<R>) {
 /// series the Monitor charts: GPU load, temperature, power, PCIe receive and CPU load.
 #[derive(Default)]
 pub struct Telemetry {
-    inner: std::sync::Mutex<(cerebro_engine::telemetry::Sampler, std::collections::VecDeque<[Option<f64>; 5]>)>,
+    inner: std::sync::Mutex<TelemetryState>,
 }
 
+#[derive(Default)]
+struct TelemetryState {
+    sampler: cerebro_engine::telemetry::Sampler,
+    /// One row per second: GPU load, temperature, power, PCIe receive, CPU load, disk read.
+    history: std::collections::VecDeque<[Option<f64>; 6]>,
+    /// The latest reading; callers inside FRESH share it instead of sampling again.
+    last: Option<(std::time::Instant, cerebro_engine::telemetry::Sample)>,
+}
+
+/// The UI polls at 3 Hz from more than one place (status bar, Monitor); within this window they all
+/// get the same reading, so the hardware is asked at most ~3 times a second.
+const FRESH: std::time::Duration = std::time::Duration::from_millis(250);
+
 impl Telemetry {
-    fn tick(&self) -> (cerebro_engine::telemetry::Sample, [Vec<Option<f64>>; 5]) {
+    fn tick(&self) -> (cerebro_engine::telemetry::Sample, [Vec<Option<f64>>; 6]) {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let (sampler, hist) = &mut *g;
-        let s = sampler.sample();
-        let gp = s.gpus.first();
-        hist.push_back([gp.and_then(|x| x.util_pct), gp.and_then(|x| x.temp_c), gp.and_then(|x| x.power_w), gp.and_then(|x| x.pcie_rx_mbs), s.cpu_pct]);
-        while hist.len() > 60 {
-            hist.pop_front();
-        }
+        let st = &mut *g;
+        let sample = match &st.last {
+            Some((at, s)) if at.elapsed() < FRESH => s.clone(),
+            _ => {
+                let s = st.sampler.sample();
+                if s.new_second {
+                    let gp = s.gpus.first();
+                    st.history.push_back([gp.and_then(|x| x.util_pct), gp.and_then(|x| x.temp_c), gp.and_then(|x| x.power_w), gp.and_then(|x| x.pcie_rx_mbs), s.cpu_pct, s.disk_read_mbs]);
+                    while st.history.len() > 60 {
+                        st.history.pop_front();
+                    }
+                }
+                st.last = Some((std::time::Instant::now(), s.clone()));
+                s
+            }
+        };
+        let hist = &st.history;
         let col = |i: usize| -> Vec<Option<f64>> {
             let mut v = vec![None; 60 - hist.len()];
             v.extend(hist.iter().map(|x| x[i]));
             v
         };
-        (s, [col(0), col(1), col(2), col(3), col(4)])
+        (sample, [col(0), col(1), col(2), col(3), col(4), col(5)])
     }
+}
+
+/// CPU name and thread count never change while the app runs; the registry is read once.
+fn machine_fixed() -> (String, usize) {
+    static FIXED: std::sync::OnceLock<(String, usize)> = std::sync::OnceLock::new();
+    FIXED.get_or_init(|| (cerebro_engine::hw::cpu_name(), std::thread::available_parallelism().map_or(1, |n| n.get()))).clone()
 }
