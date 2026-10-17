@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0b1220" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f2f5f9" media="(prefers-color-scheme: light)">
+<title>Cerebro</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to main content</a>
+
+<header class="topbar">
+  <div class="topbar-row">
+    <h1 class="brand">Cerebro</h1>
+    <p class="pill" id="pill" data-state="loading" role="status">
+      <span class="dot" aria-hidden="true"></span><span id="pillText">Connecting</span>
+    </p>
+  </div>
+  <p class="fresh" id="fresh" data-stale="false">No update yet</p>
+</header>
+
+<main id="main">
+
+  <section id="viewSignIn" class="view" aria-labelledby="signInTitle">
+    <h2 id="signInTitle">Sign in</h2>
+    <p class="hint" id="pairHint">Scan the QR code in Cerebro &gt; Settings &gt; Phone access, then enter your password.</p>
+    <form id="signInForm" novalidate>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go">
+      </div>
+      <div class="field">
+        <label for="device">Device name</label>
+        <input id="device" name="device" type="text" autocomplete="off" autocapitalize="words" spellcheck="false" enterkeyhint="go">
+        <p class="hint small">Listed in Cerebro under Settings &gt; Phone access.</p>
+      </div>
+      <p class="alert" id="signInError" role="alert" hidden></p>
+      <p class="hint small" id="retryNote" role="status" hidden></p>
+      <button type="submit" class="primary block" id="signInSubmit">Sign in</button>
+    </form>
+  </section>
+
+  <section id="viewDash" class="view" aria-label="Dashboard" hidden>
+    <div class="tabs" role="tablist" aria-label="Dashboard sections">
+      <button type="button" role="tab" class="tab" id="tabStatus" aria-controls="panelStatus" aria-selected="true">Status</button>
+      <button type="button" role="tab" class="tab" id="tabChat" aria-controls="panelChat" aria-selected="false" tabindex="-1" hidden>Chat</button>
+    </div>
+
+    <div id="panelStatus" role="tabpanel" aria-labelledby="tabStatus" tabindex="0">
+      <div class="grid">
+        <section class="card span2">
+          <h2 class="card-title">Model</h2>
+          <p class="model" id="modelName">—</p>
+          <p class="hint small" id="modelQuant">—</p>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">Decode</h2>
+          <p class="readout"><span class="tnum" id="decode">—</span><span class="unit">tok/s</span></p>
+          <p class="hint small">Prefill <span class="tnum" id="prefill">—</span> tok/s</p>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">Context</h2>
+          <p class="readout small"><span class="tnum" id="ctxText">—</span></p>
+          <div class="bar" aria-hidden="true"><div class="fill" id="ctxBar"></div></div>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">Graphics</h2>
+          <dl class="stats">
+            <div><dt>Use</dt><dd class="tnum" id="gpuUtil">—</dd></div>
+            <div><dt>Temp</dt><dd class="tnum" id="gpuTemp">—</dd></div>
+            <div><dt>Power</dt><dd class="tnum" id="gpuPower">—</dd></div>
+          </dl>
+          <p class="readout small"><span class="tnum" id="vramText">—</span></p>
+          <div class="bar" aria-hidden="true"><div class="fill" id="vramBar"></div></div>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">System</h2>
+          <dl class="stats">
+            <div><dt>CPU</dt><dd class="tnum" id="cpu">—</dd></div>
+            <div><dt>Device</dt><dd id="deviceName">—</dd></div>
+          </dl>
+          <p class="readout small"><span class="tnum" id="ramText">—</span></p>
+          <div class="bar" aria-hidden="true"><div class="fill" id="ramBar"></div></div>
+        </section>
+
+        <section class="card span2">
+          <h2 class="card-title">Recent requests</h2>
+          <ul class="reqs" id="requests"><li class="empty">No requests yet.</li></ul>
+        </section>
+      </div>
+      <button type="button" class="danger block spaced" id="stopButton" hidden>Stop generating</button>
+    </div>
+
+    <div id="panelChat" role="tabpanel" aria-labelledby="tabChat" tabindex="0" hidden>
+      <div class="chatlog" id="chatLog" role="log" aria-live="off" aria-label="Conversation"></div>
+      <p class="hint small" id="chatNote" role="status"></p>
+      <form id="chatForm" class="chatform">
+        <label class="sr-only" for="chatInput">Message</label>
+        <textarea id="chatInput" rows="2" placeholder="Send a message" enterkeyhint="send"></textarea>
+        <div class="chat-actions">
+          <button type="submit" class="primary" id="sendButton" disabled>Send</button>
+          <button type="button" class="danger" id="chatStop" hidden>Stop</button>
+        </div>
+      </form>
+    </div>
+
+    <button type="button" class="ghost block signout" id="signOut">Sign out</button>
+  </section>
+
+</main>
+
+<div class="scrim" id="stopScrim" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="stopTitle" aria-describedby="stopBody">
+    <h2 id="stopTitle">Stop generating?</h2>
+    <p id="stopBody">The reply in progress will be cut off where it stands.</p>
+    <div class="sheet-actions">
+      <button type="button" class="ghost" id="stopCancel">Keep going</button>
+      <button type="button" class="danger" id="stopConfirm">Stop</button>
+    </div>
+  </div>
+</div>
+
+<p class="sr-only" id="live" role="status" aria-live="polite"></p>
+</body>
+</html>

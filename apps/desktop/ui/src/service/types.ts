@@ -574,3 +574,41 @@ export interface McpCallResult {
   content?: Array<{ type: string; text?: string }>;
   isError?: boolean;
 }
+
+/** Phone access (src-tauri/src/remote.rs): a paired phone and the settings screen's view. */
+export interface RemoteDevice {
+  id: string;
+  name: string;
+  createdAt: number;
+  lastSeenAt: number;
+  ip: string;
+}
+export interface RemoteView {
+  enabled: boolean;
+  running: boolean;
+  url: string | null;
+  /** Where it listens now, or the saved choice while off. */
+  address: string | null;
+  /** The saved choice; null = automatic. */
+  addressChoice: string | null;
+  port: number;
+  addresses: string[];
+  passwordSet: boolean;
+  allowChat: boolean;
+  allowTailscale: boolean;
+  sessionDays: number;
+  fingerprint: string | null;
+  devices: RemoteDevice[];
+  error: string | null;
+}
+export interface RemotePairing {
+  url: string;
+  qrSvg: string;
+  expiresAt: number;
+}
+export interface RemoteOptions {
+  allowChat: boolean;
+  allowTailscale: boolean;
+  address: string | null;
+  sessionDays: number;
+}

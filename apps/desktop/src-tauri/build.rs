@@ -35,6 +35,12 @@ const COMMANDS: &[&str] = &[
     "mcp_restart",
     "mcp_tools",
     "mcp_call",
+    "remote_get",
+    "remote_set_password",
+    "remote_enable",
+    "remote_options",
+    "remote_pair",
+    "remote_revoke",
 ];
 
 fn main() {

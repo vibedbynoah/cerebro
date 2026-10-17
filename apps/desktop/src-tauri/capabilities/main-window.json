@@ -38,6 +38,12 @@
     "allow-mcp-restart",
     "allow-mcp-tools",
     "allow-mcp-call",
+    "allow-remote-get",
+    "allow-remote-set-password",
+    "allow-remote-enable",
+    "allow-remote-options",
+    "allow-remote-pair",
+    "allow-remote-revoke",
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize"
   ]

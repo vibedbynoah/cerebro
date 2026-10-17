@@ -1,4 +1,4 @@
-import type { EngineSwitch, McpCallResult, McpConfig, McpServerStatus, McpTool,
+import type { EngineSwitch, RemoteOptions, RemotePairing, RemoteView, McpCallResult, McpConfig, McpServerStatus, McpTool,
   ActivePatch,
   CatalogModel,
   DedupeResult,
@@ -136,6 +136,15 @@ export interface CerebroService {
   mcpRestart(name: string): Promise<void>;
   mcpTools(): Promise<McpTool[]>;
   mcpCall(server: string, tool: string, args: unknown): Promise<McpCallResult>;
+
+  // ---- Phone access: off by default; LAN only, QR pairing plus password. ----
+  remoteGet(): Promise<RemoteView>;
+  remoteSetPassword(password: string): Promise<RemoteView>;
+  remoteEnable(on: boolean): Promise<RemoteView>;
+  remoteOptions(options: RemoteOptions): Promise<RemoteView>;
+  remotePair(): Promise<RemotePairing>;
+  /** "*" signs out every phone. */
+  remoteRevoke(id: string): Promise<RemoteView>;
 
   // ---- Chat. One reply streams at a time per conversation. ----
 

@@ -27,6 +27,8 @@ const ALLOWED = new Set([
   "switches_reset",
   "mcp_config_get",
   "mcp_status",
+  "remote_get",
+  "remote_pair",
   "mcp_tools",
   // Tauri's own drag-region script (data-tauri-drag-region on the title bar).
   "plugin:window|start_dragging",
@@ -105,6 +107,19 @@ const WITH_ARGS = {
   switch_set: (p) => isPlain(p) && hasOnlyKeys(p, ["id", "value"]) && typeof p.id === "string" && /^[a-z0-9_]{1,48}$/.test(p.id) && Number.isSafeInteger(p.value),
   mcp_config_save: (p) => isPlain(p) && hasOnlyKeys(p, ["config"]) && isMcpConfig(p.config),
   mcp_restart: (p) => isPlain(p) && hasOnlyKeys(p, ["name"]) && isServerName(p.name),
+  remote_set_password: (p) => isPlain(p) && hasOnlyKeys(p, ["password"]) && typeof p.password === "string" && p.password.length >= 8 && p.password.length <= 1024,
+  remote_enable: (p) => isPlain(p) && hasOnlyKeys(p, ["on"]) && typeof p.on === "boolean",
+  remote_options: (p) =>
+    isPlain(p) &&
+    hasOnlyKeys(p, ["allowChat", "allowTailscale", "address", "sessionDays"]) &&
+    typeof p.allowChat === "boolean" &&
+    typeof p.allowTailscale === "boolean" &&
+    (p.address === null || (typeof p.address === "string" && /^\d{1,3}(\.\d{1,3}){3}$/.test(p.address))) &&
+    typeof p.sessionDays === "number" &&
+    Number.isSafeInteger(p.sessionDays) &&
+    p.sessionDays >= 0 &&
+    p.sessionDays <= 3650,
+  remote_revoke: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && typeof p.id === "string" && /^(\*|[A-Za-z0-9_-]{1,32})$/.test(p.id),
   mcp_call: (p) => isPlain(p) && hasOnlyKeys(p, ["server", "tool", "arguments"]) && isServerName(p.server) && typeof p.tool === "string" && p.tool.length > 0 && p.tool.length <= 128 && (p.arguments === null || isPlain(p.arguments)),
   chat_send: (p) => isPlain(p) && hasOnlyKeys(p, ["request", "onEvent"]) && isChatRequest(p.request) && isChannel(p.onEvent),
 };

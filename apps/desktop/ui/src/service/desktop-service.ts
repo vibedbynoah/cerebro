@@ -13,7 +13,7 @@ import type { ChatEvent, ChatRequest } from "./chat-types";
 import type { HistoryRange, MetricsSeries, MetricsSnapshot, RequestDetail } from "./monitor-types";
 import type { CatalogModel, GpuInfo, HardwareProfile, LibraryModel, LiveStats, LoadedModel, LoadParams, ModelDetail, ModelSummary, NetworkState } from "./types";
 import { CURRENT_CATALOG } from "./catalog";
-import type { ActivePatch, EngineSwitch, McpCallResult, McpConfig, McpServerStatus, McpTool, HubDownloadEvent, HubFile, HubRepo, LoadPreset, PatchProfile } from "./types";
+import type { ActivePatch, EngineSwitch, RemotePairing, RemoteView, McpCallResult, McpConfig, McpServerStatus, McpTool, HubDownloadEvent, HubFile, HubRepo, LoadPreset, PatchProfile } from "./types";
 import { EMPTY_TWEAKS, profileNameError, sanitizeTweaks } from "../lib/tweaks";
 
 const NOT_YET = (what: string) => Promise.reject(new Error(`${what} is not available in this build yet.`));
@@ -186,6 +186,13 @@ export function createDesktopService(local: CerebroService): CerebroService {
     mcpRestart: (name) => invoke<void>("mcp_restart", { name }),
     mcpTools: () => invoke<McpTool[]>("mcp_tools"),
     mcpCall: (server, tool, args) => invoke<McpCallResult>("mcp_call", { server, tool, arguments: args }),
+
+    remoteGet: () => invoke<RemoteView>("remote_get"),
+    remoteSetPassword: (password) => invoke<RemoteView>("remote_set_password", { password }),
+    remoteEnable: (on) => invoke<RemoteView>("remote_enable", { on }),
+    remoteOptions: (o) => invoke<RemoteView>("remote_options", { allowChat: o.allowChat, allowTailscale: o.allowTailscale, address: o.address, sessionDays: o.sessionDays }),
+    remotePair: () => invoke<RemotePairing>("remote_pair"),
+    remoteRevoke: (id) => invoke<RemoteView>("remote_revoke", { id }),
 
     async chat(request: ChatRequest, onEvent: (e: ChatEvent) => void, signal: AbortSignal) {
       const channel = new Channel<ChatEvent>();

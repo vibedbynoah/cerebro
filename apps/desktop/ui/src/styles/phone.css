@@ -1,0 +1,133 @@
+/*
+ * Phone access (screens/settings/PhoneAccess.tsx). Design tokens only, with one deliberate
+ * exception: the QR card is `white`, because a scanner needs black modules on white, whatever * theme the app is in. Everything else on that card sits outside it.
+ */
+
+.phone { display: grid; gap: var(--space-6); min-width: 0; }
+.phone > *,
+.phone__status-row > *,
+.phone__card > *,
+.phone__form > *,
+.phone__field-grid > *,
+.phone__generated > *,
+.phone__pair > *,
+.phone__pair-actions > *,
+.phone__code > *,
+.phone__code-text > *,
+.phone__qr > *,
+.phone__devices > *,
+.phone__device-list > *,
+.phone__device > *,
+.phone__device-text > *,
+.phone__options > * { min-width: 0; }
+
+/* Status */
+.phone__status-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
+.phone__status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--color-text-secondary);
+}
+.phone__dot { flex: none; width: 8px; height: 8px; border-radius: var(--radius-pill); background: var(--color-text-muted); }
+.phone__status[data-state="on"] { color: var(--color-success); }
+.phone__status[data-state="on"] .phone__dot { background: var(--color-success); }
+.phone__status[data-state="error"] { color: var(--color-danger); }
+.phone__status[data-state="error"] .phone__dot { background: var(--color-danger); }
+
+/* Cards, titles, fields */
+.phone__card {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-1);
+}
+.phone__title { margin: 0; font-size: 0.9375rem; font-weight: var(--weight-semibold); color: var(--color-text-primary); }
+.phone__form { display: grid; gap: var(--space-3); }
+.phone__field-grid { display: grid; gap: var(--space-3); max-width: 560px; }
+.phone__field { display: grid; gap: var(--space-1); min-width: 0; color: var(--color-text-secondary); font-size: var(--text-small); }
+.phone__field > span { font-weight: var(--weight-medium); color: var(--color-text-primary); }
+.phone__field input,
+.phone__field select {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+  color: var(--color-text-primary);
+  font: inherit;
+}
+.phone__field input:focus-visible,
+.phone__field select:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--radius-sm); }
+.phone__strength { margin: 0; color: var(--color-text-muted); font-size: var(--text-small); }
+.phone__strength[data-level="weak"] { color: var(--color-warning); }
+.phone__strength[data-level="fair"] { color: var(--color-accent-text); }
+.phone__strength[data-level="strong"] { color: var(--color-success); }
+.phone__warn { color: var(--color-warning); }
+.phone .btn--sm { min-height: 28px; padding-inline: var(--space-3); font-size: var(--text-small); }
+.phone__actions, .phone__pair-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+
+.phone__generated {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-2);
+}
+.phone__generated-value { min-width: 0; overflow-wrap: anywhere; }
+
+/* Disclosures */
+.phone__disclosure > *,
+.phone__advanced > * { margin-top: var(--space-3); }
+.phone__disclosure summary,
+.phone__advanced summary { cursor: pointer; color: var(--color-text-secondary); font-size: var(--text-small); }
+.phone__disclosure summary:focus-visible,
+.phone__advanced summary:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--radius-sm); }
+
+/* Pairing code */
+.phone__pair { display: grid; gap: var(--space-4); }
+.phone__code { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-4) var(--space-6); }
+.phone__qr { display: grid; gap: var(--space-2); justify-items: center; margin: 0; }
+.phone__qr-card { padding: var(--space-3); border-radius: var(--radius-md); background: white; }
+.phone__qr-img { display: block; width: 200px; height: 200px; background: white; }
+.phone__qr-caption { color: var(--color-text-secondary); font-size: var(--text-small); font-variant-numeric: tabular-nums; }
+.phone__code-text { display: grid; gap: var(--space-2); max-width: 560px; }
+.phone__url {
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  overflow-wrap: anywhere;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-2);
+  font-size: var(--text-small);
+}
+
+/* Paired phones */
+.phone__devices { display: grid; gap: var(--space-3); }
+.phone__device-list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.phone__device {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+}
+.phone__device-text { display: grid; gap: 2px; }
+.phone__device-name { font-weight: var(--weight-medium); color: var(--color-text-primary); }
+.phone__device-ip { color: var(--color-text-secondary); font-size: var(--text-small); }
+
+/* Options */
+.phone__options { display: grid; gap: var(--space-3); max-width: 640px; }

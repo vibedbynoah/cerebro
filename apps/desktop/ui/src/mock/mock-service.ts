@@ -5,6 +5,7 @@ import type { CerebroService, Unsubscribe } from "../service/service";
 import { createMockChat } from "./chat";
 import type {
   EngineSwitch,
+  RemoteView,
   McpConfig,
   McpServerStatus,
   McpTool,
@@ -228,6 +229,17 @@ const IMAGE_TYPE = /^image\/(png|jpeg|webp|gif)$/;
  */
 export function createMockService(options: MockServiceOptions = {}): CerebroService {
   const switches: EngineSwitch[] = MOCK_SWITCHES.map((x) => ({ ...x }));
+  let remote: Omit<RemoteView, "running" | "url" | "address" | "port"> = {
+    enabled: false, addressChoice: null, addresses: ["192.168.1.20"], passwordSet: false, allowChat: false, allowTailscale: false,
+    sessionDays: 30, fingerprint: "AB:CD:EF:01:23:45:67:89", devices: [], error: null,
+  };
+  const remoteView = (): RemoteView => ({
+    ...remote,
+    running: remote.enabled,
+    url: remote.enabled ? `https://${remote.addressChoice ?? "192.168.1.20"}:51234/` : null,
+    address: remote.addressChoice ?? "192.168.1.20",
+    port: 51234,
+  });
   let mcp: McpConfig = {
     mcpServers: { files: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "C:/Users/me/Projects"], env: {}, disabled: false } },
   };
@@ -728,6 +740,36 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
           : [],
       ),
     mcpCall: (_server, tool) => later(0, () => ({ content: [{ type: "text", text: `Mock result of ${tool}` }], isError: false })),
+
+    remoteGet: () => later(0, () => remoteView()),
+    remoteSetPassword: (password) =>
+      later(0, () => {
+        if (password.length < 8) throw new Error("Use at least 8 characters.");
+        remote = { ...remote, passwordSet: true, devices: [] };
+        return remoteView();
+      }),
+    remoteEnable: (on) =>
+      later(0, () => {
+        if (on && !remote.passwordSet) throw new Error("Set a password first.");
+        remote = { ...remote, enabled: on };
+        return remoteView();
+      }),
+    remoteOptions: (o) =>
+      later(0, () => {
+        remote = { ...remote, allowChat: o.allowChat, allowTailscale: o.allowTailscale, addressChoice: o.address, sessionDays: o.sessionDays };
+        return remoteView();
+      }),
+    remotePair: () =>
+      later(0, () => {
+        if (!remote.enabled) throw new Error("Turn phone access on first.");
+        // A plain square stands in for the QR: the web build has no server to pair with.
+        return { url: "https://192.168.1.20:51234/#pair=example", qrSvg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="#fff"/><rect x="1" y="1" width="3" height="3"/></svg>', expiresAt: Date.now() + 600_000 };
+      }),
+    remoteRevoke: (id) =>
+      later(0, () => {
+        remote = { ...remote, devices: id === "*" ? [] : remote.devices.filter((d) => d.id !== id) };
+        return remoteView();
+      }),
 
     chat: (request, onEvent, signal) => chatEngine.chat(request, onEvent, signal),
 

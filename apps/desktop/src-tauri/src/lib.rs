@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 mod mcp;
+mod remote;
 mod commands;
 mod engine;
 mod hub;
@@ -62,6 +63,12 @@ pub fn run() -> Result<(), tauri::Error> {
             mcp::mcp_restart,
             mcp::mcp_tools,
             mcp::mcp_call,
+            commands::remote_get,
+            commands::remote_set_password,
+            commands::remote_enable,
+            commands::remote_options,
+            commands::remote_pair,
+            commands::remote_revoke,
         ])
         .manage(engine::Engine::start())
         .manage(hub::Downloads::default())
@@ -72,6 +79,20 @@ pub fn run() -> Result<(), tauri::Error> {
             {
                 use tauri::Manager;
                 mcp::mcp_start_all(app.handle().clone(), app.state::<mcp::Mcp>());
+                // Phone access: saved settings, written atomically (temp file + rename) on change.
+                let path = commands::remote_file(app.handle());
+                let settings = path.as_ref().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+                let save = move |s: &remote::Settings| {
+                    let Some(p) = &path else { return };
+                    let _ = std::fs::create_dir_all(p.parent().unwrap_or(p));
+                    let tmp = p.with_extension("json.tmp");
+                    if std::fs::write(&tmp, serde_json::to_vec_pretty(s).unwrap_or_default()).is_ok() {
+                        let _ = std::fs::rename(&tmp, p);
+                    }
+                };
+                let phone = remote::Remote::new(settings, std::sync::Arc::new(commands::PhoneBackend(app.handle().clone())), Box::new(save));
+                app.manage(std::sync::Arc::clone(&phone));
+                phone.resume();
             }
             // Declared in tauri.conf.json with `create: false` and built here, so the navigation and
             // new-window guards are attached before the window loads anything.
@@ -94,5 +115,15 @@ pub fn run() -> Result<(), tauri::Error> {
                 .build()?;
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())?
+        .run(|app, event| {
+            // Phone access closes its port as the app exits, not when the process is torn down.
+            if let tauri::RunEvent::Exit = event {
+                use tauri::Manager;
+                if let Some(phone) = app.try_state::<std::sync::Arc<remote::Remote>>() {
+                    phone.shutdown();
+                }
+            }
+        });
+    Ok(())
 }

@@ -18,7 +18,6 @@ use cerebro_engine::model::{Model, Session};
 use cerebro_engine::sample::SamplerConfig;
 use cerebro_engine::tokenizer::Tokenizer;
 use serde::{Deserialize, Serialize};
-use tauri::ipc::Channel;
 
 const GIB: f64 = (1u64 << 30) as f64;
 
@@ -284,6 +283,9 @@ pub struct ChatSampler {
     pub max_tokens: usize,
 }
 
+/// Where a reply's events go: the window's IPC channel, or a paired phone (remote.rs).
+pub type ChatSink = Arc<dyn Fn(ChatEvent) + Send + Sync>;
+
 /// Streamed to the UI. Mirrors `ChatEvent`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -381,7 +383,7 @@ pub struct LoadedInfo {
 enum Job {
     Load { model: LibraryModel, ctx: usize, reply: Sender<Result<(), String>> },
     Unload { reply: Sender<()> },
-    Chat { req: ChatRequest, events: Channel<ChatEvent>, reply: Sender<()> },
+    Chat { req: ChatRequest, events: ChatSink, reply: Sender<()> },
 }
 
 /// Cheap to clone: every field is shared.
@@ -450,7 +452,7 @@ impl Engine {
                             match loaded.as_mut() {
                                 Some(l) if l.info.id == req.model_id => run_chat(l, &req, &events, &st, &cn),
                                 _ => {
-                                    let _ = events.send(ChatEvent::Error { message: "Load this model first (Models screen).".into() });
+                                    events(ChatEvent::Error { message: "Load this model first (Models screen).".into() });
                                 }
                             }
                             set(&st, |s| s.activity = "idle");
@@ -503,7 +505,7 @@ impl Engine {
         rx.recv().map_err(|_| "The engine stopped while unloading.".to_owned())
     }
 
-    pub fn chat(&self, req: ChatRequest, events: Channel<ChatEvent>) -> Result<(), String> {
+    pub fn chat(&self, req: ChatRequest, events: ChatSink) -> Result<(), String> {
         let (reply, rx) = channel();
         self.send(Job::Chat { req, events, reply })?;
         rx.recv().map_err(|_| "The engine stopped during the reply.".to_owned())
@@ -558,7 +560,7 @@ fn prompt_text(req: &ChatRequest, think: bool) -> String {
     cerebro_engine::chatml(sys, &turns, think)
 }
 
-fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &Channel<ChatEvent>, st: &Arc<Mutex<Status>>, cancel: &Arc<AtomicBool>) {
+fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex<Status>>, cancel: &Arc<AtomicBool>) {
     let think = req.native.is_some();
     let text = prompt_text(req, think);
     let ids = l.tok.encode(&text);
@@ -604,7 +606,7 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &Channel<ChatEvent>, st: 
     let result = generate(&l.model, &mut l.session, &l.tok, &ids, &cfg, |piece| {
         if !started_ev {
             started_ev = true;
-            let _ = events.send(ChatEvent::Start { ttft_ms: t0.elapsed().as_secs_f64() * 1000.0 });
+            events(ChatEvent::Start { ttft_ms: t0.elapsed().as_secs_f64() * 1000.0 });
             set(st, |s| s.activity = "generating");
         }
         n += 1;
@@ -614,7 +616,7 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &Channel<ChatEvent>, st: 
                 if let Some(i) = pending.find("</think>") {
                     let t = pending[..i].replace("<think>", "");
                     if !t.is_empty() {
-                        let _ = events.send(ChatEvent::Thinking { text: t });
+                        events(ChatEvent::Thinking { text: t });
                     }
                     pending = pending[i + 8..].trim_start_matches('\n').to_owned();
                     in_think = false;
@@ -626,14 +628,14 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &Channel<ChatEvent>, st: 
                 if cut > 0 {
                     let t = pending[..cut].replace("<think>", "");
                     if !t.is_empty() {
-                        let _ = events.send(ChatEvent::Thinking { text: t });
+                        events(ChatEvent::Thinking { text: t });
                     }
                     thinking_tokens += 1;
                     pending = pending[cut..].to_owned();
                 }
             } else if !pending.is_empty() {
                 answer.push_str(&pending);
-                let _ = events.send(ChatEvent::Token { text: std::mem::take(&mut pending) });
+                events(ChatEvent::Token { text: std::mem::take(&mut pending) });
             }
             break;
         }
@@ -647,11 +649,11 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &Channel<ChatEvent>, st: 
     if !pending.is_empty() {
         let ev = if in_think { ChatEvent::Thinking { text: pending.clone() } } else { ChatEvent::Token { text: pending.clone() } };
         answer.push_str(&pending);
-        let _ = events.send(ev);
+        events(ev);
     }
     match result {
         Ok(g) => {
-            let _ = events.send(ChatEvent::Done {
+            events(ChatEvent::Done {
                 stats: ChatStats { output_tokens: g.output_tokens, thinking_tokens, tok_per_sec: g.decode_tps, ttft_ms: g.ttft_ms, total_ms: g.total_ms, extra_ms: 0.0, stopped: g.stopped },
             });
             let info = loaded_info(l, l.session.max_ctx);
@@ -678,7 +680,7 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &Channel<ChatEvent>, st: 
             });
         }
         Err(e) => {
-            let _ = events.send(ChatEvent::Error { message: format!("Generation failed: {e}") });
+            events(ChatEvent::Error { message: format!("Generation failed: {e}") });
             set(st, |s| {
                 s.totals.errors += 1;
                 if let Some(r) = s.requests.iter_mut().find(|r| r.id == id) {

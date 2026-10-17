@@ -1,6 +1,7 @@
 import "../styles/settings.css";
 import { createEffect, createResource, createSignal, For, Show, type JSX } from "solid-js";
 import { ChatSettings } from "./settings/ChatSettings";
+import { PhoneAccess } from "./settings/PhoneAccess";
 import { exportConfig, importConfig } from "../lib/config-file";
 import { Icon, type IconName } from "../components/icons";
 import { ScreenHeader, Section } from "../components/Screen";
@@ -206,6 +207,8 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
       <Section id="network" title="Network" description="Every network feature is optional. Cerebro works fully offline.">
         {group("network")}
       </Section>
+
+      <PhoneAccess />
 
       <Section id="about" title="About">
         <dl class="about">

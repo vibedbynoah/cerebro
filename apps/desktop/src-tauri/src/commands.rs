@@ -142,7 +142,10 @@ pub async fn chat_send(engine: State<'_, Engine>, request: ChatRequest, on_event
     }
     find_model(&engine, &request.model_id)?;
     let eng = engine.inner().handle();
-    tauri::async_runtime::spawn_blocking(move || eng.chat(request, on_event)).await.map_err(|_| "The reply failed.".to_owned())?
+    let sink: crate::engine::ChatSink = std::sync::Arc::new(move |e| {
+        let _ = on_event.send(e);
+    });
+    tauri::async_runtime::spawn_blocking(move || eng.chat(request, sink)).await.map_err(|_| "The reply failed.".to_owned())?
 }
 
 /// Stops the reply being written.
@@ -423,4 +426,108 @@ impl Telemetry {
 fn machine_fixed() -> (String, usize) {
     static FIXED: std::sync::OnceLock<(String, usize)> = std::sync::OnceLock::new();
     FIXED.get_or_init(|| (cerebro_engine::hw::cpu_name(), std::thread::available_parallelism().map_or(1, |n| n.get()))).clone()
+}
+
+// ---- Phone access (remote.rs) ----
+
+use tauri::Manager as _;
+
+/// The engine as a paired phone sees it: status, stop, and (when allowed) a reply.
+pub struct PhoneBackend(pub tauri::AppHandle);
+
+impl crate::remote::Backend for PhoneBackend {
+    fn status(&self) -> serde_json::Value {
+        let tele = self.0.state::<Telemetry>();
+        let (live, _) = tele.tick();
+        let engine = self.0.state::<Engine>();
+        let s = engine.status.lock().unwrap_or_else(|e| e.into_inner());
+        let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+        let (ram_total, ram_available) = cerebro_engine::hw::memory();
+        let gp = live.gpus.first();
+        let last = s.requests.front();
+        serde_json::json!({
+            "at": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64),
+            "engine": { "state": s.activity },
+            "model": s.loaded.as_ref().map(|l| serde_json::json!({ "name": l.model.name, "quant": l.model.quant, "contextUsed": l.context_used, "contextMax": l.ctx })),
+            "decodeTps": if s.activity == "generating" { s.live_decode_tps } else { None },
+            "lastDecodeTps": s.last_decode_tps,
+            "prefillTps": last.and_then(|r| r.prefill_tps),
+            "gpu": gp.map(|g| serde_json::json!({
+                "name": g.name, "utilPct": g.util_pct, "tempC": g.temp_c, "powerW": g.power_w,
+                "vramUsedGiB": g.vram_used.map(gib), "vramTotalGiB": g.vram_total.map(gib),
+            })),
+            "cpuPct": live.cpu_pct,
+            "ramUsedGiB": gib(ram_total.saturating_sub(ram_available)),
+            "ramTotalGiB": gib(ram_total),
+            "requests": s.requests.iter().take(5).map(|r| serde_json::json!({
+                "id": r.id, "state": r.state, "startedAt": r.started_at, "outputTokens": r.output_tokens, "decodeTps": r.decode_tps,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    fn stop(&self) {
+        self.0.state::<Engine>().cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn chat(&self, turns: Vec<(String, String)>, sink: Box<dyn Fn(crate::remote::PhoneEvent) + Send + Sync>) -> Result<(), String> {
+        use crate::remote::PhoneEvent;
+        let engine = self.0.state::<Engine>();
+        let model_id = engine.status.lock().unwrap_or_else(|e| e.into_inner()).loaded.as_ref().map(|l| l.model.id.clone()).ok_or("Load a model on the computer first.")?;
+        let request = ChatRequest {
+            model_id,
+            system_prompt: String::new(),
+            turns: turns.into_iter().map(|(role, text)| crate::engine::ChatTurn { role, text }).collect(),
+            // Qwen's recommended non-thinking sampler; min_p keeps long replies from looping.
+            sampler: crate::engine::ChatSampler { temperature: 0.7, top_p: 0.8, min_p: 0.05, top_k: 20, repeat_penalty: 1.0, max_tokens: 4096 },
+            native: None,
+        };
+        let out: crate::engine::ChatSink = std::sync::Arc::new(move |e| match e {
+            ChatEvent::Token { text } => sink(PhoneEvent::Token(text)),
+            ChatEvent::Thinking { text } => sink(PhoneEvent::Thinking(text)),
+            ChatEvent::Done { stats } => sink(PhoneEvent::Done { tokens: stats.output_tokens as u64, tps: stats.tok_per_sec }),
+            ChatEvent::Error { message } => sink(PhoneEvent::Error(message)),
+            ChatEvent::Start { .. } => {}
+        });
+        engine.handle().chat(request, out)
+    }
+}
+
+pub fn remote_file<R: Runtime>(app: &tauri::AppHandle<R>) -> Option<std::path::PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join("phone-access.json"))
+}
+
+type RemoteState<'a> = State<'a, std::sync::Arc<crate::remote::Remote>>;
+
+#[tauri::command(async)]
+pub fn remote_get(remote: RemoteState<'_>) -> serde_json::Value {
+    remote.view()
+}
+
+#[tauri::command(async)]
+pub fn remote_set_password(remote: RemoteState<'_>, password: String) -> Result<serde_json::Value, String> {
+    remote.set_password(&password)?;
+    Ok(remote.view())
+}
+
+#[tauri::command(async)]
+pub fn remote_enable(remote: RemoteState<'_>, on: bool) -> Result<serde_json::Value, String> {
+    remote.set_enabled(on)?;
+    Ok(remote.view())
+}
+
+#[tauri::command(async)]
+pub fn remote_options(remote: RemoteState<'_>, allow_chat: bool, allow_tailscale: bool, address: Option<String>, session_days: u32) -> Result<serde_json::Value, String> {
+    remote.set_options(allow_chat, allow_tailscale, address, session_days)?;
+    Ok(remote.view())
+}
+
+#[tauri::command(async)]
+pub fn remote_pair(remote: RemoteState<'_>) -> Result<serde_json::Value, String> {
+    remote.pair()
+}
+
+#[tauri::command(async)]
+pub fn remote_revoke(remote: RemoteState<'_>, id: String) -> serde_json::Value {
+    remote.revoke(&id);
+    remote.view()
 }
