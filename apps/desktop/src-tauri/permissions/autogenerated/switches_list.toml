@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-switches-list"
+description = "Enables the switches_list command without any pre-configured scope."
+commands.allow = ["switches_list"]
+
+[[permission]]
+identifier = "deny-switches-list"
+description = "Denies the switches_list command without any pre-configured scope."
+commands.deny = ["switches_list"]

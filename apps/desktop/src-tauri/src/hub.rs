@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -519,8 +519,9 @@ mod tests {
         b.extend(kv_u32("qwen3moe.context_length", 32768));
         b.extend(kv_u32("general.file_type", 15));
         // An array of two strings, skipped whole.
-        b.extend_from_slice(&(15u64).to_le_bytes());
-        b.extend_from_slice(b"tokenizer.ggml.tokens");
+        let key = b"tokenizer.ggml.tokens";
+        b.extend_from_slice(&(key.len() as u64).to_le_bytes());
+        b.extend_from_slice(key);
         b.extend_from_slice(&9u32.to_le_bytes());
         b.extend_from_slice(&8u32.to_le_bytes());
         b.extend_from_slice(&2u64.to_le_bytes());

@@ -56,8 +56,8 @@ export function QuantTable(props: {
                 Size
               </th>
               <Show when={props.memory}>
-                <th scope="col" class="num">
-                  Memory
+                <th scope="col" class="num" title={`Memory this file needs at ${props.memory!.ctxLabel} context`}>
+                  VRAM + RAM
                 </th>
               </Show>
               <th scope="col" class="num">
@@ -119,7 +119,12 @@ export function QuantTable(props: {
                       {(mem) => (
                         <td class="num qrow__mem">
                           <Show when={mem().of(q)} fallback={<span class="qrow__why">Header not read</span>}>
-                            {(e) => <span class="mono" data-estimate={q.id}>{memoryNeeds(e(), mem().ctxLabel)}</span>}
+                            {(e) => (
+                              // Compact in the table; the full sentence is the tooltip and what screen readers hear.
+                              <span class="mono" data-estimate={q.id} title={memoryNeeds(e(), mem().ctxLabel)} aria-label={memoryNeeds(e(), mem().ctxLabel)}>
+                                {f1(e().vramGiB)} + {f1(e().ramGiB)} GiB
+                              </span>
+                            )}
                           </Show>
                         </td>
                       )}

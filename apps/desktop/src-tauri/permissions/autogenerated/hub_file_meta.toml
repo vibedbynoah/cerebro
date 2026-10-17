@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-hub-file-meta"
+description = "Enables the hub_file_meta command without any pre-configured scope."
+commands.allow = ["hub_file_meta"]
+
+[[permission]]
+identifier = "deny-hub-file-meta"
+description = "Denies the hub_file_meta command without any pre-configured scope."
+commands.deny = ["hub_file_meta"]

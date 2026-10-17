@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-switches-reset"
+description = "Enables the switches_reset command without any pre-configured scope."
+commands.allow = ["switches_reset"]
+
+[[permission]]
+identifier = "deny-switches-reset"
+description = "Denies the switches_reset command without any pre-configured scope."
+commands.deny = ["switches_reset"]
