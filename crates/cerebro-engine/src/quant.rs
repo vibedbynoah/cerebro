@@ -413,6 +413,10 @@ impl QAct {
 pub fn dot_q8_0_q8(row: &[u8], a: &QAct) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
+        if std::arch::is_x86_feature_detected!("avxvnni") {
+            // SAFETY: AVX-VNNI (which implies AVX2) was checked at run time just above.
+            return unsafe { dot_q8_0_q8_vnni(row, a) };
+        }
         if std::arch::is_x86_feature_detected!("avx2") {
             // SAFETY: AVX2 support was checked at run time just above.
             return unsafe { dot_q8_0_q8_avx2(row, a) };
@@ -446,6 +450,27 @@ unsafe fn dot_q8_0_q8_avx2(row: &[u8], a: &QAct) -> f32 {
         let sx = _mm256_sign_epi8(x, w);
         let p16 = _mm256_maddubs_epi16(aw, sx);
         let p32 = _mm256_madd_epi16(p16, ones);
+        acc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(p32), _mm256_set1_ps(wd * d), acc);
+    }
+    let hi = _mm256_extractf128_ps(acc, 1);
+    let s = _mm_add_ps(hi, _mm256_castps256_ps128(acc));
+    let s = _mm_add_ps(s, _mm_movehl_ps(s, s));
+    let s = _mm_add_ss(s, _mm_shuffle_ps(s, s, 1));
+    _mm_cvtss_f32(s)
+}
+
+/// AVX-VNNI (Alder Lake and newer): one vpdpbusd replaces maddubs + madd per 32 values.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,avxvnni")]
+unsafe fn dot_q8_0_q8_vnni(row: &[u8], a: &QAct) -> f32 {
+    use std::arch::x86_64::*;
+    let mut acc = _mm256_setzero_ps();
+    for (bi, d) in a.d.iter().enumerate() {
+        let b = row.as_ptr().add(bi * 34);
+        let wd = f16_to_f32(u16::from_le_bytes([*b, *b.add(1)]));
+        let w = _mm256_loadu_si256(b.add(2) as *const __m256i);
+        let x = _mm256_loadu_si256(a.q.as_ptr().add(bi * 32) as *const __m256i);
+        let p32 = _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), _mm256_sign_epi8(w, w), _mm256_sign_epi8(x, w));
         acc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(p32), _mm256_set1_ps(wd * d), acc);
     }
     let hi = _mm256_extractf128_ps(acc, 1);
@@ -885,6 +910,25 @@ mod tests {
         assert_eq!(f16_to_f32(0x0000), 0.0);
         assert!((f16_to_f32(0x3555) - 0.333_251_95).abs() < 1e-6);
         assert!(f16_to_f32(0x0001) > 0.0);
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn vnni_q8_dot_equals_avx2() {
+        if !std::arch::is_x86_feature_detected!("avxvnni") {
+            return;
+        }
+        let nb = 64;
+        let mut row: Vec<u8> = (0..nb * 34).map(|i| (i as u32).wrapping_mul(2654435761).rotate_right(13) as u8).collect();
+        for b in 0..nb {
+            row[b * 34..b * 34 + 2].copy_from_slice(&0x2c00u16.to_le_bytes());
+        }
+        let x: Vec<f32> = (0..nb * 32).map(|i| (i as f32 * 0.21).cos()).collect();
+        let mut a = QAct::new(x.len());
+        a.quantize(&x);
+        // SAFETY: feature checked above.
+        let (v, w) = unsafe { (dot_q8_0_q8_vnni(&row, &a), dot_q8_0_q8_avx2(&row, &a)) };
+        assert!((v - w).abs() <= 1e-3 * w.abs().max(1.0), "{v} vs {w}");
     }
 
     #[test]
