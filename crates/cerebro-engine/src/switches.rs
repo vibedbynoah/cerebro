@@ -78,6 +78,7 @@ fn logical() -> i64 {
 
 pub const GPU_MMA_MATMUL: &str = "gpu_mma_matmul";
 pub const GPU_MMA_ATTENTION: &str = "gpu_mma_attention";
+pub const GPU_DECODE_GQA: &str = "gpu_decode_gqa";
 pub const CPU_BATCH_PREFILL: &str = "cpu_batch_prefill";
 pub const CPU_THREADS: &str = "cpu_threads";
 pub const CPU_CHUNK_DIV: &str = "cpu_chunk_div";
@@ -110,6 +111,18 @@ fn registry() -> &'static [Switch] {
                 beginner: "Keeps long prompts fast: the model compares every word with the ones before it using the graphics card's fastest units.",
                 advanced: "Flash attention for prefill on f16 tensor cores (m16n8k16, ldmatrix.trans, online softmax in exp2). Head size 128, compute capability 8.0+.",
                 env: "CEREBRO_NO_MMA_ATTN",
+                default: on,
+            },
+            Switch {
+                id: GPU_DECODE_GQA,
+                name: "Shared-head decode attention",
+                group: "GPU",
+                kind: Kind::Toggle,
+                channel: Channel::Beta,
+                applies: Applies::Reload,
+                beginner: "Keeps writing fast as a conversation gets long, by reading the model's memory of the conversation once for several heads at a time.",
+                advanced: "Decode attention with one block per KV head serving its whole query group (K/V read once per group), one cached position per lane, splits sized to the GPU and derived from the position at run time. Group size up to 8, head size up to 256.",
+                env: "CEREBRO_NO_DECODE_GQA",
                 default: on,
             },
             Switch {

@@ -188,6 +188,174 @@ extern "C" __global__ void attn_partial(const float* __restrict__ q, const __hal
     }
 }
 
+// Decode attention for grouped-query models: one block per (kv head, split) serves every query head
+// that shares the kv head, so K and V are read once per group instead of once per query head.
+// Scores: 8 lanes share a K row, each reading one full 32-byte sector, so a warp reads 4 whole rows
+// per load and reduces each with 3 shuffles. Values: each lane owns HD/32 contiguous dims and reads
+// them in one load per row. Compiled per head size and group size so registers fit the model. The
+// split's range is derived from *posp at run time, so the launch shape is fixed (graph capture)
+// while the work follows the context length. Writes the same partials as attn_partial; attn_combine
+// merges them.
+template <int HD> struct DecVec;
+template <> struct DecVec<64> { typedef uint32_t T; };   // 2 halves per lane in the V pass
+template <> struct DecVec<128> { typedef uint2 T; };     // 4 halves
+template <> struct DecVec<256> { typedef uint4 T; };     // 8 halves
+
+template <int HD, int G>
+__device__ __forceinline__ void attn_decode_gqa_t(const float* __restrict__ q, const __half* __restrict__ kc,
+                                                  const __half* __restrict__ vc, float* __restrict__ pm,
+                                                  float* __restrict__ pl, float* __restrict__ pacc, int n_kv,
+                                                  const int* __restrict__ posp, int group, float scale) {
+    constexpr int PER = HD / 32;     // V dims per lane
+    constexpr int KL = HD / 8;       // K halves per lane (8 lanes per row)
+    constexpr int KV4 = KL / 8;      // ... as 16-byte loads
+    __shared__ float qs[G * HD];
+    __shared__ float wm[4][G], wl[4][G];
+    __shared__ float wacc[4][G * HD];
+    const int len = *posp + 1;
+    const int kvh = blockIdx.x, split = blockIdx.y, splits = gridDim.y;
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int chunk = (((len + splits - 1) / splits) + 31) & ~31;
+    const int start = split * chunk, end = min(len, start + chunk);
+    if (start >= len) {
+        if (threadIdx.x < group) {
+            size_t i = (size_t)(kvh * group + threadIdx.x) * splits + split;
+            pm[i] = -1e30f;
+            pl[i] = 0.f;
+        }
+        return;
+    }
+    for (int i = threadIdx.x; i < G * HD; i += blockDim.x) qs[i] = i < group * HD ? q[(size_t)kvh * group * HD + i] * scale : 0.f;
+    __syncthreads();
+
+    const size_t stride = (size_t)n_kv * HD;
+    const int sub = lane & 7, rq = lane >> 3;  // K pass: this lane's slice of the row, and which of 4 rows
+    float m[G], l[G], acc[G][PER];
+#pragma unroll
+    for (int g = 0; g < G; ++g) {
+        m[g] = -1e30f;
+        l[g] = 0.f;
+#pragma unroll
+        for (int j = 0; j < PER; ++j) acc[g][j] = 0.f;
+    }
+    for (int base = start + warp * 32; base < end; base += 128) {
+        // Scores for the tile's 32 positions, 4 rows per step.
+        float s[G];
+#pragma unroll
+        for (int g = 0; g < G; ++g) s[g] = 0.f;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int row = base + i * 4 + rq;
+            float part[G];
+#pragma unroll
+            for (int g = 0; g < G; ++g) part[g] = 0.f;
+            if (row < end) {
+                const uint4* kt = reinterpret_cast<const uint4*>(kc + row * stride + (size_t)kvh * HD + sub * KL);
+#pragma unroll
+                for (int c = 0; c < KV4; ++c) {
+                    const uint4 raw = kt[c];
+                    const __half2* h = reinterpret_cast<const __half2*>(&raw);
+#pragma unroll
+                    for (int e = 0; e < 4; ++e) {
+                        const float2 k = __half22float2(h[e]);
+                        const int d = sub * KL + c * 8 + e * 2;
+#pragma unroll
+                        for (int g = 0; g < G; ++g) part[g] += k.x * qs[g * HD + d] + k.y * qs[g * HD + d + 1];
+                    }
+                }
+            }
+#pragma unroll
+            for (int g = 0; g < G; ++g) {
+                float v = part[g];
+                v += __shfl_xor_sync(0xffffffff, v, 1);
+                v += __shfl_xor_sync(0xffffffff, v, 2);
+                v += __shfl_xor_sync(0xffffffff, v, 4);
+                // Position base + lane is row (lane >> 2) * 4 + (lane & 3): taken from step lane >> 2.
+                const float mine = __shfl_sync(0xffffffff, v, (lane & 3) << 3);
+                if ((lane >> 2) == i) s[g] = mine;
+            }
+        }
+        const bool valid = base + lane < end;
+        float p[G];
+#pragma unroll
+        for (int g = 0; g < G; ++g) {
+            const float mx = warp_max(valid ? s[g] : -1e30f);
+            const float mn = fmaxf(m[g], mx);
+            const float c = __expf(m[g] - mn);
+            p[g] = valid ? __expf(s[g] - mn) : 0.f;
+            l[g] = l[g] * c + warp_sum(p[g]);
+#pragma unroll
+            for (int j = 0; j < PER; ++j) acc[g][j] *= c;
+            m[g] = mn;
+        }
+        // Values: lane owns dims [lane * PER, lane * PER + PER), one load per row.
+        const int n = min(32, end - base);
+        for (int j0 = 0; j0 < n; j0 += 4) {
+            typename DecVec<HD>::T raw[4];
+#pragma unroll
+            for (int u = 0; u < 4; ++u) {
+                const int j = min(j0 + u, n - 1);
+                raw[u] = *reinterpret_cast<const typename DecVec<HD>::T*>(vc + (base + j) * stride + (size_t)kvh * HD + lane * PER);
+            }
+#pragma unroll
+            for (int u = 0; u < 4; ++u) {
+                const __half2* h = reinterpret_cast<const __half2*>(&raw[u]);
+                float v[PER];
+#pragma unroll
+                for (int e = 0; e < PER / 2; ++e) {
+                    const float2 f = __half22float2(h[e]);
+                    v[2 * e] = f.x;
+                    v[2 * e + 1] = f.y;
+                }
+#pragma unroll
+                for (int g = 0; g < G; ++g) {
+                    const float pj = j0 + u < n ? __shfl_sync(0xffffffff, p[g], (j0 + u) & 31) : 0.f;
+#pragma unroll
+                    for (int e = 0; e < PER; ++e) acc[g][e] += pj * v[e];
+                }
+            }
+        }
+    }
+    // Merge the four warps.
+    if (lane == 0)
+#pragma unroll
+        for (int g = 0; g < G; ++g) { wm[warp][g] = m[g]; wl[warp][g] = l[g]; }
+#pragma unroll
+    for (int g = 0; g < G; ++g)
+#pragma unroll
+        for (int e = 0; e < PER; ++e) wacc[warp][g * HD + lane * PER + e] = acc[g][e];
+    __syncthreads();
+    for (int i = threadIdx.x; i < group * HD; i += blockDim.x) {
+        const int g = i / HD, d = i % HD;
+        float M = -1e30f;
+        for (int w = 0; w < 4; ++w) M = fmaxf(M, wm[w][g]);
+        float o = 0.f;
+        for (int w = 0; w < 4; ++w) o += wacc[w][g * HD + d] * __expf(wm[w][g] - M);
+        pacc[((size_t)(kvh * group + g) * splits + split) * HD + d] = o;
+    }
+    if (threadIdx.x < group) {
+        const int g = threadIdx.x;
+        float M = -1e30f;
+        for (int w = 0; w < 4; ++w) M = fmaxf(M, wm[w][g]);
+        float L = 0.f;
+        for (int w = 0; w < 4; ++w) L += wl[w][g] * __expf(wm[w][g] - M);
+        const size_t i = (size_t)(kvh * group + g) * splits + split;
+        pm[i] = M;
+        pl[i] = L;
+    }
+}
+
+#define ATTN_DECODE_GQA(HD, G)                                                                                         \
+    extern "C" __global__ void attn_decode_gqa_##HD##_##G(const float* __restrict__ q, const __half* __restrict__ kc, \
+                                                          const __half* __restrict__ vc, float* __restrict__ pm,      \
+                                                          float* __restrict__ pl, float* __restrict__ pacc, int n_kv, \
+                                                          const int* __restrict__ posp, int group, float scale) {     \
+        attn_decode_gqa_t<HD, G>(q, kc, vc, pm, pl, pacc, n_kv, posp, group, scale);                                  \
+    }
+ATTN_DECODE_GQA(64, 1) ATTN_DECODE_GQA(64, 2) ATTN_DECODE_GQA(64, 4) ATTN_DECODE_GQA(64, 8)
+ATTN_DECODE_GQA(128, 1) ATTN_DECODE_GQA(128, 2) ATTN_DECODE_GQA(128, 4) ATTN_DECODE_GQA(128, 8)
+ATTN_DECODE_GQA(256, 1) ATTN_DECODE_GQA(256, 2) ATTN_DECODE_GQA(256, 4) ATTN_DECODE_GQA(256, 8)
+
 extern "C" __global__ void attn_combine(const float* __restrict__ pm, const float* __restrict__ pl,
                                         const float* __restrict__ pacc, float* __restrict__ out, int hd, int splits) {
     int head = blockIdx.x, d = threadIdx.x;

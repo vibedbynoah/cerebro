@@ -76,6 +76,8 @@ struct Funcs {
     qkv_post: CudaFunction,
     attn_partial: CudaFunction,
     attn_combine: CudaFunction,
+    /// Grouped-query decode attention (one block per KV head and split); None when switched off.
+    attn_gqa: Option<CudaFunction>,
     silu_mul_quant: CudaFunction,
     embed: CudaFunction,
     argmax: CudaFunction,
@@ -329,6 +331,8 @@ pub struct GpuState {
     pl: CudaSlice<f32>,
     pacc: CudaSlice<f32>,
     splits: usize,
+    /// Splits for attn_decode_gqa: enough blocks to fill the GPU, independent of the context size.
+    gqa_splits: usize,
     b: Batch,
     moe: Option<MoeGpu>,
     graph: Option<CudaGraph>,
@@ -409,6 +413,7 @@ impl GpuState {
             qkv_post: lf("qkv_post")?,
             attn_partial: lf("attn_partial")?,
             attn_combine: lf("attn_combine")?,
+            attn_gqa: None,
             silu_mul_quant: lf("silu_mul_quant")?,
             embed: lf("embed")?,
             argmax: lf("argmax_next")?,
@@ -429,6 +434,13 @@ impl GpuState {
             attn_tiled: lf("attn_prefill_tiled")?,
         };
         let c = &model.cfg;
+        // The grouped decode kernel is compiled per head size (64, 128, 256).
+        let mut f = f;
+        if switches::enabled(switches::GPU_DECODE_GQA) && matches!(c.head_dim, 64 | 128 | 256) && c.n_kv > 0 && c.n_head / c.n_kv <= 8 {
+            // Smallest compiled group size that holds this model's group (registers follow it).
+            let g = [1, 2, 4, 8].into_iter().find(|&g| g >= c.n_head / c.n_kv).unwrap_or(8);
+            f.attn_gqa = Some(lf(&format!("attn_decode_gqa_{}_{g}", c.head_dim))?);
+        }
         if c.head_dim > 256 || c.head_dim % 64 != 0 || c.dim > 8192 {
             return Err(Error::Unsupported(format!("head size {} / width {} on the GPU", c.head_dim, c.dim)));
         }
@@ -483,6 +495,10 @@ impl GpuState {
         let qd = c.n_head * c.head_dim;
         let widest = c.dim.max(c.ffn).max(qd);
         let splits = max_ctx.div_ceil(SPLIT);
+        // About eight blocks per SM for the grouped decode kernel; it sizes each split from the live
+        // position, so short contexts leave most splits empty and long ones keep every SM busy.
+        let sms = ctx.attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT).unwrap_or(40).max(1) as usize;
+        let gqa_splits = (8 * sms).div_ceil(c.n_kv.max(1)).clamp(1, 128);
         let row = qd + 2 * kvd;
         let b = Batch {
             x: z(CHUNK * c.dim)?,
@@ -532,10 +548,11 @@ impl GpuState {
             tok: stream.alloc_zeros::<i32>(1).map_err(gerr)?,
             pos: stream.alloc_zeros::<i32>(1).map_err(gerr)?,
             next: stream.alloc_zeros::<i32>(1).map_err(gerr)?,
-            pm: z(c.n_head * splits)?,
-            pl: z(c.n_head * splits)?,
-            pacc: z(c.n_head * splits * c.head_dim)?,
+            pm: z(c.n_head * splits.max(gqa_splits))?,
+            pl: z(c.n_head * splits.max(gqa_splits))?,
+            pacc: z(c.n_head * splits.max(gqa_splits) * c.head_dim)?,
             splits,
+            gqa_splits,
             b,
             moe,
             graph: None,
@@ -820,7 +837,28 @@ impl GpuState {
                 }
                 .map_err(gerr)?;
             }
-            {
+            let gqa = f.attn_gqa.as_ref();
+            if let Some(k) = gqa {
+                let cfg = LaunchConfig { grid_dim: (sh.n_kv as u32, self.gqa_splits as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
+                unsafe {
+                    s.launch_builder(k)
+                        .arg(&self.qkv)
+                        .arg(&l.kc)
+                        .arg(&l.vc)
+                        .arg(&mut self.pm)
+                        .arg(&mut self.pl)
+                        .arg(&mut self.pacc)
+                        .arg(&n_kv)
+                        .arg(&self.pos)
+                        .arg(&group)
+                        .arg(&scale)
+                        .launch(cfg)
+                }
+                .map_err(gerr)?;
+                let splits = self.gqa_splits as i32;
+                let cfg = LaunchConfig { grid_dim: (sh.n_head as u32, 1, 1), block_dim: (sh.hd as u32, 1, 1), shared_mem_bytes: 0 };
+                unsafe { s.launch_builder(&f.attn_combine).arg(&self.pm).arg(&self.pl).arg(&self.pacc).arg(&mut self.att).arg(&hd).arg(&splits).launch(cfg) }.map_err(gerr)?;
+            } else {
                 let chunk = SPLIT as i32;
                 let cfg = LaunchConfig { grid_dim: (sh.n_head as u32, self.splits as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
                 unsafe {
@@ -1361,5 +1399,107 @@ impl GpuState {
             }
         }
         Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// f32 -> IEEE half bits (truncating; the reference decodes the same bits, so it stays exact).
+    fn f16_bits(x: f32) -> u16 {
+        let b = x.to_bits();
+        let sign = ((b >> 16) & 0x8000) as u16;
+        let exp = ((b >> 23) & 0xff) as i32 - 127 + 15;
+        let man = b & 0x7f_ffff;
+        if exp <= 0 {
+            if exp < -10 {
+                return sign;
+            }
+            return sign | (((man | 0x80_0000) >> (14 - exp)) as u16);
+        }
+        sign | ((exp as u16) << 10) | ((man >> 13) as u16)
+    }
+
+    fn f16_value(h: u16) -> f64 {
+        let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+        let exp = ((h >> 10) & 0x1f) as i32;
+        let man = (h & 0x3ff) as f64;
+        sign * if exp == 0 { man * 2f64.powi(-24) } else { (1.0 + man / 1024.0) * 2f64.powi(exp - 15) }
+    }
+
+    /// The grouped decode kernel against an f64 reference and against attn_partial, on random
+    /// queries and an f16 cache, at lengths that hit one tile, a partial tile and many splits.
+    #[test]
+    fn grouped_decode_attention_matches_the_reference() {
+        let Ok(ctx) = CudaContext::new(0) else { return eprintln!("no CUDA device; skipped") };
+        let stream = ctx.default_stream();
+        let module = ctx.load_module(Ptx::from_src(PTX)).unwrap();
+        let (n_head, n_kv, hd) = (16usize, 8usize, 128usize);
+        let group = n_head / n_kv;
+        let gqa = module.load_function("attn_decode_gqa_128_2").unwrap();
+        let old = module.load_function("attn_partial").unwrap();
+        let combine = module.load_function("attn_combine").unwrap();
+        let mut seed = 0x2545F4914F6CDD1Du64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f32 / (1u64 << 53) as f32 * 2.0 - 1.0
+        };
+        for len in [1usize, 16, 31, 33, 300, 2048, 4100] {
+            let max_ctx = 4352;
+            let q: Vec<f32> = (0..n_head * hd).map(|_| rnd()).collect();
+            let kc: Vec<u16> = (0..max_ctx * n_kv * hd).map(|_| f16_bits(rnd())).collect();
+            let vc: Vec<u16> = (0..max_ctx * n_kv * hd).map(|_| f16_bits(rnd())).collect();
+            let scale = 1.0 / (hd as f32).sqrt();
+            // f64 reference.
+            let mut want = vec![0f64; n_head * hd];
+            for h in 0..n_head {
+                let kvh = h / group;
+                let s: Vec<f64> = (0..len).map(|t| (0..hd).map(|d| q[h * hd + d] as f64 * f16_value(kc[(t * n_kv + kvh) * hd + d])).sum::<f64>() * scale as f64).collect();
+                let mx = s.iter().cloned().fold(f64::MIN, f64::max);
+                let w: Vec<f64> = s.iter().map(|x| (x - mx).exp()).collect();
+                let z: f64 = w.iter().sum();
+                for d in 0..hd {
+                    want[h * hd + d] = (0..len).map(|t| w[t] * f16_value(vc[(t * n_kv + kvh) * hd + d])).sum::<f64>() / z;
+                }
+            }
+            let dq = stream.clone_htod(&q).unwrap();
+            let dk = stream.clone_htod(&kc).unwrap();
+            let dv = stream.clone_htod(&vc).unwrap();
+            let dpos = stream.clone_htod(&[(len - 1) as i32]).unwrap();
+            let run = |f: &CudaFunction, grid: (u32, u32), splits: i32, gqa_kernel: bool| -> Vec<f32> {
+                let mut pm = stream.alloc_zeros::<f32>(n_head * splits as usize).unwrap();
+                let mut pl = stream.alloc_zeros::<f32>(n_head * splits as usize).unwrap();
+                let mut pacc = stream.alloc_zeros::<f32>(n_head * splits as usize * hd).unwrap();
+                let mut out = stream.alloc_zeros::<f32>(n_head * hd).unwrap();
+                let (n_kv_i, hd_i, group_i) = (n_kv as i32, hd as i32, group as i32);
+                let cfg = LaunchConfig { grid_dim: (grid.0, grid.1, 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
+                let chunk = SPLIT as i32;
+                unsafe {
+                    let mut b = stream.launch_builder(f);
+                    b.arg(&dq).arg(&dk).arg(&dv).arg(&mut pm).arg(&mut pl).arg(&mut pacc).arg(&n_kv_i);
+                    if gqa_kernel {
+                        b.arg(&dpos).arg(&group_i).arg(&scale);
+                    } else {
+                        b.arg(&hd_i).arg(&dpos).arg(&group_i).arg(&scale).arg(&chunk);
+                    }
+                    b.launch(cfg).unwrap();
+                    let cfg = LaunchConfig { grid_dim: (n_head as u32, 1, 1), block_dim: (hd as u32, 1, 1), shared_mem_bytes: 0 };
+                    stream.launch_builder(&combine).arg(&pm).arg(&pl).arg(&pacc).arg(&mut out).arg(&hd_i).arg(&splits).launch(cfg).unwrap();
+                }
+                stream.clone_dtoh(&out).unwrap()
+            };
+            let gqa_splits = 46i32;
+            let new = run(&gqa, (n_kv as u32, gqa_splits as u32), gqa_splits, true);
+            let old_splits = max_ctx.div_ceil(SPLIT) as i32;
+            let old_out = run(&old, (n_head as u32, old_splits as u32), old_splits, false);
+            let err = |got: &[f32]| got.iter().zip(&want).map(|(g, w)| (*g as f64 - w).abs()).fold(0f64, f64::max);
+            let (e_new, e_old) = (err(&new), err(&old_out));
+            eprintln!("len {len:>5}: max |error| grouped {e_new:.2e}, previous kernel {e_old:.2e}");
+            assert!(e_new < 1e-4, "grouped kernel error {e_new} at len {len}");
+            assert!(e_new <= e_old * 4.0 + 1e-6, "grouped kernel is much less accurate than before at len {len}");
+        }
     }
 }
