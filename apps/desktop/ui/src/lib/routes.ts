@@ -12,7 +12,6 @@ export type RouteId =
   | "documents"
   | "plugins"
   | "tools"
-  | "security"
   | "settings"
   | "about";
 
@@ -41,7 +40,6 @@ export const ROUTES: readonly RouteDef[] = [
   { id: "documents", label: "Documents", icon: "documents", group: "Create", summary: "Search your own files by meaning, on this machine.", keywords: "rag search files knowledge pdf" },
   { id: "plugins", label: "Plugins", icon: "plugins", group: "Extend", summary: "Add capabilities. Installing needs a network; installed plugins run offline.", keywords: "extensions addons install" },
   { id: "tools", label: "Tools", icon: "tools", group: "Extend", summary: "Actions a model may take, each behind your permission.", keywords: "functions actions agent" },
-  { id: "security", label: "Security", icon: "security", group: "System", summary: "What protects the model process, and what each protection does not do.", keywords: "sandbox integrity protection containment" },
   { id: "settings", label: "Settings", icon: "settings", group: "System", summary: "Theme, protections and network features. You can change all of it.", keywords: "preferences options config theme" },
   { id: "about", label: "About", icon: "about", group: "System", summary: "What Cerebro does for you, the version on this machine and the documents that come with it.", keywords: "version licence license credits mark logo info help" },
 ];

@@ -2,6 +2,7 @@ import "../styles/images.css";
 import { createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { Icon } from "../components/icons";
 import { IllustrativeFlag, ScreenHeader } from "../components/Screen";
+import { Preview } from "../components/Preview";
 import {
   ASPECTS,
   estimateSeconds,
@@ -30,6 +31,31 @@ import { useAppState } from "../state";
  * and export. In this build images are illustrative artwork drawn from the seed.
  */
 export function ImageStudio(): JSX.Element {
+  // The desktop engine runs language models only; it says so instead of drawing stand-in artwork.
+  if (__DESKTOP__) return <ImagesPlanned />;
+  return <ImageStudioPreview />;
+}
+
+function ImagesPlanned(): JSX.Element {
+  return (
+    <div class="screen">
+      <ScreenHeader route="images" />
+      <Preview
+        art="gallery"
+        title="Images made on this computer"
+        lede="Cerebro Engine runs language models today. Image models come next, on the same GPU and with the same speed tuning."
+        features={[
+          { icon: "images", title: "Text to image", text: "Describe a picture; it is drawn locally with the seed shown so you can make it again." },
+          { icon: "sliders", title: "Edit and upscale", text: "Paint a mask to change part of a picture, or upscale it, without uploading anything." },
+          { icon: "gpu", title: "Fits your card", text: "Picks the image model and resolution your VRAM can hold." },
+        ]}
+      />
+    </div>
+  );
+}
+
+/** The browser preview's design study of the screen, with illustrative artwork drawn from the seed. */
+function ImageStudioPreview(): JSX.Element {
   const app = useAppState();
   const [advanced, setAdvanced] = createSignal(app.level() === "advanced");
   const [p, setP] = createSignal<GenParams>({

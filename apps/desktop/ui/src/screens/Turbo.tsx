@@ -37,6 +37,19 @@ import { EngineSwitches } from "./turbo/EngineSwitches";
 export function Turbo(): JSX.Element {
   const app = useAppState();
   const advanced = () => app.level() === "advanced";
+  // The desktop app shows only what the engine really has: its switches and the release channel.
+  // Builds, schedulers, power profiles and the profiler stay a browser-preview design study until
+  // the engine measures them.
+  if (__DESKTOP__)
+    return (
+      <div class="screen turbo">
+        <ScreenHeader route="turbo" lede="Every speed-up in the engine, each with a plain explanation, on or off. Changes are saved on this computer." />
+        <EngineSwitches />
+        <Show when={advanced()}>
+          <Channels channel={app.channel()} onChange={(c) => app.setChannel(c)} />
+        </Show>
+      </div>
+    );
   return (
     <div class="screen turbo">
       <ScreenHeader

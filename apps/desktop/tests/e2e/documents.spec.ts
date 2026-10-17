@@ -14,7 +14,7 @@ test.describe("documents", () => {
     await open(page);
     await page.getByRole("searchbox", { name: "Search documents" }).fill("annual leave days");
     const hit = page.locator(".doc-hit").first();
-    await expect(hit).toContainText("Employee handbook 2026.pdf");
+    await expect(hit).toContainText("Employee handbook 2026.txt");
     await expect(hit.locator("mark").first()).toHaveText(/annual/i);
   });
 

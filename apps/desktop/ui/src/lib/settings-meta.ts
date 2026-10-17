@@ -8,8 +8,11 @@ export interface SettingMeta {
   /** One short, neutral sentence on what the switch does. No warnings, no nagging. */
   note: string;
   term?: GlossaryKey;
-  /** For protections: what the mechanism does NOT do (docs/CLAIMS.md), shown on Security. */
+  /** For protections: what the mechanism does NOT do (docs/CLAIMS.md), shown under the switch. */
   limits?: string;
+  /** False when it guards something the desktop build does not have (a separate model process, a
+   *  local API, plugins): there the switch would change nothing, so it is not shown. */
+  desktop?: boolean;
 }
 
 export const SETTINGS_META: readonly SettingMeta[] = [
@@ -20,6 +23,7 @@ export const SETTINGS_META: readonly SettingMeta[] = [
     note: "Runs the model in a Windows Job Object, so it and anything it starts end when Cerebro stops.",
     term: "jobObject",
     limits: "Does not limit which files or network addresses the model process can open.",
+    desktop: false,
   },
   {
     key: "cleanEnvironment",
@@ -28,6 +32,7 @@ export const SETTINGS_META: readonly SettingMeta[] = [
     note: "Gives the model process a short, fixed set of environment variables instead of a copy of Cerebro's.",
     term: "cleanEnv",
     limits: "Does not restrict what the process can read or reach once it runs.",
+    desktop: false,
   },
   {
     key: "integrityCheck",
@@ -35,6 +40,7 @@ export const SETTINGS_META: readonly SettingMeta[] = [
     label: "Backend integrity check",
     note: "Fingerprints the backend's program files before every start and stops if any changed.",
     term: "integrity",
+    desktop: false,
   },
   {
     key: "permissionPrompts",
@@ -49,6 +55,7 @@ export const SETTINGS_META: readonly SettingMeta[] = [
     note: "Serves the API on 127.0.0.1. Off lets other devices on your network connect to it.",
     term: "loopback",
     limits: "Any program on this computer can still reach a loopback address.",
+    desktop: false,
   },
   {
     key: "offlineMode",
@@ -67,5 +74,6 @@ export const SETTINGS_META: readonly SettingMeta[] = [
     group: "network",
     label: "Plugin installs",
     note: "Lets you install plugins when a network is available.",
+    desktop: false,
   },
 ];

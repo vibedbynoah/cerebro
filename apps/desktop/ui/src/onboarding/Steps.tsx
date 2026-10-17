@@ -444,6 +444,34 @@ export function PrivacyStep(): JSX.Element {
       keys: ["integrityCheck"],
     },
   ];
+  // What is true of the desktop build: the engine runs inside Cerebro (no separate process or API to
+  // contain), tools ask first, and phone access stays off until it is set up.
+  const desktopCards: typeof cards = [
+    {
+      icon: "offline",
+      title: "Works without a network",
+      body: () => <>Chat, the Monitor, document search and every engine switch run on this computer. Only Model Hub downloads use a network, and you can turn them off.</>,
+      keys: null,
+    },
+    {
+      icon: "lock",
+      title: "Nothing leaves this computer",
+      body: () => <>The engine runs inside Cerebro. No account, no telemetry, no cloud model behind it.</>,
+      keys: null,
+    },
+    {
+      icon: "check",
+      title: "Tools ask first",
+      body: () => <>Before a model uses a tool, such as reading a file through an MCP server, Cerebro shows what it will do and waits for you.</>,
+      keys: ["permissionPrompts"],
+    },
+    {
+      icon: "monitor",
+      title: "Phone access is off",
+      body: () => <>Checking on the model from your phone needs a password and a QR code, and only works on your own network. It stays off until you set it up in Settings.</>,
+      keys: null,
+    },
+  ];
   return (
     <div class="onb-page">
       <StepHeader
@@ -453,7 +481,7 @@ export function PrivacyStep(): JSX.Element {
         lede="No accounts and no telemetry. These protections are on from the first start, and each one says exactly what it does."
       />
       <ul class="promise-grid">
-        <For each={cards}>
+        <For each={__DESKTOP__ ? desktopCards : cards}>
           {(c) => {
             const state = () => (c.keys ? on(...c.keys) : null);
             return (

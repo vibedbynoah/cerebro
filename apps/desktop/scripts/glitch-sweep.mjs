@@ -14,7 +14,7 @@ import { startServer } from "./serve.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const OUT = path.resolve(HERE, "../review/sweep");
-const ROUTES = ["home", "hub", "models", "tune", "monitor", "turbo", "chat", "images", "documents", "plugins", "tools", "security", "settings", "about"];
+const ROUTES = ["home", "hub", "models", "tune", "monitor", "turbo", "chat", "images", "documents", "plugins", "tools", "settings", "about"];
 const SRC = await readFile(path.resolve(HERE, "../ui/src/onboarding/progress.ts"), "utf8");
 const c = (n) => new RegExp(`export const ${n} = "([^"]+)"`).exec(SRC)?.[1];
 const done = JSON.stringify({ v: 1, completed: true, termsVersion: c("TERMS_VERSION"), model: "gemma-4-12b-it" });

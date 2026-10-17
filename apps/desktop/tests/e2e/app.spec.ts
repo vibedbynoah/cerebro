@@ -12,7 +12,6 @@ const TITLES: Record<(typeof ROUTE_IDS)[number], string> = {
   documents: "Documents",
   plugins: "Plugins",
   tools: "Tools",
-  security: "Security",
   settings: "Settings",
   about: "About Cerebro",
 };
@@ -27,11 +26,11 @@ for (const scheme of ["dark", "light"] as const) {
         await expect(page.locator(`a.nav-link[data-route="${id}"]`)).toHaveAttribute("aria-current", "page");
         await scrollThrough(page);
         await settle(page);
-        // Frame is complete: title bar and its lockup, the engine pill, 14 nav entries, the HUD and its disclosure.
+        // Frame is complete: title bar and its lockup, the engine pill, one nav entry per screen, the HUD and its disclosure.
         await expect(page.locator(".titlebar")).toBeVisible();
         await expect(page.locator(".titlebar [data-brand='lockup']")).toBeVisible();
         await expect(page.locator(".titlebar .engine-pill")).toBeVisible();
-        await expect(page.locator("a.nav-link")).toHaveCount(14);
+        await expect(page.locator("a.nav-link")).toHaveCount(ROUTE_IDS.length);
         await expect(page.locator(".statusbar")).toContainText("Illustrative data");
       });
     }
@@ -187,8 +186,6 @@ test.describe("user control", () => {
       await page.getByRole("switch", { name }).click({ force: true });
       await expect(page.getByRole("switch", { name })).not.toBeChecked();
     }
-    await page.getByRole("link", { name: "Security" }).click();
-    await expect(page.locator("main h2").first()).toHaveText("0 of 5 protections on");
   });
 
   test("keyboard toggles a switch", async ({ page }) => {

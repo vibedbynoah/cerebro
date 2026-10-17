@@ -36,12 +36,12 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
 
   const group = (g: SettingMeta["group"]) => (
     <div class="card settings-card">
-      <For each={SETTINGS_META.filter((m) => m.group === g)}>
+      <For each={SETTINGS_META.filter((m) => m.group === g && (!__DESKTOP__ || m.desktop !== false))}>
         {(meta) => (
           <SettingSwitch
             id={`setting-${meta.key}`}
             label={meta.label}
-            note={meta.note}
+            note={meta.limits ? `${meta.note} ${meta.limits}` : meta.note}
             checked={settings()?.[meta.key] ?? false}
             disabled={settings() === null}
             onChange={(on) => void setSetting(meta.key, on, `${meta.label} ${on ? "on" : "off"}`)}

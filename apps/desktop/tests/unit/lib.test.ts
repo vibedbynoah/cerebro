@@ -72,7 +72,6 @@ describe("routing", () => {
       "Documents",
       "Plugins",
       "Tools",
-      "Security",
       "Settings",
       "About",
     ]);

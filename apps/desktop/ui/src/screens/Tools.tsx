@@ -118,7 +118,8 @@ export function Tools(): JSX.Element {
           <tbody>
             <For each={TOOLS}>
               {(t) => {
-                const call = SAMPLE_CALLS.find((c) => c.toolId === t.id);
+                // Sample calls are a browser-preview demo; the desktop app logs only real calls.
+                const call = __DESKTOP__ ? undefined : SAMPLE_CALLS.find((c) => c.toolId === t.id);
                 return (
                   <tr data-tool={t.id}>
                     <th scope="row">
@@ -154,7 +155,9 @@ export function Tools(): JSX.Element {
             </For>
           </tbody>
         </table>
-        <p class="hint">Sample calls are illustrative: nothing actually runs.</p>
+        <Show when={!__DESKTOP__}>
+          <p class="hint">Sample calls are illustrative: nothing actually runs.</p>
+        </Show>
         <span class="sr-only" aria-live="polite">
           {log()[0] ? `${toolName(log()[0]!.toolId)}: ${log()[0]!.outcome}` : ""}
         </span>
@@ -163,7 +166,7 @@ export function Tools(): JSX.Element {
       <Section id="tool-log" title="Activity" description="Every tool call and what happened to it, newest first.">
         <input class="tools-search" type="search" placeholder="Search calls" aria-label="Search tool activity" value={q()} onInput={(e) => setQ(e.currentTarget.value)} />
         <ol class="tools-log" role="list">
-          <For each={shown()} fallback={<li class="hint">{log().length ? "Nothing matches." : "No tool calls yet. Try one above."}</li>}>
+          <For each={shown()} fallback={<li class="hint">{log().length ? "Nothing matches." : __DESKTOP__ ? "No tool calls yet. They appear here as models use tools in Chat." : "No tool calls yet. Try one above."}</li>}>
             {(e) => (
               <li data-outcome={e.outcome}>
                 <span class="mono tools-log__at">{new Date(e.at).toLocaleTimeString()}</span>

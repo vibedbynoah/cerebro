@@ -1,27 +1,26 @@
 import "../styles/documents.css";
-import { createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
+import { createMemo, createSignal, For, Show, type JSX } from "solid-js";
 import { Icon } from "../components/icons";
 import { IllustrativeFlag, ScreenHeader, Section } from "../components/Screen";
 import { Term } from "../components/Term";
-import { checkFile, loadDocs, saveDocs, search, type Doc } from "../lib/documents";
+import { checkFile, loadDocs, makeDoc, MAX_CHARS, MAX_TOTAL_CHARS, saveDocs, search, totalChars, type Doc } from "../lib/documents";
 import { newId } from "../lib/chat/store";
 import { notify } from "../lib/toast";
 
 const size = (b: number) => (b >= 1_000_000 ? `${(b / 1_000_000).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1000))} KB`);
 
 /**
- * Documents: search your own files by meaning, on this machine (local RAG). Drop files to index
- * them; search shows the passage that answers. Nothing is uploaded.
+ * Documents: search your own files on this machine. Drop text files to index them (read, split into
+ * passages, ranked by BM25 keyword search, lib/documents.ts); search shows the passage that answers.
+ * Nothing is uploaded.
  */
 export function Documents(): JSX.Element {
   const [docs, setDocsS] = createSignal<Doc[]>(loadDocs());
   const [query, setQuery] = createSignal("");
   const [over, setOver] = createSignal(false);
-  const timers: ReturnType<typeof setInterval>[] = [];
-  onCleanup(() => timers.forEach(clearInterval));
   const setDocs = (d: Doc[]) => {
     setDocsS(d);
-    saveDocs(d.filter((x) => x.progress >= 1));
+    saveDocs(d);
   };
 
   const add = async (files: FileList | File[]) => {
@@ -31,21 +30,28 @@ export function Documents(): JSX.Element {
         notify(`${f.name} not added`, err, "warning");
         continue;
       }
-      const text = /\.(txt|md|csv|json|rs|ts|tsx|py|js|html?)$/i.test(f.name) && f.size < 2_000_000 ? (await f.text()).slice(0, 20000) : `${f.name}: contents are read and chunked on this machine when the engine indexes it.`;
-      const doc: Doc = { id: newId(), name: f.name.slice(0, 260), type: f.type, bytes: f.size, chunks: Math.max(1, Math.round(f.size / 2000)), progress: 0, text, addedAt: Date.now() };
-      setDocsS((d) => [doc, ...d]);
-      const fast = new URLSearchParams(location.search).getAll("mock").includes("fast-docs") ? 10 : 1;
-      const t = setInterval(() => {
-        const cur = docs().find((x) => x.id === doc.id);
-        if (!cur) return clearInterval(t);
-        const p = Math.min(1, cur.progress + 0.05 * fast);
-        setDocs(docs().map((x) => (x.id === doc.id ? { ...x, progress: p } : x)));
-        if (p >= 1) {
-          clearInterval(t);
-          notify("Indexed", `${doc.name}: ${doc.chunks} passages, searchable now.`, "success");
-        }
-      }, 80);
-      timers.push(t);
+      let raw: string;
+      try {
+        raw = await f.text();
+      } catch {
+        notify(`${f.name} not added`, "The file could not be read.", "error");
+        continue;
+      }
+      if (raw.includes("\u0000")) {
+        notify(`${f.name} not added`, "That is not a text file.", "warning");
+        continue;
+      }
+      const doc = makeDoc(newId(), f.name, f.type, f.size, raw, Date.now());
+      if (totalChars(docs()) + doc.text.length > MAX_TOTAL_CHARS) {
+        notify(`${f.name} not added`, "The index is full. Remove a file to make room.", "warning");
+        continue;
+      }
+      setDocs([doc, ...docs()]);
+      notify(
+        "Indexed",
+        `${doc.name}: ${doc.chunks} passage${doc.chunks === 1 ? "" : "s"}, searchable now.${doc.truncated ? ` Only the first ${MAX_CHARS.toLocaleString()} characters are searchable.` : ""}`,
+        doc.truncated ? "warning" : "success",
+      );
     }
   };
   const remove = (id: string) => setDocs(docs().filter((d) => d.id !== id));
@@ -54,7 +60,7 @@ export function Documents(): JSX.Element {
 
   return (
     <div class="screen documents">
-      <ScreenHeader route="documents" actions={<IllustrativeFlag />} />
+      <ScreenHeader route="documents" actions={__DESKTOP__ ? undefined : <IllustrativeFlag />} />
       <label
         class="doc-drop"
         data-over={over()}
@@ -68,11 +74,11 @@ export function Documents(): JSX.Element {
       >
         <Icon name="upload" size={22} />
         <span class="doc-drop__title">Drop files to make them searchable</span>
-        <span class="hint">PDF, Word, text, Markdown, HTML, CSV, JSON and code. Indexed on this computer.</span>
+        <span class="hint">Text, Markdown, HTML, CSV, JSON, logs and code. Indexed on this computer; nothing is uploaded.</span>
         <input class="sr-only" type="file" multiple onChange={(e) => e.currentTarget.files && void add(e.currentTarget.files)} />
       </label>
 
-      <Section id="doc-search" title="Search" description={<>Ask a question; the passages that answer it come back with their file (<Term k="rag" />).</>}>
+      <Section id="doc-search" title="Search" description={<>Ask a question; the passages that share its words come back with their file. Keyword search for now; search by meaning (<Term k="rag" />) comes with the embedding engine.</>}>
         <input class="doc-search" type="search" placeholder="How many days of annual leave?" aria-label="Search documents" value={query()} onInput={(e) => setQuery(e.currentTarget.value)} />
         <Show when={query().trim()}>
           <ol class="doc-hits" role="list" aria-live="polite">
@@ -82,7 +88,9 @@ export function Documents(): JSX.Element {
                   <div class="doc-hit__head">
                     <Icon name="documents" size={16} />
                     <span class="doc-hit__name">{h.doc.name}</span>
-                    <span class="mono hint">{Math.round(h.score * 100)}% match</span>
+                    <span class="mono hint">
+                      {h.matched} of {h.of} words
+                    </span>
                   </div>
                   <p class="doc-hit__text">
                     <For each={h.parts}>{(p) => (p.hit ? <mark>{p.v}</mark> : p.v)}</For>

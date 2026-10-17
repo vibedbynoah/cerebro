@@ -125,6 +125,9 @@ export function Home(): JSX.Element {
         )}
       </Show>
 
+      {/* The desktop app has no command line and runs the engine in its own process, so neither of
+          these sections applies there; the browser preview keeps them as a design study. */}
+      <Show when={!__DESKTOP__}>
       <Section id="start" title="From the command line" description="Everything here also works from a terminal, and none of it needs a network.">
         <CodeBlock large lines={["cerebro models", "cerebro tune qwen3-coder-30b-a3b-q4km", "cerebro serve qwen3-coder-30b-a3b-q4km", "cerebro chat"]} />
       </Section>
@@ -147,13 +150,14 @@ export function Home(): JSX.Element {
             )}
           </For>
         </ul>
-        <a class="btn btn--secondary" href={hrefFor("security")} data-press>
+        <a class="btn btn--secondary" href={`${hrefFor("settings")}`} data-press>
           Review protections
           <span class="btn__arrow" aria-hidden="true">
             <Icon name="arrowRight" size={16} />
           </span>
         </a>
       </Section>
+      </Show>
     </div>
   );
 }
