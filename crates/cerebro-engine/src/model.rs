@@ -741,17 +741,24 @@ impl Session {
     }
 
     fn empty(m: &Model, max_ctx: usize) -> Self {
+        Self::empty_from(m, max_ctx, 0)
+    }
+
+    /// A session whose CPU runs layers `from`.. (a GPU runs the ones before): only those keep a KV
+    /// cache or recurrent state here.
+    fn empty_from(m: &Model, max_ctx: usize, from: usize) -> Self {
         let c = &m.cfg;
         let kv = c.n_kv * c.head_dim;
         // Only attention layers keep a KV cache; DeltaNet layers keep a fixed-size state instead.
+        let mine = |i: usize| i >= from;
         let attn = |i: usize| m.layers[i].delta.is_none();
         let ssm = c.ssm.unwrap_or(Ssm { conv: 1, nk: 0, dk: 0, nv: 0, dv: 0 });
         Self {
             max_ctx,
-            k: (0..c.n_layer).map(|i| if attn(i) { vec![0f32; max_ctx * kv] } else { Vec::new() }).collect(),
-            v: (0..c.n_layer).map(|i| if attn(i) { vec![0f32; max_ctx * kv] } else { Vec::new() }).collect(),
-            conv_hist: (0..c.n_layer).map(|i| if attn(i) { Vec::new() } else { vec![0f32; (ssm.conv - 1) * ssm.channels()] }).collect(),
-            ssm_state: (0..c.n_layer).map(|i| if attn(i) { Vec::new() } else { vec![0f32; ssm.nv * ssm.dk * ssm.dv] }).collect(),
+            k: (0..c.n_layer).map(|i| if mine(i) && attn(i) { vec![0f32; max_ctx * kv] } else { Vec::new() }).collect(),
+            v: (0..c.n_layer).map(|i| if mine(i) && attn(i) { vec![0f32; max_ctx * kv] } else { Vec::new() }).collect(),
+            conv_hist: (0..c.n_layer).map(|i| if !mine(i) || attn(i) { Vec::new() } else { vec![0f32; (ssm.conv - 1) * ssm.channels()] }).collect(),
+            ssm_state: (0..c.n_layer).map(|i| if !mine(i) || attn(i) { Vec::new() } else { vec![0f32; ssm.nv * ssm.dk * ssm.dv] }).collect(),
             dmix: vec![0.0; ssm.channels()],
             dz: vec![0.0; ssm.nv * ssm.dv],
             dalpha: vec![0.0; ssm.nv],
@@ -809,6 +816,18 @@ impl Session {
         self.tokens.truncate(common);
         let t0 = Instant::now();
         #[cfg(feature = "cuda")]
+        if let Some(from) = self.gpu.as_ref().filter(|g| g.is_split()).map(|g| g.gpu_layers()) {
+            // Split: each chunk through the GPU's layers, then the same chunk through the CPU's.
+            let mut xs = Vec::new();
+            for c in prompt[common..].chunks(crate::gpu::GpuState::SPLIT_CHUNK) {
+                let pos = self.tokens.len();
+                self.gpu.as_mut().expect("gpu").prefill_split(m, c, pos, &mut xs)?;
+                self.step_batch_from(m, c, Some(std::mem::take(&mut xs)), from);
+            }
+            self.stats = Stats { prompt_tokens: prompt.len(), reused_tokens: common, prefill_ms: t0.elapsed().as_secs_f64() * 1000.0, ..Default::default() };
+            return Ok(common);
+        }
+        #[cfg(feature = "cuda")]
         if let Some(g) = self.gpu.as_mut() {
             // Batched prefill on the GPU: every weight read once per chunk of tokens.
             g.prefill(m, &prompt[common..], common, Some(&mut self.logits))?;
@@ -834,22 +853,34 @@ impl Session {
     /// A session whose whole forward pass runs on the first CUDA GPU.
     #[cfg(feature = "cuda")]
     pub fn new_gpu(m: &Model, max_ctx: usize) -> Result<Self, Error> {
-        let mut s = Self::empty(m, 1);
+        if !crate::switches::enabled(crate::switches::GPU_ENABLED) {
+            return Err(Error::Unsupported("the graphics card is switched off (Use the graphics card)".into()));
+        }
+        let g = crate::gpu::GpuState::load(m, max_ctx)?;
+        // A split model keeps the KV cache of the CPU's layers here; a whole-GPU model keeps none.
+        let mut s = Self::empty_from(m, max_ctx, g.gpu_layers());
         s.max_ctx = max_ctx;
-        s.gpu = Some(crate::gpu::GpuState::load(m, max_ctx)?);
+        s.gpu = Some(g);
         Ok(s)
     }
 
     /// Appends `toks` (dense models): the same math as `step` for a chunk of tokens, with every
     /// matrix applied to the whole chunk at once (`Model::matmul_batch`). Writes logits for the last.
     fn step_batch(&mut self, m: &Model, toks: &[u32]) {
+        self.step_batch_from(m, toks, None, 0);
+    }
+
+    /// `step_batch` from layer `from`, on activations `x0` (tokens x width) when a GPU ran the
+    /// layers before; embeddings otherwise.
+    fn step_batch_from(&mut self, m: &Model, toks: &[u32], x0: Option<Vec<f32>>, from: usize) {
         let c = &m.cfg;
         let (nt, dim, hd, ffn) = (toks.len(), c.dim, c.head_dim, c.ffn);
         let (qd, kvd) = (c.n_head * hd, c.n_kv * hd);
         let group = c.n_head / c.n_kv;
         let scale = 1.0 / (hd as f32).sqrt();
         let pos0 = self.tokens.len();
-        let mut x = vec![0f32; nt * dim];
+        let embed = x0.is_none();
+        let mut x = x0.unwrap_or_else(|| vec![0f32; nt * dim]);
         let mut h = vec![0f32; nt * dim];
         let mut q = vec![0f32; nt * qd];
         let mut kb = vec![0f32; nt * kvd];
@@ -861,8 +892,10 @@ impl Session {
         let mut qa_dim: Vec<QAct> = (0..nt).map(|_| QAct::new(dim)).collect();
         let mut qa_att: Vec<QAct> = (0..nt).map(|_| QAct::new(qd)).collect();
         let mut qa_ffn: Vec<QAct> = (0..nt).map(|_| QAct::new(ffn)).collect();
-        for (t, &tok) in toks.iter().enumerate() {
-            m.embed_row(tok, &mut x[t * dim..(t + 1) * dim]);
+        if embed {
+            for (t, &tok) in toks.iter().enumerate() {
+                m.embed_row(tok, &mut x[t * dim..(t + 1) * dim]);
+            }
         }
         let cs: Vec<Vec<(f32, f32)>> = (0..nt)
             .map(|t| m.inv_freq.iter().map(|f| ((pos0 + t) as f32 * f).sin_cos()).map(|(s, c)| (c, s)).collect())
@@ -873,7 +906,7 @@ impl Session {
                 qa[t].quantize(&h[t * dim..(t + 1) * dim]);
             }
         };
-        for (li, l) in m.layers.iter().enumerate() {
+        for (li, l) in m.layers.iter().enumerate().skip(from) {
             norm_quant(&x, &l.attn_norm, &mut h, &mut qa_dim);
             m.matmul_batch(&l.q, &h, &qa_dim, &mut q);
             m.matmul_batch(&l.k, &h, &qa_dim, &mut kb);
@@ -966,21 +999,39 @@ impl Session {
         #[cfg(feature = "cuda")]
         if let Some(g) = self.gpu.as_mut() {
             let pos = self.tokens.len();
+            if g.is_split() {
+                // The GPU's layers, then the CPU's layers and the output head here.
+                let from = g.gpu_layers();
+                if let Err(e) = g.step_split(m, token, pos, &mut self.x) {
+                    panic!("GPU step failed: {e}");
+                }
+                self.layers_from(m, from, pos);
+                self.head(m);
+                self.tokens.push(token);
+                return;
+            }
             if let Err(e) = g.step(m, token, pos, Some(&mut self.logits)) {
                 panic!("GPU step failed: {e}");
             }
             self.tokens.push(token);
             return;
         }
-        let c = &m.cfg;
         let pos = self.tokens.len();
+        m.embed_row(token, &mut self.x);
+        self.layers_from(m, 0, pos);
+        self.head(m);
+        self.tokens.push(token);
+    }
+
+    /// Layers `from`.. for the token at `pos`, on the activation in `self.x`.
+    fn layers_from(&mut self, m: &Model, from: usize, pos: usize) {
+        let c = &m.cfg;
         let hd = c.head_dim;
         let kvd = c.n_kv * hd;
         let group = c.n_head / c.n_kv;
         let scale = 1.0 / (hd as f32).sqrt();
-        m.embed_row(token, &mut self.x);
         let cs: Vec<(f32, f32)> = m.inv_freq.iter().map(|f| (pos as f32 * f).sin_cos()).map(|(s, c)| (c, s)).collect();
-        for (li, l) in m.layers.iter().enumerate() {
+        for (li, l) in m.layers.iter().enumerate().skip(from) {
             rmsnorm(&self.x, &l.attn_norm, c.eps, &mut self.h);
             self.qa_dim.quantize(&self.h);
             if let Some(d) = &l.delta {
@@ -1126,12 +1177,15 @@ impl Session {
             }
             self.ffn_step(m, li, l);
         }
+    }
+
+    /// The output head: final norm and logits.
+    fn head(&mut self, m: &Model) {
         let to = Instant::now();
-        rmsnorm_inplace(&mut self.x, &m.out_norm, c.eps);
+        rmsnorm_inplace(&mut self.x, &m.out_norm, m.cfg.eps);
         self.qa_dim.quantize(&self.x);
         m.matvec(&m.output, &self.x, &self.qa_dim, &mut self.logits);
         self.prof[6] += to.elapsed().as_secs_f64();
-        self.tokens.push(token);
     }
 
     /// Clears every DeltaNet state (a new sequence).

@@ -62,7 +62,7 @@ pub fn generate(model: &Model, session: &mut Session, tok: &Tokenizer, prompt: &
     let td = Instant::now();
     #[cfg(feature = "cuda")]
     if cfg.sampler.temperature <= 0.0 {
-        if let Some(g) = session.gpu.as_mut() {
+        if let Some(g) = session.gpu.as_mut().filter(|g| !g.is_split()) {
             let first = argmax(&session.logits);
             if max_new > 0 && !tok.eot.contains(&first) {
                 if !push(&mut out, first, &mut printed, &mut first_at) {

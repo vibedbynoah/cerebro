@@ -9,6 +9,7 @@ pub mod gpu;
 pub mod hw;
 mod iq_tables;
 pub mod model;
+pub mod placement;
 pub mod pool;
 pub mod quant;
 mod quant_more;

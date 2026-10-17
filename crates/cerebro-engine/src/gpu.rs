@@ -5,6 +5,11 @@
 //! captured once as a CUDA graph and replayed per token: no per-kernel launch cost, no logits copy for
 //! greedy decoding (the next token is picked on the GPU).
 //!
+//! Dense models larger than the free VRAM are split by layer (placement.rs plans it): the first N
+//! layers run here in the file's own K-quant format, their output activation is copied to the host,
+//! and the CPU runs the remaining layers and the output head. A model that fits runs entirely here,
+//! in the int8 layout when that fits too (fastest prompt reading), else in its own format.
+//!
 //! Mixture-of-experts models run hybrid: attention, router, embeddings and output on the GPU; the
 //! experts live in RAM and the hottest ones are also cached in VRAM in their native K-quant format.
 //! Per layer the GPU picks the experts, cached ones run on the GPU while the CPU computes the rest
@@ -313,7 +318,8 @@ pub struct GpuState {
     sh: Shape,
     layers: Vec<GLayer>,
     out_norm: CudaSlice<f32>,
-    output: GMat,
+    /// The output head; None when the model is split (the CPU computes the logits).
+    output: Option<GMat>,
     embed: Option<GMat>,
     /// MoE models look embeddings up on the CPU (the table stays out of VRAM); the row is uploaded.
     host_embed: Option<Vec<f32>>,
@@ -338,6 +344,10 @@ pub struct GpuState {
     graph: Option<CudaGraph>,
     pub max_ctx: usize,
     pub vram_bytes: usize,
+    /// Where the weights went and why (also shown to the user).
+    pub plan: crate::placement::Plan,
+    /// Split models: the activation after the last GPU layer, copied for the CPU.
+    host_x: Option<PinnedHostSlice<f32>>,
 }
 
 fn gerr<E: std::fmt::Debug>(e: E) -> Error {
@@ -450,10 +460,16 @@ impl GpuState {
         }
         let g = model.gguf();
         let mut vram = 0usize;
-        // MoE models keep K-quant weights native on the GPU (about half the bytes of the int8
-        // layout), leaving the VRAM to the expert cache; dense models use int8 everywhere so that
-        // the batched prefill kernels apply.
-        let native = c.n_expert > 0;
+        let kvd = c.n_kv * c.head_dim;
+        // Where everything goes (placement.rs). MoE models keep their K-quant weights native on
+        // the GPU (about half the bytes of int8), leaving VRAM to the expert cache.
+        let plan = Self::plan(&ctx, model, max_ctx)?;
+        if plan.layout == crate::placement::Layout::Cpu {
+            return Err(Error::Unsupported(plan.notes.join(" ")));
+        }
+        let native = c.n_expert > 0 || plan.layout != crate::placement::Layout::GpuInt8;
+        let n_gpu = if c.n_expert > 0 { c.n_layer } else { plan.gpu_layers };
+        let split = n_gpu < c.n_layer;
         let mut up = |mats: &[&Mat]| -> Result<GMat, Error> {
             if native && mats.iter().all(|m| gpu_block(m.dtype).is_some() && m.cols % 256 == 0) {
                 let mut parts = Vec::with_capacity(mats.len());
@@ -469,9 +485,8 @@ impl GpuState {
             vram += qs.len() + ds.len() * 4;
             Ok(GMat::Q8 { qs: stream.clone_htod(&qs).map_err(gerr)?, ds: stream.clone_htod(&ds).map_err(gerr)?, rows, cols })
         };
-        let kvd = c.n_kv * c.head_dim;
-        let mut layers = Vec::with_capacity(c.n_layer);
-        for l in model.layers() {
+        let mut layers = Vec::with_capacity(n_gpu);
+        for l in &model.layers()[..n_gpu] {
             let (gu, down, router) = match &l.ffn {
                 Ffn::Dense { gate, up: upm, down } => (Some(up(&[gate, upm])?), Some(up(&[down])?), None),
                 Ffn::Moe(m) => (None, None, Some(stream.clone_htod(&m.router).map_err(gerr)?)),
@@ -490,11 +505,12 @@ impl GpuState {
                 vc: stream.alloc_zeros::<u16>(max_ctx * kvd).map_err(gerr)?,
             });
         }
-        let output = up(&[model.output_mat()])?;
-        // Tied embeddings reuse the output matrix on the GPU; otherwise upload the table too.
+        let output = if split { None } else { Some(up(&[model.output_mat()])?) };
+        // Tied embeddings reuse the output matrix on the GPU; otherwise upload the table too. In the
+        // native layout the row is looked up on the CPU and uploaded (the table stays out of VRAM).
         let host_embed = native.then(|| vec![0f32; c.dim]);
         let embed = if model.tied() || native { None } else { Some(up(&[model.embed_mat()])?) };
-        vram += c.n_layer * 2 * max_ctx * kvd * 2;
+        vram += n_gpu * 2 * max_ctx * kvd * 2;
         let z = |n: usize| stream.alloc_zeros::<f32>(n).map_err(gerr);
         let qd = c.n_head * c.head_dim;
         let widest = c.dim.max(c.ffn).max(qd);
@@ -515,9 +531,10 @@ impl GpuState {
             pos0: stream.alloc_zeros::<i32>(1).map_err(gerr)?,
         };
         // Everything uploaded so far is read from VRAM only; free its RAM for the CPU-side weights.
+        // A split keeps the CPU's layers and the head (and the embeddings, looked up on the CPU).
         {
             let rel = |m: &Mat| g.release(m.offset, m.rows * m.row_bytes);
-            for l in model.layers() {
+            for l in &model.layers()[..n_gpu] {
                 for m in [&l.q, &l.k, &l.v, &l.o] {
                     rel(m);
                 }
@@ -527,7 +544,12 @@ impl GpuState {
                     }
                 }
             }
-            rel(model.output_mat());
+            if !split {
+                let tied_and_host = model.tied() && native;
+                if !tied_and_host {
+                    rel(model.output_mat());
+                }
+            }
             if !native {
                 rel(model.embed_mat());
             }
@@ -537,6 +559,7 @@ impl GpuState {
             vram += m.owner.len() * m.slot_bytes;
         }
         let sh = Shape { dim: c.dim, ffn: c.ffn, n_head: c.n_head, n_kv: c.n_kv, hd: c.head_dim, vocab: c.vocab, eps: c.eps, base: c.rope_base, qk_norm: c.qk_norm };
+        let ctx_pin = ctx.clone();
         Ok(Self {
             out_norm: stream.clone_htod(model.out_norm()).map_err(gerr)?,
             output,
@@ -567,7 +590,78 @@ impl GpuState {
             _ctx: ctx,
             max_ctx,
             vram_bytes: vram,
+            plan,
+            // SAFETY: a plain host buffer, read only after the stream is synchronized.
+            host_x: if split { Some(unsafe { ctx_pin.alloc_pinned::<f32>(c.dim) }.map_err(gerr)?) } else { None },
         })
+    }
+
+    /// The layers the GPU runs (all of them unless split).
+    pub fn gpu_layers(&self) -> usize {
+        self.layers.len()
+    }
+
+    /// The CPU runs the layers from here on and the output head.
+    pub fn is_split(&self) -> bool {
+        self.output.is_none()
+    }
+
+    /// Placement for this model on this machine: VRAM free now, RAM available, the model's drive.
+    fn plan(ctx: &Arc<CudaContext>, model: &Model, max_ctx: usize) -> Result<crate::placement::Plan, Error> {
+        use crate::placement::{drive_of, plan_dense, plan_moe, LayerCost, Machine, ModelCost};
+        let c = &model.cfg;
+        let (free, _) = ctx.mem_get_info().map_err(gerr)?;
+        let (_, ram) = crate::hw::memory();
+        let mach = Machine::new(free as u64, ram, drive_of(&model.path));
+        let kvd = (c.n_kv * c.head_dim) as u64;
+        let native_bytes = |m: &Mat| -> Option<u64> {
+            let (bb, _) = gpu_block(m.dtype)?;
+            (m.cols % 256 == 0).then_some((m.rows * m.cols / 256 * bb) as u64)
+        };
+        let int8_bytes = |m: &Mat| (m.rows * m.cols + m.rows * m.cols / 32 * 4) as u64;
+        let qd = c.n_head * c.head_dim;
+        let widest = c.dim.max(c.ffn).max(qd);
+        let scratch = (CHUNK * (c.dim + qd + 2 * kvd as usize + qd + 2 * c.ffn) * 4 + CHUNK * widest * 2 + c.vocab * 4 + 64 * (c.n_head * c.head_dim) * 4 * 4) as u64;
+        if c.n_expert > 0 {
+            let mut dense = scratch + c.n_layer as u64 * 2 * max_ctx as u64 * kvd * 2;
+            let mut experts = 0u64;
+            for l in model.layers() {
+                dense += [&l.q, &l.k, &l.v, &l.o].iter().map(|m| native_bytes(m).unwrap_or(int8_bytes(m))).sum::<u64>();
+                if let Ffn::Moe(m) = &l.ffn {
+                    experts += [&m.gate, &m.up, &m.down].iter().map(|x| (x.rows * x.row_bytes) as u64).sum::<u64>();
+                }
+            }
+            let out = model.output_mat();
+            dense += native_bytes(out).unwrap_or(int8_bytes(out));
+            return Ok(plan_moe(dense, experts, c.n_used as f64 / c.n_expert.max(1) as f64, &mach));
+        }
+        let mut layers = Vec::with_capacity(c.n_layer);
+        for l in model.layers() {
+            let Ffn::Dense { gate, up, down } = &l.ffn else { return Err(Error::Unsupported("mixed dense and expert layers".into())) };
+            let mats = [&l.q, &l.k, &l.v, &l.o, gate, up, down];
+            let nat: Option<u64> = mats.iter().map(|m| native_bytes(m)).sum();
+            layers.push(LayerCost {
+                int8: mats.iter().map(|m| int8_bytes(m)).sum(),
+                native: nat.unwrap_or_else(|| mats.iter().map(|m| (m.rows * m.row_bytes) as u64).sum()),
+                kv_gpu: 2 * max_ctx as u64 * kvd * 2,
+                kv_cpu: 2 * max_ctx as u64 * kvd * 4,
+                native_ok: nat.is_some(),
+            });
+        }
+        let out = model.output_mat();
+        let mut head_int8 = int8_bytes(out);
+        let mut head_native = native_bytes(out).unwrap_or(head_int8);
+        if !model.tied() {
+            head_int8 += int8_bytes(model.embed_mat());
+        }
+        // In the native layout the embeddings are looked up on the CPU: nothing extra on the GPU.
+        let _ = &mut head_native;
+        let cost = ModelCost { layers, head_int8, head_native, scratch, file: model.gguf().len() as u64 };
+        let force = match crate::switches::get(crate::switches::GPU_LAYERS) {
+            n if n > 0 => Some(n as usize),
+            _ => None,
+        };
+        Ok(plan_dense(&cost, &mach, force))
     }
 
     /// Sets up the VRAM expert cache in the memory left after the dense weights and KV cache (minus a
@@ -810,7 +904,7 @@ impl GpuState {
         if let Some(row) = &self.host_embed {
             s.memcpy_htod(row, &mut self.x).map_err(gerr)?;
         } else {
-            let (qs, ds, _, _) = self.embed.as_ref().unwrap_or(&self.output).q8();
+            let (qs, ds, _, _) = self.embed.as_ref().or(self.output.as_ref()).expect("embedding table").q8();
             unsafe { s.launch_builder(&f.embed).arg(qs).arg(ds).arg(&self.tok).arg(&mut self.x).arg(&dim).launch(blocks(sh.dim)) }.map_err(gerr)?;
         }
         let has_norm = sh.qk_norm as i32;
@@ -958,8 +1052,14 @@ impl GpuState {
             s.memcpy_htod(&mo.cpu_pin, &mut mo.cpu).map_err(gerr)?;
             unsafe { s.launch_builder(&f.moe_combine).arg(&mut self.x).arg(&mo.eo).arg(&mo.sel).arg(&k).arg(&mo.cpu).arg(&dim).launch(blocks(sh.dim)) }.map_err(gerr)?;
         }
+        let Some(output) = &self.output else {
+            // Split: the CPU takes the activation from here.
+            let hx = self.host_x.as_mut().expect("split host buffer");
+            s.memcpy_dtoh(&self.x, hx).map_err(gerr)?;
+            return Ok(());
+        };
         unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&self.out_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
-        Self::matvec(s, f, &self.output, &self.xq, &self.xd, &mut self.logits, false)?;
+        Self::matvec(s, f, output, &self.xq, &self.xd, &mut self.logits, false)?;
         let vocab = sh.vocab as i32;
         unsafe { s.launch_builder(&f.argmax).arg(&self.logits).arg(&vocab).arg(&mut self.next).arg(&mut self.tok).arg(&mut self.pos).launch(one) }.map_err(gerr)?;
         Ok(())
@@ -1008,6 +1108,39 @@ impl GpuState {
         Ok(next[0] as u32)
     }
 
+    /// Split models: runs the GPU's layers for `token` at `pos` and leaves the activation in `x`
+    /// for the CPU's layers.
+    pub fn step_split(&mut self, model: &Model, token: u32, pos: usize, x: &mut [f32]) -> Result<(), Error> {
+        if pos >= self.max_ctx {
+            return Err(Error::Request("context full".into()));
+        }
+        self.stream.memcpy_htod(&[token as i32], &mut self.tok).map_err(gerr)?;
+        self.stream.memcpy_htod(&[pos as i32], &mut self.pos).map_err(gerr)?;
+        if let Some(row) = self.host_embed.as_mut() {
+            model.embed_into(token, row);
+        }
+        self.run(model)?;
+        self.stream.synchronize().map_err(gerr)?;
+        x.copy_from_slice(self.host_x.as_ref().expect("split host buffer").as_slice().map_err(gerr)?);
+        Ok(())
+    }
+
+    /// Split models: batched GPU layers over one chunk of up to CHUNK tokens at pos0..; their
+    /// activations (tokens x width) go to `xs` for the CPU's layers.
+    pub fn prefill_split(&mut self, model: &Model, toks: &[u32], pos0: usize, xs: &mut Vec<f32>) -> Result<(), Error> {
+        if toks.is_empty() || toks.len() > CHUNK || pos0 + toks.len() > self.max_ctx {
+            return Err(Error::Request("prefill outside the context".into()));
+        }
+        self.prefill_chunk(model, toks, pos0, None)?;
+        let n = toks.len() * self.sh.dim;
+        xs.resize(n, 0.0);
+        self.stream.memcpy_dtoh(&self.b.x.slice(0..n), xs.as_mut_slice()).map_err(gerr)?;
+        Ok(())
+    }
+
+    /// Tokens per split prefill chunk.
+    pub const SPLIT_CHUNK: usize = CHUNK;
+
     /// Batched forward over `toks` at positions pos0.. (prefill, or verifying a draft): every weight is
     /// read once per chunk of up to CHUNK tokens. Writes the KV cache for all of them and the logits of
     /// the last one into `out` when given; returns the greedy next token.
@@ -1039,7 +1172,7 @@ impl GpuState {
         for (ci, chunk) in toks.chunks(CHUNK).enumerate() {
             let p0 = pos0 + ci * CHUNK;
             let is_last = (ci + 1) * CHUNK >= toks.len();
-            last = self.prefill_chunk(chunk, p0, if is_last { out.as_deref_mut() } else { None })?;
+            last = self.prefill_chunk(model, chunk, p0, if is_last { out.as_deref_mut() } else { None })?;
         }
         Ok(last)
     }
@@ -1270,7 +1403,7 @@ impl GpuState {
             let one = LaunchConfig { grid_dim: (1, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
             unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&last).arg(&self.out_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
         }
-        Self::matvec(s, f, &self.output, &self.xq, &self.xd, &mut self.logits, false)?;
+        Self::matvec(s, f, self.output.as_ref().expect("output head"), &self.xq, &self.xd, &mut self.logits, false)?;
         let vocab = sh.vocab as i32;
         let one = LaunchConfig { grid_dim: (1, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
         unsafe { s.launch_builder(&f.argmax).arg(&self.logits).arg(&vocab).arg(&mut self.next).arg(&mut self.tok).arg(&mut self.pos).launch(one) }.map_err(gerr)?;
@@ -1282,7 +1415,7 @@ impl GpuState {
         Ok(next[0] as u32)
     }
 
-    fn prefill_chunk(&mut self, toks: &[u32], pos0: usize, out: Option<&mut [f32]>) -> Result<u32, Error> {
+    fn prefill_chunk(&mut self, model: &Model, toks: &[u32], pos0: usize, out: Option<&mut [f32]>) -> Result<u32, Error> {
         let t = toks.len();
         let sh = &self.sh;
         let s = &self.stream;
@@ -1297,14 +1430,35 @@ impl GpuState {
         let has_norm = sh.qk_norm as i32;
         let rows_cfg = |rows: usize| LaunchConfig { grid_dim: ((rows as u32).div_ceil(8), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
         let b = &mut self.b;
-        {
-            let (qs, ds, _, _) = self.embed.as_ref().unwrap_or(&self.output).q8();
+        if self.host_embed.is_some() {
+            // Native layout: embeddings looked up on the CPU and uploaded.
+            let mut emb = vec![0f32; t * sh.dim];
+            for (i, &tok) in toks.iter().enumerate() {
+                model.embed_into(tok, &mut emb[i * sh.dim..(i + 1) * sh.dim]);
+            }
+            s.memcpy_htod(&emb, &mut b.x.slice_mut(0..t * sh.dim)).map_err(gerr)?;
+        } else {
+            let (qs, ds, _, _) = self.embed.as_ref().or(self.output.as_ref()).expect("embedding table").q8();
             let cfg = LaunchConfig { grid_dim: ((sh.dim as u32).div_ceil(256), t as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
             unsafe { s.launch_builder(&f.embed_b).arg(qs).arg(ds).arg(&b.toks).arg(&mut b.x).arg(&dim).launch(cfg) }.map_err(gerr)?;
         }
         let norm_cfg = LaunchConfig { grid_dim: (t as u32, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
         let null_f: u64 = 0;
+        let null_i: u64 = 0;
         let mm = |m: &GMat, xq: &CudaSlice<i8>, xd: &CudaSlice<f32>, y: &mut CudaSlice<f32>, add: bool| -> Result<(), Error> {
+            if let GMat::K { parts, cols } = m {
+                // The file's own format: one kmatmul per stacked part, rows offset into each token's row.
+                let ystride: usize = parts.iter().map(|p| p.rows).sum();
+                let mut r0 = 0;
+                for p in parts {
+                    let (ni, ys, r, c, a) = (t as i32, ystride as i32, p.rows as i32, *cols as i32, add as i32);
+                    let cfg = LaunchConfig { grid_dim: ((p.rows as u32).div_ceil(8), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+                    let mut yv = y.slice_mut(r0..);
+                    unsafe { s.launch_builder(&f.kmatmul).arg(&p.w).arg(&p.dtype).arg(&p.bb).arg(xq).arg(xd).arg(&null_i).arg(&ni).arg(&mut yv).arg(&ys).arg(&r).arg(&c).arg(&a).launch(cfg) }.map_err(gerr)?;
+                    r0 += p.rows;
+                }
+                return Ok(());
+            }
             let (qs, ds, mrows, mcols) = m.q8();
             let (rows, cols, add) = (mrows as i32, mcols as i32, add as i32);
             match &f.matmul_mma {
@@ -1353,13 +1507,17 @@ impl GpuState {
             unsafe { s.launch_builder(&f.silu_b).arg(&b.gu).arg(&mut b.xq).arg(&mut b.xd).arg(&ffn).arg(&ti).launch(LaunchConfig { grid_dim: (n.div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
             mm(l.down.as_ref().expect("dense layer"), &b.xq, &b.xd, &mut b.x, true)?;
         }
+        let Some(output) = &self.output else {
+            // Split: the caller copies the activations to the CPU.
+            return Ok(0);
+        };
         // Logits for the last token only, through the decode buffers.
         {
             let last = b.x.slice((t - 1) * sh.dim..t * sh.dim);
             let one = LaunchConfig { grid_dim: (1, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
             unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&last).arg(&self.out_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
         }
-        Self::matvec(s, f, &self.output, &self.xq, &self.xd, &mut self.logits, false)?;
+        Self::matvec(s, f, output, &self.xq, &self.xd, &mut self.logits, false)?;
         let vocab = sh.vocab as i32;
         let one = LaunchConfig { grid_dim: (1, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
         // argmax_next also bumps pos/tok, which decode overwrites before it runs, so this is harmless.

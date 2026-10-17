@@ -88,6 +88,8 @@ pub const CPU_THREADS: &str = "cpu_threads";
 pub const CPU_CHUNK_DIV: &str = "cpu_chunk_div";
 pub const PREFAULT: &str = "prefault";
 pub const EXPERT_VRAM_MB: &str = "expert_vram_mb";
+pub const GPU_ENABLED: &str = "gpu_enabled";
+pub const GPU_LAYERS: &str = "gpu_layers";
 
 fn registry() -> &'static [Switch] {
     static R: OnceLock<Vec<Switch>> = OnceLock::new();
@@ -199,6 +201,30 @@ fn registry() -> &'static [Switch] {
                 beginner: "How much graphics memory holds the model's most-used parts. Automatic uses everything that is free.",
                 advanced: "Caps the adaptive VRAM expert cache (0 = all free VRAM minus a 600 MB margin). Lower it to share the GPU with games or other apps.",
                 env: "CEREBRO_EXPERT_VRAM_MB",
+                default: zero,
+            },
+            Switch {
+                id: GPU_ENABLED,
+                name: "Use the graphics card",
+                group: "Placement",
+                kind: Kind::Toggle,
+                channel: Channel::Stable,
+                applies: Applies::Reload,
+                beginner: "Runs the model on your NVIDIA graphics card when it has room. Off runs everything on the processor.",
+                advanced: "Off skips CUDA entirely (CPU session). On, the placement planner puts as many layers on the GPU as fit (placement.rs).",
+                env: "CEREBRO_NO_GPU",
+                default: on,
+            },
+            Switch {
+                id: GPU_LAYERS,
+                name: "Layers on the graphics card",
+                group: "Placement",
+                kind: Kind::Number { min: 0, max: 1024, zero_auto: true, unit: "layers" },
+                channel: Channel::Stable,
+                applies: Applies::Reload,
+                beginner: "How much of a model too big for your graphics card runs on it; the rest runs on the processor. Automatic puts as much there as fits.",
+                advanced: "Dense models larger than free VRAM split by layer: the first N on the GPU in their own K-quant format, the rest and the output head on the CPU, one activation copy each way per token. 0 = as many as fit (600 MB margin). Larger values are clamped to what fits.",
+                env: "CEREBRO_GPU_LAYERS",
                 default: zero,
             },
         ]
