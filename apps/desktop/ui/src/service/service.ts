@@ -1,4 +1,4 @@
-import type {
+import type { EngineSwitch,
   ActivePatch,
   CatalogModel,
   DedupeResult,
@@ -122,6 +122,12 @@ export interface CerebroService {
   /** One kept request with its captured bodies (each cut at 256K characters). Rejects a malformed
    *  or unknown id. */
   getRequest(id: string): Promise<RequestDetail>;
+
+  // ---- Engine switches (Turbo). Values are saved on this machine by the app. ----
+  listSwitches(): Promise<EngineSwitch[]>;
+  /** Resolves to the stored value (clamped to the switch's range). */
+  setSwitch(id: string, value: number): Promise<number>;
+  resetSwitches(): Promise<EngineSwitch[]>;
 
   // ---- Chat. One reply streams at a time per conversation. ----
 

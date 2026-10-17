@@ -1,4 +1,4 @@
-import type { GpuInfo, HardwareProfile, LiveStats, ModelSummary, Settings } from "../service/types";
+import type { EngineSwitch, GpuInfo, HardwareProfile, LiveStats, ModelSummary, Settings } from "../service/types";
 
 /**
  * ILLUSTRATIVE DATA, NOT MEASUREMENTS. Every number below is a placeholder for layout and testing.
@@ -99,3 +99,25 @@ export const DEFAULT_SETTINGS: Settings = {
   allowModelDownloads: true,
   allowPluginInstalls: true,
 };
+
+/** Mirrors part of the engine's switch registry (crates/cerebro-engine/src/switches.rs). */
+export const MOCK_SWITCHES: readonly EngineSwitch[] = [
+  {
+    id: "gpu_mma_matmul", name: "Tensor-core prompt reading", group: "GPU", kind: { type: "toggle" }, channel: "stable", applies: "reload",
+    beginner: "Reads your prompt up to 12x faster on recent NVIDIA graphics cards.",
+    advanced: "Prefill matmuls run on int8 tensor cores (mma m16n8k32, cp.async double buffer) instead of dp4a.",
+    env: "CEREBRO_NO_MMA", value: 1, default: 1,
+  },
+  {
+    id: "cpu_threads", name: "Processor threads", group: "CPU", kind: { type: "number", min: 1, max: 20, zero_auto: false, unit: "threads" }, channel: "stable", applies: "restart",
+    beginner: "How many processor threads the model may use. The default leaves room for your other apps.",
+    advanced: "Size of the engine's worker pool (logical CPUs minus four by default).",
+    env: "CEREBRO_THREADS", value: 16, default: 16,
+  },
+  {
+    id: "expert_vram_mb", name: "Graphics memory for experts", group: "Mixture of experts", kind: { type: "number", min: 0, max: 262144, zero_auto: true, unit: "MB" }, channel: "beta", applies: "reload",
+    beginner: "How much graphics memory holds the model's most-used parts. Automatic uses everything that is free.",
+    advanced: "Caps the adaptive VRAM expert cache (0 = all free VRAM minus a 600 MB margin).",
+    env: "CEREBRO_EXPERT_VRAM_MB", value: 0, default: 0,
+  },
+];

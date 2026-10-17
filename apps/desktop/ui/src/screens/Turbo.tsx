@@ -26,6 +26,7 @@ import {
 } from "../lib/turbo";
 import { ENGINE_BUILDS, GPU_RANGE, LOGICAL_CORES, MEASURED_SWEET_SPOT, PROFILE_MEASUREMENTS, PROFILES, TOKEN_PROFILE } from "../mock/turbo";
 import { useAppState } from "../state";
+import { EngineSwitches } from "./turbo/EngineSwitches";
 
 /**
  * Turbo: engine builds, schedulers, machine profiles and the profiler (docs/specs/turbo-system.md).
@@ -43,6 +44,7 @@ export function Turbo(): JSX.Element {
         lede="Builds tuned to this machine, smarter scheduling and power profiles. Each change is measured here and kept only if it is faster."
         actions={<IllustrativeFlag />}
       />
+      <EngineSwitches />
       <Profiles />
       <Show
         when={advanced()}

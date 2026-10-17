@@ -286,3 +286,50 @@
     transition: none;
   }
 }
+
+/* Engine switches */
+.switches__group {
+  margin: var(--space-6) 0 var(--space-2);
+  color: var(--color-text-secondary);
+  font-size: 0.75rem;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+[data-testid="engine-switches"] .setting__note { display: inline; }
+[data-testid="engine-switches"] .badge {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  margin-left: var(--space-2);
+  padding: 0 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-2);
+  color: var(--color-text-secondary);
+  font-size: 0.6875rem;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+[data-testid="engine-switches"] .badge--stable { border-color: var(--color-success); color: var(--color-success); }
+[data-testid="engine-switches"] .badge--beta { border-color: var(--color-accent); color: var(--color-accent-text); }
+[data-testid="engine-switches"] .badge--experimental { border-color: var(--color-warning); color: var(--color-warning); }
+[data-testid="engine-switches"] .setting:has(.switches__number) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+}
+.switches__number { width: 7.5rem; height: 36px; padding: 0 var(--space-3); }
+.switches__unit { color: var(--color-text-muted); font-size: 0.8125rem; }
+.switches__env {
+  margin-left: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+}
+.switches__footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--space-4);
+}

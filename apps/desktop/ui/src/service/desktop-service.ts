@@ -13,7 +13,7 @@ import type { ChatEvent, ChatRequest } from "./chat-types";
 import type { HistoryRange, MetricsSeries, MetricsSnapshot, RequestDetail } from "./monitor-types";
 import type { CatalogModel, GpuInfo, HardwareProfile, LibraryModel, LiveStats, LoadedModel, LoadParams, ModelDetail, ModelSummary, NetworkState } from "./types";
 import { CURRENT_CATALOG } from "./catalog";
-import type { ActivePatch, HubDownloadEvent, HubFile, HubRepo, LoadPreset, PatchProfile } from "./types";
+import type { ActivePatch, EngineSwitch, HubDownloadEvent, HubFile, HubRepo, LoadPreset, PatchProfile } from "./types";
 import { EMPTY_TWEAKS, profileNameError, sanitizeTweaks } from "../lib/tweaks";
 
 const NOT_YET = (what: string) => Promise.reject(new Error(`${what} is not available in this build yet.`));
@@ -167,6 +167,10 @@ export function createDesktopService(local: CerebroService): CerebroService {
       return (await invoke<MetricsSnapshot>("metrics")).history;
     },
     getRequest: (): Promise<RequestDetail> => NOT_YET("Request bodies"),
+
+    listSwitches: () => invoke<EngineSwitch[]>("switches_list"),
+    setSwitch: (id, value) => invoke<number>("switch_set", { id, value }),
+    resetSwitches: () => invoke<EngineSwitch[]>("switches_reset"),
 
     async chat(request: ChatRequest, onEvent: (e: ChatEvent) => void, signal: AbortSignal) {
       const channel = new Channel<ChatEvent>();

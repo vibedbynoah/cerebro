@@ -4,6 +4,7 @@ import { activeTweakCount, applyTweaks, contextCeiling, EMPTY_TWEAKS, profileNam
 import type { CerebroService, Unsubscribe } from "../service/service";
 import { createMockChat } from "./chat";
 import type {
+  EngineSwitch,
   ActivePatch,
   CatalogModel,
   DuplicateGroup,
@@ -23,7 +24,7 @@ import type {
   TuneEvent,
   TuneState,
 } from "../service/types";
-import { DEFAULT_SETTINGS, MOCK_CATALOG, MOCK_GPU, MOCK_HARDWARE, MOCK_LIVE_BASE, MOCK_MODELS } from "./fixtures";
+import { DEFAULT_SETTINGS, MOCK_SWITCHES, MOCK_CATALOG, MOCK_GPU, MOCK_HARDWARE, MOCK_LIVE_BASE, MOCK_MODELS } from "./fixtures";
 import { detailFor, MOCK_LIBRARY, mockDuplicates } from "./library";
 import { buildTuneScript, createTunePlayer, type TuneHold, type TuneScript } from "./tune";
 import { applyTuneEvent, emptyTuneView, isTuneProfile } from "../lib/tune";
@@ -223,6 +224,7 @@ const IMAGE_TYPE = /^image\/(png|jpeg|webp|gif)$/;
  * The HUD ticker only runs while someone is subscribed, so an idle page schedules no timers.
  */
 export function createMockService(options: MockServiceOptions = {}): CerebroService {
+  const switches: EngineSwitch[] = MOCK_SWITCHES.map((x) => ({ ...x }));
   const chatEngine = createMockChat(options.chatSpeed !== undefined ? { speed: options.chatSpeed } : {});
   const tickMs = options.tickMs !== undefined && Number.isFinite(options.tickMs) && options.tickMs > 0 ? options.tickMs : 1000;
   const random = options.random ?? Math.random;
@@ -681,6 +683,21 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
         const d = monitor.request(id);
         if (!d) throw new Error("Request no longer kept");
         return d;
+      }),
+
+    listSwitches: () => later(0, () => switches.map((x) => ({ ...x }))),
+    setSwitch: (id, value) =>
+      later(0, () => {
+        const sw = switches.find((x) => x.id === id);
+        if (!sw) throw new Error(`unknown switch ${id}`);
+        const v = sw.kind.type === "toggle" ? (value !== 0 ? 1 : 0) : sw.kind.zero_auto && value === 0 ? 0 : Math.min(sw.kind.max, Math.max(sw.kind.min, Math.trunc(value)));
+        sw.value = v;
+        return v;
+      }),
+    resetSwitches: () =>
+      later(0, () => {
+        for (const x of switches) x.value = x.default;
+        return switches.map((x) => ({ ...x }));
       }),
 
     chat: (request, onEvent, signal) => chatEngine.chat(request, onEvent, signal),

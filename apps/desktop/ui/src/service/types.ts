@@ -528,3 +528,20 @@ export type HubDownloadEvent =
   | { type: "progress"; done: number; total: number; bytesPerSec: number }
   | { type: "done"; path: string }
   | { type: "error"; message: string };
+
+/** One engine optimisation the user can change (engine switches registry, Turbo screen). */
+export type SwitchKind = { type: "toggle" } | { type: "number"; min: number; max: number; zero_auto: boolean; unit: string };
+export interface EngineSwitch {
+  id: string;
+  name: string;
+  group: string;
+  kind: SwitchKind;
+  channel: "stable" | "beta" | "experimental";
+  /** When a change takes effect. */
+  applies: "live" | "reload" | "restart";
+  beginner: string;
+  advanced: string;
+  env: string;
+  value: number;
+  default: number;
+}

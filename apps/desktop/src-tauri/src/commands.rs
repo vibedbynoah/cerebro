@@ -312,3 +312,55 @@ pub fn hub_cancel(downloads: State<'_, Downloads>, repo: String, file: String) {
         f.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
+
+/// Engine switches (Turbo screen): every optimisation with its explanation, channel and value.
+#[tauri::command]
+pub fn switches_list() -> Vec<cerebro_engine::switches::State> {
+    cerebro_engine::switches::catalogue()
+}
+
+/// Sets one switch and saves the user's choices; returns the stored (clamped) value.
+#[tauri::command]
+pub fn switch_set<R: Runtime>(app: tauri::AppHandle<R>, id: String, value: i64) -> Result<i64, String> {
+    let v = cerebro_engine::switches::set(&id, value)?;
+    save_switches(&app);
+    Ok(v)
+}
+
+/// Back to the start-up values.
+#[tauri::command]
+pub fn switches_reset<R: Runtime>(app: tauri::AppHandle<R>) -> Vec<cerebro_engine::switches::State> {
+    cerebro_engine::switches::reset();
+    save_switches(&app);
+    cerebro_engine::switches::catalogue()
+}
+
+fn switches_file<R: Runtime>(app: &tauri::AppHandle<R>) -> Option<std::path::PathBuf> {
+    use tauri::Manager;
+    app.path().app_config_dir().ok().map(|d| d.join("switches.json"))
+}
+
+/// Writes the switches that differ from their defaults to the app's config folder.
+fn save_switches<R: Runtime>(app: &tauri::AppHandle<R>) {
+    let changed: serde_json::Map<String, serde_json::Value> = cerebro_engine::switches::catalogue()
+        .into_iter()
+        .filter(|s| s.value != s.default)
+        .map(|s| (s.info.id.to_string(), s.value.into()))
+        .collect();
+    if let Some(p) = switches_file(app) {
+        let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
+        let _ = std::fs::write(p, serde_json::to_vec_pretty(&changed).unwrap_or_default());
+    }
+}
+
+/// Applies saved switches at start-up (before any model loads or the worker pool starts).
+pub fn load_switches<R: Runtime>(app: &tauri::AppHandle<R>) {
+    let Some(p) = switches_file(app) else { return };
+    let Ok(bytes) = std::fs::read(p) else { return };
+    let Ok(map) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes) else { return };
+    for (id, v) in map {
+        if let Some(v) = v.as_i64() {
+            let _ = cerebro_engine::switches::set(&id, v);
+        }
+    }
+}

@@ -52,10 +52,14 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::hub_files,
             commands::hub_download,
             commands::hub_cancel,
+            commands::switches_list,
+            commands::switch_set,
+            commands::switches_reset,
         ])
         .manage(engine::Engine::start())
         .manage(hub::Downloads::default())
         .setup(|app| {
+            commands::load_switches(app.handle());
             // Declared in tauri.conf.json with `create: false` and built here, so the navigation and
             // new-window guards are attached before the window loads anything.
             let config = app
