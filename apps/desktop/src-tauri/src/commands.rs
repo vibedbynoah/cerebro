@@ -158,6 +158,56 @@ fn loaded_json(engine: &Engine) -> serde_json::Value {
     }
 }
 
+// ---- Disk space (dedup.rs): the same file kept in more than one folder. Hashing takes seconds,
+// so every one of these runs on a blocking thread. ----
+
+type DiskState<'a> = State<'a, std::sync::Arc<crate::dedup::Disk>>;
+
+/// Every model file stored more than once: grouped by exact byte size first, then SHA-256. The
+/// first scan reads each file once; an unchanged library is rescanned without reading anything.
+#[tauri::command]
+pub async fn disk_scan(disk: DiskState<'_>, engine: State<'_, Engine>) -> Result<crate::dedup::DiskReport, String> {
+    let disk = std::sync::Arc::clone(disk.inner());
+    let engine = engine.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut library = engine.library.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if library.is_empty() {
+            // The Models screen lists the library before the disk panel opens; if nothing has yet,
+            // scan the folders now (and remember it, like library_list does).
+            library = engine::scan_library();
+            *engine.library.lock().unwrap_or_else(|e| e.into_inner()) = library.clone();
+        }
+        disk.scan(&library)
+    })
+    .await
+    .map_err(|_| "The disk scan failed.".to_owned())
+}
+
+/// Keeps the copy at `keep_path` and replaces the group's other copies on its drive with hard
+/// links to it, after checking every copy's hash from disk again.
+#[tauri::command]
+pub async fn disk_deduplicate(disk: DiskState<'_>, group_id: String, keep_path: String) -> Result<crate::dedup::DedupeResult, String> {
+    let disk = std::sync::Arc::clone(disk.inner());
+    tauri::async_runtime::spawn_blocking(move || disk.deduplicate(&group_id, &keep_path))
+        .await
+        .map_err(|_| "The deduplicate failed.".to_owned())?
+}
+
+/// Undoes a deduplicate: copies the bytes back so each path is its own file again.
+#[tauri::command]
+pub async fn disk_unlink(disk: DiskState<'_>, group_id: String) -> Result<crate::dedup::DuplicateGroup, String> {
+    let disk = std::sync::Arc::clone(disk.inner());
+    tauri::async_runtime::spawn_blocking(move || disk.unlink(&group_id)).await.map_err(|_| "The undo failed.".to_owned())?
+}
+
+/// Opens File Explorer at the model's file, with the file selected. False where that is not
+/// possible (the UI then shows the path instead).
+#[tauri::command]
+pub fn model_reveal(engine: State<'_, Engine>, id: String) -> Result<bool, String> {
+    let model = find_model(&engine, &id)?;
+    Ok(crate::dedup::reveal(std::path::Path::new(&model.path)))
+}
+
 /// Streams a reply through `on_event`; resolves when it is finished or stopped.
 #[tauri::command]
 pub async fn chat_send(engine: State<'_, Engine>, request: ChatRequest, on_event: Channel<ChatEvent>) -> Result<(), String> {
