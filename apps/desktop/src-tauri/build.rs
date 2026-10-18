@@ -29,6 +29,8 @@ const COMMANDS: &[&str] = &[
     "kv_store_clear",
     "live_stats",
     "metrics",
+    "metrics_history",
+    "request_detail",
     "hub_search",
     "hub_files",
     "hub_file_meta",
