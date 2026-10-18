@@ -34,6 +34,7 @@ fn main() {
     let mut fresh = session(&m, mode);
     fresh.feed(&m, &p2).expect("feed");
     let want = greedy(&m, &mut fresh, 24);
+    drop(fresh);
 
     let mut first = session(&m, mode);
     first.feed(&m, &p1).expect("feed");
@@ -44,6 +45,17 @@ fn main() {
     let n = restored.load_kv(&m, &mut buf.as_slice()).expect("load");
     let reused = restored.feed(&m, &p2).expect("feed");
     let got = greedy(&m, &mut restored, 24);
+    drop(restored);
+    // A file cut short: refused, and the session (which held p1) is left empty, not half-restored.
+    let mut cut = session(&m, mode);
+    cut.feed(&m, &p1).expect("feed");
+    let short = &buf[..buf.len() * 2 / 3];
+    let refused = cut.load_kv(&m, &mut &short[..]).is_err();
+    let emptied = cut.tokens.is_empty();
+    cut.feed(&m, &p2).expect("feed");
+    let after = greedy(&m, &mut cut, 24);
+    drop(cut);
+    println!("{mode}: cut-short file refused {refused}, session emptied {emptied}, then correct text: {}", after == want);
     // Control: the same two-step reading (p1, then the rest) without saving: isolates batch-shape
     // numerics from the save/restore itself.
     let mut two = session(&m, mode);

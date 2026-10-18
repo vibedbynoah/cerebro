@@ -1482,13 +1482,32 @@ impl Session {
     }
 
     /// Restores a cache written by `save_kv` for this model; returns the tokens it holds. The next
-    /// `feed` continues from them.
+    /// `feed` continues from them. If the file fails partway, the session is left empty (no
+    /// tokens, recurrent state cleared), never half old and half restored.
     pub fn load_kv(&mut self, m: &Model, r: &mut dyn std::io::Read) -> Result<usize, Error> {
-        let c = &m.cfg;
+        #[cfg(feature = "portable")]
+        if self.portable.is_some() {
+            return Err(Error::Unsupported("restoring a cache is not available on the portable GPU backend yet".into()));
+        }
+        // A file for another model or context is refused before anything is touched.
         let (n, kvd) = read_kv_header(m, r)?;
         if n == 0 || n >= self.max_ctx {
             return Err(Error::Format("the saved cache does not fit this context".into()));
         }
+        let res = self.load_kv_body(m, r, n, kvd);
+        if res.is_err() {
+            self.tokens.clear();
+            self.reset_recurrent();
+            #[cfg(feature = "cuda")]
+            if let Some(g) = self.gpu.as_mut() {
+                let _ = g.reset_recurrent();
+            }
+        }
+        res
+    }
+
+    fn load_kv_body(&mut self, m: &Model, r: &mut dyn std::io::Read, n: usize, kvd: usize) -> Result<usize, Error> {
+        let c = &m.cfg;
         let rd = |r: &mut dyn std::io::Read, len: usize| -> Result<Vec<u8>, Error> {
             let mut b = vec![0u8; len];
             r.read_exact(&mut b).map_err(|e| Error::Format(format!("saved cache cut short: {e}")))?;
