@@ -6,6 +6,39 @@ import type { Attachment } from "../../lib/chat/store";
 const IMAGE = /^image\/(png|jpeg|gif|webp)$/;
 const MAX_IMAGE = 10 * 1024 * 1024;
 const MAX_FILES = 10;
+/** Longest side an attached image keeps: the image is stored with the chat and sent with every
+ *  turn, and a vision model reads at most about this much detail anyway. */
+const MAX_SIDE = 1344;
+/** Data URLs above this are re-encoded smaller (the chat store keeps previews up to 2 MB). */
+const MAX_DATA = 1_500_000;
+
+/** Downscales an image data URL to MAX_SIDE (JPEG) when it is larger, else returns it unchanged.
+ *  Where the browser cannot decode or draw it, the original is kept. */
+async function shrink(url: string): Promise<string> {
+  try {
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    const long = Math.max(img.naturalWidth, img.naturalHeight);
+    if (long <= MAX_SIDE && url.length <= MAX_DATA) return url;
+    const scale = Math.min(1, MAX_SIDE / long);
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    c.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    const g = c.getContext("2d");
+    if (!g) return url;
+    g.fillStyle = "#fff";
+    g.fillRect(0, 0, c.width, c.height);
+    g.drawImage(img, 0, 0, c.width, c.height);
+    for (const q of [0.9, 0.8, 0.65]) {
+      const out = c.toDataURL("image/jpeg", q);
+      if (out.length <= MAX_DATA) return out;
+    }
+    return c.toDataURL("image/jpeg", 0.5);
+  } catch {
+    return url;
+  }
+}
 const ORCHESTRATE_WORKERS: readonly [number, number] = [1, 6];
 const ORCHESTRATE_ROUNDS: readonly [number, number] = [1, 8];
 
@@ -73,12 +106,13 @@ export function Composer(props: {
           setError(`${f.name} is over 10 MB.`);
           continue;
         }
-        const preview = await new Promise<string | null>((resolve) => {
+        const raw = await new Promise<string | null>((resolve) => {
           const r = new FileReader();
           r.onload = () => resolve(typeof r.result === "string" ? r.result : null);
           r.onerror = () => resolve(null);
           r.readAsDataURL(f);
         });
+        const preview = raw ? await shrink(raw) : null;
         setAtts((a) => [...a, { name: f.name.slice(0, 260), type: f.type, bytes: f.size, preview }]);
       } else {
         setAtts((a) => [...a, { name: f.name.slice(0, 260), type: f.type.slice(0, 100) || "application/octet-stream", bytes: f.size, preview: null }]);

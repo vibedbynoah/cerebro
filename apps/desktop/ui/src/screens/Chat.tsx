@@ -161,7 +161,7 @@ export function Chat(): JSX.Element {
     const p = prefs();
     const turns: ChatTurn[] = conv.messages
       .filter((m) => !m.streaming && !m.error)
-      .map((m) => ({ role: m.role, text: m.text, ...(m.attachments.length ? { attachments: m.attachments.map(({ name, type, bytes }) => ({ name, type, bytes })) } : {}) }));
+      .map((m) => ({ role: m.role, text: m.text, ...(m.attachments.length ? { attachments: m.attachments.map(({ name, type, bytes, preview }) => ({ name, type, bytes, ...(preview ? { data: preview } : {}) })) } : {}) }));
     const mid = newId();
     const reply: ChatMessage = { id: mid, role: "assistant", text: "", thinking: "", checks: [], image: null, tools: [], ledger: null, attachments: [], stats: null, effort: p.effort, verbosity: p.verbosity, source: p.source, streaming: true, error: null };
     setState("list", (c) => c.id === cid, "messages", (l) => [...l, reply]);

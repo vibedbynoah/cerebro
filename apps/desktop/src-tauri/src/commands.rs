@@ -615,7 +615,7 @@ impl crate::remote::Backend for PhoneBackend {
         let request = ChatRequest {
             model_id,
             system_prompt: String::new(),
-            turns: turns.into_iter().map(|(role, text)| crate::engine::ChatTurn { role, text }).collect(),
+            turns: turns.into_iter().map(|(role, text)| crate::engine::ChatTurn { role, text, attachments: Vec::new() }).collect(),
             // Qwen's recommended non-thinking sampler; min_p keeps long replies from looping.
             sampler: crate::engine::ChatSampler { temperature: 0.7, top_p: 0.8, min_p: 0.05, top_k: 20, repeat_penalty: 1.0, max_tokens: 4096 },
             native: None,
@@ -790,7 +790,7 @@ impl crate::mcp_server::McpBackend for McpEngineBackend {
         let request = ChatRequest {
             model_id,
             system_prompt: system.to_owned(),
-            turns: turns.into_iter().map(|(role, text)| crate::engine::ChatTurn { role, text }).collect(),
+            turns: turns.into_iter().map(|(role, text)| crate::engine::ChatTurn { role, text, attachments: Vec::new() }).collect(),
             sampler: crate::engine::ChatSampler { temperature, top_p: 0.8, min_p: 0.05, top_k: 20, repeat_penalty: 1.0, max_tokens },
             native: None,
             tools: None,
@@ -882,7 +882,7 @@ pub fn api_turns(messages: &[crate::local_api::Msg], dialect: crate::toolcall::D
     let mut tool_block: Vec<String> = Vec::new();
     let flush = |out: &mut Vec<crate::engine::ChatTurn>, block: &mut Vec<String>| {
         if !block.is_empty() {
-            out.push(crate::engine::ChatTurn { role: "user".into(), text: std::mem::take(block).join("\n") });
+            out.push(crate::engine::ChatTurn { role: "user".into(), text: std::mem::take(block).join("\n"), attachments: Vec::new() });
         }
     };
     for m in messages {
@@ -890,7 +890,7 @@ pub fn api_turns(messages: &[crate::local_api::Msg], dialect: crate::toolcall::D
             Msg::Tool(t) => tool_block.push(crate::toolcall::tool_response(t)),
             Msg::User(t) => {
                 flush(&mut out, &mut tool_block);
-                out.push(crate::engine::ChatTurn { role: "user".into(), text: t.clone() });
+                out.push(crate::engine::ChatTurn { role: "user".into(), text: t.clone(), attachments: Vec::new() });
             }
             Msg::Assistant { text, calls } => {
                 flush(&mut out, &mut tool_block);
@@ -899,7 +899,7 @@ pub fn api_turns(messages: &[crate::local_api::Msg], dialect: crate::toolcall::D
                     parts.push(text.trim().to_owned());
                 }
                 parts.extend(calls.iter().map(|c| crate::toolcall::render_call(dialect, c)));
-                out.push(crate::engine::ChatTurn { role: "assistant".into(), text: parts.join("\n") });
+                out.push(crate::engine::ChatTurn { role: "assistant".into(), text: parts.join("\n"), attachments: Vec::new() });
             }
         }
     }

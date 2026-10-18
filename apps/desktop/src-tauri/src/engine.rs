@@ -12,9 +12,9 @@ use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use cerebro_engine::chat::{generate, GenConfig};
+use cerebro_engine::chat::{generate, generate_parts, GenConfig};
 use cerebro_engine::gguf::Gguf;
-use cerebro_engine::model::{Model, Session};
+use cerebro_engine::model::{ImageTokens, Model, Part, Session};
 use cerebro_engine::sample::SamplerConfig;
 use cerebro_engine::tokenizer::Tokenizer;
 use cerebro_engine::tune;
@@ -50,7 +50,8 @@ pub struct LibraryModel {
     pub tuned_params: Option<()>,
     pub tuned_at: Option<String>,
     pub tune_result: Option<()>,
-    pub projector: Option<()>,
+    /// The vision projector paired with this model, when one sits beside it (vision_input.rs).
+    pub projector: Option<crate::vision_input::Projector>,
     /// Whether Cerebro Engine can run this file's architecture today.
     pub supported: bool,
     pub arch_name: String,
@@ -158,6 +159,7 @@ fn describe(path: &Path, source: &'static str) -> Option<LibraryModel> {
     let params = g.str("general.size_label").map(str::to_owned).unwrap_or_default();
     let quant = g.u64("general.file_type").map(file_type_name).unwrap_or("other").to_owned();
     let family = g.str("general.basename").map(str::to_owned).unwrap_or_else(|| arch.clone());
+    let projector = crate::vision_input::find_projector(path, dim, g.str("general.basename").unwrap_or(""));
     Some(LibraryModel {
         id: id_of(path),
         name,
@@ -168,8 +170,8 @@ fn describe(path: &Path, source: &'static str) -> Option<LibraryModel> {
         context_max: u("context_length").unwrap_or(0),
         tune: "untuned",
         provenance: "measured",
-        kind: "text",
-        modalities: vec!["text"],
+        kind: if projector.is_some() { "vision" } else { "text" },
+        modalities: if projector.is_some() { vec!["text", "vision"] } else { vec!["text"] },
         family,
         file: path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
         path: path.to_string_lossy().into_owned(),
@@ -191,7 +193,7 @@ fn describe(path: &Path, source: &'static str) -> Option<LibraryModel> {
         tuned_params: None,
         tuned_at: None,
         tune_result: None,
-        projector: None,
+        projector,
         supported: SUPPORTED_ARCHS.contains(&arch.as_str()),
         arch_name: arch,
     })
@@ -403,6 +405,25 @@ const APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 
 pub struct ChatTurn {
     pub role: String,
     pub text: String,
+    /// What the Chat screen attached; images carry their data (a data: URL) so a vision model can
+    /// see them, other files only their names.
+    #[serde(default)]
+    pub attachments: Vec<TurnAttachment>,
+}
+
+/// An attachment as the engine uses it: only an image's data matters (names and types are for the
+/// screen).
+#[derive(Debug, Clone, Deserialize)]
+pub struct TurnAttachment {
+    #[serde(default)]
+    pub data: Option<String>,
+}
+
+impl ChatTurn {
+    /// The images attached to this turn, as data: URLs.
+    fn images(&self) -> impl Iterator<Item = &str> {
+        self.attachments.iter().filter_map(|a| a.data.as_deref()).filter(|d| d.starts_with("data:image/"))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -596,6 +617,46 @@ struct Loaded {
     /// How this model writes tool calls, read from its chat template.
     dialect: crate::toolcall::Dialect,
     placement: Option<cerebro_engine::placement::Plan>,
+    /// The vision encoder, loaded the first time an image arrives (it takes RAM a text chat does
+    /// not need).
+    vision: Option<cerebro_engine::vision::VisionModel>,
+    /// Encoded images of recent chats by `vision_input::key`, so a chat's images are encoded once.
+    images: std::collections::HashMap<u64, Arc<cerebro_engine::vision::ImageEmbedding>>,
+}
+
+/// Encoded images kept for reuse (a few chats' worth).
+const MAX_CACHED_IMAGES: usize = 16;
+
+/// Encodes `pics` (data: URLs) for the loaded model, reusing earlier encodings of the same image.
+fn encode_images(l: &mut Loaded, pics: &[String]) -> Result<Vec<Arc<cerebro_engine::vision::ImageEmbedding>>, String> {
+    if pics.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(proj) = l.info.projector.clone() else {
+        return Err("This model cannot see images: load one with a vision projector (an mmproj file) beside it.".to_owned());
+    };
+    if l.vision.is_none() {
+        let v = cerebro_engine::vision::VisionModel::load(Path::new(&proj.path)).map_err(|e| format!("Could not load the vision projector {}: {e}", proj.file))?;
+        l.vision = Some(v);
+    }
+    let v = l.vision.as_ref().expect("vision encoder");
+    let mut out = Vec::with_capacity(pics.len());
+    for p in pics {
+        let k = crate::vision_input::key(p);
+        if let Some(e) = l.images.get(&k) {
+            out.push(e.clone());
+            continue;
+        }
+        let rgb = crate::vision_input::decode_data_url(p)?;
+        let input = v.preprocess(&rgb.pixels, rgb.width, rgb.height);
+        let emb = Arc::new(v.encode(&input).map_err(|e| format!("Could not read an attached image: {e}"))?);
+        if l.images.len() >= MAX_CACHED_IMAGES {
+            l.images.clear();
+        }
+        l.images.insert(k, emb.clone());
+        out.push(emb);
+    }
+    Ok(out)
 }
 
 impl Engine {
@@ -822,7 +883,7 @@ fn load(m: &LibraryModel, ctx: usize, gpu_layers: Option<usize>) -> Result<Loade
         }
     };
     let dialect = crate::toolcall::dialect_from_template(model.gguf().str("tokenizer.chat_template").unwrap_or(""));
-    Ok(Loaded { model, session, tok, info: m.clone(), dialect, placement })
+    Ok(Loaded { model, session, tok, info: m.clone(), dialect, placement, vision: None, images: Default::default() })
 }
 
 fn loaded_info(l: &Loaded, ctx: usize) -> LoadedInfo {
@@ -926,6 +987,10 @@ fn restore_cache(l: &mut Loaded, store: &Arc<Mutex<KvStore>>, ids: &[u32]) {
 /// Keeps this conversation's cache on disk for next time: only a long chat whose history would take
 /// more than a moment to read again is worth a file (`tokens / the last prefill speed`).
 fn save_cache(l: &mut Loaded, store: &Arc<Mutex<KvStore>>) {
+    // A chat with images is not saved yet (the engine refuses: image positions are not stored).
+    if !l.session.images.is_empty() {
+        return;
+    }
     let tokens = l.session.tokens.len();
     if tokens < kv_store::MIN_SAVE_TOKENS || !kv_store::worth_saving(tokens, l.session.stats.prefill_tps()) {
         return;
@@ -1026,7 +1091,25 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
         }
         sys
     };
-    let mut convo: Vec<(String, String)> = req.turns.iter().map(|t| (if t.role == "assistant" { "assistant" } else { "user" }.to_owned(), t.text.clone())).collect();
+    // Images go before their turn's text, as the model's own template places them; `pics` lists
+    // them in prompt order. MARK is stripped from everything else so only placeholders carry it.
+    let mark = crate::vision_input::MARK;
+    let mut pics: Vec<String> = Vec::new();
+    let mut convo: Vec<(String, String)> = Vec::new();
+    for t in &req.turns {
+        let role = if t.role == "assistant" { "assistant" } else { "user" };
+        let mut text = t.text.replace(mark, "");
+        if role == "user" {
+            let mut pre = String::new();
+            for d in t.images() {
+                pics.push(d.to_owned());
+                pre.push_str(&crate::vision_input::placeholder());
+            }
+            text = pre + &text;
+        }
+        convo.push((role.to_owned(), text));
+    }
+    let system = system.replace(mark, "");
 
     let id = format!("r{}", now_ms());
     let started = now_ms();
@@ -1066,15 +1149,29 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
     let (mut ttft_ms, mut decode_ms, mut prefill_tps, mut stopped) = (0.0f64, 0.0f64, 0.0f64, false);
     let mut failed: Option<String> = None;
     let mut n = 0usize;
+    let embeds = match encode_images(l, &pics) {
+        Ok(v) => v,
+        Err(e) => {
+            failed = Some(e);
+            Vec::new()
+        }
+    };
 
     for round in 0..=MAX_TOOL_ROUNDS {
+        if failed.is_some() {
+            break;
+        }
         let turns: Vec<(&str, &str)> = convo.iter().map(|(r, t)| (r.as_str(), t.as_str())).collect();
         let text = cerebro_engine::chatml((!system.is_empty()).then_some(system.as_str()), &turns, think);
-        let ids = l.tok.encode(&text);
-        set(st, |s| s.live_prompt = ids.len());
+        // Text pieces around the images (one piece when there are none). Tool results added in
+        // later rounds may contain the mark: only the first `embeds.len()` count.
+        let pieces: Vec<Vec<u32>> = crate::vision_input::split_prompt(&text, embeds.len()).iter().map(|p| l.tok.encode(p)).collect();
+        let ids: Vec<u32> = pieces.concat();
+        let image_tokens: usize = embeds.iter().take(pieces.len() - 1).map(|e| e.cols * e.rows).sum();
+        set(st, |s| s.live_prompt = ids.len() + image_tokens);
         // Returning to a long chat: start from its saved cache (Settings > Protections) instead of
         // reading the history again. Restored before `generate`, so its reused count is the feed's.
-        if round == 0 && req.keep_cache {
+        if round == 0 && req.keep_cache && embeds.is_empty() {
             if let Some(store) = kv {
                 restore_cache(l, store, &ids);
             }
@@ -1097,7 +1194,7 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
                 }
             }
         };
-        let result = generate(&l.model, &mut l.session, &l.tok, &ids, &cfg, |piece| {
+        let on_piece = |piece: &str| {
             if !started_ev {
                 started_ev = true;
                 events(ChatEvent::Start { ttft_ms: t0.elapsed().as_secs_f64() * 1000.0 });
@@ -1140,7 +1237,20 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
                 s.live_decode_tps = Some(n as f64 / secs.max(1e-3));
             });
             !cancel.load(Ordering::SeqCst)
-        });
+        };
+        let result = if embeds.is_empty() {
+            generate(&l.model, &mut l.session, &l.tok, &ids, &cfg, on_piece)
+        } else {
+            let mut parts: Vec<Part<'_>> = Vec::with_capacity(pieces.len() * 2);
+            for (i, p) in pieces.iter().enumerate() {
+                if i > 0 {
+                    let e = &embeds[i - 1];
+                    parts.push(Part::Image(ImageTokens { cols: e.cols, rows: e.rows, dim: e.dim, data: &e.data }));
+                }
+                parts.push(Part::Text(p));
+            }
+            generate_parts(&l.model, &mut l.session, &l.tok, &parts, &cfg, on_piece)
+        };
         if !pending.is_empty() {
             if in_think {
                 events(ChatEvent::Thinking { text: std::mem::take(&mut pending) });
@@ -1654,7 +1764,7 @@ mod tool_loop_tests {
         let req = ChatRequest {
             model_id: model.id.clone(),
             system_prompt: String::new(),
-            turns: vec![ChatTurn { role: "user".into(), text: "What is the capital of France? One word.".into() }],
+            turns: vec![ChatTurn { role: "user".into(), text: "What is the capital of France? One word.".into(), attachments: Vec::new() }],
             sampler: ChatSampler { temperature: 0.0, top_p: 1.0, min_p: 0.0, top_k: 1, repeat_penalty: 1.0, max_tokens: 400 },
             native: None,
             tools: None,
@@ -1666,6 +1776,41 @@ mod tool_loop_tests {
         let text: String = events.lock().unwrap().iter().filter_map(|e| if let ChatEvent::Token { text } = e { Some(text.clone()) } else { None }).collect();
         println!("reply: {text:?}");
         assert!(text.contains("Paris"), "{text}");
+    }
+
+    /// A vision model sees a photo attached in Chat: the projector is found beside the model, the
+    /// data URL decoded and encoded, and the reply is about the picture (a newspaper front page about
+    /// the Moon landing). `cargo test -p cerebro-desktop sees_an_attached -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn a_vision_model_sees_an_attached_image() {
+        use base64::Engine as _;
+        let model = describe(Path::new(r"C:\models\dev\qwen35\Qwen3.5-0.8B-Q8_0.gguf"), "test").expect("model");
+        assert_eq!(model.kind, "vision", "the projector beside the model was not found");
+        let jpeg = std::fs::read(r"C:\Users\noahm\Projects\cerebro-engine\.ref\test-1.jpeg").expect("test photo");
+        let data = format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(jpeg));
+        let engine = Engine::start();
+        engine.load(model.clone(), 4096, None).unwrap();
+        let events: Arc<Mutex<Vec<ChatEvent>>> = Arc::default();
+        let ev = events.clone();
+        let sink: ChatSink = Arc::new(move |e: ChatEvent| ev.lock().unwrap().push(e));
+        let req = ChatRequest {
+            model_id: model.id.clone(),
+            system_prompt: String::new(),
+            turns: vec![ChatTurn { role: "user".into(), text: "What is this a picture of? One sentence.".into(), attachments: vec![TurnAttachment { data: Some(data) }] }],
+            sampler: ChatSampler { temperature: 0.0, top_p: 1.0, min_p: 0.0, top_k: 1, repeat_penalty: 1.0, max_tokens: 80 },
+            native: None,
+            tools: None,
+            orchestrate: None,
+            keep_cache: false,
+            client_tools: None,
+        };
+        engine.chat(req, sink).unwrap();
+        let evs = events.lock().unwrap();
+        let text: String = evs.iter().filter_map(|e| if let ChatEvent::Token { text } = e { Some(text.clone()) } else { None }).collect();
+        println!("reply: {text:?}");
+        let lower = text.to_lowercase();
+        assert!(lower.contains("newspaper") || lower.contains("times") || lower.contains("moon"), "{text}");
     }
 
     /// The real engine and a real model through the whole loop: the model asks for the tool, the
@@ -1694,7 +1839,7 @@ mod tool_loop_tests {
         let req = ChatRequest {
             model_id: model.id.clone(),
             system_prompt: String::new(),
-            turns: vec![ChatTurn { role: "user".into(), text: "What is the weather in Paris right now? Use the tool.".into() }],
+            turns: vec![ChatTurn { role: "user".into(), text: "What is the weather in Paris right now? Use the tool.".into(), attachments: Vec::new() }],
             sampler: ChatSampler { temperature: 0.0, top_p: 1.0, min_p: 0.0, top_k: 1, repeat_penalty: 1.0, max_tokens: 400 },
             native: None,
             tools: Some(ToolsRequest { rules: Default::default(), default_rule: "ask".into(), offline: false, allow_local_fetch: false, access: Access::Workspace, show_secrets: false, blind_writes: false, plan_mode: false }),
@@ -1732,7 +1877,7 @@ mod tool_loop_tests {
         let req = ChatRequest {
             model_id: model.id.clone(),
             system_prompt: String::new(),
-            turns: vec![ChatTurn { role: "user".into(), text: "What is 17 multiplied by 23? Show the working briefly, then the number.".into() }],
+            turns: vec![ChatTurn { role: "user".into(), text: "What is 17 multiplied by 23? Show the working briefly, then the number.".into(), attachments: Vec::new() }],
             sampler: ChatSampler { temperature: 0.2, top_p: 0.8, min_p: 0.05, top_k: 20, repeat_penalty: 1.0, max_tokens: 600 },
             native: None,
             tools: None,

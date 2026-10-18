@@ -1,10 +1,12 @@
 import type { Effort, ReasoningSource, Verbosity } from "../lib/chat/prompt";
 
-/** One message as sent to the engine. Attachments are referenced by name and type; the bytes stay local. */
+/** One message as sent to the engine. Attachments are referenced by name and type; an image also
+ *  carries its data (a data: URL) so a vision model on this machine can see it. Nothing leaves the
+ *  machine. */
 export interface ChatTurn {
   role: "user" | "assistant";
   text: string;
-  attachments?: ReadonlyArray<{ name: string; type: string; bytes: number }>;
+  attachments?: ReadonlyArray<{ name: string; type: string; bytes: number; data?: string }>;
 }
 
 export interface Sampler {

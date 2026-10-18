@@ -140,11 +140,30 @@ function isMcpConfig(c) {
   return servers.length <= 64 && servers.every(([name, s]) => isServerName(name) && isMcpServer(s));
 }
 
+/** A turn's attachment: name, type and size, plus an image's data (a base64 image data: URL of at
+ *  most 3 MB, which the composer's downscaling keeps it under). @param {unknown} a */
+function isAttachment(a) {
+  if (!isPlain(a) || !hasOnlyKeys(a, ["name", "type", "bytes", "data"])) return false;
+  const { name, type, bytes, data } = /** @type {Record<string, unknown>} */ (a);
+  return (
+    typeof name === "string" && name.length <= 260 &&
+    typeof type === "string" && type.length <= 100 &&
+    typeof bytes === "number" && Number.isFinite(bytes) && bytes >= 0 &&
+    (data === undefined || (typeof data === "string" && data.length <= 3_000_000 && /^data:image\/(png|jpeg|gif|webp);base64,/.test(data)))
+  );
+}
+
 /** @param {unknown} r */
 function isChatRequest(r) {
   if (!isPlain(r) || !isModelId(r.modelId) || typeof r.systemPrompt !== "string" || !Array.isArray(r.turns) || !isPlain(r.sampler)) return false;
   return (
-    r.turns.every((t) => isPlain(t) && (t.role === "user" || t.role === "assistant") && typeof t.text === "string") &&
+    r.turns.every(
+      (t) =>
+        isPlain(t) &&
+        (t.role === "user" || t.role === "assistant") &&
+        typeof t.text === "string" &&
+        (t.attachments === undefined || (Array.isArray(t.attachments) && t.attachments.length <= 10 && t.attachments.every(isAttachment))),
+    ) &&
     (r.tools === undefined || r.tools === null || isToolsRequest(r.tools)) &&
     (r.orchestrate === undefined || r.orchestrate === null || isOrchestrateRequest(r.orchestrate)) &&
     (r.keepCache === undefined || typeof r.keepCache === "boolean")

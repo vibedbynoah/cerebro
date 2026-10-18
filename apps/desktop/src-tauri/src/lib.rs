@@ -26,6 +26,7 @@ mod agent_tools;
 mod trainer;
 mod engine;
 mod dedup;
+mod vision_input;
 mod hub;
 mod kv_store;
 pub mod navigation;

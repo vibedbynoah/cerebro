@@ -53,7 +53,7 @@ export function parseCores(text: string, threads: number): number[] | null {
 
 /** Models that can draft for `model`: same family, text, smaller, and in the library. */
 export function draftCandidates(model: LibraryModel, library: readonly LibraryModel[]): LibraryModel[] {
-  return library.filter((m) => m.id !== model.id && m.kind === "text" && m.family === model.family && m.sizeGiB < model.sizeGiB * 0.5);
+  return library.filter((m) => m.id !== model.id && (m.kind === "text" || m.kind === "vision") && m.family === model.family && m.sizeGiB < model.sizeGiB * 0.5);
 }
 
 /**

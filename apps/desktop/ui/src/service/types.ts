@@ -186,7 +186,7 @@ export interface CatalogQuant {
 export type Modality = "text" | "vision" | "audio-in" | "audio-out" | "image-gen";
 
 /**
- * How a model runs. `text` and `vision` load into llama.cpp's server (one slot: loading another
+ * How a model runs. `text` and `vision` load into Cerebro Engine (one slot: loading another
  * replaces it); `stt`, `tts` and `image` each load into their own lightweight engine beside it.
  */
 export type ModelKind = "text" | "vision" | "stt" | "tts" | "image";
