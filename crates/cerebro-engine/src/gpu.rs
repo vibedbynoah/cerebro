@@ -320,7 +320,10 @@ struct Batch {
     xq: CudaSlice<i8>,
     xd: CudaSlice<f32>,
     toks: CudaSlice<i32>,
+    /// [slot of the chunk's first token, rotary lag] (see qkv_post).
     pos0: CudaSlice<i32>,
+    /// Per-token rotary (time, height, width) for a chunk with image tokens.
+    rtab: CudaSlice<i32>,
     /// Gated attention: the projection's [q|gate] rows before they are split, and the gates.
     qg: CudaSlice<f32>,
     gate: CudaSlice<f32>,
@@ -361,6 +364,31 @@ struct Shape {
     /// Attention heads carry an output gate (Qwen3.8).
     gate: bool,
     delta: Option<DeltaShape>,
+    /// Multi-axis rotary sections, one byte each (0 = plain RoPE); see `rope_axis` in kernels.cu.
+    sec: i32,
+}
+
+/// An image prompt being read on the GPU (`Session::feed_parts`): rotary (time, height, width)
+/// positions for slots `from..`, and the image tokens' input rows by slot (they replace the
+/// embedding lookup).
+pub struct ImagePrefill {
+    pub from: usize,
+    pub rope: Vec<i32>,
+    pub rows: Vec<(usize, Vec<f32>)>,
+}
+
+impl ImagePrefill {
+    /// The rotary table for slots p0..p0 + t, when it covers them.
+    fn table(&self, p0: usize, t: usize) -> Option<&[i32]> {
+        let a = p0.checked_sub(self.from)? * 3;
+        self.rope.get(a..a + 3 * t)
+    }
+}
+
+/// Image slots carry pseudo ids (high bit set) that are not in the vocabulary: look up token 0
+/// for them; their rows are replaced afterwards.
+fn real_id(t: u32) -> u32 {
+    if t & 0x8000_0000 != 0 { 0 } else { t }
 }
 
 /// The model's weights, KV cache and scratch on one GPU, plus the captured decode graph.
@@ -406,6 +434,10 @@ pub struct GpuState {
     pub debug_stop: Option<usize>,
     /// Prompt-reading progress, advanced after each finished chunk (set by the session).
     pub progress: Option<Arc<crate::model::Progress>>,
+    /// How far rotary positions lag cache slots for text after images (set by the session).
+    pub rope_shift: i32,
+    /// The image prompt being read, during `Session::feed_parts`.
+    pub image: Option<ImagePrefill>,
     /// Logits of every position of a verify pass (SPEC_MAX x vocab); None where speculation
     /// does not apply (split, mixture of experts, recurrent layers).
     spec: Option<CudaSlice<f32>>,
@@ -637,7 +669,8 @@ impl GpuState {
             xq: stream.alloc_zeros::<i8>(CHUNK * widest).map_err(gerr)?,
             xd: z(CHUNK * widest / 32)?,
             toks: stream.alloc_zeros::<i32>(CHUNK).map_err(gerr)?,
-            pos0: stream.alloc_zeros::<i32>(1).map_err(gerr)?,
+            pos0: stream.alloc_zeros::<i32>(2).map_err(gerr)?,
+            rtab: stream.alloc_zeros::<i32>(3 * CHUNK).map_err(gerr)?,
         };
         // Everything uploaded so far is read from VRAM only; free its RAM for the CPU-side weights.
         // A split keeps the CPU's layers and the head (and the embeddings, looked up on the CPU).
@@ -676,7 +709,7 @@ impl GpuState {
         if let Some(m) = &moe {
             vram += m.owner.len() * m.slot_bytes;
         }
-        let sh = Shape { dim: c.dim, ffn: c.ffn, n_head: c.n_head, n_kv: c.n_kv, hd: c.head_dim, vocab: c.vocab, eps: c.eps, base: c.rope_base, rd: c.rope_dim, gate: c.attn_gate, delta: dsh };
+        let sh = Shape { dim: c.dim, ffn: c.ffn, n_head: c.n_head, n_kv: c.n_kv, hd: c.head_dim, vocab: c.vocab, eps: c.eps, base: c.rope_base, rd: c.rope_dim, gate: c.attn_gate, delta: dsh, sec: c.rope_sections.map_or(0, |s| s.iter().enumerate().map(|(i, &v)| (v.min(255) as i32) << (8 * i)).fold(0, |a, b| a | b)) };
         let ctx_pin = ctx.clone();
         let spec = if split || c.n_expert > 0 || c.ssm.is_some() { None } else { Some(z(SPEC_MAX * c.vocab)?) };
         Ok(Self {
@@ -694,7 +727,7 @@ impl GpuState {
             gate: z(if c.attn_gate { qd } else { 0 })?,
             logits: z(c.vocab)?,
             tok: stream.alloc_zeros::<i32>(1).map_err(gerr)?,
-            pos: stream.alloc_zeros::<i32>(1).map_err(gerr)?,
+            pos: stream.alloc_zeros::<i32>(2).map_err(gerr)?,
             next: stream.alloc_zeros::<i32>(1).map_err(gerr)?,
             pm: z(c.n_head * splits.max(gqa_splits))?,
             pl: z(c.n_head * splits.max(gqa_splits))?,
@@ -714,6 +747,8 @@ impl GpuState {
             plan,
             debug_stop: None,
             progress: None,
+            rope_shift: 0,
+            image: None,
             spec,
             // SAFETY: a plain host buffer, read only after the stream is synchronized.
             host_x: if split { Some(unsafe { ctx_pin.alloc_pinned::<f32>(c.dim) }.map_err(gerr)?) } else { None },
@@ -1145,6 +1180,8 @@ impl GpuState {
                         .arg(&base)
                         .arg(&eps)
                         .arg(&(sh.rd as i32))
+                        .arg(&0u64)
+                        .arg(&sh.sec)
                         .launch(cfg)
                 }
                 .map_err(gerr)?;
@@ -1313,7 +1350,7 @@ impl GpuState {
             return Err(Error::Request("context full".into()));
         }
         self.stream.memcpy_htod(&[token as i32], &mut self.tok).map_err(gerr)?;
-        self.stream.memcpy_htod(&[pos as i32], &mut self.pos).map_err(gerr)?;
+        self.stream.memcpy_htod(&[pos as i32, self.rope_shift], &mut self.pos).map_err(gerr)?;
         if let Some(row) = self.host_embed.as_mut() {
             model.embed_into(token, row);
         }
@@ -1333,7 +1370,7 @@ impl GpuState {
             return Err(Error::Request("context full".into()));
         }
         self.stream.memcpy_htod(&[token as i32], &mut self.tok).map_err(gerr)?;
-        self.stream.memcpy_htod(&[pos as i32], &mut self.pos).map_err(gerr)?;
+        self.stream.memcpy_htod(&[pos as i32, self.rope_shift], &mut self.pos).map_err(gerr)?;
         if let Some(row) = self.host_embed.as_mut() {
             model.embed_into(token, row);
         }
@@ -1485,10 +1522,21 @@ impl GpuState {
         // Embeddings on the CPU.
         let mut emb = vec![0f32; t * sh.dim];
         for (i, &tok) in toks.iter().enumerate() {
-            model.embed_into(tok, &mut emb[i * sh.dim..(i + 1) * sh.dim]);
+            model.embed_into(real_id(tok), &mut emb[i * sh.dim..(i + 1) * sh.dim]);
         }
         s.memcpy_htod(&emb, &mut b.x.slice_mut(0..t * sh.dim)).map_err(gerr)?;
-        s.memcpy_htod(&[pos0 as i32], &mut b.pos0).map_err(gerr)?;
+        s.memcpy_htod(&[pos0 as i32, self.rope_shift], &mut b.pos0).map_err(gerr)?;
+        let tab = self.image.as_ref().and_then(|im| im.table(pos0, t));
+        if let Some(tb) = tab {
+            s.memcpy_htod(tb, &mut b.rtab.slice_mut(0..tb.len())).map_err(gerr)?;
+        }
+        if let Some(im) = &self.image {
+            for (slot, row) in im.rows.iter().filter(|(sl, _)| (pos0..pos0 + t).contains(sl)) {
+                let o = (slot - pos0) * sh.dim;
+                s.memcpy_htod(row, &mut b.x.slice_mut(o..o + sh.dim)).map_err(gerr)?;
+            }
+        }
+        let use_tab = tab.is_some();
         let norm_cfg = LaunchConfig { grid_dim: (t as u32, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
         let kmm = |w: &cudarc::driver::CudaView<u8>, dtype: i32, bb: i32, xq: &CudaSlice<i8>, xd: &CudaSlice<f32>, idx: Option<&cudarc::driver::CudaView<i32>>, n: usize, y: &mut cudarc::driver::CudaViewMut<f32>, ystride: usize, rows: usize, cols: usize, add: bool| -> Result<(), Error> {
             let (ni, ys, r, c, a) = (n as i32, ystride as i32, rows as i32, cols as i32, add as i32);
@@ -1523,23 +1571,19 @@ impl GpuState {
                 let qn = l.q_norm.as_ref().unwrap_or(&l.attn_norm);
                 let kn = l.k_norm.as_ref().unwrap_or(&l.attn_norm);
                 let cfg = LaunchConfig { grid_dim: ((sh.n_head + sh.n_kv) as u32, t as u32, 1), block_dim: ((sh.hd / 2) as u32, 1, 1), shared_mem_bytes: 0 };
-                unsafe {
-                    s.launch_builder(&f.qkv_post)
-                        .arg(&mut b.qkv)
-                        .arg(qn)
-                        .arg(kn)
-                        .arg(&(l.q_norm.is_some() as i32))
-                        .arg(&mut l.kc)
-                        .arg(&mut l.vc)
-                        .arg(&n_head)
-                        .arg(&n_kv)
-                        .arg(&hd)
-                        .arg(&b.pos0)
-                        .arg(&base)
-                        .arg(&eps)
-                        .arg(&(sh.rd as i32))
-                        .launch(cfg)
+                let no_tab = 0u64;
+                let rd = sh.rd as i32;
+                let has_norm = l.q_norm.is_some() as i32;
+                let mut lb = s.launch_builder(&f.qkv_post);
+                lb.arg(&mut b.qkv).arg(qn).arg(kn).arg(&has_norm).arg(&mut l.kc).arg(&mut l.vc);
+                lb.arg(&n_head).arg(&n_kv).arg(&hd).arg(&b.pos0).arg(&base).arg(&eps).arg(&rd);
+                if use_tab {
+                    lb.arg(&b.rtab);
+                } else {
+                    lb.arg(&no_tab);
                 }
+                lb.arg(&sh.sec);
+                unsafe { lb.launch(cfg) }
                 .map_err(gerr)?;
                 Self::attn_batch(s, f, sh, &b.qkv, &l.kc, &l.vc, &mut b.att, &b.pos0, t)?;
             }
@@ -1714,9 +1758,14 @@ impl GpuState {
         let sh = &self.sh;
         let s = &self.stream;
         let f = &self.f;
-        let ids: Vec<i32> = toks.iter().map(|&v| v as i32).collect();
+        let ids: Vec<i32> = toks.iter().map(|&v| real_id(v) as i32).collect();
         s.memcpy_htod(&ids, &mut self.b.toks).map_err(gerr)?;
-        s.memcpy_htod(&[pos0 as i32], &mut self.b.pos0).map_err(gerr)?;
+        s.memcpy_htod(&[pos0 as i32, self.rope_shift], &mut self.b.pos0).map_err(gerr)?;
+        let tab = self.image.as_ref().and_then(|im| im.table(pos0, t));
+        if let Some(tb) = tab {
+            s.memcpy_htod(tb, &mut self.b.rtab.slice_mut(0..tb.len())).map_err(gerr)?;
+        }
+        let use_tab = tab.is_some();
         let (dim, ffn, hd) = (sh.dim as i32, sh.ffn as i32, sh.hd as i32);
         let (n_head, n_kv) = (sh.n_head as i32, sh.n_kv as i32);
         let (eps, base) = (sh.eps, sh.base);
@@ -1727,13 +1776,19 @@ impl GpuState {
             // Native layout: embeddings looked up on the CPU and uploaded.
             let mut emb = vec![0f32; t * sh.dim];
             for (i, &tok) in toks.iter().enumerate() {
-                model.embed_into(tok, &mut emb[i * sh.dim..(i + 1) * sh.dim]);
+                model.embed_into(real_id(tok), &mut emb[i * sh.dim..(i + 1) * sh.dim]);
             }
             s.memcpy_htod(&emb, &mut b.x.slice_mut(0..t * sh.dim)).map_err(gerr)?;
         } else {
             let (qs, ds, _, _) = self.embed.as_ref().or(self.output.as_ref()).expect("embedding table").q8();
             let cfg = LaunchConfig { grid_dim: ((sh.dim as u32).div_ceil(256), t as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
             unsafe { s.launch_builder(&f.embed_b).arg(qs).arg(ds).arg(&b.toks).arg(&mut b.x).arg(&dim).launch(cfg) }.map_err(gerr)?;
+        }
+        if let Some(im) = &self.image {
+            for (slot, row) in im.rows.iter().filter(|(sl, _)| (pos0..pos0 + t).contains(sl)) {
+                let o = (slot - pos0) * sh.dim;
+                s.memcpy_htod(row, &mut b.x.slice_mut(o..o + sh.dim)).map_err(gerr)?;
+            }
         }
         let norm_cfg = LaunchConfig { grid_dim: (t as u32, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
         let null_f: u64 = 0;
@@ -1783,23 +1838,19 @@ impl GpuState {
                 let qn = l.q_norm.as_ref().unwrap_or(&l.attn_norm);
                 let kn = l.k_norm.as_ref().unwrap_or(&l.attn_norm);
                 let cfg = LaunchConfig { grid_dim: ((sh.n_head + sh.n_kv) as u32, t as u32, 1), block_dim: ((sh.hd / 2) as u32, 1, 1), shared_mem_bytes: 0 };
-                unsafe {
-                    s.launch_builder(&f.qkv_post)
-                        .arg(&mut b.qkv)
-                        .arg(qn)
-                        .arg(kn)
-                        .arg(&(l.q_norm.is_some() as i32))
-                        .arg(&mut l.kc)
-                        .arg(&mut l.vc)
-                        .arg(&n_head)
-                        .arg(&n_kv)
-                        .arg(&hd)
-                        .arg(&b.pos0)
-                        .arg(&base)
-                        .arg(&eps)
-                        .arg(&(sh.rd as i32))
-                        .launch(cfg)
+                let no_tab = 0u64;
+                let rd = sh.rd as i32;
+                let has_norm = l.q_norm.is_some() as i32;
+                let mut lb = s.launch_builder(&f.qkv_post);
+                lb.arg(&mut b.qkv).arg(qn).arg(kn).arg(&has_norm).arg(&mut l.kc).arg(&mut l.vc);
+                lb.arg(&n_head).arg(&n_kv).arg(&hd).arg(&b.pos0).arg(&base).arg(&eps).arg(&rd);
+                if use_tab {
+                    lb.arg(&b.rtab);
+                } else {
+                    lb.arg(&no_tab);
                 }
+                lb.arg(&sh.sec);
+                unsafe { lb.launch(cfg) }
                 .map_err(gerr)?;
             }
             {
@@ -1867,7 +1918,7 @@ impl GpuState {
             return Ok(n);
         }
         self.stream.memcpy_htod(&[first as i32], &mut self.tok).map_err(gerr)?;
-        self.stream.memcpy_htod(&[pos as i32], &mut self.pos).map_err(gerr)?;
+        self.stream.memcpy_htod(&[pos as i32, self.rope_shift], &mut self.pos).map_err(gerr)?;
         let mut n = 0;
         let mut next = [0i32];
         while n < max_new && pos + n < self.max_ctx {

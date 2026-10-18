@@ -96,13 +96,36 @@ extern "C" __global__ void rmsnorm_quant(const float* __restrict__ x, const floa
 // and K (written into the f16 K cache), V copied into the f16 V cache. Grid: (n_head + n_kv, T).
 // Per head of q and k: optional RMS norm, then RoPE on the first `rd` dimensions (pairs i, i + rd/2;
 // rd == hd rotates the whole head), and k and v into the f16 cache. Grid (n_head + n_kv, T), block hd/2.
+// Interleaved multi-axis rotary (Qwen3-VL / Qwen3.5): which of a token's time, height and width
+// positions frequency j uses. `sec` packs the four section sizes one byte each; 0 = plain RoPE.
+__device__ __forceinline__ float rope_axis(int j, int sec, int pt, int ph, int pw) {
+    if (sec == 0) return (float)pt;
+    int s0 = sec & 255, s1 = (sec >> 8) & 255, s2 = (sec >> 16) & 255, s3 = (sec >> 24) & 255;
+    int total = s0 + s1 + s2 + s3;
+    if (total == 0) return (float)pt;
+    int k = j % total;
+    if (k % 3 == 1 && k < 3 * s1) return (float)ph;
+    if (k % 3 == 2 && k < 3 * s2) return (float)pw;
+    if (k % 3 == 0 && k < 3 * s0) return (float)pt;
+    return 0.f;
+}
+
 extern "C" __global__ void qkv_post(float* __restrict__ qkv, const float* __restrict__ qn, const float* __restrict__ kn,
                                     int has_norm, __half* __restrict__ kc, __half* __restrict__ vc,
-                                    int n_head, int n_kv, int hd, const int* __restrict__ posp, float base, float eps, int rd) {
+                                    int n_head, int n_kv, int hd, const int* __restrict__ posp, float base, float eps, int rd,
+                                    const int* __restrict__ rtab, int sec) {
     __shared__ float red[32];
     __shared__ float hv[256];
     int t = blockIdx.y;
-    int pos = *posp + t;
+    // posp[0] is the cache slot of token 0, posp[1] how far rotary positions lag the slots (the
+    // positions images saved); rtab, when given, holds (time, height, width) per token instead.
+    int pos = posp[0] + t;
+    int pt = pos - posp[1], ph = pt, pw = pt;
+    if (rtab) {
+        pt = rtab[3 * t];
+        ph = rtab[3 * t + 1];
+        pw = rtab[3 * t + 2];
+    }
     int h = blockIdx.x, i = threadIdx.x, half = hd >> 1;
     int kvd = n_kv * hd;
     int row = n_head * hd + 2 * kvd;
@@ -120,7 +143,7 @@ extern "C" __global__ void qkv_post(float* __restrict__ qkv, const float* __rest
     if (rd == hd) {
         float inv = powf(base, -2.f * i / hd);
         float sn, cs;
-        sincosf(pos * inv, &sn, &cs);
+        sincosf(rope_axis(i, sec, pt, ph, pw) * inv, &sn, &cs);
         ra = a * cs - b * sn;
         rb = a * sn + b * cs;
     } else {
@@ -139,7 +162,7 @@ extern "C" __global__ void qkv_post(float* __restrict__ qkv, const float* __rest
         if (i < rh) {
             float inv = powf(base, -2.f * i / rd);
             float sn, cs;
-            sincosf(pos * inv, &sn, &cs);
+            sincosf(rope_axis(i, sec, pt, ph, pw) * inv, &sn, &cs);
             hv[i] = x0 * cs - x1 * sn;
             hv[i + rh] = x0 * sn + x1 * cs;
         }

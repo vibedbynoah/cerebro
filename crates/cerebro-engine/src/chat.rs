@@ -3,7 +3,7 @@
 
 use std::time::Instant;
 
-use crate::model::{Model, Session};
+use crate::model::{Model, Part, Session};
 
 /// Draft tokens for prompt-lookup speculation: the tokens that followed the most recent earlier
 /// occurrence of the context's last 3 (then 2, then 1) tokens, up to `max`. Searches the last 8192
@@ -61,9 +61,30 @@ pub struct GenConfig {
 /// Feeds `prompt` (reusing the cached prefix) and generates until an end-of-turn token,
 /// `max_tokens`, the context limit, or `on_text` returning false. `on_text` receives complete UTF-8
 /// pieces in order.
-pub fn generate(model: &Model, session: &mut Session, tok: &Tokenizer, prompt: &[u32], cfg: &GenConfig, mut on_text: impl FnMut(&str) -> bool) -> Result<GenStats, Error> {
+pub fn generate(model: &Model, session: &mut Session, tok: &Tokenizer, prompt: &[u32], cfg: &GenConfig, on_text: impl FnMut(&str) -> bool) -> Result<GenStats, Error> {
+    generate_with(model, session, tok, prompt.len(), |s| s.feed(model, prompt), cfg, on_text)
+}
+
+/// `generate` for a prompt with images (`Session::feed_parts`): text and encoded images in order.
+pub fn generate_parts(model: &Model, session: &mut Session, tok: &Tokenizer, parts: &[Part<'_>], cfg: &GenConfig, on_text: impl FnMut(&str) -> bool) -> Result<GenStats, Error> {
+    let n = parts.iter().map(|p| match p {
+        Part::Text(t) => t.len(),
+        Part::Image(e) => e.cols * e.rows,
+    }).sum();
+    generate_with(model, session, tok, n, |s| s.feed_parts(model, parts), cfg, on_text)
+}
+
+fn generate_with(
+    model: &Model,
+    session: &mut Session,
+    tok: &Tokenizer,
+    prompt_len: usize,
+    feed: impl FnOnce(&mut Session) -> Result<usize, Error>,
+    cfg: &GenConfig,
+    mut on_text: impl FnMut(&str) -> bool,
+) -> Result<GenStats, Error> {
     let t0 = Instant::now();
-    let reused = session.feed(model, prompt)?;
+    let reused = feed(session)?;
     let prefill_tps = session.stats.prefill_tps();
     let room = session.max_ctx.saturating_sub(session.tokens.len() + 1);
     let max_new = cfg.max_tokens.min(room);
@@ -116,7 +137,7 @@ pub fn generate(model: &Model, session: &mut Session, tok: &Tokenizer, prompt: &
             }
             let dsecs = td.elapsed().as_secs_f64();
             return Ok(GenStats {
-                prompt_tokens: prompt.len(),
+                prompt_tokens: prompt_len,
                 reused_tokens: reused,
                 output_tokens: out.len(),
                 ttft_ms: first_at.unwrap_or(0.0),
@@ -216,7 +237,7 @@ pub fn generate(model: &Model, session: &mut Session, tok: &Tokenizer, prompt: &
             }
             let dsecs = td.elapsed().as_secs_f64();
             return Ok(GenStats {
-                prompt_tokens: prompt.len(),
+                prompt_tokens: prompt_len,
                 reused_tokens: reused,
                 output_tokens: out.len(),
                 ttft_ms: first_at.unwrap_or(0.0),
@@ -240,7 +261,7 @@ pub fn generate(model: &Model, session: &mut Session, tok: &Tokenizer, prompt: &
     }
     let dsecs = td.elapsed().as_secs_f64();
     Ok(GenStats {
-        prompt_tokens: prompt.len(),
+        prompt_tokens: prompt_len,
         reused_tokens: reused,
         output_tokens: out.len(),
         ttft_ms: first_at.unwrap_or(0.0),

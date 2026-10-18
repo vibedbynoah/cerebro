@@ -904,6 +904,11 @@ fn rope(x: &mut [f32], cs: &[(f32, f32)]) {
     }
 }
 
+/// How many rotary positions all of `images` saved: text after them lags its slots by this.
+fn rope_shift_of(images: &[ImageSpan]) -> usize {
+    images.iter().map(|im| im.nx * im.ny - im.nx.max(im.ny)).sum()
+}
+
 /// `Session::rope_pos` for a list of image spans (sorted by slot).
 fn rope_pos_in(images: &[ImageSpan], slot: usize) -> [usize; 3] {
     let mut saved = 0;
@@ -1175,6 +1180,10 @@ impl Session {
             }
         }
         self.images.retain(|im| im.slot0 + im.nx * im.ny <= common);
+        #[cfg(feature = "cuda")]
+        if let Some(g) = self.gpu.as_mut() {
+            g.rope_shift = rope_shift_of(&self.images) as i32;
+        }
         self.tokens.truncate(common);
         let t0 = Instant::now();
         self.progress.begin(common);
@@ -1317,31 +1326,23 @@ impl Session {
         Ok(s)
     }
 
-    /// Whether a GPU backend runs this session's layers.
-    fn gpu_active(&self) -> bool {
-        #[cfg(feature = "cuda")]
-        if self.gpu.is_some() {
-            return true;
-        }
-        #[cfg(feature = "portable")]
-        if self.portable.is_some() {
-            return true;
-        }
-        false
-    }
-
     /// Like `feed`, for a prompt with images: `parts` in order, text as token ids and each image
     /// as its encoder output (`vision::ImageEmbedding`, one row of `dim` values per image token,
     /// `cols` across). Image tokens sit in the cache as pseudo-tokens derived from the image's
     /// values, so the conversation cache reuses an image only when it is the same image. Runs on
-    /// the processor (GPU sessions refuse images for now). Returns the reused prefix length.
+    /// the processor or wholly on a CUDA card. Returns the reused prefix length.
     pub fn feed_parts(&mut self, m: &Model, parts: &[Part<'_>]) -> Result<usize, Error> {
         if !parts.iter().any(|p| matches!(p, Part::Image(_))) {
             let ids: Vec<u32> = parts.iter().flat_map(|p| if let Part::Text(t) = p { t.to_vec() } else { Vec::new() }).collect();
             return self.feed(m, &ids);
         }
-        if self.gpu_active() {
-            return Err(Error::Unsupported("images are read on the processor for now: load the model with no layers on the graphics card to use them".into()));
+        #[cfg(feature = "portable")]
+        if self.portable.is_some() {
+            return Err(Error::Unsupported("images are not read on this graphics card yet: load the model on the processor or an NVIDIA card to use them".into()));
+        }
+        #[cfg(feature = "cuda")]
+        if self.gpu.as_ref().is_some_and(|g| g.is_split()) {
+            return Err(Error::Unsupported("images are not read when a model is split between the graphics card and the processor yet: load it whole on one of them".into()));
         }
         // The full slot sequence, with image tokens as pseudo-ids.
         let mut ids = Vec::new();
@@ -1368,15 +1369,17 @@ impl Session {
         if common == ids.len() {
             common -= 1;
         }
-        if m.cfg.ssm.is_some() && common < self.tokens.len() {
-            common = 0;
-            self.reset_recurrent();
-        }
+        let mut reset = m.cfg.ssm.is_some() && common < self.tokens.len();
         if let Some(&(s0, _, _, _)) = spans.iter().find(|(s0, nx, ny, _)| *s0 < common && common < s0 + nx * ny) {
             common = s0;
-            if m.cfg.ssm.is_some() {
-                common = 0;
-                self.reset_recurrent();
+            reset |= m.cfg.ssm.is_some();
+        }
+        if reset {
+            common = 0;
+            self.reset_recurrent();
+            #[cfg(feature = "cuda")]
+            if let Some(g) = self.gpu.as_mut() {
+                g.reset_recurrent()?;
             }
         }
         self.tokens.truncate(common);
@@ -1391,6 +1394,26 @@ impl Session {
             }
         }
         self.images.sort_by_key(|im| im.slot0);
+        #[cfg(feature = "cuda")]
+        if self.gpu.is_some() {
+            let rope: Vec<i32> = (common..ids.len()).flat_map(|sl| self.rope_pos(sl)).map(|v| v as i32).collect();
+            let rows: Vec<(usize, Vec<f32>)> = spans
+                .iter()
+                .flat_map(|&(s0, nx, ny, e)| (0..nx * ny).filter(move |i| s0 + i >= common).map(move |i| (s0 + i, e.data[i * e.dim..(i + 1) * e.dim].to_vec())))
+                .collect();
+            let shift = rope_shift_of(&self.images) as i32;
+            let g = self.gpu.as_mut().expect("gpu");
+            g.progress = Some(self.progress.clone());
+            g.image = Some(crate::gpu::ImagePrefill { from: common, rope, rows });
+            let r = g.prefill(m, &ids[common..], common, Some(&mut self.logits));
+            g.image = None;
+            g.rope_shift = shift;
+            r?;
+            self.tokens.extend_from_slice(&ids[common..]);
+            self.progress.set(self.tokens.len());
+            self.stats = Stats { prompt_tokens: ids.len(), reused_tokens: common, prefill_ms: t0.elapsed().as_secs_f64() * 1000.0, ..Default::default() };
+            return Ok(common);
+        }
         crate::pool::for_reading();
         for slot in common..ids.len() {
             let id = ids[slot];
@@ -1883,6 +1906,10 @@ impl Session {
         if res.is_err() {
             self.tokens.clear();
             self.images.clear();
+            #[cfg(feature = "cuda")]
+            if let Some(g) = self.gpu.as_mut() {
+                g.rope_shift = 0;
+            }
             self.reset_recurrent();
             #[cfg(feature = "cuda")]
             if let Some(g) = self.gpu.as_mut() {
