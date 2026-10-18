@@ -496,6 +496,8 @@ pub struct Status {
     pub totals: Totals,
     /// One sample per second: (decode tok/s, prefill tok/s, expert hit %, VRAM GiB, RAM GiB).
     pub history: VecDeque<[Option<f64>; 5]>,
+    /// The loaded session's prompt-reading progress (live prompt tokens read and speed).
+    pub progress: Option<Arc<cerebro_engine::model::Progress>>,
 }
 
 #[derive(Default, Clone, Serialize)]
@@ -597,8 +599,12 @@ impl Engine {
                             let msg = match r {
                                 Ok(l) => {
                                     let info = loaded_info(&l, ctx);
+                                    let progress = l.session.progress.clone();
                                     loaded = Some(l);
-                                    set(&st, |s| s.loaded = Some(info));
+                                    set(&st, |s| {
+                                        s.loaded = Some(info);
+                                        s.progress = Some(progress);
+                                    });
                                     Ok(())
                                 }
                                 Err(e) => Err(e),
@@ -610,7 +616,10 @@ impl Engine {
                             if let Some(l) = loaded.take() {
                                 save_profile(&l);
                             }
-                            set(&st, |s| s.loaded = None);
+                            set(&st, |s| {
+                                s.loaded = None;
+                                s.progress = None;
+                            });
                             let _ = reply.send(());
                         }
                         Job::Chat { req, events, reply } => {
@@ -645,7 +654,8 @@ impl Engine {
             let gen = s.activity == "generating";
             let sample = [
                 if gen { s.live_decode_tps } else { None },
-                s.loaded.as_ref().and_then(|l| l.last_prefill_tps),
+                // Live while a prompt is being read, else the last prompt's figure.
+                s.progress.as_ref().filter(|_| s.activity == "reading").and_then(|p| p.read().2).or_else(|| s.loaded.as_ref().and_then(|l| l.last_prefill_tps)),
                 s.loaded.as_ref().and_then(|l| l.experts).map(|e| e.2 * 100.0),
                 s.loaded.as_ref().map(|l| l.vram_bytes as f64 / GIB),
                 Some((total - avail) as f64 / GIB),

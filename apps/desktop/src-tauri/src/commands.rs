@@ -247,15 +247,17 @@ pub fn metrics(engine: State<'_, Engine>, tele: State<'_, Telemetry>) -> serde_j
         .collect();
     let activity = s.activity;
     let running = s.requests.front().filter(|_| activity != "idle").map(|r| r.id.clone());
+    // Prompt reading, live: tokens in the cache, tokens reused, tokens per second so far.
+    let read = s.progress.as_ref().filter(|_| activity == "reading").map(|p| p.read());
     serde_json::json!({
         "provenance": "measured",
         "at": now,
         "live": {
             "state": activity, "queued": 0, "requestId": running,
-            "promptRead": s.live_prompt, "promptTotal": s.live_prompt, "promptReused": s.live_reused,
+            "promptRead": read.map_or(s.live_prompt, |r| r.0.min(s.live_prompt)), "promptTotal": s.live_prompt, "promptReused": read.map_or(s.live_reused, |r| r.1),
             "generated": s.live_generated, "maxTokens": 0,
             "decodeTps": if activity == "generating" { s.live_decode_tps } else { None },
-            "prefillTps": null, "firstTokenS": null,
+            "prefillTps": read.and_then(|r| r.2), "firstTokenS": null,
             "phase": if activity == "generating" { Some("answer") } else { None },
         },
         "hardware": {

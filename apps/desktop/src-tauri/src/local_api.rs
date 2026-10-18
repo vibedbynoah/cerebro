@@ -1002,7 +1002,9 @@ mod tests {
         req.push_str(body);
         s.write_all(req.as_bytes()).unwrap();
         let mut out = String::new();
-        s.read_to_string(&mut out).unwrap();
+        if let Err(e) = s.read_to_string(&mut out) {
+            panic!("{method} {path}: read failed ({e:?}) after {} bytes: {out:?}", out.len());
+        }
         let (head, body) = out.split_once("\r\n\r\n").unwrap();
         let status = head[9..12].parse().unwrap();
         let hs = head.lines().skip(1).filter_map(|l| l.split_once(": ")).map(|(k, v)| (k.to_ascii_lowercase(), v.to_owned())).collect();
