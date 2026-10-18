@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-gguf-copy-revert"
+description = "Enables the gguf_copy_revert command without any pre-configured scope."
+commands.allow = ["gguf_copy_revert"]
+
+[[permission]]
+identifier = "deny-gguf-copy-revert"
+description = "Denies the gguf_copy_revert command without any pre-configured scope."
+commands.deny = ["gguf_copy_revert"]

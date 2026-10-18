@@ -208,6 +208,49 @@ pub fn model_reveal(engine: State<'_, Engine>, id: String) -> Result<bool, Strin
     Ok(crate::dedup::reveal(std::path::Path::new(&model.path)))
 }
 
+/// A model file's metadata for the Models screen: every entry (arrays summarised), the chat
+/// template, and the edited copy when there is one.
+#[tauri::command]
+pub async fn model_detail(engine: State<'_, Engine>, id: String) -> Result<serde_json::Value, String> {
+    let model = find_model(&engine, &id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = std::path::Path::new(&model.path);
+        let (entries, template) = crate::gguf_edit::detail(path)?;
+        Ok(serde_json::json!({
+            "id": model.id,
+            "gguf": entries,
+            "chatTemplate": template,
+            "quirks": [],
+            "author": { "rope": null, "sampler": null },
+            "copy": crate::gguf_edit::existing_copy(path),
+        }))
+    })
+    .await
+    .map_err(|_| "The model's details could not be read.".to_owned())?
+}
+
+/// Writes (or rewrites) a metadata-edited copy of a model file beside it; the original is never
+/// written. Copying gigabytes takes a while, so it runs off the command thread.
+#[tauri::command]
+pub async fn gguf_copy_write(engine: State<'_, Engine>, id: String, edits: Vec<crate::gguf_edit::Edit>) -> Result<crate::gguf_edit::Copy, String> {
+    let model = find_model(&engine, &id)?;
+    if crate::gguf_edit::is_copy(std::path::Path::new(&model.path)) {
+        return Err("This is already an edited copy: edit the original instead.".to_owned());
+    }
+    tauri::async_runtime::spawn_blocking(move || crate::gguf_edit::write_copy(std::path::Path::new(&model.path), &edits))
+        .await
+        .map_err(|_| "The copy could not be written.".to_owned())?
+}
+
+/// Deletes a model's edited copy and its edit list.
+#[tauri::command]
+pub async fn gguf_copy_revert(engine: State<'_, Engine>, id: String) -> Result<(), String> {
+    let model = find_model(&engine, &id)?;
+    tauri::async_runtime::spawn_blocking(move || crate::gguf_edit::revert_copy(std::path::Path::new(&model.path)))
+        .await
+        .map_err(|_| "The copy could not be deleted.".to_owned())?
+}
+
 /// Streams a reply through `on_event`; resolves when it is finished or stopped.
 #[tauri::command]
 pub async fn chat_send(engine: State<'_, Engine>, request: ChatRequest, on_event: Channel<ChatEvent>) -> Result<(), String> {

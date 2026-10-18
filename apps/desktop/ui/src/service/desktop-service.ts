@@ -11,7 +11,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import type { CerebroService, Unsubscribe } from "./service";
 import type { ChatEvent, ChatRequest } from "./chat-types";
 import type { HistoryRange, MetricsSeries, MetricsSnapshot, RequestDetail } from "./monitor-types";
-import type { CatalogModel, DedupeResult, DiskReport, DuplicateGroup, GpuInfo, HardwareProfile, KvStoreUsage, LibraryModel, LiveStats, LoadedModel, LoadParams, ModelDetail, ModelSummary, NetworkState } from "./types";
+import type { CatalogModel, DedupeResult, DiskReport, DuplicateGroup, GpuInfo, HardwareProfile, KvStoreUsage, LibraryModel, LiveStats, LoadedModel, LoadParams, ModelDetail, ModelSummary, NetworkState, GgufCopy } from "./types";
 import { CURRENT_CATALOG } from "./catalog";
 import type { TrainerStatus, TrainEvent, TrainInstalled } from "./train-types";
 import type { Placement } from "./types";
@@ -99,10 +99,7 @@ export function createDesktopService(local: CerebroService): CerebroService {
       library = await invoke<LibraryModel[]>("library_list");
       return library.map((m) => ({ ...m }));
     },
-    async getModelDetail(id): Promise<ModelDetail> {
-      if (!library.some((m) => m.id === id)) throw new Error("That model is not in the library.");
-      return { id, gguf: null, chatTemplate: null, quirks: [], author: { rope: null, sampler: null }, copy: null };
-    },
+    getModelDetail: (id) => invoke<ModelDetail>("model_detail", { id }),
     listLoaded: () => invoke<LoadedModel[]>("models_loaded"),
     loadModel: (id: string, params: LoadParams | null) => invoke<LoadedModel[]>("model_load", { id, context: params?.contextLength ?? null, gpuLayers: params?.gpuLayers ?? null }),
     placementPreview: (id, contextLength, gpuLayers) => invoke<Placement>("placement_preview", { id, context: contextLength, gpuLayers }),
@@ -158,8 +155,8 @@ export function createDesktopService(local: CerebroService): CerebroService {
       profiles.set(sha, next);
       return next.map((p) => ({ ...p }));
     },
-    writeGgufCopy: () => NOT_YET("Editing a model's metadata"),
-    revertGgufCopy: () => NOT_YET("Editing a model's metadata"),
+    writeGgufCopy: (id, edits) => invoke<GgufCopy>("gguf_copy_write", { id, edits }),
+    revertGgufCopy: (id) => invoke<void>("gguf_copy_revert", { id }),
     // The engine's scan groups the model files by size and SHA-256 and remembers the result, so
     // deduplicate and undo work on the copies the last scan reported.
     scanDisk: () => invoke<DiskReport>("disk_scan"),

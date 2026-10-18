@@ -156,6 +156,8 @@ fn describe(path: &Path, source: &'static str) -> Option<LibraryModel> {
     let dim = u("embedding_length").unwrap_or(0);
     let experts = u("expert_count").filter(|&e| e > 0);
     let name = g.str("general.name").map(str::to_owned).unwrap_or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
+    // A metadata-edited copy (gguf_edit.rs) is its own model; its name says so.
+    let name = if crate::gguf_edit::is_copy(path) { format!("{name} (edited)") } else { name };
     let params = g.str("general.size_label").map(str::to_owned).unwrap_or_default();
     let quant = g.u64("general.file_type").map(file_type_name).unwrap_or("other").to_owned();
     let family = g.str("general.basename").map(str::to_owned).unwrap_or_else(|| arch.clone());

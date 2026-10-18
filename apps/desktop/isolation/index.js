@@ -198,6 +198,16 @@ const WITH_ARGS = {
   disk_deduplicate: (p) => isPlain(p) && hasOnlyKeys(p, ["groupId", "keepPath"]) && isGroupId(p.groupId) && isPath(p.keepPath),
   disk_unlink: (p) => isPlain(p) && hasOnlyKeys(p, ["groupId"]) && isGroupId(p.groupId),
   model_reveal: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && isModelId(p.id),
+  model_detail: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && isModelId(p.id),
+  gguf_copy_write: (p) =>
+    isPlain(p) &&
+    hasOnlyKeys(p, ["id", "edits"]) &&
+    isModelId(p.id) &&
+    Array.isArray(p.edits) &&
+    p.edits.length > 0 &&
+    p.edits.length <= 64 &&
+    p.edits.every((e) => isPlain(e) && hasOnlyKeys(e, ["key", "value"]) && typeof e.key === "string" && e.key.length > 0 && e.key.length <= 256 && (typeof e.value === "string" ? e.value.length <= 65_536 : typeof e.value === "boolean" || (typeof e.value === "number" && Number.isFinite(e.value)))),
+  gguf_copy_revert: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && isModelId(p.id),
   hub_search: (p) => isPlain(p) && hasOnlyKeys(p, ["query"]) && typeof p.query === "string" && p.query.length <= 120,
   hub_files: (p) => isPlain(p) && hasOnlyKeys(p, ["repo"]) && isRepo(p.repo),
   hub_file_meta: (p) => isPlain(p) && hasOnlyKeys(p, ["repo", "file"]) && isRepo(p.repo) && isGguf(p.file),

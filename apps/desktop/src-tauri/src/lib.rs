@@ -26,6 +26,7 @@ mod agent_tools;
 mod trainer;
 mod engine;
 mod dedup;
+mod gguf_edit;
 mod vision_input;
 mod hub;
 mod kv_store;
@@ -61,6 +62,9 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::disk_deduplicate,
             commands::disk_unlink,
             commands::model_reveal,
+            commands::model_detail,
+            commands::gguf_copy_write,
+            commands::gguf_copy_revert,
             commands::chat_send,
             commands::chat_stop,
             commands::kv_store_usage,
