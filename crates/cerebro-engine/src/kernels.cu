@@ -94,10 +94,13 @@ extern "C" __global__ void rmsnorm_quant(const float* __restrict__ x, const floa
 // After the fused QKV matmul for T tokens at positions pos0..pos0+T-1 (T = gridDim.y; decode uses
 // T = 1 with pos0 read from device memory): per-head RMSNorm (optional) + NeoX RoPE for Q (in place)
 // and K (written into the f16 K cache), V copied into the f16 V cache. Grid: (n_head + n_kv, T).
+// Per head of q and k: optional RMS norm, then RoPE on the first `rd` dimensions (pairs i, i + rd/2;
+// rd == hd rotates the whole head), and k and v into the f16 cache. Grid (n_head + n_kv, T), block hd/2.
 extern "C" __global__ void qkv_post(float* __restrict__ qkv, const float* __restrict__ qn, const float* __restrict__ kn,
                                     int has_norm, __half* __restrict__ kc, __half* __restrict__ vc,
-                                    int n_head, int n_kv, int hd, const int* __restrict__ posp, float base, float eps) {
+                                    int n_head, int n_kv, int hd, const int* __restrict__ posp, float base, float eps, int rd) {
     __shared__ float red[32];
+    __shared__ float hv[256];
     int t = blockIdx.y;
     int pos = *posp + t;
     int h = blockIdx.x, i = threadIdx.x, half = hd >> 1;
@@ -113,10 +116,37 @@ extern "C" __global__ void qkv_post(float* __restrict__ qkv, const float* __rest
         a = a * s * nw[i];
         b = b * s * nw[i + half];
     }
-    float inv = powf(base, -2.f * i / hd);
-    float sn, cs;
-    sincosf(pos * inv, &sn, &cs);
-    float ra = a * cs - b * sn, rb = a * sn + b * cs;
+    float ra = a, rb = b;
+    if (rd == hd) {
+        float inv = powf(base, -2.f * i / hd);
+        float sn, cs;
+        sincosf(pos * inv, &sn, &cs);
+        ra = a * cs - b * sn;
+        rb = a * sn + b * cs;
+    } else {
+        // Partial rotation: pairs (i, i + rd/2) for i < rd/2 cross this thread's (i, i + half).
+        // Every thread reaches the same barriers; only the first rd/2 rotate.
+        hv[i] = a;
+        hv[i + half] = b;
+        __syncthreads();
+        int rh = rd >> 1;
+        float x0 = 0.f, x1 = 0.f;
+        if (i < rh) {
+            x0 = hv[i];
+            x1 = hv[i + rh];
+        }
+        __syncthreads();
+        if (i < rh) {
+            float inv = powf(base, -2.f * i / rd);
+            float sn, cs;
+            sincosf(pos * inv, &sn, &cs);
+            hv[i] = x0 * cs - x1 * sn;
+            hv[i + rh] = x0 * sn + x1 * cs;
+        }
+        __syncthreads();
+        ra = hv[i];
+        rb = hv[i + half];
+    }
     if (is_k) {
         size_t o = (size_t)pos * kvd + (h - n_head) * hd;
         kc[o + i] = __float2half(ra);
@@ -921,4 +951,125 @@ extern "C" __global__ void attn_prefill_tiled(const float* __restrict__ qkv, con
         o[2] = acc[j][2] * inv;
         o[3] = acc[j][3] * inv;
     }
+}
+
+// ---- Qwen3.5 / Qwen3.8 hybrid layers (Gated DeltaNet + gated attention) ------------------------
+// Rows of the fused input projection, per token: [ q|k|v (ch) | z (nv*dv) | alpha (nv) | beta (nv) ].
+
+// Causal depthwise convolution over the last kc inputs of each channel, then SiLU, for T tokens in
+// order. `hist` keeps the kc-1 previous inputs per channel (oldest first) across calls. One thread
+// per channel; kc <= 9.
+extern "C" __global__ void delta_conv(float* __restrict__ row, int ld, const float* __restrict__ w,
+                                      float* __restrict__ hist, int ch, int kc, int T) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= ch) return;
+    float h[8];
+    for (int j = 0; j < kc - 1; j++) h[j] = hist[(size_t)j * ch + c];
+    const float* wc = w + (size_t)c * kc;
+    for (int t = 0; t < T; t++) {
+        float x = row[(size_t)t * ld + c];
+        float y = wc[kc - 1] * x;
+        for (int j = 0; j < kc - 1; j++) y += wc[j] * h[j];
+        for (int j = 0; j + 1 < kc - 1; j++) h[j] = h[j + 1];
+        if (kc > 1) h[kc - 2] = x;
+        row[(size_t)t * ld + c] = y / (1.f + __expf(-y));
+    }
+    for (int j = 0; j < kc - 1; j++) hist[(size_t)j * ch + c] = h[j];
+}
+
+// L2-normalises each q and k head (2*nk heads of dk); q heads also take `qscale`. Grid (2*nk, T),
+// block dk threads.
+extern "C" __global__ void delta_l2(float* __restrict__ row, int ld, int nk, int dk, float qscale) {
+    __shared__ float red[32];
+    int h = blockIdx.x, t = blockIdx.y, i = threadIdx.x;
+    float* v = row + (size_t)t * ld + (size_t)h * dk;
+    float x = v[i];
+    float s = rsqrtf(block_sum(x * x, red) + 1e-6f);
+    if (h < nk) s *= qscale;
+    v[i] = x * s;
+}
+
+// The delta rule for T tokens in order. Grid (nv, dv/32), block 128: 32 state columns of one value
+// head, each column's dk rows split over 4 thread groups; the slice stays in shared memory for all
+// T tokens and is written back at the end. Per token: S *= decay; kv = S^T k; S += k (beta (v - kv))^T;
+// o = S^T q. Value head h reads key head h % nk. Shared memory: (dk + 4) * 32 floats.
+extern "C" __global__ void delta_rule(const float* __restrict__ row, int ld, int ch, int nk, int dk, int nv, int dv,
+                                      const float* __restrict__ a, const float* __restrict__ dtb,
+                                      float* __restrict__ state, float* __restrict__ out, int ldo, int T) {
+    extern __shared__ float sm[];
+    float* S = sm;
+    float* part = sm + dk * 32;
+    int h = blockIdx.x, tx = threadIdx.x & 31, ty = threadIdx.x >> 5;
+    int j = blockIdx.y * 32 + tx;
+    int kh = h % nk;
+    float* st = state + (size_t)h * dk * dv;
+    for (int i = ty; i < dk; i += 4) S[i * 32 + tx] = st[(size_t)i * dv + j];
+    __syncthreads();
+    for (int t = 0; t < T; t++) {
+        const float* r = row + (size_t)t * ld;
+        const float* q = r + kh * dk;
+        const float* k = r + (nk + kh) * dk;
+        float al = r[ch + nv * dv + h], be = r[ch + nv * dv + nv + h];
+        float x = al + dtb[h];
+        float sp = x > 20.f ? x : log1pf(__expf(x));
+        float decay = __expf(a[h] * sp);
+        float b = 1.f / (1.f + __expf(-be));
+        float kv = 0.f;
+        for (int i = ty; i < dk; i += 4) {
+            float s = S[i * 32 + tx] * decay;
+            S[i * 32 + tx] = s;
+            kv += s * k[i];
+        }
+        part[ty * 32 + tx] = kv;
+        __syncthreads();
+        kv = part[tx] + part[32 + tx] + part[64 + tx] + part[96 + tx];
+        float delta = (r[2 * nk * dk + h * dv + j] - kv) * b;
+        __syncthreads();
+        float o = 0.f;
+        for (int i = ty; i < dk; i += 4) {
+            float s = S[i * 32 + tx] + k[i] * delta;
+            S[i * 32 + tx] = s;
+            o += s * q[i];
+        }
+        part[ty * 32 + tx] = o;
+        __syncthreads();
+        if (ty == 0) out[(size_t)t * ldo + h * dv + j] = part[tx] + part[32 + tx] + part[64 + tx] + part[96 + tx];
+        __syncthreads();
+    }
+    for (int i = ty; i < dk; i += 4) st[(size_t)i * dv + j] = S[i * 32 + tx];
+}
+
+// Gated RMSNorm of each value head's output: o = rmsnorm(o) * w * silu(z). Grid (nv, T), block dv.
+extern "C" __global__ void delta_gnorm(float* __restrict__ out, int ldo, const float* __restrict__ row, int ld, int zoff,
+                                       const float* __restrict__ w, int dv, float eps) {
+    __shared__ float red[32];
+    int h = blockIdx.x, t = blockIdx.y, j = threadIdx.x;
+    float* o = out + (size_t)t * ldo + (size_t)h * dv;
+    float x = o[j];
+    float r = rsqrtf(block_sum(x * x, red) / dv + eps);
+    float z = row[(size_t)t * ld + zoff + h * dv + j];
+    o[j] = x * r * w[j] * (z / (1.f + __expf(-z)));
+}
+
+// Gated attention input: rows [q_h | gate_h per head (2*qd) | k (kvd) | v (kvd)] become rows
+// [q (qd) | k | v] in `qkv` and the gates in `gate` (T x qd). Grid (n_head + 2*n_kv, T), block hd.
+extern "C" __global__ void unpack_qgate(const float* __restrict__ src, float* __restrict__ qkv, float* __restrict__ gate,
+                                        int n_head, int n_kv, int hd) {
+    int b = blockIdx.x, t = blockIdx.y, i = threadIdx.x;
+    int qd = n_head * hd, kvd = n_kv * hd;
+    const float* s = src + (size_t)t * (2 * qd + 2 * kvd);
+    float* d = qkv + (size_t)t * (qd + 2 * kvd);
+    if (b < n_head) {
+        d[b * hd + i] = s[2 * b * hd + i];
+        gate[(size_t)t * qd + b * hd + i] = s[(2 * b + 1) * hd + i];
+    } else {
+        int k = b - n_head;
+        d[qd + k * hd + i] = s[2 * qd + k * hd + i];
+    }
+}
+
+// att *= sigmoid(gate), n values.
+extern "C" __global__ void gate_mul(float* __restrict__ att, const float* __restrict__ gate, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) att[i] *= 1.f / (1.f + __expf(-gate[i]));
 }

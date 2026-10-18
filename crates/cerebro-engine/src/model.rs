@@ -173,7 +173,8 @@ impl Model {
             eps: g.f32(&k("attention.layer_norm_rms_epsilon")).unwrap_or(1e-6),
             ctx_train: g.u64(&k("context_length")).unwrap_or(4096) as usize,
             vocab: embed_t.rows(),
-            qk_norm: g.tensors.contains_key("blk.0.attn_q_norm.weight"),
+            // Any layer: in Qwen3.5/3.8 layer 0 is a DeltaNet layer, without attention norms.
+            qk_norm: g.tensors.keys().any(|k| k.starts_with("blk.") && k.ends_with(".attn_q_norm.weight")),
             n_expert: g.u64(&k("expert_count")).unwrap_or(0) as usize,
             n_used: g.u64(&k("expert_used_count")).unwrap_or(0) as usize,
             expert_ffn: g.u64(&k("expert_feed_forward_length")).unwrap_or(0) as usize,
@@ -643,6 +644,21 @@ fn rmsnorm_inplace(x: &mut [f32], w: &[f32], eps: f32) {
 }
 
 /// NeoX RoPE with the position's (cos, sin) table, computed once per token for every head and layer.
+/// The file ranges of one layer's weight matrices.
+fn layer_ranges(l: &Layer) -> Vec<(usize, usize)> {
+    let r = |m: &Mat| (m.offset, m.rows * m.row_bytes);
+    let mut v: Vec<(usize, usize)> = match &l.delta {
+        Some(d) => [&d.qkv, &d.z, &d.alpha, &d.beta, &d.out].into_iter().map(r).collect(),
+        None => [&l.q, &l.k, &l.v, &l.o].into_iter().map(r).collect(),
+    };
+    match &l.ffn {
+        Ffn::Dense { gate, up, down } => v.extend([gate, up, down].into_iter().map(r)),
+        Ffn::Moe(e) => v.extend([&e.gate, &e.up, &e.down].into_iter().map(r)),
+    }
+    v.retain(|x| x.1 > 0);
+    v
+}
+
 fn rope(x: &mut [f32], cs: &[(f32, f32)]) {
     let half = cs.len();
     for (i, &(c, s)) in cs.iter().enumerate() {
@@ -812,6 +828,10 @@ impl Session {
         if m.cfg.ssm.is_some() && common < self.tokens.len() {
             common = 0;
             self.reset_recurrent();
+            #[cfg(feature = "cuda")]
+            if let Some(g) = self.gpu.as_mut() {
+                g.reset_recurrent()?;
+            }
         }
         self.tokens.truncate(common);
         let t0 = Instant::now();
@@ -819,10 +839,22 @@ impl Session {
         if let Some(from) = self.gpu.as_ref().filter(|g| g.is_split()).map(|g| g.gpu_layers()) {
             // Split: each chunk through the GPU's layers, then the same chunk through the CPU's.
             let mut xs = Vec::new();
+            // The CPU's batched path covers plain dense layers; hybrids go token by token.
+            let batched = m.cfg.ssm.is_none() && !m.cfg.attn_gate;
+            let dim = m.cfg.dim;
             for c in prompt[common..].chunks(crate::gpu::GpuState::SPLIT_CHUNK) {
                 let pos = self.tokens.len();
                 self.gpu.as_mut().expect("gpu").prefill_split(m, c, pos, &mut xs)?;
-                self.step_batch_from(m, c, Some(std::mem::take(&mut xs)), from);
+                if batched {
+                    self.step_batch_from(m, c, Some(std::mem::take(&mut xs)), from);
+                } else {
+                    for (i, &tok) in c.iter().enumerate() {
+                        self.x.copy_from_slice(&xs[i * dim..(i + 1) * dim]);
+                        self.layers_from(m, from, pos + i);
+                        self.tokens.push(tok);
+                    }
+                    self.head(m);
+                }
             }
             self.stats = Stats { prompt_tokens: prompt.len(), reused_tokens: common, prefill_ms: t0.elapsed().as_secs_f64() * 1000.0, ..Default::default() };
             return Ok(common);
@@ -866,6 +898,21 @@ impl Session {
             return Err(Error::Unsupported("no layers on the graphics card (chosen when loading)".into()));
         }
         let g = crate::gpu::GpuState::load_with(m, max_ctx, force_layers)?;
+        if g.is_split() && crate::switches::enabled(crate::switches::PREFAULT) {
+            // The CPU's share is read into RAM now (as a CPU session does at start), not by page
+            // faults during the first prompt; as much as available RAM holds.
+            let mut ranges: Vec<(usize, usize)> = m.layers[g.gpu_layers()..].iter().flat_map(layer_ranges).collect();
+            ranges.push((m.output.offset, m.output.rows * m.output.row_bytes));
+            ranges.push((m.embed.offset, m.embed.rows * m.embed.row_bytes));
+            let mut room = (crate::gguf::available_ram() as f64 * 0.9) as usize;
+            ranges.retain_mut(|r| {
+                let keep = r.1.min(room);
+                room -= keep;
+                r.1 = keep;
+                keep > 0
+            });
+            m.gguf().touch(&ranges);
+        }
         // A split model keeps the KV cache of the CPU's layers here; a whole-GPU model keeps none.
         let mut s = Self::empty_from(m, max_ctx, g.gpu_layers());
         s.max_ctx = max_ctx;
@@ -1034,13 +1081,30 @@ impl Session {
 
     /// Layers `from`.. for the token at `pos`, on the activation in `self.x`.
     fn layers_from(&mut self, m: &Model, from: usize, pos: usize) {
+        self.layers_range(m, from, m.cfg.n_layer, pos);
+    }
+
+    /// Checking aid: the residual stream after the first `upto` layers for every prompt token, on
+    /// the CPU (a fresh session). Compared against the GPU's in the split tests.
+    pub fn residual_after(&mut self, m: &Model, prompt: &[u32], upto: usize) -> Vec<f32> {
+        let mut out = Vec::with_capacity(prompt.len() * m.cfg.dim);
+        for (i, &tok) in prompt.iter().enumerate() {
+            m.embed_row(tok, &mut self.x);
+            self.layers_range(m, 0, upto, i);
+            out.extend_from_slice(&self.x);
+            self.tokens.push(tok);
+        }
+        out
+    }
+
+    fn layers_range(&mut self, m: &Model, from: usize, to: usize, pos: usize) {
         let c = &m.cfg;
         let hd = c.head_dim;
         let kvd = c.n_kv * hd;
         let group = c.n_head / c.n_kv;
         let scale = 1.0 / (hd as f32).sqrt();
         let cs: Vec<(f32, f32)> = m.inv_freq.iter().map(|f| (pos as f32 * f).sin_cos()).map(|(s, c)| (c, s)).collect();
-        for (li, l) in m.layers.iter().enumerate().skip(from) {
+        for (li, l) in m.layers.iter().enumerate().take(to).skip(from) {
             rmsnorm(&self.x, &l.attn_norm, c.eps, &mut self.h);
             self.qa_dim.quantize(&self.h);
             if let Some(d) = &l.delta {

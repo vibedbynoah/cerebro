@@ -69,12 +69,32 @@ struct GLayer {
     down: Option<GMat>,
     /// MoE router weights (n_expert x dim, f32).
     router: Option<CudaSlice<f32>>,
-    /// f16 KV cache, max_ctx positions.
+    /// f16 KV cache, max_ctx positions (one element for DeltaNet layers, which keep a state instead).
     kc: CudaSlice<u16>,
     vc: CudaSlice<u16>,
+    /// Gated DeltaNet layer (Qwen3.5/3.8): then `qkv` is the fused [q|k|v | z | alpha | beta]
+    /// projection and `o` the output projection.
+    delta: Option<GDelta>,
+}
+
+/// A Gated DeltaNet layer's small tensors and recurrent state on the GPU.
+struct GDelta {
+    a: CudaSlice<f32>,
+    dt_bias: CudaSlice<f32>,
+    conv: CudaSlice<f32>,
+    norm: CudaSlice<f32>,
+    /// The last kc-1 convolution inputs per channel, and the nv x dk x dv state.
+    hist: CudaSlice<f32>,
+    state: CudaSlice<f32>,
 }
 
 struct Funcs {
+    delta_conv: CudaFunction,
+    delta_l2: CudaFunction,
+    delta_rule: CudaFunction,
+    delta_gnorm: CudaFunction,
+    unpack_qgate: CudaFunction,
+    gate_mul: CudaFunction,
     matvec: CudaFunction,
     rmsnorm_quant: CudaFunction,
     quant: CudaFunction,
@@ -296,6 +316,30 @@ struct Batch {
     xd: CudaSlice<f32>,
     toks: CudaSlice<i32>,
     pos0: CudaSlice<i32>,
+    /// Gated attention: the projection's [q|gate] rows before they are split, and the gates.
+    qg: CudaSlice<f32>,
+    gate: CudaSlice<f32>,
+}
+
+/// Gated DeltaNet sizes: key heads, key/value head size, value heads, convolution taps.
+#[derive(Clone, Copy)]
+struct DeltaShape {
+    nk: usize,
+    dk: usize,
+    nv: usize,
+    dv: usize,
+    kc: usize,
+}
+
+impl DeltaShape {
+    /// Channels through the convolution (q, k and v).
+    fn ch(&self) -> usize {
+        2 * self.nk * self.dk + self.nv * self.dv
+    }
+    /// Width of the fused projection's output: q|k|v, z, alpha, beta.
+    fn row(&self) -> usize {
+        self.ch() + self.nv * self.dv + 2 * self.nv
+    }
 }
 
 struct Shape {
@@ -307,7 +351,11 @@ struct Shape {
     vocab: usize,
     eps: f32,
     base: f32,
-    qk_norm: bool,
+    /// Dimensions RoPE rotates (Qwen3.8: 64 of 256).
+    rd: usize,
+    /// Attention heads carry an output gate (Qwen3.8).
+    gate: bool,
+    delta: Option<DeltaShape>,
 }
 
 /// The model's weights, KV cache and scratch on one GPU, plus the captured decode graph.
@@ -329,6 +377,9 @@ pub struct GpuState {
     gu: CudaSlice<f32>,
     xq: CudaSlice<i8>,
     xd: CudaSlice<f32>,
+    /// Gated attention (decode): the [q|gate] projection and the gates.
+    qg: CudaSlice<f32>,
+    gate: CudaSlice<f32>,
     logits: CudaSlice<f32>,
     tok: CudaSlice<i32>,
     pos: CudaSlice<i32>,
@@ -346,6 +397,8 @@ pub struct GpuState {
     pub vram_bytes: usize,
     /// Where the weights went and why (also shown to the user).
     pub plan: crate::placement::Plan,
+    /// Checking aid: batched prefill stops after this many layers (None: all of them).
+    pub debug_stop: Option<usize>,
     /// Split models: the activation after the last GPU layer, copied for the CPU.
     host_x: Option<PinnedHostSlice<f32>>,
 }
@@ -420,6 +473,12 @@ impl GpuState {
             (None, None)
         };
         let f = Funcs {
+            delta_conv: lf("delta_conv")?,
+            delta_l2: lf("delta_l2")?,
+            delta_rule: lf("delta_rule")?,
+            delta_gnorm: lf("delta_gnorm")?,
+            unpack_qgate: lf("unpack_qgate")?,
+            gate_mul: lf("gate_mul")?,
             matmul_mma,
             attn_mma,
             matvec: lf("matvec_q8")?,
@@ -457,8 +516,13 @@ impl GpuState {
             f.attn_gqa = Some(lf(&format!("attn_decode_gqa_{}_{g}", c.head_dim))?);
         }
         // Qwen3.8 hybrids (Gated DeltaNet + gated attention) run on the CPU until their GPU kernels land.
-        if c.ssm.is_some() || c.attn_gate || c.rope_dim != c.head_dim {
-            return Err(Error::Unsupported("Gated DeltaNet hybrid layers on the GPU".into()));
+        if (c.ssm.is_some() || c.attn_gate) && c.n_expert > 0 {
+            return Err(Error::Unsupported("hybrid mixture-of-experts layers on the GPU".into()));
+        }
+        if let Some(ss) = c.ssm {
+            if ss.dv % 32 != 0 || ss.dk > 256 || ss.dk % 32 != 0 || ss.conv > 9 || ss.dv > 1024 {
+                return Err(Error::Unsupported("this DeltaNet layer size on the GPU".into()));
+            }
         }
         if c.head_dim > 256 || c.head_dim % 64 != 0 || c.dim > 8192 {
             return Err(Error::Unsupported(format!("head size {} / width {} on the GPU", c.head_dim, c.dim)));
@@ -497,18 +561,35 @@ impl GpuState {
                 Ffn::Dense { gate, up: upm, down } => (Some(up(&[gate, upm])?), Some(up(&[down])?), None),
                 Ffn::Moe(m) => (None, None, Some(stream.clone_htod(&m.router).map_err(gerr)?)),
             };
+            let (qkv, o, delta) = match (&l.delta, c.ssm) {
+                (Some(d), Some(ss)) => (
+                    up(&[&d.qkv, &d.z, &d.alpha, &d.beta])?,
+                    up(&[&d.out])?,
+                    Some(GDelta {
+                        a: stream.clone_htod(&d.a).map_err(gerr)?,
+                        dt_bias: stream.clone_htod(&d.dt_bias).map_err(gerr)?,
+                        conv: stream.clone_htod(&d.conv).map_err(gerr)?,
+                        norm: stream.clone_htod(&d.norm).map_err(gerr)?,
+                        hist: stream.alloc_zeros::<f32>(((ss.conv - 1) * ss.channels()).max(1)).map_err(gerr)?,
+                        state: stream.alloc_zeros::<f32>(ss.nv * ss.dk * ss.dv).map_err(gerr)?,
+                    }),
+                ),
+                _ => (up(&[&l.q, &l.k, &l.v])?, up(&[&l.o])?, None),
+            };
+            let attn = delta.is_none();
             layers.push(GLayer {
                 attn_norm: stream.clone_htod(&l.attn_norm).map_err(gerr)?,
-                qkv: up(&[&l.q, &l.k, &l.v])?,
-                o: up(&[&l.o])?,
+                qkv,
+                o,
+                delta,
                 q_norm: l.q_norm.as_deref().map(|v| stream.clone_htod(v)).transpose().map_err(gerr)?,
                 k_norm: l.k_norm.as_deref().map(|v| stream.clone_htod(v)).transpose().map_err(gerr)?,
                 ffn_norm: stream.clone_htod(&l.ffn_norm).map_err(gerr)?,
                 gu,
                 down,
                 router,
-                kc: stream.alloc_zeros::<u16>(max_ctx * kvd).map_err(gerr)?,
-                vc: stream.alloc_zeros::<u16>(max_ctx * kvd).map_err(gerr)?,
+                kc: stream.alloc_zeros::<u16>(if attn { max_ctx * kvd } else { 1 }).map_err(gerr)?,
+                vc: stream.alloc_zeros::<u16>(if attn { max_ctx * kvd } else { 1 }).map_err(gerr)?,
             });
         }
         let output = if split { None } else { Some(up(&[model.output_mat()])?) };
@@ -516,20 +597,31 @@ impl GpuState {
         // native layout the row is looked up on the CPU and uploaded (the table stays out of VRAM).
         let host_embed = native.then(|| vec![0f32; c.dim]);
         let embed = if model.tied() || native { None } else { Some(up(&[model.embed_mat()])?) };
-        vram += n_gpu * 2 * max_ctx * kvd * 2;
-        let z = |n: usize| stream.alloc_zeros::<f32>(n).map_err(gerr);
+        let attn_layers = model.layers()[..n_gpu].iter().filter(|l| l.delta.is_none()).count();
+        vram += attn_layers * 2 * max_ctx * kvd * 2;
+        let dsh = c.ssm.map(|ss| DeltaShape { nk: ss.nk, dk: ss.dk, nv: ss.nv, dv: ss.dv, kc: ss.conv });
+        if let Some(d) = dsh {
+            vram += (n_gpu - attn_layers) * (d.nv * d.dk * d.dv + (d.kc - 1) * d.ch()) * 4;
+        }
+        let z = |n: usize| stream.alloc_zeros::<f32>(n.max(1)).map_err(gerr);
         let qd = c.n_head * c.head_dim;
-        let widest = c.dim.max(c.ffn).max(qd);
+        let dout = dsh.map_or(0, |d| d.nv * d.dv);
+        let widest = c.dim.max(c.ffn).max(qd).max(dout);
+        let qkv_w = (qd + 2 * kvd).max(dsh.map_or(0, |d| d.row()));
+        let qg_w = if c.attn_gate { 2 * qd + 2 * kvd } else { 0 };
         let splits = max_ctx.div_ceil(SPLIT);
         // About eight blocks per SM for the grouped decode kernel; it sizes each split from the live
         // position, so short contexts leave most splits empty and long ones keep every SM busy.
         let sms = ctx.attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT).unwrap_or(40).max(1) as usize;
         let gqa_splits = (8 * sms).div_ceil(c.n_kv.max(1)).clamp(1, 128);
         let row = qd + 2 * kvd;
+        let _ = row;
         let b = Batch {
+            qg: z(CHUNK * qg_w)?,
+            gate: z(if c.attn_gate { CHUNK * qd } else { 0 })?,
             x: z(CHUNK * c.dim)?,
-            qkv: z(CHUNK * row)?,
-            att: z(CHUNK * qd)?,
+            qkv: z(CHUNK * qkv_w)?,
+            att: z(CHUNK * qd.max(dout))?,
             gu: z(CHUNK * 2 * c.ffn)?,
             xq: stream.alloc_zeros::<i8>(CHUNK * widest).map_err(gerr)?,
             xd: z(CHUNK * widest / 32)?,
@@ -541,8 +633,17 @@ impl GpuState {
         {
             let rel = |m: &Mat| g.release(m.offset, m.rows * m.row_bytes);
             for l in &model.layers()[..n_gpu] {
-                for m in [&l.q, &l.k, &l.v, &l.o] {
-                    rel(m);
+                match &l.delta {
+                    Some(d) => {
+                        for m in [&d.qkv, &d.z, &d.alpha, &d.beta, &d.out] {
+                            rel(m);
+                        }
+                    }
+                    None => {
+                        for m in [&l.q, &l.k, &l.v, &l.o] {
+                            rel(m);
+                        }
+                    }
                 }
                 if let Ffn::Dense { gate, up, down } = &l.ffn {
                     for m in [gate, up, down] {
@@ -564,7 +665,7 @@ impl GpuState {
         if let Some(m) = &moe {
             vram += m.owner.len() * m.slot_bytes;
         }
-        let sh = Shape { dim: c.dim, ffn: c.ffn, n_head: c.n_head, n_kv: c.n_kv, hd: c.head_dim, vocab: c.vocab, eps: c.eps, base: c.rope_base, qk_norm: c.qk_norm };
+        let sh = Shape { dim: c.dim, ffn: c.ffn, n_head: c.n_head, n_kv: c.n_kv, hd: c.head_dim, vocab: c.vocab, eps: c.eps, base: c.rope_base, rd: c.rope_dim, gate: c.attn_gate, delta: dsh };
         let ctx_pin = ctx.clone();
         Ok(Self {
             out_norm: stream.clone_htod(model.out_norm()).map_err(gerr)?,
@@ -572,11 +673,13 @@ impl GpuState {
             embed,
             host_embed,
             x: z(c.dim)?,
-            qkv: z(qd + 2 * kvd)?,
-            att: z(qd)?,
+            qkv: z(qkv_w)?,
+            att: z(qd.max(dout))?,
             gu: z(2 * c.ffn)?,
             xq: stream.alloc_zeros::<i8>(widest).map_err(gerr)?,
             xd: z(widest / 32)?,
+            qg: z(qg_w)?,
+            gate: z(if c.attn_gate { qd } else { 0 })?,
             logits: z(c.vocab)?,
             tok: stream.alloc_zeros::<i32>(1).map_err(gerr)?,
             pos: stream.alloc_zeros::<i32>(1).map_err(gerr)?,
@@ -597,9 +700,55 @@ impl GpuState {
             max_ctx,
             vram_bytes: vram,
             plan,
+            debug_stop: None,
             // SAFETY: a plain host buffer, read only after the stream is synchronized.
             host_x: if split { Some(unsafe { ctx_pin.alloc_pinned::<f32>(c.dim) }.map_err(gerr)?) } else { None },
         })
+    }
+
+    /// A DeltaNet layer after its fused projection (rows of `ld` floats in `row`, T tokens): the
+    /// convolution, q/k normalisation, the delta rule and the gated norm, into `out` (T x nv*dv).
+    fn delta_core(s: &CudaStream, f: &Funcs, sh: &Shape, dl: &mut GDelta, row: &mut CudaSlice<f32>, out: &mut CudaSlice<f32>, t: usize) -> Result<(), Error> {
+        let d = sh.delta.expect("delta shape");
+        let (ld, ch, nk, dk, nv, dv, kc, ti) = (d.row() as i32, d.ch() as i32, d.nk as i32, d.dk as i32, d.nv as i32, d.dv as i32, d.kc as i32, t as i32);
+        let conv_cfg = LaunchConfig { grid_dim: ((d.ch() as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+        unsafe { s.launch_builder(&f.delta_conv).arg(&mut *row).arg(&ld).arg(&dl.conv).arg(&mut dl.hist).arg(&ch).arg(&kc).arg(&ti).launch(conv_cfg) }.map_err(gerr)?;
+        let qscale = 1.0f32 / (d.dk as f32).sqrt();
+        let l2_cfg = LaunchConfig { grid_dim: (2 * d.nk as u32, t as u32, 1), block_dim: (d.dk as u32, 1, 1), shared_mem_bytes: 0 };
+        unsafe { s.launch_builder(&f.delta_l2).arg(&mut *row).arg(&ld).arg(&nk).arg(&dk).arg(&qscale).launch(l2_cfg) }.map_err(gerr)?;
+        let ldo = (d.nv * d.dv) as i32;
+        let rule_cfg = LaunchConfig { grid_dim: (d.nv as u32, (d.dv / 32) as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: ((d.dk + 4) * 32 * 4) as u32 };
+        unsafe { s.launch_builder(&f.delta_rule).arg(&*row).arg(&ld).arg(&ch).arg(&nk).arg(&dk).arg(&nv).arg(&dv).arg(&dl.a).arg(&dl.dt_bias).arg(&mut dl.state).arg(&mut *out).arg(&ldo).arg(&ti).launch(rule_cfg) }.map_err(gerr)?;
+        let zoff = ch;
+        let gn_cfg = LaunchConfig { grid_dim: (d.nv as u32, t as u32, 1), block_dim: (d.dv as u32, 1, 1), shared_mem_bytes: 0 };
+        unsafe { s.launch_builder(&f.delta_gnorm).arg(&mut *out).arg(&ldo).arg(&*row).arg(&ld).arg(&zoff).arg(&dl.norm).arg(&dv).arg(&sh.eps).launch(gn_cfg) }.map_err(gerr)?;
+        Ok(())
+    }
+
+    /// Gated attention: the [q|gate] projection rows (`src`) into [q|k|v] rows and the gates.
+    fn unpack_gate(s: &CudaStream, f: &Funcs, sh: &Shape, src: &CudaSlice<f32>, qkv: &mut CudaSlice<f32>, gate: &mut CudaSlice<f32>, t: usize) -> Result<(), Error> {
+        let (nh, nkv, hd) = (sh.n_head as i32, sh.n_kv as i32, sh.hd as i32);
+        let cfg = LaunchConfig { grid_dim: ((sh.n_head + 2 * sh.n_kv) as u32, t as u32, 1), block_dim: (sh.hd as u32, 1, 1), shared_mem_bytes: 0 };
+        unsafe { s.launch_builder(&f.unpack_qgate).arg(src).arg(qkv).arg(gate).arg(&nh).arg(&nkv).arg(&hd).launch(cfg) }.map_err(gerr)?;
+        Ok(())
+    }
+
+    fn apply_gate(s: &CudaStream, f: &Funcs, att: &mut CudaSlice<f32>, gate: &CudaSlice<f32>, n: usize) -> Result<(), Error> {
+        let ni = n as i32;
+        let cfg = LaunchConfig { grid_dim: ((n as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+        unsafe { s.launch_builder(&f.gate_mul).arg(att).arg(gate).arg(&ni).launch(cfg) }.map_err(gerr)?;
+        Ok(())
+    }
+
+    /// Clears every DeltaNet state (a new sequence).
+    pub fn reset_recurrent(&mut self) -> Result<(), Error> {
+        for l in &mut self.layers {
+            if let Some(d) = l.delta.as_mut() {
+                self.stream.memset_zeros(&mut d.hist).map_err(gerr)?;
+                self.stream.memset_zeros(&mut d.state).map_err(gerr)?;
+            }
+        }
+        Ok(())
     }
 
     /// The layers the GPU runs (all of them unless split).
@@ -622,7 +771,8 @@ pub fn plan_for(model: &Model, max_ctx: usize, vram_free: u64, force_layers: Opt
         use crate::placement::{drive_of, plan_dense, plan_moe, LayerCost, Machine, ModelCost};
         let c = &model.cfg;
         let (_, ram) = crate::hw::memory();
-        let gpu_kernels = c.ssm.is_none() && !c.attn_gate && c.rope_dim == c.head_dim && c.head_dim <= 256 && c.head_dim % 64 == 0 && c.dim <= 8192;
+        let hybrid = c.ssm.is_some() || c.attn_gate;
+        let gpu_kernels = !(hybrid && c.n_expert > 0) && c.head_dim <= 256 && c.head_dim % 64 == 0 && c.dim <= 8192;
         let mach = Machine::new(if gpu_kernels { vram_free } else { 0 }, ram, drive_of(&model.path));
         let kvd = (c.n_kv * c.head_dim) as u64;
         let native_bytes = |m: &Mat| -> Option<u64> {
@@ -663,13 +813,18 @@ pub fn plan_for(model: &Model, max_ctx: usize, vram_free: u64, force_layers: Opt
         let mut layers = Vec::with_capacity(c.n_layer);
         for l in model.layers() {
             let Ffn::Dense { gate, up, down } = &l.ffn else { return Err(Error::Unsupported("mixed dense and expert layers".into())) };
-            let mats = [&l.q, &l.k, &l.v, &l.o, gate, up, down];
+            let mats: Vec<&Mat> = match &l.delta {
+                Some(d) => vec![&d.qkv, &d.z, &d.alpha, &d.beta, &d.out, gate, up, down],
+                None => vec![&l.q, &l.k, &l.v, &l.o, gate, up, down],
+            };
+            let attn = l.delta.is_none();
+            let state = c.ssm.map_or(0, |ss| if attn { 0 } else { (ss.nv * ss.dk * ss.dv + (ss.conv - 1) * ss.channels()) as u64 * 4 });
             let nat: Option<u64> = mats.iter().map(|m| native_bytes(m)).sum();
             layers.push(LayerCost {
                 int8: mats.iter().map(|m| int8_bytes(m)).sum(),
                 native: nat.unwrap_or_else(|| mats.iter().map(|m| (m.rows * m.row_bytes) as u64).sum()),
-                kv_gpu: 2 * max_ctx as u64 * kvd * 2,
-                kv_cpu: 2 * max_ctx as u64 * kvd * 4,
+                kv_gpu: if attn { 2 * max_ctx as u64 * kvd * 2 } else { state },
+                kv_cpu: if attn { 2 * max_ctx as u64 * kvd * 4 } else { state },
                 native_ok: nat.is_some(),
             });
         }
@@ -935,12 +1090,24 @@ impl GpuState {
             let (qs, ds, _, _) = self.embed.as_ref().or(self.output.as_ref()).expect("embedding table").q8();
             unsafe { s.launch_builder(&f.embed).arg(qs).arg(ds).arg(&self.tok).arg(&mut self.x).arg(&dim).launch(blocks(sh.dim)) }.map_err(gerr)?;
         }
-        let has_norm = sh.qk_norm as i32;
         let group = (sh.n_head / sh.n_kv) as i32;
         let scale = 1.0f32 / (sh.hd as f32).sqrt();
         for (li, l) in self.layers.iter_mut().enumerate() {
             unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&l.attn_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
-            Self::matvec(s, f, &l.qkv, &self.xq, &self.xd, &mut self.qkv, false)?;
+            if let Some(dl) = l.delta.as_mut() {
+                // Gated DeltaNet: fused projection, the recurrent core, output projection.
+                Self::matvec(s, f, &l.qkv, &self.xq, &self.xd, &mut self.qkv, false)?;
+                Self::delta_core(s, f, sh, dl, &mut self.qkv, &mut self.att, 1)?;
+                let n = sh.delta.map_or(0, |d| d.nv * d.dv) as i32;
+                unsafe { s.launch_builder(&f.quant).arg(&self.att).arg(&mut self.xq).arg(&mut self.xd).arg(&n).launch(blocks(n as usize)) }.map_err(gerr)?;
+                Self::matvec(s, f, &l.o, &self.xq, &self.xd, &mut self.x, true)?;
+            } else {
+            if sh.gate {
+                Self::matvec(s, f, &l.qkv, &self.xq, &self.xd, &mut self.qg, false)?;
+                Self::unpack_gate(s, f, sh, &self.qg, &mut self.qkv, &mut self.gate, 1)?;
+            } else {
+                Self::matvec(s, f, &l.qkv, &self.xq, &self.xd, &mut self.qkv, false)?;
+            }
             {
                 let qn = l.q_norm.as_ref().unwrap_or(&l.attn_norm);
                 let kn = l.k_norm.as_ref().unwrap_or(&l.attn_norm);
@@ -950,7 +1117,7 @@ impl GpuState {
                         .arg(&mut self.qkv)
                         .arg(qn)
                         .arg(kn)
-                        .arg(&has_norm)
+                        .arg(&(l.q_norm.is_some() as i32))
                         .arg(&mut l.kc)
                         .arg(&mut l.vc)
                         .arg(&n_head)
@@ -959,6 +1126,7 @@ impl GpuState {
                         .arg(&self.pos)
                         .arg(&base)
                         .arg(&eps)
+                        .arg(&(sh.rd as i32))
                         .launch(cfg)
                 }
                 .map_err(gerr)?;
@@ -1009,8 +1177,12 @@ impl GpuState {
                 unsafe { s.launch_builder(&f.attn_combine).arg(&self.pm).arg(&self.pl).arg(&self.pacc).arg(&mut self.att).arg(&hd).arg(&splits).launch(cfg) }.map_err(gerr)?;
             }
             let qd = (sh.n_head * sh.hd) as i32;
+            if sh.gate {
+                Self::apply_gate(s, f, &mut self.att, &self.gate, sh.n_head * sh.hd)?;
+            }
             unsafe { s.launch_builder(&f.quant).arg(&self.att).arg(&mut self.xq).arg(&mut self.xd).arg(&qd).launch(blocks(sh.n_head * sh.hd)) }.map_err(gerr)?;
             Self::matvec(s, f, &l.o, &self.xq, &self.xd, &mut self.x, true)?;
+            }
             if let (Some(gu), Some(down)) = (&l.gu, &l.down) {
                 unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&l.ffn_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
                 Self::matvec(s, f, gu, &self.xq, &self.xd, &mut self.gu, false)?;
@@ -1166,6 +1338,14 @@ impl GpuState {
         Ok(())
     }
 
+    /// Checking aid: the batched residual stream of the last prefill chunk (tokens x width).
+    pub fn debug_batch_x(&self, t: usize) -> Result<Vec<f32>, Error> {
+        let n = t * self.sh.dim;
+        let mut v = vec![0f32; n];
+        self.stream.memcpy_dtoh(&self.b.x.slice(0..n), v.as_mut_slice()).map_err(gerr)?;
+        Ok(v)
+    }
+
     /// Tokens per split prefill chunk.
     pub const SPLIT_CHUNK: usize = CHUNK;
 
@@ -1218,7 +1398,6 @@ impl GpuState {
         let (n_head, n_kv) = (sh.n_head as i32, sh.n_kv as i32);
         let (eps, base) = (sh.eps, sh.base);
         let ti = t as i32;
-        let has_norm = sh.qk_norm as i32;
         let null_f: u64 = 0;
         let null_i: u64 = 0;
         let b = &mut self.b;
@@ -1268,7 +1447,7 @@ impl GpuState {
                         .arg(&mut b.qkv)
                         .arg(qn)
                         .arg(kn)
-                        .arg(&has_norm)
+                        .arg(&(l.q_norm.is_some() as i32))
                         .arg(&mut l.kc)
                         .arg(&mut l.vc)
                         .arg(&n_head)
@@ -1277,6 +1456,7 @@ impl GpuState {
                         .arg(&b.pos0)
                         .arg(&base)
                         .arg(&eps)
+                        .arg(&(sh.rd as i32))
                         .launch(cfg)
                 }
                 .map_err(gerr)?;
@@ -1455,7 +1635,6 @@ impl GpuState {
         let (n_head, n_kv) = (sh.n_head as i32, sh.n_kv as i32);
         let (eps, base) = (sh.eps, sh.base);
         let ti = t as i32;
-        let has_norm = sh.qk_norm as i32;
         let rows_cfg = |rows: usize| LaunchConfig { grid_dim: ((rows as u32).div_ceil(8), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
         let b = &mut self.b;
         if self.host_embed.is_some() {
@@ -1498,9 +1677,22 @@ impl GpuState {
             }
             Ok(())
         };
-        for l in &mut self.layers {
+        let stop = self.debug_stop.unwrap_or(usize::MAX);
+        for l in self.layers.iter_mut().take(stop) {
             unsafe { s.launch_builder(&f.norm_b).arg(&b.x).arg(&l.attn_norm).arg(&mut b.xq).arg(&mut b.xd).arg(&dim).arg(&eps).arg(&null_f).launch(norm_cfg) }.map_err(gerr)?;
-            mm(&l.qkv, &b.xq, &b.xd, &mut b.qkv, false)?;
+            if let Some(dl) = l.delta.as_mut() {
+                mm(&l.qkv, &b.xq, &b.xd, &mut b.qkv, false)?;
+                Self::delta_core(s, f, sh, dl, &mut b.qkv, &mut b.att, t)?;
+                let n = (t * sh.delta.map_or(0, |d| d.nv * d.dv)) as i32;
+                unsafe { s.launch_builder(&f.quant).arg(&b.att).arg(&mut b.xq).arg(&mut b.xd).arg(&n).launch(LaunchConfig { grid_dim: ((n as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
+                mm(&l.o, &b.xq, &b.xd, &mut b.x, true)?;
+            } else {
+            if sh.gate {
+                mm(&l.qkv, &b.xq, &b.xd, &mut b.qg, false)?;
+                Self::unpack_gate(s, f, sh, &b.qg, &mut b.qkv, &mut b.gate, t)?;
+            } else {
+                mm(&l.qkv, &b.xq, &b.xd, &mut b.qkv, false)?;
+            }
             {
                 let qn = l.q_norm.as_ref().unwrap_or(&l.attn_norm);
                 let kn = l.k_norm.as_ref().unwrap_or(&l.attn_norm);
@@ -1510,7 +1702,7 @@ impl GpuState {
                         .arg(&mut b.qkv)
                         .arg(qn)
                         .arg(kn)
-                        .arg(&has_norm)
+                        .arg(&(l.q_norm.is_some() as i32))
                         .arg(&mut l.kc)
                         .arg(&mut l.vc)
                         .arg(&n_head)
@@ -1519,6 +1711,7 @@ impl GpuState {
                         .arg(&b.pos0)
                         .arg(&base)
                         .arg(&eps)
+                        .arg(&(sh.rd as i32))
                         .launch(cfg)
                 }
                 .map_err(gerr)?;
@@ -1527,8 +1720,12 @@ impl GpuState {
                 Self::attn_batch(s, f, sh, &b.qkv, &l.kc, &l.vc, &mut b.att, &b.pos0, t)?;
             }
             let qn_total = (t * sh.n_head * sh.hd) as i32;
+            if sh.gate {
+                Self::apply_gate(s, f, &mut b.att, &b.gate, t * sh.n_head * sh.hd)?;
+            }
             unsafe { s.launch_builder(&f.quant).arg(&b.att).arg(&mut b.xq).arg(&mut b.xd).arg(&qn_total).launch(LaunchConfig { grid_dim: ((qn_total as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
             mm(&l.o, &b.xq, &b.xd, &mut b.x, true)?;
+            }
             unsafe { s.launch_builder(&f.norm_b).arg(&b.x).arg(&l.ffn_norm).arg(&mut b.xq).arg(&mut b.xd).arg(&dim).arg(&eps).arg(&null_f).launch(norm_cfg) }.map_err(gerr)?;
             mm(l.gu.as_ref().expect("dense layer"), &b.xq, &b.xd, &mut b.gu, false)?;
             let n = (t * sh.ffn) as u32;
