@@ -88,7 +88,7 @@ export function MachineTune(props: { onTuned?: () => void }): JSX.Element {
         </Show>
         <Show when={stopped()}>
           <p class="machine-tune__status" role="status">
-            Tuning was stopped. Settings finished before the stop are kept.
+            Tuning was stopped. Your settings are unchanged.
           </p>
         </Show>
         <Show when={problem()}>
@@ -102,10 +102,13 @@ export function MachineTune(props: { onTuned?: () => void }): JSX.Element {
               <p class="machine-tune__note" data-testid="machine-tune-note">
                 {o().note}
               </p>
-              <p class="machine-tune__speed mono">{speedLine(o())}</p>
-              <p class="machine-tune__settings">
-                {o().kept ? "Kept settings" : "Your settings"}: {settingsInWords(o().settings)}
-              </p>
+              {/* No trials: nothing on the processor to tune (the whole model is on the GPU). */}
+              <Show when={o().trials.length > 0}>
+                <p class="machine-tune__speed mono">{speedLine(o())}</p>
+                <p class="machine-tune__settings">
+                  {o().kept ? "Kept settings" : "Your settings"}: {settingsInWords(o().settings)}
+                </p>
+              </Show>
               <p class="machine-tune__machine">{o().machine}</p>
               <p class="machine-tune__took">Took {formatSeconds(o().seconds)}.</p>
             </div>
