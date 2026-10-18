@@ -168,6 +168,98 @@ fn main(@builtin(workgroup_id) g: vec3<u32>, @builtin(local_invocation_id) l: ve
 }
 "#;
 
+/// The product straight from the file's Q4_K blocks (256 weights in 144 bytes: f16 d and dmin,
+/// twelve bytes of 6-bit scales and mins, 128 bytes of nibbles), one row per workgroup of 64
+/// threads. A thread takes 8 bytes of nibbles: 8 weights of sub-block 2j and 8 of 2j+1. Half the
+/// memory of the int8 layout, so a Q4_K_M model fits a card the int8 copy would not.
+const MATVEC_Q4K: &str = r#"
+struct P { rows: u32, cols: u32, add: u32, off: u32, out_stride: u32, in_stride: u32, fixed: u32, _a: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(2) var<storage, read> w: array<u32>;
+@group(0) @binding(4) var<storage, read> x: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> o: array<f32>;
+var<workgroup> red: array<f32, TB * 64u>;
+fn sb(bw: u32, k: u32) -> u32 { return (w[bw + 1u + k / 4u] >> (8u * (k % 4u))) & 0xFFu; }
+fn lo(q: u32) -> vec4<f32> { return vec4<f32>(f32(q & 15u), f32((q >> 8u) & 15u), f32((q >> 16u) & 15u), f32((q >> 24u) & 15u)); }
+fn hi(q: u32) -> vec4<f32> { return vec4<f32>(f32((q >> 4u) & 15u), f32((q >> 12u) & 15u), f32((q >> 20u) & 15u), f32((q >> 28u) & 15u)); }
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) g: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
+    let r = g.x + g.y * 65535u;
+    let valid = r < p.rows;
+    var nt = st.n;
+    if (p.fixed > 0u) { nt = p.fixed; }
+    let t0 = g.z * TB;
+    var acc: array<f32, TB>;
+    if (valid) {
+        let nb = p.cols / 256u;
+        let rw = r * nb * 36u;
+        let xs = p.in_stride / 4u;
+        let one = vec4<f32>(1.0, 1.0, 1.0, 1.0);
+        for (var u = l.x; u < nb * 16u; u += 64u) {
+            let b = u / 16u;
+            let j = (u % 16u) / 4u;
+            let qq = u % 4u;
+            let bw = rw + b * 36u;
+            let dd = unpack2x16float(w[bw]);
+            let is = 2u * j;
+            var sc1 = 0u;
+            var m1 = 0u;
+            var sc2 = 0u;
+            var m2 = 0u;
+            if (j < 2u) {
+                sc1 = sb(bw, is) & 63u;
+                m1 = sb(bw, is + 4u) & 63u;
+                sc2 = sb(bw, is + 1u) & 63u;
+                m2 = sb(bw, is + 5u) & 63u;
+            } else {
+                sc1 = (sb(bw, is + 4u) & 15u) | ((sb(bw, is - 4u) >> 6u) << 4u);
+                m1 = (sb(bw, is + 4u) >> 4u) | ((sb(bw, is) >> 6u) << 4u);
+                sc2 = (sb(bw, is + 5u) & 15u) | ((sb(bw, is - 3u) >> 6u) << 4u);
+                m2 = (sb(bw, is + 5u) >> 4u) | ((sb(bw, is + 1u) >> 6u) << 4u);
+            }
+            let d1 = dd.x * f32(sc1);
+            let n1 = dd.y * f32(m1);
+            let d2 = dd.x * f32(sc2);
+            let n2 = dd.y * f32(m2);
+            let q0 = w[bw + 4u + j * 8u + qq * 2u];
+            let q1 = w[bw + 5u + j * 8u + qq * 2u];
+            let l0 = lo(q0);
+            let l1 = lo(q1);
+            let h0 = hi(q0);
+            let h1 = hi(q1);
+            let xl = (b * 256u + j * 64u + qq * 8u) / 4u;
+            for (var t = 0u; t < TB; t++) {
+                if (t0 + t < nt) {
+                    let xb = (t0 + t) * xs + xl;
+                    let a0 = x[xb];
+                    let a1 = x[xb + 1u];
+                    let c0 = x[xb + 8u];
+                    let c1 = x[xb + 9u];
+                    acc[t] += d1 * (dot(l0, a0) + dot(l1, a1)) - n1 * (dot(a0, one) + dot(a1, one)) + d2 * (dot(h0, c0) + dot(h1, c1)) - n2 * (dot(c0, one) + dot(c1, one));
+                }
+            }
+        }
+    }
+    for (var t = 0u; t < TB; t++) { red[t * 64u + l.x] = acc[t]; }
+    workgroupBarrier();
+    for (var k = 32u; k > 0u; k >>= 1u) {
+        if (l.x < k) {
+            for (var t = 0u; t < TB; t++) { red[t * 64u + l.x] += red[t * 64u + l.x + k]; }
+        }
+        workgroupBarrier();
+    }
+    if (valid && l.x == 0u) {
+        for (var t = 0u; t < TB; t++) {
+            if (t0 + t < nt) {
+                let oi = (t0 + t) * p.out_stride + p.off + r;
+                let v = red[t * 64u];
+                if (p.add == 1u) { o[oi] += v; } else { o[oi] = v; }
+            }
+        }
+    }
+}
+"#;
+
 /// Per (head, token): optional RMS norm, RoPE on the first rd values, then K and V (f16) into the
 /// cache at the token's position. Heads 0..n_head are queries, the rest KV heads.
 const QK_POST: &str = r#"
@@ -561,6 +653,10 @@ fn pick_adapter(inst: &wgpu::Instance) -> Result<wgpu::Adapter, Error> {
     })
 }
 
+fn no_room() -> Error {
+    Error::Unsupported("the model does not fit in this graphics card's memory (the portable backend needs the whole model on the card)".into())
+}
+
 fn perr(e: impl std::fmt::Display) -> Error {
     Error::Unsupported(format!("portable GPU: {e}"))
 }
@@ -572,17 +668,22 @@ struct GMat {
 }
 
 impl GMat {
-    /// Bytes on the GPU: one per weight plus a 4-byte scale per 32.
+    /// Bytes on the GPU.
     fn size(&self) -> u64 {
-        self.parts.iter().map(|p| (p.rows * self.cols * 9 / 8) as u64).sum()
+        self.parts.iter().map(|p| p.bytes).sum()
     }
 }
 
 struct Part {
     w: wgpu::Buffer,
+    /// int8 scales; a 16-byte placeholder for Q4_K parts (their scales are inside the blocks).
     s: wgpu::Buffer,
+    /// First row of this part in the stacked output.
     row0: usize,
     rows: usize,
+    /// The file's own Q4_K blocks rather than the int8 layout.
+    q4k: bool,
+    bytes: u64,
 }
 
 /// How a prepared dispatch is sized for a chunk of `nt` tokens.
@@ -596,7 +697,7 @@ enum Dims {
     Heads(u32),
     /// A matrix of `rows` rows: four per workgroup (x, then y past 65535); token groups in z.
     /// `fixed`: the head, always one token.
-    Rows { rows: u32, fixed: bool },
+    Rows { rows: u32, fixed: bool, q4k: bool },
     /// `n` values per token, 256 per workgroup.
     Elems(u32),
     /// Attention spans: `heads` in x, the chunk's spans (SPAN positions each) in y, tokens in z.
@@ -648,6 +749,9 @@ const P_SILU: usize = 4;
 const P_COMB: usize = 5;
 /// The one-workgroup-per-head attention (ATTENTION_HEAD), for GPUs where the split one is unsafe.
 const P_ATTN_HEAD: usize = 6;
+/// The Q4_K matrix kernel for one token and for TB tokens (P_MATVEC's layout).
+const P_Q4K: usize = 7;
+const P_Q4K8: usize = 8;
 /// Attention positions per workgroup (SPAN in the shader).
 const SPAN: usize = 256;
 /// Matrix kernel variants, all with P_MATVEC's layout: (label, family, threads, tokens per weight read).
@@ -660,7 +764,7 @@ const MV_VARIANTS: [(&str, &str, u32, usize); 6] = [
     ("1 row x 32 threads", "row", 32, 8),
 ];
 /// Pipelines from index MV0 on are the MV_VARIANTS, in order.
-const MV0: usize = 7;
+const MV0: usize = 9;
 const TB: usize = 8;
 /// A submission should take about this long: Windows resets a GPU driver whose work runs past two
 /// seconds, and an integrated GPU shares itself with the desktop, which must stay responsive.
@@ -761,43 +865,78 @@ impl PortableState {
         let f32s = |v: &[f32], label: &str| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: &v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>(), usage: storage });
         let uni = |words: &[u32]| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: &words.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>(), usage: wgpu::BufferUsages::UNIFORM });
 
-        // Stacks matrices of one width row-wise (q|k|v, gate|up) and uploads them in parts.
+        // Q4_K matrices stay in the file's blocks on a separate graphics card, where memory is what
+        // runs out: half the int8 copy, and as fast or faster (RTX 3070 Ti via Vulkan, Qwen3-0.6B
+        // Q4_K_M: 49.0 vs 45.9 tok/s). An integrated GPU uses system memory and is short of
+        // arithmetic, so it keeps int8 (Iris Xe: 24.2 native vs 33.8 tok/s int8).
+        // CEREBRO_PORTABLE_INT8=1 / =0 forces either.
+        let native = match std::env::var("CEREBRO_PORTABLE_INT8").ok().as_deref() {
+            Some("1") => false,
+            Some("0") => true,
+            _ => ai.device_type != wgpu::DeviceType::IntegratedGpu,
+        };
+        let is_q4k = |mm: &Mat| native && mm.dtype == crate::quant::DType::Q4K && mm.cols % 256 == 0;
+        let placeholder = device.create_buffer(&wgpu::BufferDescriptor { label: Some("no scales"), size: 16, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+        // Stacks matrices of one width row-wise (q|k|v, gate|up) and uploads them in parts that each
+        // fit one binding; neighbouring matrices of the same kind share parts.
         let upload = |mats: &[&Mat], label: &str| -> Result<GMat, Error> {
             let cols = mats[0].cols;
             if mats.iter().any(|x| x.cols != cols) {
                 return Err(Error::Format("stacked matrices differ in width".into()));
             }
-            let total: usize = mats.iter().map(|x| x.rows).sum();
-            // Parts hold a multiple of four rows (a workgroup's share) and fit one binding.
-            let per = ((max_bind / cols) & !3).clamp(4, total.next_multiple_of(4));
             let mut parts = Vec::new();
-            let mut row0 = 0;
-            while row0 < total {
-                let rows = per.min(total - row0);
-                let w = device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: (rows * cols) as u64, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: true });
-                let s = device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: (rows * cols / 32 * 4) as u64, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: true });
-                {
-                    let mut wv = vec![0u8; rows * cols];
-                    let mut sv = vec![0u8; rows * cols / 32 * 4];
-                    // Rows [row0, row0 + rows) of the stack, matrix by matrix.
+            let mut stack_row = 0;
+            let mut k = 0;
+            while k < mats.len() {
+                let q4k = is_q4k(mats[k]);
+                let mut e = k + 1;
+                while e < mats.len() && is_q4k(mats[e]) == q4k {
+                    e += 1;
+                }
+                let group = &mats[k..e];
+                let total: usize = group.iter().map(|x| x.rows).sum();
+                let row_bytes = if q4k { mats[k].row_bytes } else { cols };
+                // A multiple of four rows (the 4-row kernel's share) per part.
+                let per = ((max_bind / row_bytes) & !3).clamp(4, total.next_multiple_of(4));
+                let mut row0 = 0;
+                while row0 < total {
+                    let rows = per.min(total - row0);
+                    let mut wv = vec![0u8; rows * row_bytes];
+                    let mut sv = if q4k { Vec::new() } else { vec![0u8; rows * cols / 32 * 4] };
+                    // Rows [row0, row0 + rows) of the group, matrix by matrix.
                     let mut at = 0;
                     let mut start = 0;
-                    for mm in mats {
+                    for mm in group {
                         let (a, b) = (start.max(row0), (start + mm.rows).min(row0 + rows));
                         if a < b {
                             let n = b - a;
-                            repack(m, mm, a - start, n, &mut wv[at * cols..(at + n) * cols], &mut sv[at * cols / 32 * 4..(at + n) * cols / 32 * 4]);
+                            if q4k {
+                                let src = m.gguf().bytes_at(mm.offset + (a - start) * row_bytes, n * row_bytes);
+                                wv[at * row_bytes..(at + n) * row_bytes].copy_from_slice(src);
+                            } else {
+                                repack(m, mm, a - start, n, &mut wv[at * cols..(at + n) * cols], &mut sv[at * cols / 32 * 4..(at + n) * cols / 32 * 4]);
+                            }
                             at += n;
                         }
                         start += mm.rows;
                     }
-                    w.slice(..).get_mapped_range_mut().map_err(perr)?.copy_from_slice(&wv);
-                    s.slice(..).get_mapped_range_mut().map_err(perr)?.copy_from_slice(&sv);
+                    let w = device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: wv.len() as u64, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: true });
+                    // A buffer the GPU had no memory for comes back invalid and cannot be mapped.
+                    w.slice(..).get_mapped_range_mut().map_err(|_| no_room())?.copy_from_slice(&wv);
+                    w.unmap();
+                    let s = if q4k {
+                        placeholder.clone()
+                    } else {
+                        let s = device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: sv.len() as u64, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: true });
+                        s.slice(..).get_mapped_range_mut().map_err(|_| no_room())?.copy_from_slice(&sv);
+                        s.unmap();
+                        s
+                    };
+                    parts.push(Part { w, s, row0: stack_row + row0, rows, q4k, bytes: (wv.len() + sv.len()) as u64 });
+                    row0 += rows;
                 }
-                w.unmap();
-                s.unmap();
-                parts.push(Part { w, s, row0, rows });
-                row0 += rows;
+                stack_row += total;
+                k = e;
             }
             Ok(GMat { parts, cols })
         };
@@ -849,6 +988,8 @@ impl PortableState {
             pipe(format!("{STEP}{SILU}"), P_SILU, "silu"),
             pipe(format!("{STEP}{ATTN_COMBINE}"), P_COMB, "attention combine"),
             pipe(format!("{STEP}{ATTENTION_HEAD}"), P_ATTN_HEAD, "attention per head"),
+            pipe(format!("const TB: u32 = 1u;{STEP}{MATVEC_Q4K}"), P_MATVEC, "matvec q4k"),
+            pipe(format!("const TB: u32 = {TB}u;{STEP}{MATVEC_Q4K}"), P_MATVEC, "matvec q4k batch"),
         ];
         let mut pipes = pipes;
         for (label, family, wg, tb) in MV_VARIANTS {
@@ -864,7 +1005,7 @@ impl PortableState {
         let matvec = |g: &GMat, input: &wgpu::Buffer, in_stride: usize, out: &wgpu::Buffer, out_stride: usize, add: bool, fixed: bool, calls: &mut Vec<Call>| {
             for p in &g.parts {
                 let u = uni(&[p.rows as u32, g.cols as u32, add as u32, p.row0 as u32, out_stride as u32, in_stride as u32, fixed as u32, 0]);
-                calls.push(Call { pipe: P_MATVEC, bind: bind(P_MATVEC, &[&u, &step, &p.w, &p.s, input, out]), dims: Dims::Rows { rows: p.rows as u32, fixed } });
+                calls.push(Call { pipe: P_MATVEC, bind: bind(P_MATVEC, &[&u, &step, &p.w, &p.s, input, out]), dims: Dims::Rows { rows: p.rows as u32, fixed, q4k: p.q4k } });
             }
         };
         let eps = c.eps.to_bits();
@@ -917,7 +1058,7 @@ impl PortableState {
         let n_layer = layer_calls.len();
         // Time every matrix kernel variant on this GPU with the first layer's gate|up product (the
         // largest matrix of a layer), for one token and for TB, and keep the fastest of each.
-        let probe = layer_calls[0].iter().filter(|c| matches!(c.dims, Dims::Rows { .. })).max_by_key(|c| if let Dims::Rows { rows, .. } = c.dims { rows } else { 0 }).map(|c| (&c.bind, c.dims));
+        let probe = layer_calls.iter().flatten().filter(|c| matches!(c.dims, Dims::Rows { q4k: false, .. })).max_by_key(|c| if let Dims::Rows { rows, .. } = c.dims { rows } else { 0 }).map(|c| (&c.bind, c.dims));
         let mut chosen = [(MV0, 4u32), (MV0 + 3, 4u32)];
         let fxc = ai.backend == wgpu::Backend::Dx12 && !has_dxc();
         let mut words = Vec::new();
@@ -986,6 +1127,9 @@ impl PortableState {
             words.push(format!("forced {} ({} per read) for prompts", MV_VARIANTS[i].0, MV_VARIANTS[i].3));
         }
         let (mv1, mv8) = (chosen[0], chosen[1]);
+        if layer_calls.iter().flatten().chain(head_calls.iter()).any(|c| matches!(c.dims, Dims::Rows { q4k: true, .. })) {
+            words.push("Q4_K weights read as stored".into());
+        }
         words.push(if per_head { "attention one head per workgroup".into() } else { "attention in 256-position spans".into() });
         if ai.backend == wgpu::Backend::Dx12 {
             words.push(if fxc { "shaders compiled by FXC".into() } else { "shaders compiled by DXC".into() });
@@ -1043,7 +1187,11 @@ impl PortableState {
                 Dims::Heads(h) => (call.pipe, (h, ntu, 1)),
                 Dims::Elems(n) => (call.pipe, ((ntu * n).div_ceil(256), 1, 1)),
                 Dims::Spans(h) => (call.pipe, (h, spans, ntu)),
-                Dims::Rows { rows, fixed } => {
+                Dims::Rows { rows, fixed, q4k: true } => {
+                    let (pipe, z) = if fixed || nt == 1 { (P_Q4K, 1) } else { (P_Q4K8, ntu.div_ceil(TB as u32)) };
+                    (pipe, (rows.min(65535), rows.div_ceil(65535), z))
+                }
+                Dims::Rows { rows, fixed, q4k: false } => {
                     let ((pipe, per), z) = if fixed || nt == 1 { (self.mv1, 1) } else { (self.mv8, ntu.div_ceil(MV_VARIANTS[self.mv8.0 - MV0].3 as u32)) };
                     let wg = rows.div_ceil(per);
                     (pipe, (wg.min(65535), wg.div_ceil(65535), z))
