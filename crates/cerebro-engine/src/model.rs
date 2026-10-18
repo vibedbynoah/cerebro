@@ -644,6 +644,73 @@ fn rmsnorm_inplace(x: &mut [f32], w: &[f32], eps: f32) {
 }
 
 /// NeoX RoPE with the position's (cos, sin) table, computed once per token for every head and layer.
+const KV_MAGIC: &[u8; 8] = b"CBKV\x01\0\0\0";
+
+/// Identifies the model a saved cache belongs to: its shape and its file (name and size).
+pub fn model_fingerprint(m: &Model) -> u64 {
+    let c = &m.cfg;
+    let name = m.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |v: u64| {
+        for b in v.to_le_bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    };
+    for v in [c.n_layer, c.dim, c.n_head, c.n_kv, c.head_dim, c.vocab, c.ffn, m.gguf().len()] {
+        mix(v as u64);
+    }
+    for b in name.bytes() {
+        mix(b as u64);
+    }
+    h
+}
+
+fn read_kv_header(m: &Model, r: &mut dyn std::io::Read) -> Result<(usize, usize), Error> {
+    let mut head = [0u8; 40];
+    r.read_exact(&mut head).map_err(|e| Error::Format(format!("not a saved cache: {e}")))?;
+    let num = |i: usize| u64::from_le_bytes(head[8 + i * 8..16 + i * 8].try_into().expect("8 bytes"));
+    if &head[..8] != KV_MAGIC || num(0) != model_fingerprint(m) || num(3) != m.cfg.n_layer as u64 || num(2) != (m.cfg.n_kv * m.cfg.head_dim) as u64 {
+        return Err(Error::Format("the saved cache belongs to another model".into()));
+    }
+    Ok((num(1) as usize, num(2) as usize))
+}
+
+/// f32 -> IEEE half bits, rounding to nearest even.
+fn f32_to_f16(x: f32) -> u16 {
+    let b = x.to_bits();
+    let sign = ((b >> 16) & 0x8000) as u16;
+    let exp = ((b >> 23) & 0xff) as i32;
+    let man = b & 0x7f_ffff;
+    if exp == 0xff {
+        return sign | 0x7c00 | if man != 0 { 0x200 } else { 0 };
+    }
+    let e = exp - 127 + 15;
+    if e >= 0x1f {
+        return sign | 0x7c00;
+    }
+    if e <= 0 {
+        if e < -10 {
+            return sign;
+        }
+        let m = man | 0x80_0000;
+        let shift = (14 - e) as u32;
+        let half = 1u32 << (shift - 1);
+        let rest = m & ((1 << shift) - 1);
+        let mut v = m >> shift;
+        if rest > half || (rest == half && v & 1 == 1) {
+            v += 1;
+        }
+        return sign | v as u16;
+    }
+    let mut v = ((e as u32) << 10) | (man >> 13);
+    let rest = man & 0x1fff;
+    if rest > 0x1000 || (rest == 0x1000 && v & 1 == 1) {
+        v += 1;
+    }
+    sign | v as u16
+}
+
 /// The file ranges of one layer's weight matrices.
 fn layer_ranges(l: &Layer) -> Vec<(usize, usize)> {
     let r = |m: &Mat| (m.offset, m.rows * m.row_bytes);
@@ -1301,6 +1368,130 @@ impl Session {
         self.qa_dim.quantize(&self.x);
         m.matvec(&m.output, &self.x, &self.qa_dim, &mut self.logits);
         self.prof[6] += to.elapsed().as_secs_f64();
+    }
+
+    /// Writes the cache (tokens, every attention layer's K and V as f16, every DeltaNet layer's
+    /// state) so a later session on the same model can continue without re-reading the prompt.
+    pub fn save_kv(&self, m: &Model, w: &mut dyn std::io::Write) -> Result<(), Error> {
+        let c = &m.cfg;
+        let n = self.tokens.len();
+        let kvd = c.n_kv * c.head_dim;
+        let io = |e: std::io::Error| Error::Request(format!("could not write the cache: {e}"));
+        w.write_all(KV_MAGIC).map_err(io)?;
+        for v in [model_fingerprint(m), n as u64, kvd as u64, c.n_layer as u64] {
+            w.write_all(&v.to_le_bytes()).map_err(io)?;
+        }
+        let bytes32 = |v: &[f32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+        let bytes16 = |v: &[u16]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+        w.write_all(&self.tokens.iter().flat_map(|t| t.to_le_bytes()).collect::<Vec<u8>>()).map_err(io)?;
+        #[cfg(feature = "cuda")]
+        let gpu_layers = self.gpu.as_ref().map_or(0, |g| g.gpu_layers());
+        #[cfg(not(feature = "cuda"))]
+        let gpu_layers = 0;
+        for li in 0..c.n_layer {
+            let attn = m.layers[li].delta.is_none();
+            if li < gpu_layers {
+                #[cfg(feature = "cuda")]
+                {
+                    let g = self.gpu.as_ref().expect("gpu");
+                    if attn {
+                        let (k, v) = g.kv_get(li, n, kvd)?.ok_or_else(|| Error::Format("layer kind mismatch".into()))?;
+                        w.write_all(&[0]).map_err(io)?;
+                        w.write_all(&bytes16(&k)).map_err(io)?;
+                        w.write_all(&bytes16(&v)).map_err(io)?;
+                    } else {
+                        let (h, st) = g.rec_get(li)?.ok_or_else(|| Error::Format("layer kind mismatch".into()))?;
+                        w.write_all(&[1]).map_err(io)?;
+                        w.write_all(&(h.len() as u64).to_le_bytes()).map_err(io)?;
+                        w.write_all(&bytes32(&h)).map_err(io)?;
+                        w.write_all(&(st.len() as u64).to_le_bytes()).map_err(io)?;
+                        w.write_all(&bytes32(&st)).map_err(io)?;
+                    }
+                }
+            } else if attn {
+                let k: Vec<u16> = self.k[li][..n * kvd].iter().map(|&x| f32_to_f16(x)).collect();
+                let v: Vec<u16> = self.v[li][..n * kvd].iter().map(|&x| f32_to_f16(x)).collect();
+                w.write_all(&[0]).map_err(io)?;
+                w.write_all(&bytes16(&k)).map_err(io)?;
+                w.write_all(&bytes16(&v)).map_err(io)?;
+            } else {
+                w.write_all(&[1]).map_err(io)?;
+                w.write_all(&(self.conv_hist[li].len() as u64).to_le_bytes()).map_err(io)?;
+                w.write_all(&bytes32(&self.conv_hist[li])).map_err(io)?;
+                w.write_all(&(self.ssm_state[li].len() as u64).to_le_bytes()).map_err(io)?;
+                w.write_all(&bytes32(&self.ssm_state[li])).map_err(io)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The tokens a saved cache holds, read from its header only (to pick the best match cheaply).
+    pub fn peek_kv(m: &Model, r: &mut dyn std::io::Read) -> Result<Vec<u32>, Error> {
+        let (n, _) = read_kv_header(m, r)?;
+        let mut buf = vec![0u8; n * 4];
+        r.read_exact(&mut buf).map_err(|e| Error::Format(format!("saved cache cut short: {e}")))?;
+        Ok(buf.chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect())
+    }
+
+    /// Restores a cache written by `save_kv` for this model; returns the tokens it holds. The next
+    /// `feed` continues from them.
+    pub fn load_kv(&mut self, m: &Model, r: &mut dyn std::io::Read) -> Result<usize, Error> {
+        let c = &m.cfg;
+        let (n, kvd) = read_kv_header(m, r)?;
+        if n == 0 || n >= self.max_ctx {
+            return Err(Error::Format("the saved cache does not fit this context".into()));
+        }
+        let rd = |r: &mut dyn std::io::Read, len: usize| -> Result<Vec<u8>, Error> {
+            let mut b = vec![0u8; len];
+            r.read_exact(&mut b).map_err(|e| Error::Format(format!("saved cache cut short: {e}")))?;
+            Ok(b)
+        };
+        let u16s = |b: Vec<u8>| b.chunks_exact(2).map(|x| u16::from_le_bytes([x[0], x[1]])).collect::<Vec<u16>>();
+        let f32s = |b: Vec<u8>| b.chunks_exact(4).map(|x| f32::from_le_bytes([x[0], x[1], x[2], x[3]])).collect::<Vec<f32>>();
+        let tokens: Vec<u32> = rd(r, n * 4)?.chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        #[cfg(feature = "cuda")]
+        let gpu_layers = self.gpu.as_ref().map_or(0, |g| g.gpu_layers());
+        #[cfg(not(feature = "cuda"))]
+        let gpu_layers = 0;
+        for li in 0..c.n_layer {
+            let tag = rd(r, 1)?[0];
+            let attn = m.layers[li].delta.is_none();
+            if (tag == 0) != attn {
+                return Err(Error::Format("the saved cache does not match this model's layers".into()));
+            }
+            if attn {
+                let k = u16s(rd(r, n * kvd * 2)?);
+                let v = u16s(rd(r, n * kvd * 2)?);
+                if li < gpu_layers {
+                    #[cfg(feature = "cuda")]
+                    self.gpu.as_mut().expect("gpu").kv_set(li, &k, &v)?;
+                } else {
+                    for (dst, src) in self.k[li][..n * kvd].iter_mut().zip(&k) {
+                        *dst = crate::quant::f16_to_f32(*src);
+                    }
+                    for (dst, src) in self.v[li][..n * kvd].iter_mut().zip(&v) {
+                        *dst = crate::quant::f16_to_f32(*src);
+                    }
+                }
+            } else {
+                let hl = u64::from_le_bytes(rd(r, 8)?.try_into().expect("8 bytes")) as usize;
+                let h = f32s(rd(r, hl * 4)?);
+                let sl = u64::from_le_bytes(rd(r, 8)?.try_into().expect("8 bytes")) as usize;
+                let st = f32s(rd(r, sl * 4)?);
+                if li < gpu_layers {
+                    #[cfg(feature = "cuda")]
+                    self.gpu.as_mut().expect("gpu").rec_set(li, &h, &st)?;
+                } else {
+                    if h.len() != self.conv_hist[li].len() || st.len() != self.ssm_state[li].len() {
+                        return Err(Error::Format("saved state does not fit this model".into()));
+                    }
+                    self.conv_hist[li].copy_from_slice(&h);
+                    self.ssm_state[li].copy_from_slice(&st);
+                }
+            }
+        }
+        self.tokens = tokens;
+        Ok(n)
     }
 
     /// Clears every DeltaNet state (a new sequence).

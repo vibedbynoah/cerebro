@@ -1374,6 +1374,43 @@ impl GpuState {
         Ok(())
     }
 
+    /// Saved-cache access: an attention layer's K and V (f16 bits) for positions 0..n, or None for
+    /// a DeltaNet layer.
+    pub fn kv_get(&self, li: usize, n: usize, kvd: usize) -> Result<Option<(Vec<u16>, Vec<u16>)>, Error> {
+        let l = &self.layers[li];
+        if l.delta.is_some() {
+            return Ok(None);
+        }
+        let mut k = vec![0u16; n * kvd];
+        let mut v = vec![0u16; n * kvd];
+        self.stream.memcpy_dtoh(&l.kc.slice(0..n * kvd), k.as_mut_slice()).map_err(gerr)?;
+        self.stream.memcpy_dtoh(&l.vc.slice(0..n * kvd), v.as_mut_slice()).map_err(gerr)?;
+        Ok(Some((k, v)))
+    }
+
+    pub fn kv_set(&mut self, li: usize, k: &[u16], v: &[u16]) -> Result<(), Error> {
+        let l = &mut self.layers[li];
+        self.stream.memcpy_htod(k, &mut l.kc.slice_mut(0..k.len())).map_err(gerr)?;
+        self.stream.memcpy_htod(v, &mut l.vc.slice_mut(0..v.len())).map_err(gerr)?;
+        Ok(())
+    }
+
+    /// A DeltaNet layer's convolution history and recurrent state.
+    pub fn rec_get(&self, li: usize) -> Result<Option<(Vec<f32>, Vec<f32>)>, Error> {
+        let Some(dl) = self.layers[li].delta.as_ref() else { return Ok(None) };
+        Ok(Some((self.stream.clone_dtoh(&dl.hist).map_err(gerr)?, self.stream.clone_dtoh(&dl.state).map_err(gerr)?)))
+    }
+
+    pub fn rec_set(&mut self, li: usize, hist: &[f32], state: &[f32]) -> Result<(), Error> {
+        let Some(dl) = self.layers[li].delta.as_mut() else { return Err(Error::Format("not a DeltaNet layer".into())) };
+        if hist.len() != dl.hist.len() || state.len() != dl.state.len() {
+            return Err(Error::Format("saved state does not fit this model".into()));
+        }
+        self.stream.memcpy_htod(hist, &mut dl.hist).map_err(gerr)?;
+        self.stream.memcpy_htod(state, &mut dl.state).map_err(gerr)?;
+        Ok(())
+    }
+
     /// Speculation can verify drafts on this model (whole GPU, attention layers only).
     pub fn can_verify(&self) -> bool {
         self.spec.is_some()
