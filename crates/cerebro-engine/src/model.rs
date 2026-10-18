@@ -668,6 +668,36 @@ fn rope(x: &mut [f32], cs: &[(f32, f32)]) {
     }
 }
 
+/// How far the current prompt read has got, shared with readers on other threads (the Monitor):
+/// `base` tokens came from the conversation cache, `pos` are in the cache now, since `started`.
+#[derive(Debug, Default)]
+pub struct Progress {
+    pub base: std::sync::atomic::AtomicUsize,
+    pub pos: std::sync::atomic::AtomicUsize,
+    started: std::sync::Mutex<Option<Instant>>,
+}
+
+impl Progress {
+    fn begin(&self, base: usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.base.store(base, Relaxed);
+        self.pos.store(base, Relaxed);
+        *self.started.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+    }
+
+    pub fn set(&self, pos: usize) {
+        self.pos.store(pos, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// (tokens in the cache, tokens reused, tokens per second read so far).
+    pub fn read(&self) -> (usize, usize, Option<f64>) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (pos, base) = (self.pos.load(Relaxed), self.base.load(Relaxed));
+        let secs = self.started.lock().unwrap_or_else(|e| e.into_inner()).map(|t| t.elapsed().as_secs_f64());
+        (pos, base, secs.filter(|&s| s > 0.05 && pos > base).map(|s| (pos - base) as f64 / s))
+    }
+}
+
 /// Timing and cache figures for the last `Session::feed` / generation, read by the server and Monitor.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Stats {
@@ -734,6 +764,8 @@ pub struct Session {
     pub prof: [f64; 7],
     pub logits: Vec<f32>,
     pub stats: Stats,
+    /// Live prompt-reading progress (Monitor).
+    pub progress: Arc<Progress>,
     /// When set, every step runs on the GPU and the CPU buffers above stay idle.
     #[cfg(feature = "cuda")]
     pub gpu: Option<crate::gpu::GpuState>,
@@ -804,6 +836,7 @@ impl Session {
             att_part: Vec::new(),
             logits: vec![0.0; c.vocab],
             stats: Stats::default(),
+            progress: Arc::default(),
             #[cfg(feature = "cuda")]
             gpu: None,
         }
@@ -835,6 +868,11 @@ impl Session {
         }
         self.tokens.truncate(common);
         let t0 = Instant::now();
+        self.progress.begin(common);
+        #[cfg(feature = "cuda")]
+        if let Some(g) = self.gpu.as_mut() {
+            g.progress = Some(self.progress.clone());
+        }
         #[cfg(feature = "cuda")]
         if let Some(from) = self.gpu.as_ref().filter(|g| g.is_split()).map(|g| g.gpu_layers()) {
             // Split: each chunk through the GPU's layers, then the same chunk through the CPU's.
@@ -847,11 +885,13 @@ impl Session {
                 self.gpu.as_mut().expect("gpu").prefill_split(m, c, pos, &mut xs)?;
                 if batched {
                     self.step_batch_from(m, c, Some(std::mem::take(&mut xs)), from);
+                    self.progress.set(self.tokens.len());
                 } else {
                     for (i, &tok) in c.iter().enumerate() {
                         self.x.copy_from_slice(&xs[i * dim..(i + 1) * dim]);
                         self.layers_from(m, from, pos + i);
                         self.tokens.push(tok);
+                        self.progress.set(self.tokens.len());
                     }
                     self.head(m);
                 }
@@ -871,10 +911,12 @@ impl Session {
         if dense && crate::switches::enabled(crate::switches::CPU_BATCH_PREFILL) {
             for c in prompt[common..].chunks(CPU_CHUNK) {
                 self.step_batch(m, c);
+                self.progress.set(self.tokens.len());
             }
         } else {
             for &tok in &prompt[common..] {
                 self.step(m, tok);
+                self.progress.set(self.tokens.len());
             }
         }
         self.stats = Stats { prompt_tokens: prompt.len(), reused_tokens: common, prefill_ms: t0.elapsed().as_secs_f64() * 1000.0, ..Default::default() };

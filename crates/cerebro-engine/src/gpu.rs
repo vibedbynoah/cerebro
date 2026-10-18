@@ -404,6 +404,8 @@ pub struct GpuState {
     pub plan: crate::placement::Plan,
     /// Checking aid: batched prefill stops after this many layers (None: all of them).
     pub debug_stop: Option<usize>,
+    /// Prompt-reading progress, advanced after each finished chunk (set by the session).
+    pub progress: Option<Arc<crate::model::Progress>>,
     /// Logits of every position of a verify pass (SPEC_MAX x vocab); None where speculation
     /// does not apply (split, mixture of experts, recurrent layers).
     spec: Option<CudaSlice<f32>>,
@@ -711,6 +713,7 @@ impl GpuState {
             vram_bytes: vram,
             plan,
             debug_stop: None,
+            progress: None,
             spec,
             // SAFETY: a plain host buffer, read only after the stream is synchronized.
             host_x: if split { Some(unsafe { ctx_pin.alloc_pinned::<f32>(c.dim) }.map_err(gerr)?) } else { None },
@@ -1361,6 +1364,16 @@ impl GpuState {
         Ok(v)
     }
 
+    /// After a prefill chunk: wait for it (so the count is finished work, not queued work) and
+    /// publish how many prompt tokens are in the cache. Only when someone is watching.
+    fn chunk_done(&mut self, pos: usize) -> Result<(), Error> {
+        if let Some(p) = &self.progress {
+            self.stream.synchronize().map_err(gerr)?;
+            p.set(pos);
+        }
+        Ok(())
+    }
+
     /// Speculation can verify drafts on this model (whole GPU, attention layers only).
     pub fn can_verify(&self) -> bool {
         self.spec.is_some()
@@ -1396,6 +1409,7 @@ impl GpuState {
             for (ci, chunk) in toks.chunks(CHUNK).enumerate() {
                 let is_last = (ci + 1) * CHUNK >= toks.len();
                 last = self.prefill_moe_chunk(model, chunk, pos0 + ci * CHUNK, if is_last { out.as_deref_mut() } else { None })?;
+                self.chunk_done(pos0 + ci * CHUNK + chunk.len())?;
             }
             // Prompt-aware placement: move the experts this prompt used most into VRAM before
             // generation starts (bounded so a short prompt does not pay for a large reshuffle).
@@ -1410,6 +1424,7 @@ impl GpuState {
             let p0 = pos0 + ci * CHUNK;
             let is_last = (ci + 1) * CHUNK >= toks.len();
             last = self.prefill_chunk(model, chunk, p0, if is_last { out.as_deref_mut() } else { None })?;
+            self.chunk_done(p0 + chunk.len())?;
         }
         Ok(last)
     }
