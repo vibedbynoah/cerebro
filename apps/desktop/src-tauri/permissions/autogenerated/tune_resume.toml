@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tune-resume"
+description = "Enables the tune_resume command without any pre-configured scope."
+commands.allow = ["tune_resume"]
+
+[[permission]]
+identifier = "deny-tune-resume"
+description = "Denies the tune_resume command without any pre-configured scope."
+commands.deny = ["tune_resume"]

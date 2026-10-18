@@ -156,7 +156,7 @@ test.describe("drawer", () => {
     const r = TUNED_MOE.tuneResult;
     expect(r).not.toBeNull();
     const conditions = dialog.locator(".ov-conditions");
-    for (const part of [r?.gpu ?? "", `llama.cpp ${r?.build ?? ""}`, TUNED_MOE.quant, "8,192-token depth", `sampler ${r?.sampler ?? ""}`]) await expect(conditions).toContainText(part);
+    for (const part of [r?.gpu ?? "", r?.build ?? "", TUNED_MOE.quant, "8,192-token depth", `sampler ${r?.sampler ?? ""}`]) await expect(conditions).toContainText(part);
     await expect(dialog).not.toContainText("× defaults");
     await expect(dialog.locator(".ov-tune .stat-tile__flag")).toBeVisible();
     await expect(dialog.getByRole("link", { name: "Tune" })).toHaveAttribute("href", `#/tune?model=${TUNED_MOE.id}`);

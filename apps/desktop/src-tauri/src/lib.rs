@@ -27,6 +27,7 @@ mod trainer;
 mod engine;
 mod dedup;
 mod gguf_edit;
+mod tune_screen;
 mod vision_input;
 mod hub;
 mod kv_store;
@@ -62,6 +63,10 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::disk_deduplicate,
             commands::disk_unlink,
             commands::model_reveal,
+            commands::tune_start,
+            commands::tune_subscribe,
+            commands::tune_cancel,
+            commands::tune_resume,
             commands::model_detail,
             commands::gguf_copy_write,
             commands::gguf_copy_revert,
@@ -120,6 +125,8 @@ pub fn run() -> Result<(), tauri::Error> {
         // Disk space (dedup.rs): the last scan's groups, so the calls that follow re-check the
         // copies the user was shown.
         .manage(std::sync::Arc::new(dedup::Disk::default()))
+        // The Tune screen's run (tune_screen.rs): its event log, listeners and finished steps.
+        .manage(std::sync::Arc::new(tune_screen::TuneHub::default()))
         .setup(|app| {
             commands::load_switches(app.handle());
             {
@@ -137,6 +144,9 @@ pub fn run() -> Result<(), tauri::Error> {
                     tools = tools.with_spill_dir(spills);
                 }
                 app.state::<engine::Engine>().set_tool_host(std::sync::Arc::new(tools));
+                if let Ok(dir) = app.path().app_config_dir() {
+                    app.state::<std::sync::Arc<tune_screen::TuneHub>>().set_results_path(dir.join("tune-results.json"));
+                }
                 if let Ok(dir) = app.path().app_data_dir() {
                     app.state::<engine::Engine>().set_ledger_root(dir);
                 }

@@ -70,7 +70,7 @@ export function SpeedChart(props: { candidates: readonly CandidateView[]; active
     return [
       "Writing speed of each candidate during its screen, in tokens per second.",
       a && last ? `${a.candidate.label} is being screened, now at ${fmt(last.tps, 1)} tok/s.` : "",
-      b?.screenTps != null ? `llama.cpp automatic screened at ${fmt(b.screenTps, 1)} tok/s.` : "",
+      b?.screenTps != null ? `Automatic settings screened at ${fmt(b.screenTps, 1)} tok/s.` : "",
       `${traced().length} of ${props.candidates.length} candidates traced.`,
     ]
       .filter(Boolean)
@@ -105,7 +105,7 @@ export function SpeedChart(props: { candidates: readonly CandidateView[]; active
             <g class="chart__ref" aria-hidden="true">
               <line x1={PAD.l} x2={w() - PAD.r} y1={y(b().screenTps ?? 0)} y2={y(b().screenTps ?? 0)} />
               <text x={w() - PAD.r} y={y(b().screenTps ?? 0) - 6} text-anchor="end">
-                llama.cpp automatic
+                Automatic settings
               </text>
             </g>
           )}

@@ -107,7 +107,7 @@ export function LastTune(props: { model: LibraryModel }): JSX.Element {
       <Show when={props.model.tuneResult} fallback={<TuneChip model={props.model} />}>
         {(r) => {
           const detail = () =>
-            `Prompt reading ${r().prefillTps.toFixed(0)} tok/s; writing ${r().decodeTps0.toFixed(1)} tok/s with an empty context and ${r().decodeTpsDepth.toFixed(1)} tok/s at ${contextLabel(r().depth)}. ${r().gpu}, llama.cpp ${r().build}, sampler ${r().sampler}.`;
+            `Prompt reading ${r().prefillTps.toFixed(0)} tok/s; writing ${r().decodeTps0.toFixed(1)} tok/s with an empty context and ${r().decodeTpsDepth.toFixed(1)} tok/s at ${contextLabel(r().depth)}. ${r().gpu}, ${r().build}, sampler ${r().sampler}.`;
           return (
             <span class="last-tune" title={detail()}>
               <span class="num-unit mono" aria-hidden="true">

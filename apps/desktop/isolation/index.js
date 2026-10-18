@@ -198,6 +198,10 @@ const WITH_ARGS = {
   disk_deduplicate: (p) => isPlain(p) && hasOnlyKeys(p, ["groupId", "keepPath"]) && isGroupId(p.groupId) && isPath(p.keepPath),
   disk_unlink: (p) => isPlain(p) && hasOnlyKeys(p, ["groupId"]) && isGroupId(p.groupId),
   model_reveal: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && isModelId(p.id),
+  tune_start: (p) => isPlain(p) && hasOnlyKeys(p, ["modelId", "profile", "integrityCheck"]) && isModelId(p.modelId) && ["chat", "coding", "long-docs"].includes(/** @type {string} */ (p.profile)) && typeof p.integrityCheck === "boolean",
+  tune_subscribe: (p) => isPlain(p) && hasOnlyKeys(p, ["onEvent"]) && isChannel(p.onEvent),
+  tune_cancel: (p) => isPlain(p) && hasOnlyKeys(p, ["runId"]) && typeof p.runId === "string" && /^tune-\d{1,9}$/.test(p.runId),
+  tune_resume: (p) => isPlain(p) && hasOnlyKeys(p, ["runId"]) && typeof p.runId === "string" && /^tune-\d{1,9}$/.test(p.runId),
   model_detail: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && isModelId(p.id),
   gguf_copy_write: (p) =>
     isPlain(p) &&

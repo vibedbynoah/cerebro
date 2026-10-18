@@ -195,7 +195,7 @@ function RunHeader(props: { session: TuneSession; onNewTune: () => void }): JSX.
           <span aria-hidden="true">·</span>
           <span>{`depth ${depthLabel(run().depth)}`}</span>
           <span aria-hidden="true">·</span>
-          <span class="mono">{`llama.cpp ${run().build}`}</span>
+          <span class="mono">{run().build}</span>
         </p>
         <h3 class="run-head__model">
           {run().modelName} <span class="mono run-head__quant">{run().quant}</span>
@@ -463,7 +463,7 @@ function SpeedCard(props: { view: TuneView; highlightId: string | null }): JSX.E
         </li>
         <li>
           <span class="legend__swatch legend__swatch--ref" aria-hidden="true" />
-          llama.cpp automatic (reference)
+          Automatic settings (reference)
         </li>
         <li>
           <span class="legend__swatch legend__swatch--other" aria-hidden="true" />
@@ -501,11 +501,11 @@ function QualityCard(props: { view: TuneView }): JSX.Element {
     if (reached() && !inQuality)
       return (
         <>
-          No candidate beat llama.cpp's automatic settings by more than the {Math.round(NOISE_MARGIN * 100)}% <Term k="noiseMargin" />, so there was nothing to check.
+          No candidate beat the automatic settings by more than the {Math.round(NOISE_MARGIN * 100)}% <Term k="noiseMargin" />, so there was nothing to check.
         </>
       );
     if (reached()) return "Comparing answers…";
-    return "After Measure, every candidate faster than llama.cpp's automatic settings has its answers compared with theirs.";
+    return "After Measure, every candidate faster than the automatic settings has its answers compared with theirs.";
   };
   return (
     <div class="tune-card tune-card--quality">
@@ -644,7 +644,7 @@ export function RunPanel(props: { session: TuneSession; onNewTune: () => void })
         <figcaption class="run__caption">
           <IllustrativeFlag />
           <span class="run__provenance">
-            {`${v().run?.gpu ?? ""} (${fmt(v().run?.vramTotalGiB ?? 0, 0)} GiB) · ${v().run?.cpu ?? ""}, ${fmt(v().run?.ramTotalGiB ?? 0, 0)} GiB RAM · llama.cpp ${v().run?.build ?? ""} (${v().run?.backendCommit ?? ""}) · ${v().run?.sampler ?? ""}`}
+            {`${v().run?.gpu ?? ""} (${fmt(v().run?.vramTotalGiB ?? 0, 0)} GiB) · ${v().run?.cpu ?? ""}, ${fmt(v().run?.ramTotalGiB ?? 0, 0)} GiB RAM · ${v().run?.build ?? ""} (${v().run?.backendCommit ?? ""}) · ${v().run?.sampler ?? ""}`}
           </span>
         </figcaption>
         <RunHeader session={props.session} onNewTune={props.onNewTune} />
@@ -668,7 +668,7 @@ export function RunPanel(props: { session: TuneSession; onNewTune: () => void })
               >
                 <span class="probe-line__ok">
                   <Icon name="check" size={14} />
-                  Backend {`llama.cpp ${v().run?.build ?? ""}`} verified.
+                  Engine {v().run?.build ?? ""} verified.
                 </span>
               </Show>
             </p>

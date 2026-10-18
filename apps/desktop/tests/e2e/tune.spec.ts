@@ -108,7 +108,7 @@ test.describe("a live run", () => {
     expect(await page.locator(".trace").count()).toBeGreaterThanOrEqual(4);
     await expect(page.locator(".trace--active")).toHaveCount(1);
     await expect(page.locator(".trace--baseline")).toHaveCount(1);
-    await expect(page.locator(".chart__ref")).toContainText("llama.cpp automatic");
+    await expect(page.locator(".chart__ref")).toContainText("Automatic settings");
     await expect(page.locator(".run__caption")).toContainText("Illustrative");
     await expect(page.locator(".chip--live")).toContainText("Measuring");
     await expect(page.getByRole("button", { name: "Start tune" })).toBeDisabled();
@@ -156,13 +156,13 @@ test.describe("a live run", () => {
     await expect(page.getByRole("progressbar", { name: "Soak progress" })).toBeVisible();
   });
 
-  test("finishes with the winner locked in and why it beat llama.cpp's automatic settings", async ({ page }) => {
+  test("finishes with the winner locked in and why it beat the automatic settings", async ({ page }) => {
     await startTune(page, ["fast-tune"], MOE.id, "coding");
     const winner = page.locator(".winner");
     await expect(winner).toBeVisible({ timeout: 25_000 });
     await expect(winner).toHaveAttribute("data-kept", "tuned");
     await expect(winner.locator(".winner__eyebrow")).toContainText("Locked in");
-    await expect(winner.locator(".why li").first()).toContainText("automatic fit placed");
+    await expect(winner.locator(".why li").first()).toContainText("automatic placement put");
     await expect(winner.locator(".versus__metric")).toHaveCount(3);
     await expect(winner.locator(".winner__caption")).toContainText("Illustrative");
     await expect(winner.locator(".winner__conditions")).toContainText("depth 16K");
@@ -170,7 +170,7 @@ test.describe("a live run", () => {
     // The machine includes the processor and memory; the build names its exact commit.
     await expect(winner.locator(".winner__conditions")).toContainText("GiB RAM");
     await expect(winner.locator(".winner__conditions")).toContainText("cores");
-    await expect(winner.locator(".winner__conditions")).toContainText(/llama\.cpp b\d+ \([0-9a-f]{7,}\)/);
+    await expect(winner.locator(".winner__conditions")).toContainText(/Cerebro Engine \d+\.\d+\.\d+ \([0-9a-f]{7,}\)/);
     await expect(page.locator(".run__provenance")).toContainText("GiB RAM");
     // One hero figure, flagged as illustrative right beside it, then the reasons with their terms.
     await expect(winner.locator(".winner__hero .stat-tile__flag")).toBeVisible();
@@ -206,13 +206,13 @@ test.describe("a live run", () => {
     expect(new URL(page.url()).hash).toBe("#/models");
   });
 
-  test("a small model that fits keeps llama.cpp's own settings, and says so", async ({ page }) => {
+  test("a small model that fits keeps the automatic settings, and says so", async ({ page }) => {
     await startTune(page, ["fast-tune"], SMALL.id, "chat");
     const winner = page.locator(".winner");
     await expect(winner).toBeVisible({ timeout: 25_000 });
     await expect(winner).toHaveAttribute("data-kept", "defaults");
     await expect(winner.locator(".winner__title")).toHaveText("Defaults were fastest");
-    await expect(winner.locator(".why")).toContainText("keeps llama.cpp's own settings");
+    await expect(winner.locator(".why")).toContainText("keeps the engine's automatic settings");
   });
 });
 

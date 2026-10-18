@@ -105,7 +105,7 @@ export function Home(): JSX.Element {
                     label={`Decode speed of ${m().name}, defaults against tuned`}
                     unit="tok/s"
                     rows={shares([
-                      { label: "llama.cpp defaults", value: m().defaultsTps ?? 0 },
+                      { label: "Automatic settings", value: m().defaultsTps ?? 0 },
                       { label: "Cerebro tuned", value: m().tunedTps ?? 0, winner: true },
                     ])}
                     note={

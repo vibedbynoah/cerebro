@@ -83,8 +83,8 @@ export function WinnerCard(props: { view: TuneView; animate: boolean }): JSX.Ele
   ];
   const rows = (): Array<{ c: CandidateView; name: string; win: boolean }> => {
     const o = other();
-    const list = [{ c: winner(), name: keptDefaults() ? "llama.cpp automatic (kept)" : "Cerebro tuned", win: true }];
-    if (o) list.unshift({ c: o, name: keptDefaults() ? "Best candidate" : "llama.cpp automatic", win: false });
+    const list = [{ c: winner(), name: keptDefaults() ? "Automatic settings (kept)" : "Cerebro tuned", win: true }];
+    if (o) list.unshift({ c: o, name: keptDefaults() ? "Best candidate" : "Automatic settings", win: false });
     return list;
   };
   const soak = () => props.view.soaks.find((s) => s.candidateId === winner().id);
@@ -94,7 +94,7 @@ export function WinnerCard(props: { view: TuneView; animate: boolean }): JSX.Ele
       `${run().gpu} (${fmt(run().vramTotalGiB, 0)} GiB)`,
       `${run().cpu}, ${fmt(run().ramTotalGiB, 0)} GiB RAM`,
       `${run().modelName} ${run().quant}`,
-      `llama.cpp ${run().build} (${run().backendCommit})`,
+      `${run().build} (${run().backendCommit})`,
       `depth ${depthLabel(run().depth)}`,
       run().sampler,
       "first repetition discarded",
@@ -108,7 +108,7 @@ export function WinnerCard(props: { view: TuneView; animate: boolean }): JSX.Ele
         <div>
           <p class="winner__eyebrow">
             <Icon name={keptDefaults() ? "check" : "lock"} size={14} />
-            {keptDefaults() ? "Kept llama.cpp's automatic settings" : "Locked in"}
+            {keptDefaults() ? "Kept the automatic settings" : "Locked in"}
           </p>
           <h3 class="winner__title" id="winner-title">
             {keptDefaults() ? "Defaults were fastest" : winner().candidate.label}
@@ -146,7 +146,7 @@ export function WinnerCard(props: { view: TuneView; animate: boolean }): JSX.Ele
                   <Show when={h().ratio !== null && other()}>
                     {". "}
                     <strong class="winner__ratio mono">{`${fmt(h().ratio!, 1)}×`}</strong>
-                    {longDocs() ? ` faster than llama.cpp's automatic settings (${otherFigure()}).` : ` the writing speed of llama.cpp's automatic settings (${otherFigure()}).`}
+                    {longDocs() ? ` faster than the automatic settings (${otherFigure()}).` : ` the writing speed of the automatic settings (${otherFigure()}).`}
                   </Show>
                   <Show when={keptDefaults() && other()}>{`. The best candidate reached ${otherFigure()}.`}</Show>
                   <Show when={keptDefaults() && !other()}>.</Show>
@@ -212,7 +212,7 @@ export function WinnerCard(props: { view: TuneView; animate: boolean }): JSX.Ele
       <div class="winner__body">
         <div class="winner__why">
           <h4 class="winner__subtitle">
-            {keptDefaults() ? "Why llama.cpp's own settings stayed" : "Why it won against llama.cpp's "}
+            {keptDefaults() ? "Why the automatic settings stayed" : "Why it won against the automatic "}
             <Show when={!keptDefaults()}>
               <Term k="autofit" />
             </Show>

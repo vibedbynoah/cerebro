@@ -106,7 +106,7 @@ export function TuneScreen(): JSX.Element {
         lede={
           <>
             <Term k="tuning">Tuning</Term> runs real benchmarks on this machine and keeps the fastest configuration that passes every check. It never assumes a setting is
-            faster: when nothing beats <Term k="autofit">llama.cpp's automatic settings</Term>, it keeps them.
+            faster: when nothing beats <Term k="autofit">the engine's automatic settings</Term>, it keeps them.
           </>
         }
       />

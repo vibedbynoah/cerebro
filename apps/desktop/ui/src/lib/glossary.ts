@@ -17,7 +17,7 @@ export const GLOSSARY = {
   },
   backend: {
     term: "backend",
-    text: "The program that runs the model. In Cerebro that is llama.cpp's server, which Cerebro starts, watches and stops.",
+    text: "The program that runs the model. In Cerebro that is Cerebro Engine, its own inference engine, running inside the app.",
   },
   loopback: {
     term: "loopback",
@@ -61,7 +61,7 @@ export const GLOSSARY = {
   },
   gpu: {
     term: "GPU",
-    text: "The graphics card. It does many small calculations at once, which is why llama.cpp runs a model much faster on it than on the processor alone.",
+    text: "The graphics card. It does many small calculations at once, which is why a model runs much faster on it than on the processor alone.",
   },
   ram: {
     term: "RAM",
@@ -69,11 +69,11 @@ export const GLOSSARY = {
   },
   gguf: {
     term: "GGUF",
-    text: "The single-file format llama.cpp loads models from. One file holds the model's weights and the details needed to run it.",
+    text: "The single-file format local models come in. One file holds the model's weights and the details needed to run it.",
   },
   tuning: {
     term: "tuning",
-    text: "Cerebro runs real benchmarks on this machine with different llama.cpp settings and keeps the fastest configuration that stays within its safety checks.",
+    text: "Cerebro runs real benchmarks on this machine with different engine settings and keeps the fastest configuration that stays within its safety checks.",
   },
   context: {
     term: "context length",
@@ -153,7 +153,7 @@ export const GLOSSARY = {
   },
   ggufMeta: {
     term: "GGUF metadata",
-    text: "Named settings stored inside a GGUF file, such as its context length or chat template. llama.cpp reads them when it loads the model.",
+    text: "Named settings stored inside a GGUF file, such as its context length or chat template. The engine reads them when it loads the model.",
   },
   soak: {
     term: "soak test",
@@ -161,7 +161,7 @@ export const GLOSSARY = {
   },
   autofit: {
     term: "automatic settings",
-    text: "What llama.cpp does on its own: its built-in fit puts as much of the model on the graphics card as memory allows. The most that fits is often not the fastest, which is why Cerebro measures against it.",
+    text: "What the engine does on its own: its planner puts as much of the model on the graphics card as memory allows. The most that fits is often not the fastest, which is why Cerebro measures against it.",
   },
   klDiv: {
     term: "KL divergence",
@@ -169,7 +169,7 @@ export const GLOSSARY = {
   },
   noiseMargin: {
     term: "noise margin",
-    text: "No two runs of the same settings measure exactly alike. A candidate must beat llama.cpp's automatic settings by more than this (3%) to replace them, so a lucky run never changes your settings.",
+    text: "No two runs of the same settings measure exactly alike. A candidate must beat the automatic settings by more than this (3%) to replace them, so a lucky run never changes your settings.",
   },
   depth: {
     term: "working depth",

@@ -177,7 +177,7 @@ describe("illustrative tune scripts", () => {
         const base = v.candidates[0]!;
         if (!w.candidate.baseline) {
           expect(w.quality).toBe("passed");
-          // It beat llama.cpp's own settings by more than the noise margin, on this profile's measure.
+          // It beat the automatic settings by more than the noise margin, on this profile's measure.
           expect(objectiveScore(p, w.result!, s.run.depth)).toBeGreaterThan(objectiveScore(p, base.result!, s.run.depth) * (1 + NOISE_MARGIN));
         }
         // A soak passes exactly when its final-third trend is not negative.
@@ -203,13 +203,13 @@ describe("illustrative tune scripts", () => {
   it("tells both stories: a large MoE beats the defaults, a small model that fits keeps them", () => {
     const moe = reduceTune(eventsOf(script(MOE, "chat")));
     expect(moe.candidates.find((c) => c.winner)!.candidate.baseline).toBe(false);
-    expect(moe.winner!.reasons.join(" ")).toMatch(/automatic fit placed \d+ of \d+ layers/);
+    expect(moe.winner!.reasons.join(" ")).toMatch(/automatic placement put \d+ of \d+ layers/);
     expect(moe.candidates.some((c) => c.status === "failed")).toBe(true);
     expect(moe.soaks.some((s) => !s.result!.passed)).toBe(true);
 
     const small = reduceTune(eventsOf(script(SMALL, "chat")));
     expect(small.candidates.find((c) => c.winner)!.candidate.baseline).toBe(true);
-    expect(small.winner!.reasons.join(" ")).toContain("keeps llama.cpp's own settings");
+    expect(small.winner!.reasons.join(" ")).toContain("keeps the engine's automatic settings");
   });
 
   it("says when the integrity check was switched off instead of claiming it ran", () => {
@@ -271,7 +271,7 @@ describe("illustrative tune scripts", () => {
   });
 
   it("marks each technical term in a winner's reasons once, and leaves already-defined ones plain", () => {
-    const lines = ["A q8_0 KV cache needs less.", "The KV cache and flash attention help.", "llama.cpp's automatic fit placed 20 layers."];
+    const lines = ["A q8_0 KV cache needs less.", "The KV cache and flash attention help.", "The automatic placement put 20 layers."];
     const parts = markTerms(lines);
     const terms = parts.flat().filter((x): x is { term: keyof typeof GLOSSARY; text: string } => typeof x !== "string");
     expect(terms.map((t) => t.term)).toEqual(["kvCache", "flashAttention", "autofit"]);

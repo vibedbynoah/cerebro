@@ -16,12 +16,39 @@ import { CURRENT_CATALOG } from "./catalog";
 import type { TrainerStatus, TrainEvent, TrainInstalled } from "./train-types";
 import type { Placement } from "./types";
 import type { ActivePatch, EngineSwitch, LocalApiView, McpServerView, RemotePairing, RemoteView, McpCallResult, McpConfig, McpServerStatus, McpTool, HubDownloadEvent, HubFile, HubFileMeta, HubRepo, LoadPreset, PatchProfile } from "./types";
-import type { MachineTuneEvent, MachineTuneOutcome } from "./types";
+import type { MachineTuneEvent, MachineTuneOutcome, TuneEvent, TuneProfile, TuneRunInfo } from "./types";
 import { EMPTY_TWEAKS, profileNameError, sanitizeTweaks } from "../lib/tweaks";
 
 const NOT_YET = (what: string) => Promise.reject(new Error(`${what} is not available in this build yet.`));
 
 export function createDesktopService(local: CerebroService): CerebroService {
+  // The Tune screen's feed: one channel for the app's life. The engine sends the run so far, then
+  // every event; a new run's log starts at its "started" event.
+  let tuneLog: TuneEvent[] = [];
+  const tuneListeners = new Set<{ listener: (events: TuneEvent[], replay: boolean) => void; ready: boolean }>();
+  let tuneReady: Promise<void> | null = null;
+  const ensureTuneFeed = (): Promise<void> => {
+    if (tuneReady) return tuneReady;
+    const channel = new Channel<{ events: TuneEvent[]; replay: boolean }>();
+    channel.onmessage = ({ events, replay }) => {
+      if (replay) {
+        tuneLog = [...events];
+        return;
+      }
+      const fresh: TuneEvent[] = [];
+      for (const e of events) {
+        if (e.kind === "started") tuneLog = [];
+        if (tuneLog.some((x) => x.seq === e.seq)) continue;
+        tuneLog.push(e);
+        fresh.push(e);
+      }
+      if (fresh.length === 0) return;
+      for (const l of tuneListeners) if (l.ready) l.listener(fresh.map((e) => ({ ...e })), false);
+    };
+    tuneReady = invoke<void>("tune_subscribe", { onEvent: channel }).catch(() => {});
+    return tuneReady;
+  };
+
   let library: LibraryModel[] = [];
   // The user's own presets and per-file tweaks, kept for this session.
   const presets = new Map<string, LoadPreset[]>();
@@ -167,10 +194,27 @@ export function createDesktopService(local: CerebroService): CerebroService {
     transcribeSample: () => NOT_YET("Speech to text"),
     speakSample: () => NOT_YET("Text to speech"),
 
-    startTune: () => NOT_YET("Tune"),
-    subscribeTune: () => () => {},
-    cancelTune: () => Promise.resolve(),
-    resumeTune: () => NOT_YET("Tune"),
+    async startTune(modelId: string, profile: TuneProfile): Promise<TuneRunInfo> {
+      const { integrityCheck } = await local.getSettings();
+      ensureTuneFeed();
+      return invoke<TuneRunInfo>("tune_start", { modelId, profile, integrityCheck });
+    },
+    subscribeTune(listener) {
+      ensureTuneFeed();
+      const entry = { listener, ready: false };
+      tuneListeners.add(entry);
+      // The run so far first (one batch), then live events; the two never interleave.
+      void ensureTuneFeed().then(() => {
+        if (!tuneListeners.has(entry)) return;
+        entry.ready = true;
+        listener(tuneLog.map((e) => ({ ...e })), true);
+      });
+      return () => {
+        tuneListeners.delete(entry);
+      };
+    },
+    cancelTune: (runId: string) => invoke<void>("tune_cancel", { runId }),
+    resumeTune: (runId: string) => invoke<void>("tune_resume", { runId }),
 
     getMetrics: () => invoke<MetricsSnapshot>("metrics"),
     getMetricsHistory: (range: HistoryRange) => invoke<MetricsSeries>("metrics_history", { range }),

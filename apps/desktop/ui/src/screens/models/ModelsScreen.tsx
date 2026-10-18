@@ -22,7 +22,7 @@ export function ModelsScreen(): JSX.Element {
           lede={
             <>
               Every model file on this machine, from Cerebro's, LM Studio's and Ollama's folders. Load one with its tuned settings in one click, or open it to change any{" "}
-              <Term k="llamacpp" /> setting.
+              <Term k="backend">engine</Term> setting.
             </>
           }
         />

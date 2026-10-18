@@ -70,7 +70,8 @@ export function settingTerm(name: string): GlossaryKey | null {
  * use. Matched case-insensitively on word boundaries; longer phrases first.
  */
 const REASON_TERMS: ReadonlyArray<readonly [RegExp, GlossaryKey]> = [
-  [/\bautomatic fit\b/i, "autofit"],
+  [/\bautomatic (?:fit|placement|settings)\b/i, "autofit"],
+  [/\bprompt-lookup speculation\b/i, "ngram"],
   [/\bKV cache\b/i, "kvCache"],
   [/\bflash attention\b/i, "flashAttention"],
   [/\bn-gram speculation\b/i, "ngram"],
@@ -157,9 +158,9 @@ export const PHASES: Readonly<Record<TunePhase, PhaseMeta>> = {
   probe: { label: "Probe", text: "Read the graphics card, its free video memory and the backend build." },
   screen: { label: "Screen", text: "Try each candidate briefly. The first repetition is always discarded." },
   measure: { label: "Measure", text: "Three numbers per survivor: prompt reading, writing from empty, and writing at your working depth." },
-  quality: { label: "Quality gate", text: "Compare each faster candidate's answers with llama.cpp's automatic settings. A setting that hurts them is rejected." },
+  quality: { label: "Quality gate", text: "Compare each faster candidate's answers with the engine's automatic settings. A setting that hurts them is rejected." },
   soak: { label: "Soak", text: "Run the fastest remaining candidate under sustained load. Free video memory must hold steady over the final third." },
-  decide: { label: "Lock in", text: "Keep the fastest configuration that passed every check, or llama.cpp's own if nothing beat it." },
+  decide: { label: "Lock in", text: "Keep the fastest configuration that passed every check, or the automatic settings if nothing beat it." },
 };
 
 export type TuneStatus = "idle" | "running" | "cancelled" | "done" | "failed";
@@ -475,7 +476,7 @@ export function announcement(v: TuneView): string {
       return "";
     case "done": {
       const w = v.candidates.find((c) => c.winner);
-      return w ? (w.candidate.baseline ? "Tune finished. llama.cpp's automatic settings were fastest and are kept." : `Tune finished. ${w.candidate.label} locked in.`) : "Tune finished.";
+      return w ? (w.candidate.baseline ? "Tune finished. The automatic settings were fastest and are kept." : `Tune finished. ${w.candidate.label} locked in.`) : "Tune finished.";
     }
     default:
       return v.phase ? `${PHASES[v.phase].label}: ${PHASES[v.phase].text}` : "Starting the tune.";

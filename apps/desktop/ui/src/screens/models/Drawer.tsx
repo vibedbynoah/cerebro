@@ -319,7 +319,7 @@ function TuneMetrics(props: { result: TuneResult; quant: string; defaultsFastest
       </dl>
       <p class="ov-conditions">
         <span class="ov-conditions__label">Measured on</span>
-        <span class="mono">{`${r().gpu} · llama.cpp ${r().build} · ${props.quant} · ${r().depth.toLocaleString("en-US")}-token depth · sampler ${r().sampler} · ${r().measuredAt}`}</span>
+        <span class="mono">{`${r().gpu} · ${r().build} · ${props.quant} · ${r().depth.toLocaleString("en-US")}-token depth · sampler ${r().sampler} · ${r().measuredAt}`}</span>
       </p>
       <Show when={props.defaultsFastest}>
         <p class="studio-card__desc">Defaults were fastest on this machine, so Cerebro kept them.</p>

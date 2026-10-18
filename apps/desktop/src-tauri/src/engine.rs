@@ -49,7 +49,7 @@ pub struct LibraryModel {
     pub arch: ModelArch,
     pub tuned_params: Option<()>,
     pub tuned_at: Option<String>,
-    pub tune_result: Option<()>,
+    pub tune_result: Option<serde_json::Value>,
     /// The vision projector paired with this model, when one sits beside it (vision_input.rs).
     pub projector: Option<crate::vision_input::Projector>,
     /// Whether Cerebro Engine can run this file's architecture today.
@@ -162,6 +162,7 @@ fn describe(path: &Path, source: &'static str) -> Option<LibraryModel> {
     let quant = g.u64("general.file_type").map(file_type_name).unwrap_or("other").to_owned();
     let family = g.str("general.basename").map(str::to_owned).unwrap_or_else(|| arch.clone());
     let projector = crate::vision_input::find_projector(path, dim, g.str("general.basename").unwrap_or(""));
+    let kept = crate::tune_screen::kept(&id_of(path));
     Some(LibraryModel {
         id: id_of(path),
         name,
@@ -170,7 +171,7 @@ fn describe(path: &Path, source: &'static str) -> Option<LibraryModel> {
         architecture: if experts.is_some() { "moe" } else { "dense" },
         size_gi_b: size as f64 / GIB,
         context_max: u("context_length").unwrap_or(0),
-        tune: "untuned",
+        tune: if kept.is_some() { "tuned" } else { "untuned" },
         provenance: "measured",
         kind: if projector.is_some() { "vision" } else { "text" },
         modalities: if projector.is_some() { vec!["text", "vision"] } else { vec!["text"] },
@@ -193,12 +194,18 @@ fn describe(path: &Path, source: &'static str) -> Option<LibraryModel> {
             active_experts: u("expert_used_count").filter(|_| experts.is_some()),
         },
         tuned_params: None,
-        tuned_at: None,
-        tune_result: None,
+        tuned_at: kept.as_ref().map(|k| k.tuned_at.clone()),
+        tune_result: kept.as_ref().map(|k| k.result.clone()),
         projector,
         supported: SUPPORTED_ARCHS.contains(&arch.as_str()),
         arch_name: arch,
     })
+}
+
+/// One file as the library lists it (tests and tools).
+#[allow(dead_code)]
+pub fn scan_library_one(path: &Path) -> Option<LibraryModel> {
+    describe(path, "test")
 }
 
 pub fn scan_library() -> Vec<LibraryModel> {
@@ -586,6 +593,8 @@ enum Job {
     Unload { reply: Sender<()> },
     Chat { req: ChatRequest, events: ChatSink, reply: Sender<()> },
     Tune { events: TuneSink, reply: Sender<Result<tune::Outcome, String>> },
+    /// The Tune screen's run (tune_screen.rs): measured on the engine thread, which owns the model.
+    TuneModel { hub: Arc<crate::tune_screen::TuneHub> },
 }
 
 /// Cheap to clone: every field is shared.
@@ -608,6 +617,22 @@ pub struct Engine {
 }
 
 type Answers = Arc<Mutex<std::collections::HashMap<String, Sender<serde_json::Value>>>>;
+
+/// Today's date as YYYY-MM-DD (UTC).
+pub fn today_iso() -> String {
+    let days = (SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) / 86_400) as i64;
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
+}
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
@@ -685,6 +710,14 @@ impl Engine {
                 while let Ok(job) = rx.recv() {
                     match job {
                         Job::Load { model, ctx, gpu_layers, reply } => {
+                            // Automatic settings on a model the Tune screen tuned: its kept placement
+                            // and switches.
+                            let gpu_layers = if gpu_layers.is_none() {
+                                crate::tune_screen::apply_kept_switches(&model.id);
+                                crate::tune_screen::kept(&model.id).and_then(|k| k.gpu_layers)
+                            } else {
+                                gpu_layers
+                            };
                             if let Some(l) = loaded.take() {
                                 save_profile(&l);
                             }
@@ -737,6 +770,63 @@ impl Engine {
                             }
                             set(&st, |s| s.activity = "idle");
                             let _ = reply.send(());
+                        }
+                        Job::TuneModel { hub } => {
+                            let Some(spec) = hub.spec() else { continue };
+                            set(&st, |s| s.activity = "tuning");
+                            // The model's weights: the loaded ones when it is this file, else read now.
+                            // Its session goes first, so every candidate has the whole card.
+                            let prev_ctx = loaded.as_ref().filter(|l| l.info.id == spec.model.id).map(|l| l.session.max_ctx);
+                            let weights = match loaded.take() {
+                                Some(l) if l.info.id == spec.model.id => {
+                                    save_profile(&l);
+                                    let Loaded { model, tok, .. } = l;
+                                    Ok((model, tok))
+                                }
+                                other => {
+                                    if let Some(l) = other {
+                                        save_profile(&l);
+                                    }
+                                    Model::load(Path::new(&spec.model.path))
+                                        .map_err(|e| format!("Could not load the model: {e}"))
+                                        .and_then(|m| Tokenizer::from_gguf(m.gguf()).map(|t| (m, t)).map_err(|e| format!("Could not read the tokenizer: {e}")))
+                                }
+                            };
+                            set(&st, |s| {
+                                s.loaded = None;
+                                s.progress = None;
+                            });
+                            match weights {
+                                Ok((model, tok)) => {
+                                    let place_fn = |m: &Model, ctx: usize, layers: Option<usize>| -> Result<(Session, usize, usize, bool), String> {
+                                        let (s, _) = place(m, ctx, layers);
+                                        let on = s.gpu.as_ref().map_or(0, |g| g.gpu_layers()) + s.portable.as_ref().map_or(0, |p| p.gpu_layers());
+                                        if let (Some(want), true) = (layers, s.gpu.is_none()) {
+                                            if want > 0 {
+                                                return Err(format!("{want} layers did not fit on the graphics card."));
+                                            }
+                                        }
+                                        let cuda = s.gpu.is_some();
+                                        Ok((s, on, m.cfg.n_layer, cuda))
+                                    };
+                                    let done = crate::tune_screen::run_job(&hub, &model, &tok, &place_fn);
+                                    // The tuned model stays loaded, with the winner's placement (or as it
+                                    // was when the run stopped early): it is the model the user is about
+                                    // to use. A previously loaded different model is not reloaded.
+                                    let layers = done.as_ref().map_or(None, |d| d.gpu_layers);
+                                    let ctx = prev_ctx.unwrap_or(8192);
+                                    let l = assemble(model, tok, &spec.model, ctx, layers);
+                                    let info = loaded_info(&l, l.session.max_ctx);
+                                    let progress = l.session.progress.clone();
+                                    loaded = Some(l);
+                                    set(&st, |s| {
+                                        s.loaded = Some(info);
+                                        s.progress = Some(progress);
+                                    });
+                                }
+                                Err(e) => hub.emit(serde_json::json!({ "kind": "failed", "reason": e })),
+                            }
+                            set(&st, |s| s.activity = "idle");
                         }
                         Job::Tune { events, reply } => {
                             cn.store(false, Ordering::SeqCst);
@@ -839,6 +929,11 @@ impl Engine {
         rx.recv().map_err(|_| "The engine stopped during the reply.".to_owned())
     }
 
+    /// Queues the Tune screen's current run (or its resume) on the engine thread; returns at once.
+    pub fn tune_model(&self, hub: Arc<crate::tune_screen::TuneHub>) -> Result<(), String> {
+        self.send(Job::TuneModel { hub })
+    }
+
     /// Times the processor settings on the loaded model for this machine, streaming every finished
     /// trial to `events`; resolves with the outcome (or the reason it stopped).
     pub fn tune_machine(&self, events: TuneSink) -> Result<tune::Outcome, String> {
@@ -859,8 +954,21 @@ fn load(m: &LibraryModel, ctx: usize, gpu_layers: Option<usize>) -> Result<Loade
     }
     let model = Model::load(Path::new(&m.path)).map_err(|e| format!("Could not load the model: {e}"))?;
     let tok = Tokenizer::from_gguf(model.gguf()).map_err(|e| format!("Could not read the tokenizer: {e}"))?;
+    Ok(assemble(model, tok, m, ctx, gpu_layers))
+}
+
+/// A loaded model from its weights and tokenizer: the session placed as `place` decides.
+fn assemble(model: Model, tok: Tokenizer, m: &LibraryModel, ctx: usize, gpu_layers: Option<usize>) -> Loaded {
     let ctx = ctx.clamp(512, model.cfg.ctx_train.max(512));
-    let (session, placement) = match Session::new_gpu_with(&model, ctx, gpu_layers) {
+    let (session, placement) = place(&model, ctx, gpu_layers);
+    let dialect = crate::toolcall::dialect_from_template(model.gguf().str("tokenizer.chat_template").unwrap_or(""));
+    Loaded { model, session, tok, info: m.clone(), dialect, placement, vision: None, images: Default::default() }
+}
+
+/// Where a session for `model` runs: an NVIDIA card (with `gpu_layers` forced, or as many as fit),
+/// else another graphics card through the portable backend, else the processor; with the plan.
+fn place(model: &Model, ctx: usize, gpu_layers: Option<usize>) -> (Session, Option<cerebro_engine::placement::Plan>) {
+    match Session::new_gpu_with(model, ctx, gpu_layers) {
         Ok(s) => {
             let p = s.gpu.as_ref().map(|g| g.plan.clone());
             (s, p)
@@ -868,26 +976,24 @@ fn load(m: &LibraryModel, ctx: usize, gpu_layers: Option<usize>) -> Result<Loade
         Err(e) => {
             // No NVIDIA GPU took it: another graphics card through the portable backend (Vulkan /
             // DX12 / Metal) when one is there and the model is a kind it runs, else the processor.
-            let portable = if gpu_layers == Some(0) { None } else { Session::new_portable(&model, ctx).map_err(|pe| eprintln!("Other graphics cards: {pe}")).ok() };
+            let portable = if gpu_layers == Some(0) { None } else { Session::new_portable(model, ctx).map_err(|pe| eprintln!("Other graphics cards: {pe}")).ok() };
             match portable {
                 Some(s) => {
-                    let p = s.portable.as_ref().map(|g| g.plan(&model));
+                    let p = s.portable.as_ref().map(|g| g.plan(model));
                     (s, p)
                 }
                 None => {
                     eprintln!("Running on the processor: {e}");
                     // The processor-only plan still says what RAM and the drive will do.
-                    let mut p = cerebro_engine::gpu::plan_for(&model, ctx, 0, None).ok();
+                    let mut p = cerebro_engine::gpu::plan_for(model, ctx, 0, None).ok();
                     if let (Some(p), Some(0)) = (p.as_mut(), gpu_layers) {
                         p.notes[0] = "No layers on the graphics card (chosen when loading): everything runs on the processor.".to_owned();
                     }
-                    (Session::new(&model, ctx), p)
+                    (Session::new(model, ctx), p)
                 }
             }
         }
-    };
-    let dialect = crate::toolcall::dialect_from_template(model.gguf().str("tokenizer.chat_template").unwrap_or(""));
-    Ok(Loaded { model, session, tok, info: m.clone(), dialect, placement, vision: None, images: Default::default() })
+    }
 }
 
 fn loaded_info(l: &Loaded, ctx: usize) -> LoadedInfo {

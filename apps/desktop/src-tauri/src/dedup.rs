@@ -441,6 +441,11 @@ fn nonce() -> u64 {
 
 /// SHA-256 of one file as lowercase hex, streamed in 4 MB reads so even a 100 GiB model never
 /// sits in memory whole. Always reads: callers that must not trust a memo use this directly.
+/// SHA-256 of a whole file, streamed (the Tune screen's integrity check uses it too).
+pub(crate) fn sha256_of(path: &Path) -> std::io::Result<String> {
+    sha256_file(path)
+}
+
 fn sha256_file(path: &Path) -> std::io::Result<String> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();

@@ -251,11 +251,53 @@ pub async fn gguf_copy_revert(engine: State<'_, Engine>, id: String) -> Result<(
         .map_err(|_| "The copy could not be deleted.".to_owned())?
 }
 
+type TuneHubState<'a> = State<'a, std::sync::Arc<crate::tune_screen::TuneHub>>;
+
+/// Starts the Tune screen's run for a library model and workload profile; the measuring happens on
+/// the engine thread and streams to `tune_subscribe` listeners. Resolves with the run's info.
+#[tauri::command]
+pub fn tune_start(engine: State<'_, Engine>, hub: TuneHubState<'_>, model_id: String, profile: String, integrity_check: bool) -> Result<serde_json::Value, String> {
+    let model = find_model(&engine, &model_id)?;
+    if !model.supported {
+        return Err(format!("Cerebro Engine does not run the {} architecture yet.", model.arch_name));
+    }
+    if model.kind != "text" && model.kind != "vision" {
+        return Err("Only text and vision models can be tuned.".to_owned());
+    }
+    let profile = crate::tune_screen::Profile::parse(&profile).ok_or("That is not a workload profile.")?;
+    let spec = crate::tune_screen::Spec { model, profile, integrity: integrity_check };
+    let run = hub.begin(spec.clone(), crate::tune_screen::run_info(&spec))?;
+    engine.tune_model(std::sync::Arc::clone(hub.inner()))?;
+    Ok(run)
+}
+
+/// The run so far (one replay batch), then every new event, through `on_event`.
+#[tauri::command]
+pub fn tune_subscribe(hub: TuneHubState<'_>, on_event: Channel<serde_json::Value>) -> Result<(), String> {
+    hub.subscribe(on_event)
+}
+
+/// Stops the running tune at the end of the step it is in (finished steps are kept).
+#[tauri::command]
+pub fn tune_cancel(hub: TuneHubState<'_>, run_id: String) -> Result<(), String> {
+    hub.request_cancel(&run_id)
+}
+
+/// Continues a cancelled tune: finished steps are kept, the interrupted one runs again.
+#[tauri::command]
+pub fn tune_resume(engine: State<'_, Engine>, hub: TuneHubState<'_>, run_id: String) -> Result<(), String> {
+    hub.resume(&run_id)?;
+    engine.tune_model(std::sync::Arc::clone(hub.inner()))
+}
+
 /// Streams a reply through `on_event`; resolves when it is finished or stopped.
 #[tauri::command]
-pub async fn chat_send(engine: State<'_, Engine>, request: ChatRequest, on_event: Channel<ChatEvent>) -> Result<(), String> {
+pub async fn chat_send(engine: State<'_, Engine>, hub: TuneHubState<'_>, request: ChatRequest, on_event: Channel<ChatEvent>) -> Result<(), String> {
     if request.turns.is_empty() || request.turns.len() > 10_000 {
         return Err("A chat needs at least one message.".to_owned());
+    }
+    if hub.running() {
+        return Err("A tune is measuring the model on the Tune screen. Wait for it to finish, or cancel it there.".to_owned());
     }
     find_model(&engine, &request.model_id)?;
     let eng = engine.inner().handle();

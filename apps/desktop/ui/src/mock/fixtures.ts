@@ -70,7 +70,7 @@ export const MOCK_LIVE_BASE: LiveStats = {
   tokensPerSecond: 16.8,
   vramUsedGiB: 7.1,
   vramTotalGiB: MOCK_GPU.vramTotalGiB,
-  backend: { state: "running", address: "127.0.0.1:8181", build: "b6500" },
+  backend: { state: "running", address: "127.0.0.1:8181", build: "Cerebro Engine 0.1.0" },
 };
 
 /** Commit of the example backend build. Illustrative, like the build number beside it. */

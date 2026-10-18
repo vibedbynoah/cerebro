@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tune-subscribe"
+description = "Enables the tune_subscribe command without any pre-configured scope."
+commands.allow = ["tune_subscribe"]
+
+[[permission]]
+identifier = "deny-tune-subscribe"
+description = "Denies the tune_subscribe command without any pre-configured scope."
+commands.deny = ["tune_subscribe"]

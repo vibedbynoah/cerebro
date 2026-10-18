@@ -175,7 +175,7 @@ function settingsFor(m: LibraryModel, c: Config, depth: number): TuneSetting[] {
   const L = m.arch.layers;
   if (c.gpuLayers === "fit") {
     return [
-      { name: "Placement", value: "llama.cpp automatic fit", flag: null },
+      { name: "Placement", value: "automatic", flag: null },
       { name: "GPU layers", value: `${fitLayers(m, depth)} of ${L} on the GPU`, flag: null },
     ];
   }
@@ -210,7 +210,7 @@ function scenarioFor(m: LibraryModel, depth: number): Scenario {
 
 function plan(m: LibraryModel, profile: TuneProfile, depth: number, scenario: Scenario): Planned[] {
   const L = m.arch.layers;
-  const all: Array<{ label: string; config: Config }> = [{ label: "llama.cpp automatic", config: BASE }];
+  const all: Array<{ label: string; config: Config }> = [{ label: "Cerebro Engine automatic", config: BASE }];
   const P = 6; // performance cores on the example CPU
   if (scenario === "moe") {
     const f16 = { ...BASE, gpuLayers: L };
@@ -288,8 +288,8 @@ function reasonsFor(m: LibraryModel, depth: number, profile: TuneProfile, scenar
   const fit = fitLayers(m, depth);
   const out: string[] = [];
   if (winner.candidate.baseline) {
-    if (scenario === "fits") out.push(`The whole model and its KV cache fit in video memory at ${depth / 1024}K tokens, so llama.cpp's automatic fit already put all ${L} layers on the graphics card.`);
-    else out.push(`llama.cpp's automatic fit placed ${fit} of ${L} layers on the graphics card, and no candidate that passed every check did better.`);
+    if (scenario === "fits") out.push(`The whole model and its KV cache fit in video memory at ${depth / 1024}K tokens, so the automatic placement already put all ${L} layers on the graphics card.`);
+    else out.push(`The automatic placement put ${fit} of ${L} layers on the graphics card, and no candidate that passed every check did better.`);
     if (best && !best.candidate.baseline) {
       const b = results.get(best.candidate.id);
       const base = results.get(baseline.candidate.id);
@@ -299,20 +299,20 @@ function reasonsFor(m: LibraryModel, depth: number, profile: TuneProfile, scenar
       }
     }
     if (rejected.length > 0) out.push(`Faster candidates were rejected: ${rejected.join("; ")}.`);
-    out.push("Cerebro keeps llama.cpp's own settings rather than change something that did not help.");
+    out.push("Cerebro keeps the engine's automatic settings rather than change something that did not help.");
     return out;
   }
   const c = winner.config;
   const ngl = resolvedLayers(m, c, depth);
   if (scenario === "moe") {
-    out.push(`llama.cpp's automatic fit placed ${fit} of ${L} layers on the graphics card and ran the other ${L - fit} entirely on the processor. That is the most it could fit, not the fastest it could run.`);
+    out.push(`The automatic placement put ${fit} of ${L} layers on the graphics card and ran the other ${L - fit} entirely on the processor. That is the most it could fit, not the fastest it could run.`);
     out.push(
       `The winner keeps every layer's attention on the graphics card and moves only the expert weights of ${c.moeCpu} layers to system memory. This model reads ${m.arch.activeExperts} of its ${m.arch.experts} experts per token, so those reads cost little.`,
     );
   } else if (ngl !== fit) {
-    out.push(`llama.cpp's automatic fit placed ${fit} of ${L} layers on the graphics card. The winner places ${ngl}, so less of each token's work waits on the processor.`);
+    out.push(`The automatic placement put ${fit} of ${L} layers on the graphics card. The winner places ${ngl}, so less of each token's work waits on the processor.`);
   } else {
-    out.push(`llama.cpp's automatic fit placed ${fit} of ${L} layers on the graphics card. The winner keeps that placement and changes how the work runs.`);
+    out.push(`The automatic placement put ${fit} of ${L} layers on the graphics card. The winner keeps that placement and changes how the work runs.`);
   }
   if (c.kv !== "f16") {
     const saved = kvGiB(m, depth, "f16") - kvGiB(m, depth, c.kv);
@@ -492,7 +492,7 @@ export function buildTuneScript(m: LibraryModel, profile: TuneProfile, opts: Scr
       value,
       gate: QUALITY_GATE,
       passed,
-      reference: "next-token probabilities from llama.cpp's automatic settings with an f16 KV cache, on 64 fixed prompts",
+      reference: "next-token probabilities from the engine's automatic settings with an f16 KV cache, on 64 fixed prompts",
     });
     nextStep();
     if (passed) passedQuality.push(p);

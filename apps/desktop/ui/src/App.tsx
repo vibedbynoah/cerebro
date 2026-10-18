@@ -288,7 +288,7 @@ function TuneToasts(props: { route: Accessor<RouteId> }): JSX.Element {
           if (e.kind === "winner")
             notify(
               "Tune finished",
-              e.candidateId === e.baselineId ? `llama.cpp's automatic settings were fastest for ${model}, so they are kept.` : `${labels.get(e.candidateId) ?? "The fastest settings"} locked in for ${model}.`,
+              e.candidateId === e.baselineId ? `The engine's automatic settings were fastest for ${model}, so they are kept.` : `${labels.get(e.candidateId) ?? "The fastest settings"} locked in for ${model}.`,
               "success",
             );
           else if (e.kind === "failed") notify("Tune stopped", `${model}: ${e.reason}.`, "error");
