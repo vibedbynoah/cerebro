@@ -761,13 +761,24 @@ fn load(m: &LibraryModel, ctx: usize, gpu_layers: Option<usize>) -> Result<Loade
             (s, p)
         }
         Err(e) => {
-            eprintln!("Running on the processor: {e}");
-            // The processor-only plan still says what RAM and the drive will do.
-            let mut p = cerebro_engine::gpu::plan_for(&model, ctx, 0, None).ok();
-            if let (Some(p), Some(0)) = (p.as_mut(), gpu_layers) {
-                p.notes[0] = "No layers on the graphics card (chosen when loading): everything runs on the processor.".to_owned();
+            // No NVIDIA GPU took it: another graphics card through the portable backend (Vulkan /
+            // DX12 / Metal) when one is there and the model is a kind it runs, else the processor.
+            let portable = if gpu_layers == Some(0) { None } else { Session::new_portable(&model, ctx).map_err(|pe| eprintln!("Other graphics cards: {pe}")).ok() };
+            match portable {
+                Some(s) => {
+                    let p = s.portable.as_ref().map(|g| g.plan(&model));
+                    (s, p)
+                }
+                None => {
+                    eprintln!("Running on the processor: {e}");
+                    // The processor-only plan still says what RAM and the drive will do.
+                    let mut p = cerebro_engine::gpu::plan_for(&model, ctx, 0, None).ok();
+                    if let (Some(p), Some(0)) = (p.as_mut(), gpu_layers) {
+                        p.notes[0] = "No layers on the graphics card (chosen when loading): everything runs on the processor.".to_owned();
+                    }
+                    (Session::new(&model, ctx), p)
+                }
             }
-            (Session::new(&model, ctx), p)
         }
     };
     let dialect = crate::toolcall::dialect_from_template(model.gguf().str("tokenizer.chat_template").unwrap_or(""));
@@ -776,17 +787,18 @@ fn load(m: &LibraryModel, ctx: usize, gpu_layers: Option<usize>) -> Result<Loade
 
 fn loaded_info(l: &Loaded, ctx: usize) -> LoadedInfo {
     let g = l.session.gpu.as_ref();
+    let portable = l.session.portable.as_ref();
     LoadedInfo {
         model: l.info.clone(),
         ctx,
-        on_gpu: g.is_some(),
-        vram_bytes: g.map_or(0, |g| g.vram_bytes),
+        on_gpu: g.is_some() || portable.is_some(),
+        vram_bytes: g.map_or(0, |g| g.vram_bytes) + portable.map_or(0, |p| p.bytes as usize),
         experts: g.and_then(|g| g.expert_cache()),
         context_used: l.session.tokens.len(),
         last_prefill_tps: None,
         dialect: l.dialect,
         placement: l.placement.clone(),
-        gpu_layers: g.map_or(0, |g| g.gpu_layers()),
+        gpu_layers: g.map_or(0, |g| g.gpu_layers()) + portable.map_or(0, |_| l.model.cfg.n_layer),
     }
 }
 
@@ -1468,6 +1480,43 @@ mod tool_loop_tests {
             assert_eq!(tool, "get_weather");
             Ok(format!("{}: sunny, 21 degrees Celsius, wind 9 km/h", args["city"].as_str().unwrap_or("?")))
         }
+    }
+
+    /// A machine without a usable NVIDIA GPU (run with CUDA_VISIBLE_DEVICES=-1 to hide CUDA): the
+    /// load falls through to the portable backend, reports where the model went, and answers.
+    #[test]
+    #[ignore]
+    fn without_cuda_a_real_model_loads_on_another_graphics_card() {
+        let path = std::env::var("CEREBRO_TEST_MODEL").unwrap_or_else(|_| r"C:\models\dev\Qwen3-0.6B-Q8_0.gguf".into());
+        let model = describe(Path::new(&path), "test").expect("model");
+        let l = load(&model, 4096, None).expect("load");
+        assert!(l.session.gpu.is_none(), "CUDA was not hidden: run with CUDA_VISIBLE_DEVICES=-1");
+        let p = l.session.portable.as_ref().expect("on the portable backend");
+        let plan = l.placement.as_ref().expect("placement");
+        println!("{} ({}): {:?}", p.info.name, p.info.backend, plan.notes);
+        assert!(plan.notes[0].starts_with("All 28 layers on the "));
+        let info = loaded_info(&l, 4096);
+        assert!(info.on_gpu && info.gpu_layers == 28 && info.vram_bytes > 0);
+        let engine = Engine::start();
+        engine.load(model.clone(), 4096, None).unwrap();
+        let events: Arc<Mutex<Vec<ChatEvent>>> = Arc::default();
+        let ev = events.clone();
+        let sink: ChatSink = Arc::new(move |e: ChatEvent| ev.lock().unwrap().push(e));
+        let req = ChatRequest {
+            model_id: model.id.clone(),
+            system_prompt: String::new(),
+            turns: vec![ChatTurn { role: "user".into(), text: "What is the capital of France? One word.".into() }],
+            sampler: ChatSampler { temperature: 0.0, top_p: 1.0, min_p: 0.0, top_k: 1, repeat_penalty: 1.0, max_tokens: 400 },
+            native: None,
+            tools: None,
+            orchestrate: None,
+            keep_cache: false,
+            client_tools: None,
+        };
+        engine.chat(req, sink).unwrap();
+        let text: String = events.lock().unwrap().iter().filter_map(|e| if let ChatEvent::Token { text } = e { Some(text.clone()) } else { None }).collect();
+        println!("reply: {text:?}");
+        assert!(text.contains("Paris"), "{text}");
     }
 
     /// The real engine and a real model through the whole loop: the model asks for the tool, the

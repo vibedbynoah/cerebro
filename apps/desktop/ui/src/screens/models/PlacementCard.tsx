@@ -60,15 +60,20 @@ export function PlacementCard(props: { plan: Placement; title?: string }): JSX.E
             {slowDrive() ? gib(p().driveBytesPerToken) : "none"}
           </dd>
         </div>
-        <div>
-          <dt>Estimated speed</dt>
-          <dd class="mono">{p().estDecodeTps >= 10 ? Math.round(p().estDecodeTps) : p().estDecodeTps.toFixed(p().estDecodeTps >= 1 ? 1 : 2)} tok/s</dd>
-        </div>
+        {/* 0 = no estimate (a graphics card whose memory speed is not known) */}
+        <Show when={p().estDecodeTps > 0}>
+          <div>
+            <dt>Estimated speed</dt>
+            <dd class="mono">{p().estDecodeTps >= 10 ? Math.round(p().estDecodeTps) : p().estDecodeTps.toFixed(p().estDecodeTps >= 1 ? 1 : 2)} tok/s</dd>
+          </div>
+        </Show>
       </dl>
       <ul class="placement__notes">
         <For each={p().notes}>{(n) => <li>{n}</li>}</For>
       </ul>
-      <p class="hint">An estimate from each part's speed; Tune measures the real figure.</p>
+      <Show when={p().estDecodeTps > 0}>
+        <p class="hint">An estimate from each part's speed; Tune measures the real figure.</p>
+      </Show>
     </section>
   );
 }

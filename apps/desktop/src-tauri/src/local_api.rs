@@ -136,6 +136,8 @@ pub struct Opts {
     pub stops: Vec<String>,
     /// The model name the app asked for (echoed back), if any.
     pub model: Option<String>,
+    /// Whether the client keeps the connection open (it did not send `Connection: close`).
+    pub keep: bool,
 }
 
 fn text_of_openai_content(c: &Value) -> Result<String, ApiError> {
@@ -250,6 +252,7 @@ pub fn parse_openai(v: &Value) -> Result<(ApiRequest, Opts), ApiError> {
         include_usage: v["stream_options"]["include_usage"].as_bool().unwrap_or(false),
         stops: stops_of(&v["stop"])?,
         model: v["model"].as_str().map(str::to_owned),
+        keep: true,
     };
     Ok((req, opts))
 }
@@ -337,7 +340,7 @@ pub fn parse_anthropic(v: &Value) -> Result<(ApiRequest, Opts), ApiError> {
     let think = matches!(v["thinking"]["type"].as_str(), Some("enabled" | "adaptive"));
     let (temperature, top_p) = sampling(v, think)?;
     let req = ApiRequest { load: None, system, messages, tools, temperature, top_p, max_tokens: max_tokens(&v["max_tokens"], None)?, think };
-    let opts = Opts { stream: v["stream"].as_bool().unwrap_or(false), include_usage: true, stops: stops_of(&v["stop_sequences"])?, model: v["model"].as_str().map(str::to_owned) };
+    let opts = Opts { stream: v["stream"].as_bool().unwrap_or(false), include_usage: true, stops: stops_of(&v["stop_sequences"])?, model: v["model"].as_str().map(str::to_owned), keep: true };
     Ok((req, opts))
 }
 
@@ -466,7 +469,7 @@ fn respond(backend: &dyn ApiBackend, wire: Wire, req: ApiRequest, opts: Opts, w:
         });
         let done = match r {
             Ok(d) => d,
-            Err(e) => return write_response(w, &Response::json(e.status, error_body(wire, e.status, &e.message)), true).is_ok(),
+            Err(e) => return write_response(w, &Response::json(e.status, error_body(wire, e.status, &e.message)), opts.keep).is_ok(),
         };
         if stops.hit.is_none() {
             text.push_str(&stops.finish());
@@ -515,7 +518,7 @@ fn respond(backend: &dyn ApiBackend, wire: Wire, req: ApiRequest, opts: Opts, w:
                 })
             }
         };
-        return write_response(w, &Response::json(200, body), true).is_ok();
+        return write_response(w, &Response::json(200, body), opts.keep).is_ok();
     }
 
     // Streamed. Errors found before the first byte are ordinary responses; later ones are an event.
@@ -833,6 +836,19 @@ impl LocalApi {
     }
 
     fn serve(&self, stream: TcpStream, stop: &AtomicBool) {
+        let Ok(closer) = stream.try_clone() else { return };
+        self.serve_requests(stream, stop);
+        // Close gracefully: end our side, then read what the client still sends until it closes
+        // (at most a second). Dropping a socket with unread data makes Windows reset the
+        // connection, and a client could then lose a response it had already received.
+        let _ = closer.shutdown(std::net::Shutdown::Write);
+        let _ = closer.set_read_timeout(Some(Duration::from_secs(1)));
+        let mut sink = [0u8; 4096];
+        let mut c = &closer;
+        while matches!(std::io::Read::read(&mut c, &mut sink), Ok(n) if n > 0) {}
+    }
+
+    fn serve_requests(&self, stream: TcpStream, stop: &AtomicBool) {
         let _ = stream.set_nonblocking(false);
         let _ = stream.set_read_timeout(Some(Duration::from_secs(300)));
         let _ = stream.set_nodelay(true);
@@ -860,7 +876,9 @@ impl LocalApi {
     /// One request. Returns whether the connection may be reused.
     pub(crate) fn handle(&self, req: &Request, w: &mut dyn Write) -> bool {
         let wire = if req.path.starts_with("/v1/messages") || req.header("anthropic-version").is_some() { Wire::Anthropic } else { Wire::OpenAi };
-        let fail = |w: &mut dyn Write, status: u16, msg: &str| write_response(w, &Response::json(status, error_body(wire, status, msg)), true).is_ok();
+        // The response says whether this connection stays open, as the client asked.
+        let keep = req.keep_alive();
+        let fail = |w: &mut dyn Write, status: u16, msg: &str| write_response(w, &Response::json(status, error_body(wire, status, msg)), keep).is_ok();
         let s = self.settings().clone();
         let port = self.bound().map_or(s.port, |a| a.port());
         // Host: this machine by loopback name, or (LAN allowed) an IP literal. A DNS name pointing
@@ -882,7 +900,7 @@ impl LocalApi {
         if s.require_key {
             let given = req.header("x-api-key").or_else(|| req.header("authorization").and_then(|a| a.strip_prefix("Bearer "))).unwrap_or("");
             if given.is_empty() || !bool::from(given.as_bytes().ct_eq(s.key.as_bytes())) {
-                return write_response(w, &Response::json(401, error_body(wire, 401, "A valid API key is required (Settings > Local API).")).with("WWW-Authenticate", "Bearer realm=\"cerebro\"".into()), true).is_ok();
+                return write_response(w, &Response::json(401, error_body(wire, 401, "A valid API key is required (Settings > Local API).")).with("WWW-Authenticate", "Bearer realm=\"cerebro\"".into()), keep).is_ok();
             }
         }
         self.requests.fetch_add(1, Ordering::Relaxed);
@@ -898,13 +916,13 @@ impl LocalApi {
                     let data: Vec<Value> = list.iter().map(|m| json!({ "id": m.id, "object": "model", "created": 0, "owned_by": "cerebro" })).collect();
                     json!({ "object": "list", "data": data })
                 };
-                write_response(w, &Response::json(200, body), true).is_ok()
+                write_response(w, &Response::json(200, body), keep).is_ok()
             }
             ("GET", p) if p.starts_with("/v1/models/") => {
                 let id = &p["/v1/models/".len()..];
                 match models().into_iter().find(|m| m.id == id) {
-                    Some(m) if wire == Wire::Anthropic => write_response(w, &Response::json(200, json!({ "type": "model", "id": m.id, "display_name": m.name, "created_at": "2026-01-01T00:00:00Z" })), true).is_ok(),
-                    Some(m) => write_response(w, &Response::json(200, json!({ "id": m.id, "object": "model", "created": 0, "owned_by": "cerebro" })), true).is_ok(),
+                    Some(m) if wire == Wire::Anthropic => write_response(w, &Response::json(200, json!({ "type": "model", "id": m.id, "display_name": m.name, "created_at": "2026-01-01T00:00:00Z" })), keep).is_ok(),
+                    Some(m) => write_response(w, &Response::json(200, json!({ "id": m.id, "object": "model", "created": 0, "owned_by": "cerebro" })), keep).is_ok(),
                     None => fail(w, 404, "No such model."),
                 }
             }
@@ -929,9 +947,9 @@ impl LocalApi {
                         }
                     }
                 }
-                respond(self.backend.as_ref(), wire, api_req, opts, w)
+                respond(self.backend.as_ref(), wire, api_req, Opts { keep, ..opts }, w)
             }
-            ("GET", "/" | "/v1" | "/health") => write_response(w, &Response::json(200, json!({ "status": "ok", "server": "cerebro" })), true).is_ok(),
+            ("GET", "/" | "/v1" | "/health") => write_response(w, &Response::json(200, json!({ "status": "ok", "server": "cerebro" })), keep).is_ok(),
             _ => fail(w, 404, "Not found."),
         }
     }
