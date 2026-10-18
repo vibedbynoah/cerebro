@@ -9,16 +9,22 @@ Status: [x] done and measured, [ ] next. Numbers only from docs/measurements.
 - [x] Engine switches registry (every optimisation a user toggle with explanations; C section 2)
 - [x] Batched CPU prefill (dense, 4-token VNNI kernel) — 0.6B CPU prefill 57 -> 183 tok/s @512, bit-identical logits to 256 tokens
 - [ ] Async expert swaps + shipped expert profile per model (A#4, A#8, B S-01) — first-turn MoE 19-23 -> 30+
-- [ ] MTP / prompt-lookup speculation reusing batched prefill as verifier (A#10, B C-01) — Strata measures 1.6-1.8x
+- [x] Prompt-lookup speculation, exact speculative sampling, GPU verify — 0.6B copy-heavy 323 -> 508 tok/s; free text -5%
+- [ ] MTP / draft-model speculation; speculation for hybrids, MoE and splits (A#10, B C-01)
 - [ ] Interleaved K-quant CPU layout, large pages (A#5, A#12) — CPU expert 26-28 -> ~37 GB/s in-step
 - [ ] q8 KV pages; KV tier to RAM past 64K (A#17, B E-01/E-02)
 - [ ] Continuous batching + multi-slot KV (A#15) — needed by Orchestrate below
 - [x] Qwen3.8 hybrid (Gated DeltaNet) on CPU and GPU — 4B 5.9 -> 65 tok/s; 27B split 2.0 -> 2.8 tok/s
 - [ ] Gemma 4 graphs (A#22)
 - [x] Placement planner + GPU/CPU layer split, drive-aware (NVMe/SATA/HDD/USB-SD) — Qwen3-14B 3.2 -> 11.8 tok/s on 8 GB
-- [ ] MMA flash prefill for head size 256 (Qwen3.8) — from docs/research/2026-10-17/J-feature-roadmap-triage.md
-- [ ] Vulkan backend for AMD / Intel GPUs behind the same planner (J triage #3)
-- [ ] Block-hash prefix cache + persistent KV store on disk (J triage #4-5)
+- [x] MMA flash prefill for head size 256 (Qwen3.8) — 516 -> 2,211 tok/s
+- [x] Portable GPU backend (wgpu: Vulkan / DX12 / Metal) for AMD, Intel and Apple GPUs (J triage #3) — dense models;
+      kernels timed per GPU at load; split attention; DXC shipped (2026-10-18-portable.md)
+- [ ] Portable backend: K-quant native weights (int8 repack needs ~2x a Q4 file), MoE, hybrids, splits, saved caches;
+      recover from a driver reset and remember the failing kernel/compiler combination per machine
+- [x] Persistent KV store on disk ("Keep long chats ready"), all-or-nothing restore (J triage #5)
+- [ ] Block-hash prefix cache across chats and API calls (J triage #4)
+- [x] Tune for this machine: thread count, work splitting, four-row dots measured per model (2026-10-18-tune.md)
 
 ## App
 - [x] Turbo: real engine switches, beginner/advanced text, channel badges, saved per machine
@@ -27,7 +33,8 @@ Status: [x] done and measured, [ ] next. Numbers only from docs/measurements.
 - [x] Cerebro itself as an MCP server (Streamable HTTP, loopback + token)
 - [x] Orchestrate mode backend (GVS5H ledger; real 0.6B run correct in 10.7 s)
 - [x] Monitor: real GPU load/temp/power/PCIe/throttle, CPU load, driver (NVML at run time), 60 s history
-- [ ] Monitor: live prefill tok/s, per-tier memory %, disk read
+- [x] Monitor: live prompt-reading progress and tok/s
+- [ ] Monitor: per-tier memory %, disk read
 - [ ] Orchestrate mode (GVS5H, arXiv 2608.26480, github.com/slee-persis/GVS5H, MIT): a manager instance
       splits a task, fresh worker instances of the same local model solve parts, all coordinate through a
       ledger folder (plan, notes, current solution) in the user's workspace. Reported: local Qwen3.8-27B
