@@ -37,7 +37,8 @@ fn main() {
     if portable {
         s = Session::new_portable(&model, 4096).expect("portable session");
         let i = &s.portable.as_ref().expect("portable").info;
-        eprintln!("portable GPU: {} ({}, {}), {:.2} GiB on the GPU", i.name, i.backend, i.kind, s.portable.as_ref().expect("portable").bytes as f64 / (1u64 << 30) as f64);
+        let p = s.portable.as_ref().expect("portable");
+        eprintln!("portable GPU: {} ({}, {}), {:.2} GiB on the GPU; kernels: {}", i.name, i.backend, i.kind, p.bytes as f64 / (1u64 << 30) as f64, p.kernels);
     }
     #[cfg(not(feature = "portable"))]
     let _ = portable;
