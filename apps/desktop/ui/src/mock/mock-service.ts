@@ -4,6 +4,7 @@ import { activeTweakCount, applyTweaks, contextCeiling, EMPTY_TWEAKS, profileNam
 import type { CerebroService, Unsubscribe } from "../service/service";
 import { createMockChat } from "./chat";
 import { createMockTrainer } from "./mock-train";
+import { cloneMachineTuneOutcome, createMachineTunePlayer } from "./machine-tune";
 import type {
   EngineSwitch,
   LocalApiView,
@@ -24,6 +25,7 @@ import type {
   LoadedModel,
   LoadParams,
   LoadPreset,
+  MachineTuneOutcome,
   ModelSummary,
   NetworkState,
   PatchProfile,
@@ -300,6 +302,9 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
   const copies = new Map<string, GgufCopy>();
   let groups: DuplicateGroup[] = mockDuplicates();
   const tune = createTunePlayer({ speed: options.tuneSpeed ?? 1, hold: options.tuneHold, fail: options.failTune });
+  // Tuning for this machine (Turbo): replays the recorded run kept in machine-tune.ts.
+  const machineTune = createMachineTunePlayer();
+  let lastTuneOutcome: MachineTuneOutcome | null = null;
   let nextId = 1;
   const multiGpu = options.multiGpu === true;
   const monitor = createMonitorSim({
@@ -755,6 +760,22 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
         for (const x of switches) x.value = x.default;
         return switches.map((x) => ({ ...x }));
       }),
+
+    async tuneMachine(onTrial, signal) {
+      // The engine needs a model in the llm slot; it says so with the same sentence the Rust side
+      // uses when nothing is loaded.
+      if (!loaded.some((l) => l.slot === "llm")) throw new Error("Load a model first (Models screen).");
+      const outcome = await machineTune.play(onTrial, signal);
+      // The engine keeps the winner through its switches; the mock applies the recorded values to
+      // the switches it lists, so Turbo's list can pick them up after a refresh.
+      for (const s of outcome.settings) {
+        const sw = switches.find((x) => x.id === s.id);
+        if (sw) sw.value = sw.kind.type === "toggle" ? (s.value !== 0 ? 1 : 0) : s.value;
+      }
+      lastTuneOutcome = outcome;
+      return cloneMachineTuneOutcome(outcome);
+    },
+    lastMachineTune: () => later(0, () => (lastTuneOutcome ? cloneMachineTuneOutcome(lastTuneOutcome) : null)),
 
     mcpConfig: () => later(0, () => structuredClone(mcp)),
     mcpSaveConfig: (config) =>

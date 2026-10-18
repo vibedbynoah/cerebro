@@ -1,4 +1,4 @@
-import { createEffect, createResource, createSignal, For, Show, type JSX } from "solid-js";
+import { createEffect, createResource, createSignal, For, on, Show, type JSX } from "solid-js";
 import { Section } from "../../components/Screen";
 import { SettingSwitch } from "../../components/SettingSwitch";
 import { CHANNEL_LABELS } from "../../lib/experience";
@@ -8,16 +8,27 @@ import { useService } from "../../service/context";
 import type { EngineSwitch } from "../../service/types";
 
 /** Engine switches: the engine's optimisation registry, each with an explanation for the current level. */
-export function EngineSwitches(): JSX.Element {
+export function EngineSwitches(props: { version?: number }): JSX.Element {
   const service = useService();
   const app = useAppState();
 
   const [switches, setSwitches] = createSignal<EngineSwitch[]>([]);
-  const [list] = createResource(() => service.listSwitches());
+  const [list, { refetch }] = createResource(() => service.listSwitches());
   createEffect(() => {
     const l = list();
     if (l) setSwitches(l);
   });
+  // A finished tune for this machine changed the engine's switches; the parent bumps `version` so
+  // the list is read again and shows the kept values.
+  createEffect(
+    on(
+      () => props.version,
+      () => {
+        void refetch();
+      },
+      { defer: true },
+    ),
+  );
   const error = (): string | null => (list.error ? (list.error instanceof Error ? list.error.message : String(list.error)) : null);
 
   const update = async (s: EngineSwitch, value: number) => {

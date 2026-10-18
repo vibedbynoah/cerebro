@@ -15,6 +15,8 @@ import type { EngineSwitch, LocalApiView, McpServerView, RemoteOptions, RemotePa
   LoadedModel,
   LoadParams,
   LoadPreset,
+  MachineTuneOutcome,
+  MachineTuneTrial,
   ModelDetail,
   ModelSummary,
   NetworkState,
@@ -136,6 +138,15 @@ export interface CerebroService {
   /** Resolves to the stored value (clamped to the switch's range). */
   setSwitch(id: string, value: number): Promise<number>;
   resetSwitches(): Promise<EngineSwitch[]>;
+
+  // ---- Tune for this machine (Turbo). A loaded model is required; the model is busy meanwhile. ----
+
+  /** Times the processor settings that depend on this machine on the loaded model, calling
+   *  `onTrial` after each finished setting. Aborting the signal stops tuning, through the same
+   *  stop Chat uses. Rejects with a plain sentence when no model is loaded or tuning cannot run. */
+  tuneMachine(onTrial: (t: MachineTuneTrial) => void, signal: AbortSignal): Promise<MachineTuneOutcome>;
+  /** The last finished tune kept on this machine, or null before the first one. */
+  lastMachineTune(): Promise<MachineTuneOutcome | null>;
 
   // ---- MCP servers. The config is saved as mcp.json; saving restarts servers to match. ----
   mcpConfig(): Promise<McpConfig>;

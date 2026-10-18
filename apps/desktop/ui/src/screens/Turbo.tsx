@@ -27,6 +27,7 @@ import {
 import { ENGINE_BUILDS, GPU_RANGE, LOGICAL_CORES, MEASURED_SWEET_SPOT, PROFILE_MEASUREMENTS, PROFILES, TOKEN_PROFILE } from "../mock/turbo";
 import { useAppState } from "../state";
 import { EngineSwitches } from "./turbo/EngineSwitches";
+import { MachineTune } from "./turbo/MachineTune";
 
 /**
  * Turbo: engine builds, schedulers, machine profiles and the profiler (docs/specs/turbo-system.md).
@@ -37,6 +38,9 @@ import { EngineSwitches } from "./turbo/EngineSwitches";
 export function Turbo(): JSX.Element {
   const app = useAppState();
   const advanced = () => app.level() === "advanced";
+  // A finished tune changes the engine's switches; bumping this makes the switches list refetch.
+  const [switchesVersion, setSwitchesVersion] = createSignal(0);
+  const tuned = () => setSwitchesVersion((v) => v + 1);
   // The desktop app shows only what the engine really has: its switches and the release channel.
   // Builds, schedulers, power profiles and the profiler stay a browser-preview design study until
   // the engine measures them.
@@ -44,7 +48,8 @@ export function Turbo(): JSX.Element {
     return (
       <div class="screen turbo">
         <ScreenHeader route="turbo" lede="Every speed-up in the engine, each with a plain explanation, on or off. Changes are saved on this computer." />
-        <EngineSwitches />
+        <MachineTune onTuned={tuned} />
+        <EngineSwitches version={switchesVersion()} />
         <Show when={advanced()}>
           <Channels channel={app.channel()} onChange={(c) => app.setChannel(c)} />
         </Show>
@@ -57,7 +62,8 @@ export function Turbo(): JSX.Element {
         lede="Builds tuned to this machine, smarter scheduling and power profiles. Each change is measured here and kept only if it is faster."
         actions={<IllustrativeFlag />}
       />
-      <EngineSwitches />
+      <MachineTune onTuned={tuned} />
+      <EngineSwitches version={switchesVersion()} />
       <Profiles />
       <Show
         when={advanced()}

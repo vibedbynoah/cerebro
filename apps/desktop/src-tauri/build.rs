@@ -33,6 +33,8 @@ const COMMANDS: &[&str] = &[
     "switches_list",
     "switch_set",
     "switches_reset",
+    "tune_machine_start",
+    "tune_machine_last",
     "mcp_config_get",
     "mcp_config_save",
     "mcp_status",

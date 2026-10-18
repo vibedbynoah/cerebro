@@ -605,6 +605,50 @@ export interface EngineSwitch {
   default: number;
 }
 
+/** One processor setting and its value (cerebro_engine::tune::Setting). */
+export interface MachineTuneSetting {
+  id: string;
+  value: number;
+}
+
+/** One timed setting from a tune for this machine (cerebro_engine::tune::Trial). */
+export interface MachineTuneTrial {
+  phase: "threads" | "splitting" | "rows4" | "confirm";
+  /** Plain words, e.g. "12 threads". */
+  label: string;
+  settings: MachineTuneSetting[];
+  /** Median writing speed, tokens per second. */
+  tps: number;
+  reps: number[];
+}
+
+/** A finished tune for this machine (cerebro_engine::tune::Outcome, camelCase over IPC). */
+export interface MachineTuneOutcome {
+  /** The processor, graphics card and core layout the result belongs to. */
+  machine: string;
+  /** Model fingerprint, as hex. */
+  model: string;
+  /** Layers on the GPU when measured (0 = processor only). */
+  gpuLayers: number;
+  /** The settings in force afterwards (the winner, or the starting ones). */
+  settings: MachineTuneSetting[];
+  start: MachineTuneSetting[];
+  startTps: number;
+  tunedTps: number;
+  /** tuned / start - 1, from the alternating confirmation. */
+  gain: number;
+  kept: boolean;
+  /** How busy the processor was (0..1) from other programs, or null. */
+  busy: number | null;
+  /** One plain sentence about the result. */
+  note: string;
+  trials: MachineTuneTrial[];
+  seconds: number;
+}
+
+/** Streamed while tuning: each finished trial, then the outcome or the reason it stopped. */
+export type MachineTuneEvent = ({ type: "trial" } & MachineTuneTrial) | { type: "done"; outcome: MachineTuneOutcome } | { type: "error"; message: string };
+
 /** MCP servers (mcp.json, standard format). A server is a local program (command) or a web address (url). */
 export interface McpServerConfig {
   command?: string;

@@ -178,6 +178,42 @@ pub fn chat_stop(engine: State<'_, Engine>) {
     engine.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Times this machine's processor settings on the loaded model (Turbo screen), streaming each
+/// finished trial through `on_event`. Kept settings are saved (they survive a restart) and the
+/// outcome is written to machine-tune.json so the screen can show it on the next visit.
+/// Stopping uses `chat_stop`, the same switch the stop button in Chat sets.
+#[tauri::command]
+pub async fn tune_machine_start<R: Runtime>(app: tauri::AppHandle<R>, engine: State<'_, Engine>, on_event: Channel<serde_json::Value>) -> Result<serde_json::Value, String> {
+    let eng = engine.inner().handle();
+    let sink: crate::engine::TuneSink = std::sync::Arc::new(move |event| {
+        if let Ok(value) = serde_json::to_value(&event) {
+            let _ = on_event.send(value);
+        }
+    });
+    let outcome = tauri::async_runtime::spawn_blocking(move || eng.tune_machine(sink)).await.map_err(|_| "Tuning failed.".to_owned())??;
+    save_switches(&app);
+    let json = serde_json::to_value(&outcome).map_err(|_| "The tuning result could not be read.".to_owned())?;
+    if let Some(path) = machine_tune_file(&app) {
+        let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
+        let _ = std::fs::write(path, serde_json::to_vec_pretty(&json).unwrap_or_default());
+    }
+    Ok(json)
+}
+
+/// The last finished tune's result (Turbo screen), or null before the first one.
+#[tauri::command]
+pub fn tune_machine_last<R: Runtime>(app: tauri::AppHandle<R>) -> serde_json::Value {
+    machine_tune_file(&app)
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+fn machine_tune_file<R: Runtime>(app: &tauri::AppHandle<R>) -> Option<std::path::PathBuf> {
+    use tauri::Manager;
+    app.path().app_config_dir().ok().map(|d| d.join("machine-tune.json"))
+}
+
 /// How much the saved-chat folder holds ("Keep long chats ready"): cache files and their total size.
 #[tauri::command(async)]
 pub fn kv_store_usage(engine: State<'_, Engine>) -> serde_json::Value {

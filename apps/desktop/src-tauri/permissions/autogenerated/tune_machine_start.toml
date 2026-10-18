@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tune-machine-start"
+description = "Enables the tune_machine_start command without any pre-configured scope."
+commands.allow = ["tune_machine_start"]
+
+[[permission]]
+identifier = "deny-tune-machine-start"
+description = "Denies the tune_machine_start command without any pre-configured scope."
+commands.deny = ["tune_machine_start"]

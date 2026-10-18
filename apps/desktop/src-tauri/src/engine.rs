@@ -17,6 +17,7 @@ use cerebro_engine::gguf::Gguf;
 use cerebro_engine::model::{Model, Session};
 use cerebro_engine::sample::SamplerConfig;
 use cerebro_engine::tokenizer::Tokenizer;
+use cerebro_engine::tune;
 use serde::{Deserialize, Serialize};
 
 use crate::kv_store::{self, KvStore};
@@ -474,6 +475,19 @@ pub struct ChatStats {
     pub stopped: bool,
 }
 
+/// Where a tuning run's events go: the window's IPC channel.
+pub type TuneSink = Arc<dyn Fn(TuneMachineEvent) + Send + Sync>;
+
+/// Streamed to the UI while tuning. Mirrors `MachineTuneEvent` in ui/src/service/types.ts: a trial's
+/// fields sit beside `type`, exactly as the engine's `Trial` serializes.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum TuneMachineEvent {
+    Trial(tune::Trial),
+    Done { outcome: tune::Outcome },
+    Error { message: String },
+}
+
 /// One finished or running request, for the Monitor.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -546,6 +560,7 @@ enum Job {
     Load { model: LibraryModel, ctx: usize, gpu_layers: Option<usize>, reply: Sender<Result<(), String>> },
     Unload { reply: Sender<()> },
     Chat { req: ChatRequest, events: ChatSink, reply: Sender<()> },
+    Tune { events: TuneSink, reply: Sender<Result<tune::Outcome, String>> },
 }
 
 /// Cheap to clone: every field is shared.
@@ -658,6 +673,23 @@ impl Engine {
                             set(&st, |s| s.activity = "idle");
                             let _ = reply.send(());
                         }
+                        Job::Tune { events, reply } => {
+                            cn.store(false, Ordering::SeqCst);
+                            let msg = match loaded.as_mut() {
+                                Some(l) => {
+                                    set(&st, |s| s.activity = "tuning");
+                                    let result = run_tune(l, &events, &cn);
+                                    // Tuning replaces the session's cache with its own prompt; the
+                                    // status reflects the model after the user's cache was restored.
+                                    let info = loaded_info(l, l.session.max_ctx);
+                                    set(&st, |s| s.loaded = Some(info));
+                                    result
+                                }
+                                None => Err("Load a model first (Models screen).".to_owned()),
+                            };
+                            set(&st, |s| s.activity = "idle");
+                            let _ = reply.send(msg);
+                        }
                     }
                 }
             })
@@ -740,6 +772,14 @@ impl Engine {
         let (reply, rx) = channel();
         self.send(Job::Chat { req, events, reply })?;
         rx.recv().map_err(|_| "The engine stopped during the reply.".to_owned())
+    }
+
+    /// Times the processor settings on the loaded model for this machine, streaming every finished
+    /// trial to `events`; resolves with the outcome (or the reason it stopped).
+    pub fn tune_machine(&self, events: TuneSink) -> Result<tune::Outcome, String> {
+        let (reply, rx) = channel();
+        self.send(Job::Tune { events, reply })?;
+        rx.recv().map_err(|_| "The engine stopped during tuning.".to_owned())?
     }
 }
 
@@ -897,6 +937,43 @@ fn save_cache(l: &mut Loaded, store: &Arc<Mutex<KvStore>>) {
     let fingerprint = cerebro_engine::model::model_fingerprint(&l.model);
     let mut kv = store.lock().unwrap_or_else(|e| e.into_inner());
     kv.save(fingerprint, &l.session.tokens, bytes);
+}
+
+/// Measures this machine's processor settings on the loaded model (Turbo screen) and streams every
+/// finished trial to `events`. The session's conversation cache is saved first and put back after,
+/// so the user's chat does not have to be read again; a session that cannot save simply starts from
+/// the measurement prompt.
+fn run_tune(l: &mut Loaded, events: &TuneSink, cancel: &Arc<AtomicBool>) -> Result<tune::Outcome, String> {
+    let mut saved = Vec::new();
+    let saved_ok = match l.session.save_kv(&l.model, &mut saved) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("A chat cache could not be saved before tuning: {error}");
+            false
+        }
+    };
+    let sink = events.clone();
+    let mut on_trial = |t: &tune::Trial| sink(TuneMachineEvent::Trial(t.clone()));
+    let result = tune::tune(&l.model, &mut l.session, cancel, &mut on_trial);
+    if saved_ok {
+        if let Err(error) = l.session.load_kv(&l.model, &mut saved.as_slice()) {
+            eprintln!("The chat cache could not be restored after tuning: {error}");
+        }
+    }
+    match result {
+        Ok(outcome) => {
+            events(TuneMachineEvent::Done { outcome: outcome.clone() });
+            Ok(outcome)
+        }
+        Err(error) => {
+            let message = match error {
+                cerebro_engine::Error::Request(detail) if detail == "tuning was cancelled" => "Tuning was stopped.".to_owned(),
+                other => other.to_string(),
+            };
+            events(TuneMachineEvent::Error { message: message.clone() });
+            Err(message)
+        }
+    }
 }
 
 fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex<Status>>, cancel: &Arc<AtomicBool>, tooling: Tooling<'_>, kv: Option<&Arc<Mutex<KvStore>>>) {
@@ -1459,6 +1536,51 @@ mod spill_tests {
         assert_eq!(spill_or_truncate("short", 1000, Some(&dir), "t2"), "short");
         assert!(spill_or_truncate(&text, 1000, None, "t3").contains("[... truncated"), "no folder: cut instead");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod tune_event_tests {
+    use super::*;
+    use cerebro_engine::tune::{Outcome, Setting, Trial};
+
+    #[test]
+    fn tune_events_match_the_ui_shape() {
+        let trial = Trial {
+            phase: "threads",
+            label: "12 threads".into(),
+            settings: vec![Setting { id: "cpu_threads", value: 12 }],
+            tps: 48.3,
+            reps: vec![48.3, 48.2, 48.9],
+        };
+        let v = serde_json::to_value(TuneMachineEvent::Trial(trial.clone())).expect("trial json");
+        assert_eq!(v["type"], "trial");
+        assert_eq!(v["label"], "12 threads");
+        assert_eq!(v["tps"], 48.3);
+        assert_eq!(v["settings"][0]["id"], "cpu_threads");
+        assert_eq!(v["reps"][0], 48.3);
+        let outcome = Outcome {
+            machine: "12th Gen Intel(R) Core(TM) i9-12900H".into(),
+            model: "0123456789abcdef".into(),
+            gpu_layers: 0,
+            settings: vec![Setting { id: "cpu_threads", value: 12 }],
+            start: vec![Setting { id: "cpu_threads", value: 16 }],
+            start_tps: 47.2,
+            tuned_tps: 48.2,
+            gain: 0.022,
+            kept: true,
+            busy: Some(0.06),
+            note: "As fast with 4 fewer threads, so it runs cooler.".into(),
+            trials: vec![trial],
+            seconds: 52.0,
+        };
+        let v = serde_json::to_value(TuneMachineEvent::Done { outcome }).expect("done json");
+        assert_eq!(v["type"], "done");
+        assert_eq!(v["outcome"]["tunedTps"], 48.2);
+        assert_eq!(v["outcome"]["startTps"], 47.2);
+        assert_eq!(v["outcome"]["gpuLayers"], 0);
+        let v = serde_json::to_value(TuneMachineEvent::Error { message: "Tuning was stopped.".into() }).expect("error json");
+        assert_eq!(v, serde_json::json!({ "type": "error", "message": "Tuning was stopped." }));
     }
 }
 

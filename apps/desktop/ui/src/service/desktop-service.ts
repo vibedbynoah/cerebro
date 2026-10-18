@@ -16,6 +16,7 @@ import { CURRENT_CATALOG } from "./catalog";
 import type { TrainerStatus, TrainEvent, TrainInstalled } from "./train-types";
 import type { Placement } from "./types";
 import type { ActivePatch, EngineSwitch, LocalApiView, McpServerView, RemotePairing, RemoteView, McpCallResult, McpConfig, McpServerStatus, McpTool, HubDownloadEvent, HubFile, HubFileMeta, HubRepo, LoadPreset, PatchProfile } from "./types";
+import type { MachineTuneEvent, MachineTuneOutcome } from "./types";
 import { EMPTY_TWEAKS, profileNameError, sanitizeTweaks } from "../lib/tweaks";
 
 const NOT_YET = (what: string) => Promise.reject(new Error(`${what} is not available in this build yet.`));
@@ -184,6 +185,27 @@ export function createDesktopService(local: CerebroService): CerebroService {
     listSwitches: () => invoke<EngineSwitch[]>("switches_list"),
     setSwitch: (id, value) => invoke<number>("switch_set", { id, value }),
     resetSwitches: () => invoke<EngineSwitch[]>("switches_reset"),
+
+    // Tuning for this machine streams its trials through a channel; stopping goes through the same
+    // chat_stop the Chat screen's stop uses (the engine's cancel switch is shared).
+    async tuneMachine(onTrial, signal) {
+      const channel = new Channel<MachineTuneEvent>();
+      channel.onmessage = (event) => {
+        if (event.type !== "trial") return;
+        const { type: _type, ...trial } = event;
+        onTrial(trial);
+      };
+      const stop = () => {
+        invoke("chat_stop").catch(() => {});
+      };
+      signal.addEventListener("abort", stop, { once: true });
+      try {
+        return await invoke<MachineTuneOutcome>("tune_machine_start", { onEvent: channel });
+      } finally {
+        signal.removeEventListener("abort", stop);
+      }
+    },
+    lastMachineTune: () => invoke<MachineTuneOutcome | null>("tune_machine_last"),
 
     mcpConfig: () => invoke<McpConfig>("mcp_config_get"),
     mcpSaveConfig: (config) => invoke<void>("mcp_config_save", { config }),

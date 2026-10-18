@@ -27,6 +27,7 @@ const ALLOWED = new Set([
   "metrics",
   "switches_list",
   "switches_reset",
+  "tune_machine_last",
   "mcp_config_get",
   "mcp_status",
   "remote_get",
@@ -201,6 +202,7 @@ const WITH_ARGS = {
   remote_revoke: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && typeof p.id === "string" && /^(\*|[A-Za-z0-9_-]{1,32})$/.test(p.id),
   mcp_call: (p) => isPlain(p) && hasOnlyKeys(p, ["server", "tool", "arguments"]) && isServerName(p.server) && typeof p.tool === "string" && p.tool.length > 0 && p.tool.length <= 128 && (p.arguments === null || isPlain(p.arguments)),
   chat_send: (p) => isPlain(p) && hasOnlyKeys(p, ["request", "onEvent"]) && isChatRequest(p.request) && isChannel(p.onEvent),
+  tune_machine_start: (p) => isPlain(p) && hasOnlyKeys(p, ["onEvent"]) && isChannel(p.onEvent),
 };
 
 /**

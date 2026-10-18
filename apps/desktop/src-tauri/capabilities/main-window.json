@@ -36,6 +36,8 @@
     "allow-switches-list",
     "allow-switch-set",
     "allow-switches-reset",
+    "allow-tune-machine-start",
+    "allow-tune-machine-last",
     "allow-mcp-config-get",
     "allow-mcp-config-save",
     "allow-mcp-status",
