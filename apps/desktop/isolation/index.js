@@ -21,6 +21,8 @@ const ALLOWED = new Set([
   "model_unload",
   "models_loaded",
   "chat_stop",
+  "kv_store_usage",
+  "kv_store_clear",
   "live_stats",
   "metrics",
   "switches_list",
@@ -135,7 +137,8 @@ function isChatRequest(r) {
   return (
     r.turns.every((t) => isPlain(t) && (t.role === "user" || t.role === "assistant") && typeof t.text === "string") &&
     (r.tools === undefined || r.tools === null || isToolsRequest(r.tools)) &&
-    (r.orchestrate === undefined || r.orchestrate === null || isOrchestrateRequest(r.orchestrate))
+    (r.orchestrate === undefined || r.orchestrate === null || isOrchestrateRequest(r.orchestrate)) &&
+    (r.keepCache === undefined || typeof r.keepCache === "boolean")
   );
 }
 

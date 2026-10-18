@@ -21,6 +21,7 @@ import type { EngineSwitch, LocalApiView, McpServerView, RemoteOptions, RemotePa
   PatchProfile,
   SettingKey,
   Settings,
+  KvStoreUsage,
   TestOutput,
   TuneEvent,
   TuneProfile,
@@ -58,6 +59,10 @@ export interface CerebroService {
   getNetwork(): Promise<NetworkState>;
   getSettings(): Promise<Settings>;
   updateSetting<K extends SettingKey>(key: K, value: Settings[K]): Promise<Settings>;
+  /** What the saved-chat folder holds ("Keep long chats ready"). */
+  kvStoreUsage(): Promise<KvStoreUsage>;
+  /** Deletes every saved chat cache; resolves with what was removed. */
+  kvStoreClear(): Promise<KvStoreUsage>;
 
   // ---- Models screen. Every id argument must name a library model; every other argument is
   // validated with the same rules as the UI (lib/load-params.ts, lib/tweaks.ts, lib/gguf.ts). ----

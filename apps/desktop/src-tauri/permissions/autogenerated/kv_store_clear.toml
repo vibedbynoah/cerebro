@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-kv-store-clear"
+description = "Enables the kv_store_clear command without any pre-configured scope."
+commands.allow = ["kv_store_clear"]
+
+[[permission]]
+identifier = "deny-kv-store-clear"
+description = "Denies the kv_store_clear command without any pre-configured scope."
+commands.deny = ["kv_store_clear"]

@@ -49,6 +49,7 @@ const SETTING_KEYS: ReadonlyArray<keyof Settings> = [
   "blockLocalFetch",
   "hideSecretsFromTools",
   "readBeforeWrite",
+  "keepChatCaches",
   "loopbackOnly",
   "offlineMode",
   "allowModelDownloads",

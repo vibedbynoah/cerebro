@@ -182,6 +182,9 @@ describe("isolation hook", () => {
     no("chat_send", chatReq({ orchestrate: { workers: "3", rounds: 3 } }));
     no("chat_send", chatReq({ orchestrate: { workers: 3, rounds: 3, extra: 1 } }));
     no("chat_send", chatReq({ orchestrate: "on" }));
+    ok("chat_send", chatReq({ keepCache: false }));
+    ok("chat_send", chatReq({ keepCache: true }));
+    no("chat_send", chatReq({ keepCache: "yes" }));
     ok("switch_set", { id: "gpu_mma_matmul", value: 0 });
     no("switch_set", { id: "gpu_mma_matmul", value: 0.5 });
     no("switch_set", { id: "../x", value: 1 });

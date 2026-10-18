@@ -26,6 +26,7 @@ mod agent_tools;
 mod trainer;
 mod engine;
 mod hub;
+mod kv_store;
 pub mod navigation;
 pub mod secret;
 pub mod update_sig;
@@ -56,6 +57,8 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::placement_preview,
             commands::chat_send,
             commands::chat_stop,
+            commands::kv_store_usage,
+            commands::kv_store_clear,
             commands::live_stats,
             commands::metrics,
             commands::hub_search,

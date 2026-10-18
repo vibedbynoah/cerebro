@@ -25,6 +25,8 @@
     "allow-live-stats",
     "allow-chat-stop",
     "allow-chat-send",
+    "allow-kv-store-usage",
+    "allow-kv-store-clear",
     "allow-models-loaded",
     "allow-placement-preview",
     "allow-model-unload",

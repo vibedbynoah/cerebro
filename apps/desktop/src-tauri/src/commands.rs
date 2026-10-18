@@ -178,6 +178,25 @@ pub fn chat_stop(engine: State<'_, Engine>) {
     engine.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// How much the saved-chat folder holds ("Keep long chats ready"): cache files and their total size.
+#[tauri::command(async)]
+pub fn kv_store_usage(engine: State<'_, Engine>) -> serde_json::Value {
+    let (files, bytes) = engine.kv_store().map_or((0, 0), |kv| kv.lock().unwrap_or_else(|e| e.into_inner()).usage());
+    serde_json::json!({ "files": files, "bytes": bytes })
+}
+
+/// Deletes every saved chat cache; returns what the folder held ({ files, bytes }).
+#[tauri::command(async)]
+pub fn kv_store_clear(engine: State<'_, Engine>) -> serde_json::Value {
+    let (files, bytes) = engine.kv_store().map_or((0, 0), |kv| {
+        let mut store = kv.lock().unwrap_or_else(|e| e.into_inner());
+        let held = store.usage();
+        store.clear();
+        held
+    });
+    serde_json::json!({ "files": files, "bytes": bytes })
+}
+
 /// The status bar's sample.
 // `async` runs these off the UI thread: a poll never stalls the window, even while NVML is slow.
 #[tauri::command(async)]
@@ -517,6 +536,8 @@ impl crate::remote::Backend for PhoneBackend {
             // A phone never drives tools: approvals belong at the computer.
             tools: None,
             orchestrate: None,
+            // The user's own conversation: worth a cache like a window chat.
+            keep_cache: true,
             client_tools: None,
         };
         let out: crate::engine::ChatSink = std::sync::Arc::new(move |e| match e {
@@ -688,6 +709,8 @@ impl crate::mcp_server::McpBackend for McpEngineBackend {
             native: None,
             tools: None,
             orchestrate: None,
+            // Another app's own request: its conversations are not the user's window chats.
+            keep_cache: false,
             client_tools: None,
         };
         let out: Arc<Mutex<(String, u64, f64, Option<String>)>> = Arc::default();
@@ -834,6 +857,8 @@ impl crate::local_api::ApiBackend for ApiEngineBackend {
             native: req.think.then(|| serde_json::json!({})),
             tools: None,
             orchestrate: None,
+            // An API client manages its own context: no caches accumulate from its calls.
+            keep_cache: false,
             client_tools: (!req.tools.is_empty()).then(|| req.tools.clone()),
         };
         // The engine writes into a channel from its own thread; this thread hands each piece to the

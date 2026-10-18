@@ -192,6 +192,7 @@ export function Chat(): JSX.Element {
           source: p.source,
           tools,
           orchestrate: p.orchestrate ? { workers: p.workers, rounds: p.rounds } : null,
+          keepCache: app.settings()?.keepChatCaches !== false,
         },
         (e) => {
           switch (e.type) {

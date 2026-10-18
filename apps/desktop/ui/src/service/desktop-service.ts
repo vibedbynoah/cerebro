@@ -11,7 +11,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import type { CerebroService, Unsubscribe } from "./service";
 import type { ChatEvent, ChatRequest } from "./chat-types";
 import type { HistoryRange, MetricsSeries, MetricsSnapshot, RequestDetail } from "./monitor-types";
-import type { CatalogModel, GpuInfo, HardwareProfile, LibraryModel, LiveStats, LoadedModel, LoadParams, ModelDetail, ModelSummary, NetworkState } from "./types";
+import type { CatalogModel, GpuInfo, HardwareProfile, KvStoreUsage, LibraryModel, LiveStats, LoadedModel, LoadParams, ModelDetail, ModelSummary, NetworkState } from "./types";
 import { CURRENT_CATALOG } from "./catalog";
 import type { TrainerStatus, TrainEvent, TrainInstalled } from "./train-types";
 import type { Placement } from "./types";
@@ -91,6 +91,8 @@ export function createDesktopService(local: CerebroService): CerebroService {
     getNetwork: (): Promise<NetworkState> => Promise.resolve(navigator.onLine ? "online" : "offline"),
     getSettings: () => local.getSettings(),
     updateSetting: (key, value) => local.updateSetting(key, value),
+    kvStoreUsage: () => invoke<KvStoreUsage>("kv_store_usage"),
+    kvStoreClear: () => invoke<KvStoreUsage>("kv_store_clear"),
 
     async listLibrary() {
       library = await invoke<LibraryModel[]>("library_list");

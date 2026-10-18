@@ -97,6 +97,7 @@ export const DEFAULT_SETTINGS: Settings = {
   blockLocalFetch: true,
   hideSecretsFromTools: true,
   readBeforeWrite: true,
+  keepChatCaches: true,
   loopbackOnly: true,
   offlineMode: false,
   allowModelDownloads: true,

@@ -70,6 +70,13 @@ export const SETTINGS_META: readonly SettingMeta[] = [
     limits: "New files can be created without reading.",
   },
   {
+    key: "keepChatCaches",
+    group: "protections",
+    label: "Keep long chats ready",
+    note: "Saves a long chat's reading of its history to disk, so returning to it continues instantly.",
+    limits: "Uses up to 8 GB in your app data folder; the oldest are removed first.",
+  },
+  {
     key: "loopbackOnly",
     group: "protections",
     label: "API on loopback only",

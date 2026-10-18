@@ -18,6 +18,7 @@ import type {
   GgufCopy,
   GpuInfo,
   HardwareProfile,
+  KvStoreUsage,
   LibraryModel,
   LiveStats,
   LoadedModel,
@@ -275,6 +276,8 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
   const random = options.random ?? Math.random;
   const network: NetworkState = options.network ?? "offline";
   let settings: Settings = { ...DEFAULT_SETTINGS, ...options.settings };
+  // The saved-chat folder starts empty in web mode; the desktop service reads the real one.
+  let kvUsage: KvStoreUsage = { files: 0, bytes: 0 };
   let hardwareFailuresLeft = options.failHardware !== undefined && options.failHardware > 0 ? options.failHardware : 0;
   let current: LiveStats = cloneStats(MOCK_LIVE_BASE);
   const listeners = new Set<(stats: LiveStats) => void>();
@@ -478,6 +481,14 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
       if (typeof value !== "boolean") return Promise.reject(new TypeError(`Setting ${key} takes true or false`));
       settings = { ...settings, [key]: value };
       return Promise.resolve({ ...settings });
+    },
+
+    kvStoreUsage: () => Promise.resolve({ ...kvUsage }),
+
+    kvStoreClear: () => {
+      const held = { ...kvUsage };
+      kvUsage = { files: 0, bytes: 0 };
+      return Promise.resolve(held);
     },
 
     listLibrary: () =>

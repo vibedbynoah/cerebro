@@ -19,6 +19,8 @@ use cerebro_engine::sample::SamplerConfig;
 use cerebro_engine::tokenizer::Tokenizer;
 use serde::{Deserialize, Serialize};
 
+use crate::kv_store::{self, KvStore};
+
 const GIB: f64 = (1u64 << 30) as f64;
 
 // ---- Library ------------------------------------------------------------------------------------
@@ -271,11 +273,20 @@ pub struct ChatRequest {
     /// Orchestrate mode (GVS5H, orchestrate.rs): several instances of the model and a shared ledger.
     #[serde(default)]
     pub orchestrate: Option<OrchestrateRequest>,
+    /// Settings > Protections "Keep long chats ready": save this conversation's cache to disk after
+    /// a slow, long reply and restore it when the same chat returns. Absent means on.
+    #[serde(default = "yes")]
+    pub keep_cache: bool,
     /// Tools defined by a local API client (local_api.rs). The model sees them like any tool, but a
     /// call is handed back to the client (`Tool` event, state "requested") instead of being run, and
     /// the reply ends there. Never set by the window.
     #[serde(skip)]
     pub client_tools: Option<Vec<crate::toolcall::ToolSpec>>,
+}
+
+/// `keep_cache`'s serde default: saving is on unless the caller turns it off.
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -551,6 +562,9 @@ pub struct Engine {
     tool_host: Arc<Mutex<Option<Arc<dyn ToolHost>>>>,
     /// Where Orchestrate mode keeps its ledgers (the app's data folder).
     ledger_root: Arc<Mutex<Option<PathBuf>>>,
+    /// Saved conversation caches ("Keep long chats ready"), shared with the worker thread and the
+    /// Settings commands; None when the app data folder cannot be found.
+    kv_store: Option<Arc<Mutex<KvStore>>>,
 }
 
 type Answers = Arc<Mutex<std::collections::HashMap<String, Sender<serde_json::Value>>>>;
@@ -580,7 +594,10 @@ impl Engine {
         let st = status.clone();
         let cn = cancel.clone();
         let ledger_root: Arc<Mutex<Option<PathBuf>>> = Arc::default();
-        let (ap, th, lr, an) = (approvals.clone(), tool_host.clone(), ledger_root.clone(), answers.clone());
+        // Saved conversation caches: one folder under the app's data, at most 8 GiB (the oldest go
+        // first). Without a LOCALAPPDATA there is no store and saving is quietly off.
+        let kv_store = std::env::var_os("LOCALAPPDATA").map(|local| Arc::new(Mutex::new(KvStore::new(PathBuf::from(local).join("Cerebro").join("kv"), 8u64 << 30))));
+        let (ap, th, lr, an, kvs) = (approvals.clone(), tool_host.clone(), ledger_root.clone(), answers.clone(), kv_store.clone());
         std::thread::Builder::new()
             .name("cerebro-engine".into())
             .spawn(move || {
@@ -632,7 +649,7 @@ impl Engine {
                                 Some(l) if l.info.id == req.model_id => {
                                     let host = th.lock().unwrap_or_else(|e| e.into_inner()).clone();
                                     let spill_dir = lr.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|d| d.join("spills"));
-                                    run_chat(l, &req, &events, &st, &cn, Tooling { host, approvals: &ap, answers: &an, spill_dir });
+                                    run_chat(l, &req, &events, &st, &cn, Tooling { host, approvals: &ap, answers: &an, spill_dir }, kvs.as_ref());
                                 }
                                 _ => {
                                     events(ChatEvent::Error { message: "Load this model first (Models screen).".into() });
@@ -665,12 +682,18 @@ impl Engine {
                 s.history.pop_front();
             }
         });
-        Self { tx: Arc::new(Mutex::new(tx)), status, cancel, library: Arc::new(Mutex::new(Vec::new())), approvals, answers, tool_host, ledger_root }
+        Self { tx: Arc::new(Mutex::new(tx)), status, cancel, library: Arc::new(Mutex::new(Vec::new())), approvals, answers, tool_host, ledger_root, kv_store }
     }
 
     /// A handle that can move into a blocking task.
     pub fn handle(&self) -> Self {
         self.clone()
+    }
+
+    /// The folder of saved conversation caches, shared with the worker thread (None when the app
+    /// data folder is unknown, and then saving and restoring are off).
+    pub fn kv_store(&self) -> Option<Arc<Mutex<KvStore>>> {
+        self.kv_store.clone()
     }
 
     /// Where chat tool calls go (set once at start-up, to the MCP client).
@@ -825,7 +848,46 @@ struct Round {
     bad: Vec<(String, String)>,
 }
 
-fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex<Status>>, cancel: &Arc<AtomicBool>, tooling: Tooling<'_>) {
+/// The first round of a chat: restore the best saved cache for this model when it continues `ids`
+/// further than the session's own tokens already do (a cache that diverges is no help on a
+/// recurrent model, and `best` only returns a prefix of `ids` at all).
+fn restore_cache(l: &mut Loaded, store: &Arc<Mutex<KvStore>>, ids: &[u32]) {
+    let fingerprint = cerebro_engine::model::model_fingerprint(&l.model);
+    let path = {
+        let mut kv = store.lock().unwrap_or_else(|e| e.into_inner());
+        kv.scan(&l.model);
+        let own = kv_store::common_prefix(&l.session.tokens, ids);
+        match kv.best(fingerprint, ids) {
+            Some((path, len)) if len > own + kv_store::MIN_GAIN => path,
+            _ => return,
+        }
+    };
+    let mut file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) => return eprintln!("A saved chat cache could not be opened: {error}"),
+    };
+    if let Err(error) = l.session.load_kv(&l.model, &mut file) {
+        eprintln!("A saved chat cache could not be restored: {error}");
+    }
+}
+
+/// Keeps this conversation's cache on disk for next time: only a long chat whose history would take
+/// more than a moment to read again is worth a file (`tokens / the last prefill speed`).
+fn save_cache(l: &mut Loaded, store: &Arc<Mutex<KvStore>>) {
+    let tokens = l.session.tokens.len();
+    if tokens < kv_store::MIN_SAVE_TOKENS || !kv_store::worth_saving(tokens, l.session.stats.prefill_tps()) {
+        return;
+    }
+    let mut bytes = Vec::new();
+    if let Err(error) = l.session.save_kv(&l.model, &mut bytes) {
+        return eprintln!("A chat cache could not be written: {error}");
+    }
+    let fingerprint = cerebro_engine::model::model_fingerprint(&l.model);
+    let mut kv = store.lock().unwrap_or_else(|e| e.into_inner());
+    kv.save(fingerprint, &l.session.tokens, bytes);
+}
+
+fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex<Status>>, cancel: &Arc<AtomicBool>, tooling: Tooling<'_>, kv: Option<&Arc<Mutex<KvStore>>>) {
     use crate::toolcall::{self, Piece, Scanner};
     let think = req.native.is_some();
     let plan_mode = req.client_tools.is_none() && req.tools.as_ref().is_some_and(|t| t.plan_mode);
@@ -921,6 +983,13 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
         let text = cerebro_engine::chatml((!system.is_empty()).then_some(system.as_str()), &turns, think);
         let ids = l.tok.encode(&text);
         set(st, |s| s.live_prompt = ids.len());
+        // Returning to a long chat: start from its saved cache (Settings > Protections) instead of
+        // reading the history again. Restored before `generate`, so its reused count is the feed's.
+        if round == 0 && req.keep_cache {
+            if let Some(store) = kv {
+                restore_cache(l, store, &ids);
+            }
+        }
         // Reasoning (Qwen3: <think> ... </think>) streams as `thinking`; the answer goes through the
         // tool-call scanner, so tool markup never reaches the screen.
         let mut in_think = think;
@@ -1155,6 +1224,13 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
             }
         });
         return;
+    }
+    // Keep this conversation's cache for next time (Settings > Protections, "Keep long chats
+    // ready"); the serialising happens here, the file itself is written on a background thread.
+    if req.keep_cache {
+        if let Some(store) = kv {
+            save_cache(l, store);
+        }
     }
     let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
     let decode_tps = if decode_ms > 0.0 { out_tokens as f64 / (decode_ms / 1000.0) } else { 0.0 };
@@ -1425,6 +1501,7 @@ mod tool_loop_tests {
             native: None,
             tools: Some(ToolsRequest { rules: Default::default(), default_rule: "ask".into(), offline: false, allow_local_fetch: false, access: Access::Workspace, show_secrets: false, blind_writes: false, plan_mode: false }),
             orchestrate: None,
+            keep_cache: false,
             client_tools: None,
         };
         engine.chat(req, sink).unwrap();
@@ -1462,6 +1539,7 @@ mod tool_loop_tests {
             native: None,
             tools: None,
             orchestrate: Some(OrchestrateRequest { workers: 2, rounds: 2 }),
+            keep_cache: false,
             client_tools: None,
         };
         let t = Instant::now();

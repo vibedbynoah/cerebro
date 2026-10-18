@@ -21,6 +21,8 @@ const COMMANDS: &[&str] = &[
     "placement_preview",
     "chat_send",
     "chat_stop",
+    "kv_store_usage",
+    "kv_store_clear",
     "live_stats",
     "metrics",
     "hub_search",

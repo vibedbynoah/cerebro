@@ -33,6 +33,9 @@ export interface ChatRequest {
   tools?: ChatTools | null;
   /** Orchestrate mode: several instances of the model through a shared ledger; null = off. */
   orchestrate?: OrchestrateRequest | null;
+  /** Settings > Protections "Keep long chats ready": save this chat's cache to disk, and restore
+   *  it next time. Absent means on. */
+  keepCache?: boolean;
 }
 
 /** Workers per round (1-6) and rounds before the result is finalized (1-8). */

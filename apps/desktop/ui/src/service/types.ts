@@ -75,6 +75,9 @@ export interface Settings {
   hideSecretsFromTools: boolean;
   /** A model must read a file (and it must be unchanged since) before changing it. */
   readBeforeWrite: boolean;
+  /** Save a long conversation's reading of its history to disk, so returning to it continues
+   *  instead of running the model through every message again. */
+  keepChatCaches: boolean;
   /** Serve the API on 127.0.0.1 only. Off lets other devices on the network reach it. */
   loopbackOnly: boolean;
   /** Block every network feature (model downloads, plugin installs). */
@@ -84,6 +87,12 @@ export interface Settings {
 }
 
 export type SettingKey = keyof Settings;
+
+/** What the saved-chat folder holds ("Keep long chats ready"): the cache files and their total size. */
+export interface KvStoreUsage {
+  files: number;
+  bytes: number;
+}
 
 export interface AppInfo {
   name: string;
