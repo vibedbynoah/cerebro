@@ -52,6 +52,7 @@ describe("grouping finished trials", () => {
 describe("settings in words", () => {
   it("says each known setting the way the engine describes it", () => {
     expect(settingWords(setting("cpu_threads", 12))).toBe("12 threads");
+    expect(settingWords(setting("cpu_decode_threads", 20))).toBe("20 threads while writing");
     expect(settingWords(setting("cpu_chunk_div", 4))).toBe("4 pieces per thread");
     expect(settingWords(setting("cpu_rows4", 0))).toBe("four-row dots off");
     expect(settingWords(setting("cpu_rows4", 1))).toBe("four-row dots on");

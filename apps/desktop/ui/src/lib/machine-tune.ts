@@ -50,6 +50,8 @@ export function settingWords(s: MachineTuneSetting): string {
   switch (s.id) {
     case "cpu_threads":
       return `${s.value} threads`;
+    case "cpu_decode_threads":
+      return `${s.value} threads while writing`;
     case "cpu_chunk_div":
       return `${s.value} pieces per thread`;
     case "cpu_rows4":
