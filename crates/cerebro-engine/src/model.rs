@@ -743,9 +743,7 @@ const ATT_SPAN: usize = 256;
 
 /// Tokens per batched CPU prefill step: a chunk's activations stay in L2 while each weight row is
 /// reused across them.
-fn cpu_chunk() -> usize {
-    std::env::var("EXP_CPU_CHUNK").ok().and_then(|v| v.parse().ok()).unwrap_or(32)
-}
+const CPU_CHUNK: usize = 32;
 
 /// A raw output pointer shared by parallel work items that write disjoint elements.
 struct SyncPtr(*mut f32);
@@ -1247,7 +1245,7 @@ impl Session {
         }
         let dense = m.layers.iter().all(|l| matches!(l.ffn, Ffn::Dense { .. })) && m.cfg.ssm.is_none() && !m.cfg.attn_gate;
         if dense && crate::switches::enabled(crate::switches::CPU_BATCH_PREFILL) {
-            for c in prompt[common..].chunks(cpu_chunk()) {
+            for c in prompt[common..].chunks(CPU_CHUNK) {
                 self.step_batch(m, c);
                 self.progress.set(self.tokens.len());
             }
