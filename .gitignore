@@ -17,6 +17,9 @@ src-tauri/gen/
 /profiles/*.local.json
 *.log
 
+# Fetched for the installer (scripts/fetch-dxc.mjs)
+apps/desktop/src-tauri/resources/dxc/
+
 # Vendored engine binaries (large, fetched not committed)
 /vendor/llama.cpp/**/*.exe
 /vendor/llama.cpp/**/*.dll

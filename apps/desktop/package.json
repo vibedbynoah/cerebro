@@ -14,7 +14,8 @@
     "check": "tsc --noEmit -p tsconfig.json",
     "test": "npm run check && vitest run --config ui/vite.config.ts && npm run build && playwright test",
     "shoot": "npm run build && node scripts/shoot.mjs",
-    "tauri:check": "npm run build:desktop && cargo check -p cerebro-desktop --locked"
+    "tauri:check": "npm run build:desktop && cargo check -p cerebro-desktop --locked",
+    "fetch:dxc": "node scripts/fetch-dxc.mjs"
   },
   "dependencies": {
     "@ark-ui/solid": "5.39.2",
