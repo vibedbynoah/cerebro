@@ -4,6 +4,7 @@ import { ChatSettings } from "./settings/ChatSettings";
 import { LocalApiAccess } from "./settings/LocalApiAccess";
 import { McpServerAccess } from "./settings/McpServerAccess";
 import { PhoneAccess } from "./settings/PhoneAccess";
+import { SavedChats } from "./settings/SavedChats";
 import { WorkspaceFolders } from "./settings/WorkspaceFolders";
 import { exportConfig, importConfig } from "../lib/config-file";
 import { Icon, type IconName } from "../components/icons";
@@ -41,14 +42,19 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
     <div class="card settings-card">
       <For each={SETTINGS_META.filter((m) => m.group === g && (!__DESKTOP__ || m.desktop !== false))}>
         {(meta) => (
-          <SettingSwitch
-            id={`setting-${meta.key}`}
-            label={meta.label}
-            note={meta.limits ? `${meta.note} ${meta.limits}` : meta.note}
-            checked={settings()?.[meta.key] ?? false}
-            disabled={settings() === null}
-            onChange={(on) => void setSetting(meta.key, on, `${meta.label} ${on ? "on" : "off"}`)}
-          />
+          <>
+            <SettingSwitch
+              id={`setting-${meta.key}`}
+              label={meta.label}
+              note={meta.limits ? `${meta.note} ${meta.limits}` : meta.note}
+              checked={settings()?.[meta.key] ?? false}
+              disabled={settings() === null}
+              onChange={(on) => void setSetting(meta.key, on, `${meta.label} ${on ? "on" : "off"}`)}
+            />
+            <Show when={meta.key === "keepChatCaches"}>
+              <SavedChats />
+            </Show>
+          </>
         )}
       </For>
     </div>

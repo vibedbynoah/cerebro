@@ -1208,8 +1208,15 @@ body {
   padding: 0 var(--space-5);
 }
 
-.setting + .setting {
+.setting + .setting,
+.setting__extra + .setting {
   border-top: 1px solid var(--color-border);
+}
+
+/* A line that belongs to the setting above it (e.g. what the saved-chat folder holds). */
+.setting__extra {
+  margin: calc(-1 * var(--space-2)) 0 0;
+  padding: 0 0 var(--space-4);
 }
 
 .switch {

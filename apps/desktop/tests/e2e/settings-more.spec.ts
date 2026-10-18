@@ -15,6 +15,16 @@ test.describe("settings: replies, search, configuration file", () => {
     await expect(page.locator("#appearance-title")).toBeVisible();
   });
 
+  test("keep long chats ready: a switch, with what the saved-chat folder holds below it", async ({ page }) => {
+    await openScreen(page, "settings");
+    const sw = page.getByRole("switch", { name: "Keep long chats ready" });
+    await expect(sw).toBeChecked();
+    await expect(page.getByTestId("saved-chats")).toHaveText("No saved chats yet.");
+    // The line sits outside the switch: reading it never toggles the setting.
+    await page.getByTestId("saved-chats").click();
+    await expect(sw).toBeChecked();
+  });
+
   test("an edited effort level and the default verbosity reach Chat's system prompt", async ({ page }) => {
     await openScreen(page, "settings");
     await page.locator("label.segmented__option", { hasText: "Detailed" }).click();
