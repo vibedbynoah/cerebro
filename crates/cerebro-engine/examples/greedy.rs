@@ -31,7 +31,24 @@ fn main() {
         Session::new(&model, 4096)
     };
     let t = std::time::Instant::now();
+    // PROGRESS=1: sample the live prompt-reading progress every 100 ms while the prompt is read.
+    let watch = std::env::var_os("PROGRESS").map(|_| {
+        let p = s.progress.clone();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let d = done.clone();
+        (done, std::thread::spawn(move || {
+            while !d.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let (pos, base, tps) = p.read();
+                eprintln!("progress: {pos} in cache ({base} reused), {}", tps.map_or("-".into(), |t| format!("{t:.0} tok/s")));
+            }
+        }))
+    });
     s.feed(&model, &ids).expect("feed");
+    if let Some((done, h)) = watch {
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = h.join();
+    }
     let prefill = t.elapsed().as_secs_f64();
     // TOP=1: the five most likely next tokens after the prompt, as log-probabilities.
     if std::env::var_os("TOP").is_some() {
