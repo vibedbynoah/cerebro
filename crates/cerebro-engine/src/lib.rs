@@ -10,6 +10,8 @@ pub mod hw;
 mod iq_tables;
 pub mod model;
 pub mod placement;
+#[cfg(feature = "portable")]
+pub mod portable;
 pub mod pool;
 pub mod quant;
 mod quant_more;

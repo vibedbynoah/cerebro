@@ -272,6 +272,11 @@ impl Model {
         &self.out_norm
     }
 
+    /// RoPE inverse frequencies (rope_dim / 2).
+    pub fn inv_freq(&self) -> &[f32] {
+        &self.inv_freq
+    }
+
     /// True when the output projection reuses the token embedding table.
     pub fn tied(&self) -> bool {
         self.output.offset == self.embed.offset
@@ -840,6 +845,9 @@ pub struct Session {
     /// When set, every step runs on the GPU and the CPU buffers above stay idle.
     #[cfg(feature = "cuda")]
     pub gpu: Option<crate::gpu::GpuState>,
+    /// When set, every step runs on the portable (Vulkan / DX12 / Metal) GPU backend.
+    #[cfg(feature = "portable")]
+    pub portable: Option<crate::portable::PortableState>,
 }
 
 impl Session {
@@ -910,6 +918,8 @@ impl Session {
             progress: Arc::default(),
             #[cfg(feature = "cuda")]
             gpu: None,
+            #[cfg(feature = "portable")]
+            portable: None,
         }
     }
 
@@ -967,6 +977,14 @@ impl Session {
                     self.head(m);
                 }
             }
+            self.stats = Stats { prompt_tokens: prompt.len(), reused_tokens: common, prefill_ms: t0.elapsed().as_secs_f64() * 1000.0, ..Default::default() };
+            return Ok(common);
+        }
+        #[cfg(feature = "portable")]
+        if let Some(p) = self.portable.as_mut() {
+            p.run(m, &prompt[common..], common, &mut self.logits)?;
+            self.tokens.extend_from_slice(&prompt[common..]);
+            self.progress.set(self.tokens.len());
             self.stats = Stats { prompt_tokens: prompt.len(), reused_tokens: common, prefill_ms: t0.elapsed().as_secs_f64() * 1000.0, ..Default::default() };
             return Ok(common);
         }
@@ -1030,6 +1048,19 @@ impl Session {
         let mut s = Self::empty_from(m, max_ctx, g.gpu_layers());
         s.max_ctx = max_ctx;
         s.gpu = Some(g);
+        Ok(s)
+    }
+
+    /// A session on the portable GPU backend (Vulkan / DX12 / Metal): the whole model on the GPU.
+    #[cfg(feature = "portable")]
+    pub fn new_portable(m: &Model, max_ctx: usize) -> Result<Self, Error> {
+        if !crate::switches::enabled(crate::switches::GPU_ENABLED) {
+            return Err(Error::Unsupported("the graphics card is switched off (Use the graphics card)".into()));
+        }
+        let p = crate::portable::PortableState::load(m, max_ctx)?;
+        let mut s = Self::empty_from(m, max_ctx, m.cfg.n_layer);
+        s.max_ctx = max_ctx;
+        s.portable = Some(p);
         Ok(s)
     }
 
@@ -1165,6 +1196,15 @@ impl Session {
     }
 
     pub fn step(&mut self, m: &Model, token: u32) {
+        #[cfg(feature = "portable")]
+        if let Some(p) = self.portable.as_mut() {
+            let pos = self.tokens.len();
+            if let Err(e) = p.run(m, &[token], pos, &mut self.logits) {
+                panic!("GPU step failed: {e}");
+            }
+            self.tokens.push(token);
+            return;
+        }
         #[cfg(feature = "cuda")]
         if let Some(g) = self.gpu.as_mut() {
             let pos = self.tokens.len();
@@ -1381,6 +1421,10 @@ impl Session {
         let n = self.tokens.len();
         let kvd = c.n_kv * c.head_dim;
         let io = |e: std::io::Error| Error::Request(format!("could not write the cache: {e}"));
+        #[cfg(feature = "portable")]
+        if self.portable.is_some() {
+            return Err(Error::Unsupported("saving the cache is not available on the portable GPU backend yet".into()));
+        }
         w.write_all(KV_MAGIC).map_err(io)?;
         for v in [model_fingerprint(m), n as u64, kvd as u64, c.n_layer as u64] {
             w.write_all(&v.to_le_bytes()).map_err(io)?;

@@ -11,7 +11,10 @@ fn main() {
     let path = a.next().expect("model path");
     let prompt = a.next().unwrap_or_else(|| "The capital of France is".into());
     let n: usize = a.next().and_then(|v| v.parse().ok()).unwrap_or(32);
-    let gpu = a.next().as_deref() == Some("gpu");
+    let mode = a.next();
+    let gpu = mode.as_deref() == Some("gpu");
+    // "portable": the Vulkan / DX12 / Metal backend (CEREBRO_PORTABLE_GPU / _BACKEND pick the device).
+    let portable = mode.as_deref() == Some("portable");
     let model = Model::load(std::path::Path::new(&path)).expect("load");
     let tok = Tokenizer::from_gguf(model.gguf()).expect("tokenizer");
     let ids = tok.encode(&prompt);
@@ -30,6 +33,14 @@ fn main() {
         let _ = gpu;
         Session::new(&model, 4096)
     };
+    #[cfg(feature = "portable")]
+    if portable {
+        s = Session::new_portable(&model, 4096).expect("portable session");
+        let i = &s.portable.as_ref().expect("portable").info;
+        eprintln!("portable GPU: {} ({}, {}), {:.2} GiB on the GPU", i.name, i.backend, i.kind, s.portable.as_ref().expect("portable").bytes as f64 / (1u64 << 30) as f64);
+    }
+    #[cfg(not(feature = "portable"))]
+    let _ = portable;
     let t = std::time::Instant::now();
     // PROGRESS=1: sample the live prompt-reading progress every 100 ms while the prompt is read.
     let watch = std::env::var_os("PROGRESS").map(|_| {

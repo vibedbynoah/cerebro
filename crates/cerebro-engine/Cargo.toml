@@ -16,6 +16,9 @@ memmap2 = "0.9"
 rayon = "1.10"
 fancy-regex = "0.14"
 cudarc = { version = "0.19", default-features = false, features = ["std", "driver", "nvrtc", "dynamic-loading", "cuda-12080"], optional = true }
+# Portable GPU backend: Vulkan / DX12 (AMD, Intel, NVIDIA) and Metal (Apple) through one set of WGSL shaders.
+wgpu = { version = "=30.0.1", optional = true, default-features = false, features = ["wgsl", "vulkan", "dx12", "metal"] }
+pollster = { version = "0.4", optional = true }
 
 [[bin]]
 name = "cerebro-run"
@@ -23,5 +26,6 @@ path = "src/bin/run.rs"
 
 
 [features]
-default = ["cuda"]
+default = ["cuda", "portable"]
 cuda = ["dep:cudarc"]
+portable = ["dep:wgpu", "dep:pollster"]
