@@ -1604,6 +1604,33 @@ mod tool_loop_tests {
         }
     }
 
+    /// Tune for this machine on a real model on the processor: trials stream out, an outcome comes
+    /// back, and the user's conversation cache is the same afterwards (saved before, restored after).
+    /// `cargo test -p cerebro-desktop tune_on_a_real_model -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn tune_on_a_real_model_keeps_the_conversation() {
+        let path = std::env::var("CEREBRO_TEST_MODEL").unwrap_or_else(|_| r"C:\models\dev\Qwen3-0.6B-Q8_0.gguf".into());
+        let model = describe(Path::new(&path), "test").expect("model");
+        cerebro_engine::switches::set(cerebro_engine::switches::GPU_ENABLED, 0).unwrap();
+        let mut l = load(&model, 4096, None).expect("load");
+        let ids = l.tok.encode("A conversation the user had before tuning, long enough to matter a little.");
+        l.session.feed(&l.model, &ids).unwrap();
+        let before = l.session.tokens.clone();
+        let trials: Arc<Mutex<Vec<String>>> = Arc::default();
+        let tr = trials.clone();
+        let sink: TuneSink = Arc::new(move |e| {
+            if let TuneMachineEvent::Trial(t) = e {
+                tr.lock().unwrap().push(format!("{} {:.1}", t.label, t.tps));
+            }
+        });
+        let outcome = run_tune(&mut l, &sink, &Arc::new(AtomicBool::new(false))).expect("tune");
+        println!("{} trials; {}", trials.lock().unwrap().len(), outcome.note);
+        assert!(!outcome.trials.is_empty() && trials.lock().unwrap().len() == outcome.trials.len());
+        assert_eq!(l.session.tokens, before, "the conversation cache was not restored");
+        cerebro_engine::switches::reset();
+    }
+
     /// A machine without a usable NVIDIA GPU (run with CUDA_VISIBLE_DEVICES=-1 to hide CUDA): the
     /// load falls through to the portable backend, reports where the model went, and answers.
     #[test]
