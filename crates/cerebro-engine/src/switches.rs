@@ -166,7 +166,7 @@ fn registry() -> &'static [Switch] {
                 group: "CPU",
                 kind: Kind::Number { min: 1, max: logical(), zero_auto: false, unit: "threads" },
                 channel: Channel::Stable,
-                applies: Applies::Restart,
+                applies: Applies::Live,
                 beginner: "How many processor threads the model may use. The default leaves room for your other apps.",
                 advanced: "Size of the engine's worker pool (logical CPUs minus four by default). Measured on an i9-12900H: 6 -> 47.5, 12 -> 61.3, 16 -> 64.5 tok/s decode (0.6B Q8_0).",
                 env: "CEREBRO_THREADS",
@@ -178,7 +178,7 @@ fn registry() -> &'static [Switch] {
                 group: "CPU",
                 kind: Kind::Number { min: 1, max: 16, zero_auto: false, unit: "pieces per thread" },
                 channel: Channel::Experimental,
-                applies: Applies::Restart,
+                applies: Applies::Live,
                 beginner: "Splits each step into smaller pieces so slower cores never hold up the fast ones.",
                 advanced: "Work items per thread per parallel region. Higher values balance hybrid P/E-core CPUs better at the cost of more dispatch.",
                 env: "CEREBRO_CHUNK_DIV",
@@ -292,6 +292,9 @@ pub fn set(id: &str, value: i64) -> Result<i64, String> {
         }
     };
     overrides().write().map_err(|_| "switch table poisoned".to_string())?.insert(s.id, v);
+    if s.id == CPU_THREADS {
+        crate::pool::apply_threads(v as usize);
+    }
     Ok(v)
 }
 
@@ -300,6 +303,7 @@ pub fn reset() {
     if let Ok(mut o) = overrides().write() {
         o.clear();
     }
+    crate::pool::apply_threads(get(CPU_THREADS) as usize);
 }
 
 /// Every switch with its current and default value, for the app.

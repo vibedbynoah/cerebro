@@ -150,6 +150,11 @@ fn vec_f32(g: &Gguf, name: &str) -> Result<Vec<f32>, Error> {
 }
 
 impl Model {
+    /// Whether any attention or output matrix is Q8_0 (four-row dots only apply to those).
+    pub fn uses_q8_0(&self) -> bool {
+        self.output.dtype == DType::Q8_0 || self.layers.iter().any(|l| [&l.q, &l.k, &l.v, &l.o].iter().any(|m| m.dtype == DType::Q8_0))
+    }
+
     pub fn load(path: &Path) -> Result<Self, Error> {
         let g = Arc::new(Gguf::open(path)?);
 
@@ -305,8 +310,7 @@ impl Model {
         let total: usize = jobs.iter().map(|j| j.0.rows).sum();
         let pool = crate::pool::global();
         // Small items keep the slowest core (an E-core) from holding up the end of each job.
-        static DIV: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-        let div = *DIV.get_or_init(|| crate::switches::get(crate::switches::CPU_CHUNK_DIV).max(1) as usize);
+        let div = crate::switches::get(crate::switches::CPU_CHUNK_DIV).max(1) as usize;
         let chunk = (total / (pool.threads() * div)).clamp(4, 512);
         // Each work item is (job index, first row, row count); outputs are disjoint slices.
         let mut items = Vec::with_capacity(total / chunk + jobs.len());

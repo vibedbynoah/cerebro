@@ -8,6 +8,95 @@ pub struct Gpu {
     pub vram_free: u64,
 }
 
+/// The processor's cores. On hybrid CPUs (Intel 12th gen and later, some ARM) "performance" are the
+/// cores of the highest efficiency class; on others every core counts as one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cores {
+    pub physical: usize,
+    pub logical: usize,
+    pub performance_physical: usize,
+    pub performance_logical: usize,
+}
+
+impl Cores {
+    pub fn hybrid(&self) -> bool {
+        self.performance_physical < self.physical
+    }
+}
+
+/// Core layout from the OS (Windows: GetLogicalProcessorInformationEx); a flat layout of the
+/// logical CPU count elsewhere or on failure.
+pub fn cores() -> Cores {
+    let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let flat = Cores { physical: logical, logical, performance_physical: logical, performance_logical: logical };
+    #[cfg(windows)]
+    {
+        let mut len = 0u32;
+        // SAFETY: a size query with a null buffer.
+        unsafe { win::GetLogicalProcessorInformationEx(0, std::ptr::null_mut(), &mut len) };
+        if len == 0 {
+            return flat;
+        }
+        let mut buf = vec![0u8; len as usize];
+        // SAFETY: buf holds len bytes; RelationProcessorCore (0).
+        if unsafe { win::GetLogicalProcessorInformationEx(0, buf.as_mut_ptr(), &mut len) } == 0 {
+            return flat;
+        }
+        let mut list = Vec::new();
+        let mut off = 0usize;
+        // SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX: Relationship u32, Size u32, then PROCESSOR_RELATIONSHIP:
+        // Flags u8, EfficiencyClass u8, Reserved[20], GroupCount u16, GROUP_AFFINITY[GroupCount] (16 bytes each, mask first).
+        while off + 32 <= len as usize {
+            let size = u32::from_le_bytes(buf[off + 4..off + 8].try_into().expect("4 bytes")) as usize;
+            if size == 0 || off + size > len as usize {
+                break;
+            }
+            let class = buf[off + 9];
+            let groups = u16::from_le_bytes([buf[off + 30], buf[off + 31]]) as usize;
+            let mut threads = 0usize;
+            for g in 0..groups {
+                let at = off + 32 + g * 16;
+                if at + 8 <= off + size {
+                    threads += u64::from_le_bytes(buf[at..at + 8].try_into().expect("8 bytes")).count_ones() as usize;
+                }
+            }
+            list.push((class, threads.max(1)));
+            off += size;
+        }
+        return layout(&list).unwrap_or(flat);
+    }
+    #[allow(unreachable_code)]
+    flat
+}
+
+/// Cores from (efficiency class, logical threads) per physical core.
+fn layout(cores: &[(u8, usize)]) -> Option<Cores> {
+    let top = cores.iter().map(|c| c.0).max()?;
+    let perf: Vec<_> = cores.iter().filter(|c| c.0 == top).collect();
+    Some(Cores {
+        physical: cores.len(),
+        logical: cores.iter().map(|c| c.1).sum(),
+        performance_physical: perf.len(),
+        performance_logical: perf.iter().map(|c| c.1).sum(),
+    })
+}
+
+/// How busy the processor is, 0..1, measured over `window` (Windows: GetSystemTimes); None elsewhere.
+pub fn cpu_busy(window: std::time::Duration) -> Option<f64> {
+    let a = crate::telemetry::current_cpu_times()?;
+    std::thread::sleep(window);
+    let b = crate::telemetry::current_cpu_times()?;
+    crate::telemetry::cpu_delta(a, b).map(|pct| pct / 100.0)
+}
+
+/// A short key for the machine a tuning result belongs to: processor, GPUs and core layout.
+pub fn machine_key() -> String {
+    let c = cores();
+    let gpus: Vec<String> = gpus().into_iter().map(|g| format!("{} {} MiB", g.name, g.vram_total >> 20)).collect();
+    format!("{} | {}P{}L | {}", cpu_name(), c.performance_physical, c.logical, if gpus.is_empty() { "no GPU".into() } else { gpus.join(", ") })
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Machine {
     pub cpu_name: String,
@@ -98,8 +187,34 @@ mod win {
         pub fn GlobalMemoryStatusEx(st: *mut MemoryStatusEx) -> i32;
     }
 
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn GetLogicalProcessorInformationEx(relation: u32, buf: *mut u8, len: *mut u32) -> i32;
+    }
+
     #[link(name = "advapi32")]
     extern "system" {
         pub fn RegGetValueW(hkey: isize, subkey: *const u16, value: *const u16, flags: u32, ty: *mut u32, data: *mut c_void, len: *mut u32) -> i32;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hybrid_and_flat_layouts() {
+        // i9-12900H: 6 P-cores with two threads (class 1), 8 E-cores with one (class 0).
+        let mut h: Vec<(u8, usize)> = vec![(1, 2); 6];
+        h.extend(vec![(0, 1); 8]);
+        let c = layout(&h).unwrap();
+        assert_eq!((c.physical, c.logical, c.performance_physical, c.performance_logical), (14, 20, 6, 12));
+        assert!(c.hybrid());
+        let f = layout(&vec![(0, 2); 8]).unwrap();
+        assert_eq!((f.physical, f.logical, f.performance_physical, f.performance_logical), (8, 16, 8, 16));
+        assert!(!f.hybrid());
+        assert!(layout(&[]).is_none());
+        let live = cores();
+        assert!(live.logical >= live.physical && live.physical >= live.performance_physical && live.performance_physical >= 1);
     }
 }

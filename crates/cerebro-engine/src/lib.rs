@@ -17,6 +17,7 @@ pub mod sample;
 pub mod switches;
 pub mod telemetry;
 pub mod tokenizer;
+pub mod tune;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

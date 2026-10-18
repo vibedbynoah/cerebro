@@ -30,6 +30,8 @@ struct Shared {
     /// Workers that took the current job's pointer and may still call it.
     active: AtomicUsize,
     stop: AtomicBool,
+    /// Threads that take part in jobs, the caller included; workers numbered at or above it rest.
+    limit: AtomicUsize,
 }
 
 // SAFETY: the job pointer is only used by workers counted in `active`, and `run` waits for `active`
@@ -73,25 +75,38 @@ impl Pool {
             completed: AtomicUsize::new(0),
             active: AtomicUsize::new(0),
             stop: AtomicBool::new(false),
+            limit: AtomicUsize::new(threads.max(1)),
         });
         let handles = (0..workers)
-            .map(|_| {
+            .map(|i| {
                 let sh = shared.clone();
-                std::thread::spawn(move || worker(&sh))
+                std::thread::spawn(move || worker(&sh, i + 1))
             })
             .collect();
         Self { shared, workers, handles, lock: Mutex::new(()) }
     }
 
+    /// Threads that take part in each job, the caller included.
     pub fn threads(&self) -> usize {
+        self.shared.limit.load(Ordering::Relaxed).clamp(1, self.workers + 1)
+    }
+
+    /// Threads the pool can use at most (its workers plus the caller).
+    pub fn capacity(&self) -> usize {
         self.workers + 1
+    }
+
+    /// Changes how many threads take part, from the next job on (clamped to 1..=capacity). A
+    /// worker past the limit rests (sleeps between checks) instead of spinning.
+    pub fn set_threads(&self, n: usize) {
+        self.shared.limit.store(n.clamp(1, self.workers + 1), Ordering::Relaxed);
     }
 
     pub fn run(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
         if n == 0 {
             return;
         }
-        if self.workers == 0 || n == 1 {
+        if self.workers == 0 || n == 1 || self.threads() == 1 {
             (0..n).for_each(f);
             return;
         }
@@ -119,7 +134,7 @@ impl Pool {
     }
 }
 
-fn worker(sh: &Shared) {
+fn worker(sh: &Shared, index: usize) {
     let mut seen = 0;
     let mut idle_since = Instant::now();
     loop {
@@ -127,6 +142,12 @@ fn worker(sh: &Shared) {
         let g = loop {
             if sh.stop.load(Ordering::Relaxed) {
                 return;
+            }
+            if index >= sh.limit.load(Ordering::Relaxed) {
+                // Not taking part at the current thread count; jobs finish without this worker.
+                seen = sh.gen.load(Ordering::Acquire);
+                std::thread::sleep(Duration::from_millis(2));
+                continue;
             }
             let g = sh.gen.load(Ordering::Acquire);
             if g != seen {
@@ -164,14 +185,25 @@ impl Drop for Pool {
     }
 }
 
-/// The process-wide pool: `CEREBRO_THREADS` threads, or the logical CPU count minus four, leaving
-/// room for the OS, the GPU driver and the UI.
+static GLOBAL: OnceLock<Pool> = OnceLock::new();
+
+/// The process-wide pool. It has a worker for every logical CPU; `CEREBRO_THREADS` (or the
+/// Processor threads switch: logical CPUs minus four by default, leaving room for the OS, the GPU
+/// driver and the UI) sets how many take part.
 pub fn global() -> &'static Pool {
-    static P: OnceLock<Pool> = OnceLock::new();
-    P.get_or_init(|| {
-        let n = crate::switches::get(crate::switches::CPU_THREADS).max(1) as usize;
-        Pool::new(n)
+    GLOBAL.get_or_init(|| {
+        let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let p = Pool::new(logical);
+        p.set_threads(crate::switches::get(crate::switches::CPU_THREADS).max(1) as usize);
+        p
     })
+}
+
+/// Applies a new thread count to the pool if it is running (the switch is live).
+pub(crate) fn apply_threads(n: usize) {
+    if let Some(p) = GLOBAL.get() {
+        p.set_threads(n);
+    }
 }
 
 #[cfg(test)]
@@ -189,5 +221,22 @@ mod tests {
             });
             assert!(hits.iter().all(|h| h.load(Ordering::Relaxed) == 1));
         }
+    }
+
+    #[test]
+    fn thread_count_changes_between_jobs() {
+        let p = Pool::new(6);
+        for (round, t) in [6usize, 1, 3, 6, 2].into_iter().cycle().take(100).enumerate() {
+            p.set_threads(t);
+            assert_eq!(p.threads(), t);
+            let n = 37 + round;
+            let hits: Vec<AtomicUsize> = (0..n).map(|_| AtomicUsize::new(0)).collect();
+            p.run(n, &|i| {
+                hits[i].fetch_add(1, Ordering::Relaxed);
+            });
+            assert!(hits.iter().all(|h| h.load(Ordering::Relaxed) == 1));
+        }
+        p.set_threads(99);
+        assert_eq!(p.threads(), 6);
     }
 }

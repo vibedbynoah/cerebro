@@ -136,7 +136,7 @@ impl CpuTimes {
     }
 }
 
-fn cpu_delta(prev: (u64, u64, u64), now: (u64, u64, u64)) -> Option<f64> {
+pub(crate) fn cpu_delta(prev: (u64, u64, u64), now: (u64, u64, u64)) -> Option<f64> {
     let idle = now.0.wrapping_sub(prev.0) as f64;
     // GetSystemTimes' kernel time already includes idle time, so total = kernel + user.
     let total = (now.1.wrapping_sub(prev.1) + now.2.wrapping_sub(prev.2)) as f64;
@@ -144,7 +144,7 @@ fn cpu_delta(prev: (u64, u64, u64), now: (u64, u64, u64)) -> Option<f64> {
 }
 
 #[cfg(windows)]
-fn current_cpu_times() -> Option<(u64, u64, u64)> {
+pub(crate) fn current_cpu_times() -> Option<(u64, u64, u64)> {
     let mut idle = win::FileTime::default();
     let mut kernel = win::FileTime::default();
     let mut user = win::FileTime::default();
@@ -154,7 +154,7 @@ fn current_cpu_times() -> Option<(u64, u64, u64)> {
 }
 
 #[cfg(not(windows))]
-fn current_cpu_times() -> Option<(u64, u64, u64)> {
+pub(crate) fn current_cpu_times() -> Option<(u64, u64, u64)> {
     None
 }
 
