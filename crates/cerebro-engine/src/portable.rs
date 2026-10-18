@@ -347,8 +347,8 @@ fn backends() -> wgpu::Backends {
     }
 }
 
-/// The DXC shader compiler for DX12, if one is found: `dxcompiler.dll` (with `dxil.dll`) in
-/// CEREBRO_DXC_DIR, next to the program (the app ships it), or in an installed Windows SDK. Without it wgpu uses FXC, whose
+/// The DXC shader compiler for DX12, if one is found: `dxcompiler.dll` in CEREBRO_DXC_DIR, next to
+/// the program or in its `dxc` folder (the app ships it), or in an installed Windows SDK. Without it wgpu uses FXC, whose
 /// code hung an Intel Iris Xe in the one-row matrix kernels over several tokens (driver reset);
 /// the same shaders compiled by DXC ran correctly.
 fn dxc_path() -> Option<std::path::PathBuf> {
@@ -361,6 +361,7 @@ fn dxc_path() -> Option<std::path::PathBuf> {
         dirs.push(d.into());
     }
     if let Some(d) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())) {
+        dirs.push(d.join("dxc"));
         dirs.push(d.join("resources"));
         dirs.push(d);
     }
@@ -369,7 +370,8 @@ fn dxc_path() -> Option<std::path::PathBuf> {
         sdk.sort();
         dirs.extend(sdk.into_iter().rev());
     }
-    dirs.into_iter().map(|d| d.join("dxcompiler.dll")).find(|p| p.is_file() && p.with_file_name("dxil.dll").is_file())
+    // DXC 1.8.2502 and later validates and signs shaders itself: dxcompiler.dll alone is enough.
+    dirs.into_iter().map(|d| d.join("dxcompiler.dll")).find(|p| p.is_file())
 }
 
 /// Whether DX12 shaders are compiled by DXC (else FXC).
