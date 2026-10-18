@@ -228,8 +228,137 @@ fn main(@builtin(workgroup_id) g: vec3<u32>, @builtin(local_invocation_id) l: ve
 }
 "#;
 
-/// Per (query head, token): scores over positions 0..=pos, softmax, weighted values.
+/// Attention in spans of SPAN positions (split-K): one workgroup per (query head, span, token)
+/// writes the span's max score, its sum of exponentials and its unnormalised weighted values; the
+/// combine kernel merges the spans. Eight threads share each key's dot product, so neighbouring
+/// threads read neighbouring bytes, and the span's scores stay in workgroup memory. One workgroup
+/// per head (the first version) left most of a GPU idle on long contexts.
 const ATTENTION: &str = r#"
+const SPAN: u32 = 256u;
+struct P { group: u32, hd: u32, kvd: u32, maxs: u32, scale: f32, row: u32, n_head: u32, _c: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(2) var<storage, read> qkv: array<f32>;
+@group(0) @binding(3) var<storage, read> kc: array<u32>;
+@group(0) @binding(4) var<storage, read> vc: array<u32>;
+@group(0) @binding(5) var<storage, read_write> part: array<f32>;
+var<workgroup> qs: array<f32, 256>;
+var<workgroup> sc: array<f32, 256>;
+var<workgroup> red: array<f32, 256>;
+var<workgroup> acc2: array<vec2<f32>, 256>;
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) g: vec3<u32>, @builtin(local_invocation_id) l3: vec3<u32>) {
+    let h = g.x;
+    let span = g.y;
+    let t = g.z;
+    let i = l3.x;
+    let kvh = h / p.group;
+    let len = st.pos0 + t + 1u;
+    let pairs = p.hd / 2u;
+    let u0 = span * SPAN;
+    let pb = ((t * p.n_head + h) * p.maxs + span) * (p.hd + 2u);
+    if (i < p.hd) { qs[i] = qkv[t * p.row + h * p.hd + i]; }
+    workgroupBarrier();
+    let lane = i % 8u;
+    let slot = i / 8u;
+    let per = pairs / 8u;
+    for (var stp = 0u; stp < SPAN / 32u; stp++) {
+        let u = u0 + stp * 32u + slot;
+        var d = 0.0;
+        if (u < len) {
+            let kb = (u * p.kvd + kvh * p.hd) / 2u + lane * per;
+            for (var j = 0u; j < per; j++) {
+                let k = unpack2x16float(kc[kb + j]);
+                let q = 2u * (lane * per + j);
+                d += qs[q] * k.x + qs[q + 1u] * k.y;
+            }
+        }
+        red[i] = d;
+        workgroupBarrier();
+        if (lane == 0u) {
+            var s = 0.0;
+            for (var k = 0u; k < 8u; k++) { s += red[i + k]; }
+            if (u < len) { sc[stp * 32u + slot] = s * p.scale; } else { sc[stp * 32u + slot] = -3.0e38; }
+        }
+        workgroupBarrier();
+    }
+    red[i] = sc[i];
+    workgroupBarrier();
+    for (var k = 128u; k > 0u; k >>= 1u) {
+        if (i < k) { red[i] = max(red[i], red[i + k]); }
+        workgroupBarrier();
+    }
+    let m = red[0];
+    workgroupBarrier();
+    var e = 0.0;
+    if (u0 + i < len) { e = exp(sc[i] - m); }
+    sc[i] = e;
+    red[i] = e;
+    workgroupBarrier();
+    for (var k = 128u; k > 0u; k >>= 1u) {
+        if (i < k) { red[i] += red[i + k]; }
+        workgroupBarrier();
+    }
+    let lsum = red[0];
+    let ng = 256u / pairs;
+    let pi = i % pairs;
+    let gi = i / pairs;
+    var a = vec2<f32>(0.0, 0.0);
+    if (gi < ng) {
+        for (var v = gi; v < SPAN; v += ng) {
+            let u = u0 + v;
+            if (u < len) { a += sc[v] * unpack2x16float(vc[(u * p.kvd + kvh * p.hd) / 2u + pi]); }
+        }
+    }
+    acc2[i] = a;
+    workgroupBarrier();
+    if (gi == 0u) {
+        var s2 = a;
+        for (var k = 1u; k < ng; k++) { s2 += acc2[k * pairs + pi]; }
+        part[pb + 2u + 2u * pi] = s2.x;
+        part[pb + 3u + 2u * pi] = s2.y;
+    }
+    if (i == 0u) {
+        part[pb] = m;
+        part[pb + 1u] = lsum;
+    }
+}
+"#;
+
+/// Merges the spans of each (query head, token): out = sum(acc_s e^(m_s - M)) / sum(l_s e^(m_s - M)).
+const ATTN_COMBINE: &str = r#"
+const SPAN: u32 = 256u;
+struct P { hd: u32, maxs: u32, n_head: u32, _c: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(2) var<storage, read> part: array<f32>;
+@group(0) @binding(3) var<storage, read_write> ao: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) g: vec3<u32>, @builtin(local_invocation_id) l3: vec3<u32>) {
+    let h = g.x;
+    let t = g.y;
+    let i = l3.x;
+    let len = st.pos0 + t + 1u;
+    let ns = (len + SPAN - 1u) / SPAN;
+    let base = (t * p.n_head + h) * p.maxs;
+    let w = p.hd + 2u;
+    var mm = -3.0e38;
+    for (var s = 0u; s < ns; s++) { mm = max(mm, part[(base + s) * w]); }
+    var tot = 0.0;
+    for (var s = 0u; s < ns; s++) { tot += part[(base + s) * w + 1u] * exp(part[(base + s) * w] - mm); }
+    if (i < p.hd) {
+        var o = 0.0;
+        for (var s = 0u; s < ns; s++) {
+            let b = (base + s) * w;
+            o += part[b + 2u + i] * exp(part[b] - mm);
+        }
+        ao[t * p.n_head * p.hd + h * p.hd + i] = o / tot;
+    }
+}
+"#;
+
+/// Per (query head, token): scores over positions 0..=pos, softmax, weighted values, one workgroup
+/// per head with the scores in a scratch buffer. Used on Intel GPUs: the split kernel (ATTENTION)
+/// hung an Iris Xe (driver 30.0.101.1660) when compiled by DXC, this one did not.
+const ATTENTION_HEAD: &str = r#"
 struct P { group: u32, hd: u32, kvd: u32, max_ctx: u32, scale: f32, row: u32, n_head: u32, _c: u32 }
 @group(0) @binding(0) var<uniform> p: P;
 @group(0) @binding(2) var<storage, read> qkv: array<f32>;
@@ -470,6 +599,8 @@ enum Dims {
     Rows { rows: u32, fixed: bool },
     /// `n` values per token, 256 per workgroup.
     Elems(u32),
+    /// Attention spans: `heads` in x, the chunk's spans (SPAN positions each) in y, tokens in z.
+    Spans(u32),
 }
 
 /// One prepared dispatch.
@@ -514,6 +645,11 @@ const P_MATVEC: usize = 1;
 const P_POST: usize = 2;
 const P_ATTN: usize = 3;
 const P_SILU: usize = 4;
+const P_COMB: usize = 5;
+/// The one-workgroup-per-head attention (ATTENTION_HEAD), for GPUs where the split one is unsafe.
+const P_ATTN_HEAD: usize = 6;
+/// Attention positions per workgroup (SPAN in the shader).
+const SPAN: usize = 256;
 /// Matrix kernel variants, all with P_MATVEC's layout: (label, family, threads, tokens per weight read).
 const MV_VARIANTS: [(&str, &str, u32, usize); 6] = [
     ("4 rows x 64 threads", "quad", 256, 1),
@@ -524,7 +660,7 @@ const MV_VARIANTS: [(&str, &str, u32, usize); 6] = [
     ("1 row x 32 threads", "row", 32, 8),
 ];
 /// Pipelines from index MV0 on are the MV_VARIANTS, in order.
-const MV0: usize = 5;
+const MV0: usize = 7;
 const TB: usize = 8;
 /// A submission should take about this long: Windows resets a GPU driver whose work runs past two
 /// seconds, and an integrated GPU shares itself with the desktop, which must stay responsive.
@@ -565,7 +701,7 @@ impl PortableState {
         if c.n_expert > 0 || m.layers().iter().any(|l| !matches!(l.ffn, Ffn::Dense { .. })) {
             return Err(Error::Unsupported("the portable GPU backend does not run mixture-of-experts models yet".into()));
         }
-        if c.head_dim > 256 || c.head_dim % 2 != 0 || c.rope_dim > c.head_dim {
+        if c.head_dim > 256 || c.head_dim % 16 != 0 || c.rope_dim > c.head_dim {
             return Err(Error::Unsupported(format!("head size {} is not supported on the portable GPU backend", c.head_dim)));
         }
         if c.dim % 32 != 0 || c.ffn % 32 != 0 || (c.n_head * c.head_dim) % 32 != 0 {
@@ -612,7 +748,12 @@ impl PortableState {
         let (qd, kvd) = (nh * hd, nkv * hd);
         let row = qd + 2 * kvd;
         let max_bind = (limits.max_storage_buffer_binding_size as u64).min(limits.max_buffer_size) as usize;
-        let chunk = (SCRATCH / (nh * max_ctx * 4)).clamp(1, CHUNK);
+        // Span partials: per (token, head, span) the max, the sum and hd values; or, for the per-head
+        // kernel, every score of every head.
+        let per_head = ai.vendor == INTEL;
+        let maxs = max_ctx.div_ceil(SPAN);
+        let part_row = if per_head { nh * max_ctx * 4 } else { nh * maxs * (hd + 2) * 4 };
+        let chunk = (SCRATCH / part_row).clamp(1, CHUNK);
         let mut bytes = 0u64;
 
         let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
@@ -667,11 +808,11 @@ impl PortableState {
         let ao = buf(chunk * qd * 4, "attn out");
         let gu = buf(chunk * 2 * ffn * 4, "gate up");
         let logits = buf(c.vocab * 4, "logits");
-        let att = buf(chunk * nh * max_ctx * 4, "scores");
+        let part = buf(chunk * part_row, "attention spans");
         let step = buf(16 + chunk * c.rope_dim / 2 * 8, "step");
         let readback = device.create_buffer(&wgpu::BufferDescriptor { label: Some("readback"), size: (c.vocab * 4) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let dummy = f32s(&vec![0.0; hd], "no norm");
-        bytes += (chunk * (dim * 8 + row * 4 + qd * 4 + 8 * ffn + nh * max_ctx * 4) + c.vocab * 8) as u64;
+        bytes += (chunk * (dim * 8 + row * 4 + qd * 4 + 8 * ffn + part_row) + c.vocab * 8) as u64;
 
         // Layouts: binding 0 the call's parameters, 1 the chunk's step record, then storage
         // buffers (true = read only).
@@ -689,8 +830,10 @@ impl PortableState {
             layout(&[true, true, false]),
             layout(&[true, true, true, false]),
             layout(&[false, true, true, false, false]),
-            layout(&[true, true, true, false, false]),
+            layout(&[true, true, true, false]),
             layout(&[false]),
+            layout(&[true, false]),
+            layout(&[true, true, true, false, false]),
         ];
         let pipe = |src: String, li: usize, label: &str| {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(label), source: wgpu::ShaderSource::Wgsl(src.into()) });
@@ -704,6 +847,8 @@ impl PortableState {
             pipe(format!("{STEP}{QK_POST}"), P_POST, "qk post"),
             pipe(format!("{STEP}{ATTENTION}"), P_ATTN, "attention"),
             pipe(format!("{STEP}{SILU}"), P_SILU, "silu"),
+            pipe(format!("{STEP}{ATTN_COMBINE}"), P_COMB, "attention combine"),
+            pipe(format!("{STEP}{ATTENTION_HEAD}"), P_ATTN_HEAD, "attention per head"),
         ];
         let mut pipes = pipes;
         for (label, family, wg, tb) in MV_VARIANTS {
@@ -724,6 +869,7 @@ impl PortableState {
         };
         let eps = c.eps.to_bits();
         let rms_u = uni(&[dim as u32, eps, 0, 0]);
+        let comb_u = uni(&[hd as u32, maxs as u32, nh as u32, 0]);
         let mut layer_calls = Vec::new();
         for l in m.layers() {
             let mut calls = Vec::new();
@@ -744,8 +890,14 @@ impl PortableState {
             matvec(&wqkv, &h, dim, &qkv, row, false, false, &mut calls);
             let post_u = uni(&[nh as u32, nkv as u32, hd as u32, c.rope_dim as u32, kvd as u32, qn.is_some() as u32, kn.is_some() as u32, eps, qd as u32, row as u32, 0, 0]);
             calls.push(Call { pipe: P_POST, bind: bind(P_POST, &[&post_u, &step, &qkv, qn.as_ref().unwrap_or(&dummy), kn.as_ref().unwrap_or(&dummy), &kc, &vc]), dims: Dims::Heads((nh + nkv) as u32) });
-            let attn_u = uni(&[(nh / nkv) as u32, hd as u32, kvd as u32, max_ctx as u32, (1.0 / (hd as f32).sqrt()).to_bits(), row as u32, nh as u32, 0]);
-            calls.push(Call { pipe: P_ATTN, bind: bind(P_ATTN, &[&attn_u, &step, &qkv, &kc, &vc, &att, &ao]), dims: Dims::Heads(nh as u32) });
+            let attn_u = uni(&[(nh / nkv) as u32, hd as u32, kvd as u32, maxs as u32, (1.0 / (hd as f32).sqrt()).to_bits(), row as u32, nh as u32, 0]);
+            if per_head {
+                let head_u = uni(&[(nh / nkv) as u32, hd as u32, kvd as u32, max_ctx as u32, (1.0 / (hd as f32).sqrt()).to_bits(), row as u32, nh as u32, 0]);
+                calls.push(Call { pipe: P_ATTN_HEAD, bind: bind(P_ATTN_HEAD, &[&head_u, &step, &qkv, &kc, &vc, &part, &ao]), dims: Dims::Heads(nh as u32) });
+            } else {
+                calls.push(Call { pipe: P_ATTN, bind: bind(P_ATTN, &[&attn_u, &step, &qkv, &kc, &vc, &part]), dims: Dims::Spans(nh as u32) });
+                calls.push(Call { pipe: P_COMB, bind: bind(P_COMB, &[&comb_u, &step, &part, &ao]), dims: Dims::Heads(nh as u32) });
+            }
             matvec(&wo, &ao, qd, &x, dim, true, false, &mut calls);
             calls.push(Call { pipe: P_RMS, bind: bind(P_RMS, &[&rms_u, &step, &x, &ffn_norm, &h]), dims: Dims::PerToken });
             matvec(&wgu, &h, dim, &gu, 2 * ffn, false, false, &mut calls);
@@ -834,6 +986,7 @@ impl PortableState {
             words.push(format!("forced {} ({} per read) for prompts", MV_VARIANTS[i].0, MV_VARIANTS[i].3));
         }
         let (mv1, mv8) = (chosen[0], chosen[1]);
+        words.push(if per_head { "attention one head per workgroup".into() } else { "attention in 256-position spans".into() });
         if ai.backend == wgpu::Backend::Dx12 {
             words.push(if fxc { "shaders compiled by FXC".into() } else { "shaders compiled by DXC".into() });
         }
@@ -880,14 +1033,16 @@ impl PortableState {
     }
 
     /// Records `calls` for a chunk of `nt` tokens into `pass`.
-    fn encode<'a>(&self, pass: &mut wgpu::ComputePass<'a>, calls: impl Iterator<Item = &'a Call>, nt: usize) {
+    fn encode<'a>(&self, pass: &mut wgpu::ComputePass<'a>, calls: impl Iterator<Item = &'a Call>, nt: usize, pos0: usize) {
         let ntu = nt as u32;
+        let spans = (pos0 + nt).div_ceil(SPAN) as u32;
         for call in calls {
             let (pipe, d) = match call.dims {
                 Dims::PerToken => (call.pipe, (ntu, 1, 1)),
                 Dims::One => (call.pipe, (1, 1, 1)),
                 Dims::Heads(h) => (call.pipe, (h, ntu, 1)),
                 Dims::Elems(n) => (call.pipe, ((ntu * n).div_ceil(256), 1, 1)),
+                Dims::Spans(h) => (call.pipe, (h, spans, ntu)),
                 Dims::Rows { rows, fixed } => {
                     let ((pipe, per), z) = if fixed || nt == 1 { (self.mv1, 1) } else { (self.mv8, ntu.div_ceil(MV_VARIANTS[self.mv8.0 - MV0].3 as u32)) };
                     let wg = rows.div_ceil(per);
@@ -941,7 +1096,7 @@ impl PortableState {
                 {
                     let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
                     let calls = self.layer_calls[l0..l0 + pl].iter().flatten().chain(if head { self.head_calls.iter() } else { [].iter() });
-                    self.encode(&mut pass, calls, nt);
+                    self.encode(&mut pass, calls, nt, pos0 + i);
                 }
                 if head {
                     enc.copy_buffer_to_buffer(&self.logits, 0, &self.readback, 0, (self.vocab * 4) as u64);

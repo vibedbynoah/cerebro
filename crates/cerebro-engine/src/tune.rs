@@ -184,6 +184,9 @@ pub fn tune(m: &Model, s: &mut Session, cancel: &AtomicBool, on_trial: &mut dyn 
     let (gpu_layers, whole_gpu) = s.gpu.as_ref().map_or((0, false), |g| (g.gpu_layers(), !g.is_split()));
     #[cfg(not(feature = "cuda"))]
     let (gpu_layers, whole_gpu) = (0, false);
+    // The portable backend runs every layer on its GPU too.
+    #[cfg(feature = "portable")]
+    let (gpu_layers, whole_gpu) = if s.portable.is_some() { (m.cfg.n_layer, true) } else { (gpu_layers, whole_gpu) };
     let outcome = Outcome {
         machine: crate::hw::machine_key(),
         model: format!("{:016x}", model_fingerprint(m)),
