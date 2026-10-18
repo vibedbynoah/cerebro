@@ -25,6 +25,7 @@ mod builtin_tools;
 mod agent_tools;
 mod trainer;
 mod engine;
+mod dedup;
 mod hub;
 mod kv_store;
 pub mod navigation;
@@ -55,6 +56,10 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::model_unload,
             commands::models_loaded,
             commands::placement_preview,
+            commands::disk_scan,
+            commands::disk_deduplicate,
+            commands::disk_unlink,
+            commands::model_reveal,
             commands::chat_send,
             commands::chat_stop,
             commands::kv_store_usage,
@@ -105,6 +110,9 @@ pub fn run() -> Result<(), tauri::Error> {
         .manage(mcp::Mcp::default())
         .manage(commands::Telemetry::default())
         .manage(trainer::Trainer::default())
+        // Disk space (dedup.rs): the last scan's groups, so the calls that follow re-check the
+        // copies the user was shown.
+        .manage(std::sync::Arc::new(dedup::Disk::default()))
         .setup(|app| {
             commands::load_switches(app.handle());
             {

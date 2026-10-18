@@ -1,0 +1,22 @@
+[package]
+name = "cerebro-winfs"
+description = "Filesystem facts std does not expose: a file's identity (volume serial + file index, so hard links are recognisable) and a volume's free space"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Only GetFileInformationByHandle and GetDiskFreeSpaceExW (Win32_Storage_FileSystem), plus the
+# handle type and error codes. This crate exists on its own because the desktop crate is
+# `#![forbid(unsafe_code)]`: the FFI lives here, small and reviewable, like cerebro-job's Job
+# Object and cerebro-probe's DACL audit.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
+[lints.rust]
+missing_docs = "warn"

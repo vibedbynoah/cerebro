@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-disk-deduplicate"
+description = "Enables the disk_deduplicate command without any pre-configured scope."
+commands.allow = ["disk_deduplicate"]
+
+[[permission]]
+identifier = "deny-disk-deduplicate"
+description = "Denies the disk_deduplicate command without any pre-configured scope."
+commands.deny = ["disk_deduplicate"]

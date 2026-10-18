@@ -20,6 +20,7 @@ const ALLOWED = new Set([
   "library_list",
   "model_unload",
   "models_loaded",
+  "disk_scan",
   "chat_stop",
   "kv_store_usage",
   "kv_store_clear",
@@ -73,6 +74,13 @@ function hasOnlyKeys(o, required, optional = []) {
 
 /** @param {unknown} v */
 const isModelId = (v) => typeof v === "string" && /^[A-Za-z0-9]{1,64}$/.test(v);
+
+/** A duplicate group: the file's SHA-256 as lowercase hex (disk_scan's group id). @param {unknown} v */
+const isGroupId = (v) => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
+
+/** A model file path. The engine matches it exactly against the copies its own scan found; the
+ *  bound is Windows' maximum path length. @param {unknown} v */
+const isPath = (v) => typeof v === "string" && v.length > 0 && v.length <= 32767;
 
 /** A Tauri channel, as serialized for IPC ("__CHANNEL__:<id>") or still as its object. @param {unknown} v */
 const isChannel = (v) => (typeof v === "string" && /^__CHANNEL__:\d+$/.test(v)) || (typeof v === "object" && v !== null && typeof (/** @type {{id?: unknown}} */ (v)).id === "number");
@@ -168,6 +176,9 @@ function isToolsRequest(t) {
 const WITH_ARGS = {
   model_load: (p) => isPlain(p) && hasOnlyKeys(p, ["id"], ["context", "gpuLayers"]) && isModelId(p.id) && optCount(p.context, 1) && optCount(p.gpuLayers, 0),
   placement_preview: (p) => isPlain(p) && hasOnlyKeys(p, ["id"], ["context", "gpuLayers"]) && isModelId(p.id) && optCount(p.context, 1) && optCount(p.gpuLayers, 0),
+  disk_deduplicate: (p) => isPlain(p) && hasOnlyKeys(p, ["groupId", "keepPath"]) && isGroupId(p.groupId) && isPath(p.keepPath),
+  disk_unlink: (p) => isPlain(p) && hasOnlyKeys(p, ["groupId"]) && isGroupId(p.groupId),
+  model_reveal: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && isModelId(p.id),
   hub_search: (p) => isPlain(p) && hasOnlyKeys(p, ["query"]) && typeof p.query === "string" && p.query.length <= 120,
   hub_files: (p) => isPlain(p) && hasOnlyKeys(p, ["repo"]) && isRepo(p.repo),
   hub_file_meta: (p) => isPlain(p) && hasOnlyKeys(p, ["repo", "file"]) && isRepo(p.repo) && isGguf(p.file),

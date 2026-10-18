@@ -11,7 +11,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import type { CerebroService, Unsubscribe } from "./service";
 import type { ChatEvent, ChatRequest } from "./chat-types";
 import type { HistoryRange, MetricsSeries, MetricsSnapshot, RequestDetail } from "./monitor-types";
-import type { CatalogModel, GpuInfo, HardwareProfile, KvStoreUsage, LibraryModel, LiveStats, LoadedModel, LoadParams, ModelDetail, ModelSummary, NetworkState } from "./types";
+import type { CatalogModel, DedupeResult, DiskReport, DuplicateGroup, GpuInfo, HardwareProfile, KvStoreUsage, LibraryModel, LiveStats, LoadedModel, LoadParams, ModelDetail, ModelSummary, NetworkState } from "./types";
 import { CURRENT_CATALOG } from "./catalog";
 import type { TrainerStatus, TrainEvent, TrainInstalled } from "./train-types";
 import type { Placement } from "./types";
@@ -160,12 +160,12 @@ export function createDesktopService(local: CerebroService): CerebroService {
     },
     writeGgufCopy: () => NOT_YET("Editing a model's metadata"),
     revertGgufCopy: () => NOT_YET("Editing a model's metadata"),
-    // Total size of the library is measured; finding duplicate copies is not built yet, so no
-    // duplicate groups are reported.
-    scanDisk: async () => ({ provenance: "measured", totalGiB: library.reduce((t, m) => t + m.sizeGiB, 0), groups: [] }),
-    deduplicate: () => NOT_YET("Deduplication"),
-    unlink: () => NOT_YET("Deduplication"),
-    revealInFolder: () => Promise.resolve(false),
+    // The engine's scan groups the model files by size and SHA-256 and remembers the result, so
+    // deduplicate and undo work on the copies the last scan reported.
+    scanDisk: () => invoke<DiskReport>("disk_scan"),
+    deduplicate: (groupId, keepPath) => invoke<DedupeResult>("disk_deduplicate", { groupId, keepPath }),
+    unlink: (groupId) => invoke<DuplicateGroup>("disk_unlink", { groupId }),
+    revealInFolder: (id) => invoke<boolean>("model_reveal", { id }),
     describeImage: () => NOT_YET("Image input"),
     transcribeSample: () => NOT_YET("Speech to text"),
     speakSample: () => NOT_YET("Text to speech"),

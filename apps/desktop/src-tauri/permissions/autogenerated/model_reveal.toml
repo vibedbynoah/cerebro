@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-model-reveal"
+description = "Enables the model_reveal command without any pre-configured scope."
+commands.allow = ["model_reveal"]
+
+[[permission]]
+identifier = "deny-model-reveal"
+description = "Denies the model_reveal command without any pre-configured scope."
+commands.deny = ["model_reveal"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-disk-unlink"
+description = "Enables the disk_unlink command without any pre-configured scope."
+commands.allow = ["disk_unlink"]
+
+[[permission]]
+identifier = "deny-disk-unlink"
+description = "Denies the disk_unlink command without any pre-configured scope."
+commands.deny = ["disk_unlink"]
