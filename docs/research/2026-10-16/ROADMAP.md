@@ -13,7 +13,12 @@ Status: [x] done and measured, [ ] next. Numbers only from docs/measurements.
 - [ ] Interleaved K-quant CPU layout, large pages (A#5, A#12) — CPU expert 26-28 -> ~37 GB/s in-step
 - [ ] q8 KV pages; KV tier to RAM past 64K (A#17, B E-01/E-02)
 - [ ] Continuous batching + multi-slot KV (A#15) — needed by Orchestrate below
-- [ ] Qwen3.8 hybrid (Gated DeltaNet) and Gemma 4 graphs (A#22) — product's listed models
+- [x] Qwen3.8 hybrid (Gated DeltaNet) on CPU and GPU — 4B 5.9 -> 65 tok/s; 27B split 2.0 -> 2.8 tok/s
+- [ ] Gemma 4 graphs (A#22)
+- [x] Placement planner + GPU/CPU layer split, drive-aware (NVMe/SATA/HDD/USB-SD) — Qwen3-14B 3.2 -> 11.8 tok/s on 8 GB
+- [ ] MMA flash prefill for head size 256 (Qwen3.8) — from docs/research/2026-10-17/J-feature-roadmap-triage.md
+- [ ] Vulkan backend for AMD / Intel GPUs behind the same planner (J triage #3)
+- [ ] Block-hash prefix cache + persistent KV store on disk (J triage #4-5)
 
 ## App
 - [x] Turbo: real engine switches, beginner/advanced text, channel badges, saved per machine
