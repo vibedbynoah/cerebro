@@ -203,6 +203,8 @@ const WITH_ARGS = {
   mcp_call: (p) => isPlain(p) && hasOnlyKeys(p, ["server", "tool", "arguments"]) && isServerName(p.server) && typeof p.tool === "string" && p.tool.length > 0 && p.tool.length <= 128 && (p.arguments === null || isPlain(p.arguments)),
   chat_send: (p) => isPlain(p) && hasOnlyKeys(p, ["request", "onEvent"]) && isChatRequest(p.request) && isChannel(p.onEvent),
   tune_machine_start: (p) => isPlain(p) && hasOnlyKeys(p, ["onEvent"]) && isChannel(p.onEvent),
+  metrics_history: (p) => isPlain(p) && hasOnlyKeys(p, ["range"]) && ["1m", "15m", "1h", "24h"].includes(/** @type {string} */ (p.range)),
+  request_detail: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && typeof p.id === "string" && p.id.length > 0 && p.id.length <= 64,
 };
 
 /**

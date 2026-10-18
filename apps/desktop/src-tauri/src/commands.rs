@@ -78,7 +78,7 @@ pub fn app_info<R: Runtime>(app: tauri::AppHandle<R>) -> AppInfo {
 // ---- Engine commands. Arguments from the webview are validated here (and by type in the isolation
 // hook); errors are plain sentences without paths or internals. ----
 
-use crate::engine::{self, ChatEvent, ChatRequest, Engine, HardwareProfile, LibraryModel};
+use crate::engine::{self, ChatEvent, ChatRequest, Engine, HardwareProfile, LibraryModel, RequestRecord};
 use tauri::ipc::Channel;
 use tauri::State;
 
@@ -286,20 +286,7 @@ pub fn metrics(engine: State<'_, Engine>, tele: State<'_, Telemetry>) -> serde_j
         v
     };
     let nulls: Vec<Option<f64>> = vec![None; 60];
-    let reqs: Vec<serde_json::Value> = s
-        .requests
-        .iter()
-        .map(|r| {
-            serde_json::json!({
-                "id": r.id, "startedAt": r.started_at, "method": "POST", "path": "/chat", "model": r.model,
-                "state": r.state, "stream": true, "httpStatus": null, "wallS": r.wall_s, "loadS": null,
-                "queueS": null, "firstTokenS": r.first_token_s, "promptTokens": r.prompt_tokens,
-                "reusedTokens": r.reused_tokens, "outputTokens": r.output_tokens, "reasoningTokens": 0,
-                "decodeTps": r.decode_tps, "prefillTps": r.prefill_tps, "responseFormat": "text",
-                "session": "chat", "tool": null,
-            })
-        })
-        .collect();
+    let reqs: Vec<serde_json::Value> = s.requests.iter().map(request_summary_json).collect();
     let activity = s.activity;
     let running = s.requests.front().filter(|_| activity != "idle").map(|r| r.id.clone());
     // Prompt reading, live: tokens in the cache, tokens reused, tokens per second so far.
@@ -356,6 +343,128 @@ pub fn metrics(engine: State<'_, Engine>, tele: State<'_, Telemetry>) -> serde_j
             "reusedTokens": s.totals.reused_tokens, "parks": 0, "restores": 0, "evictions": 0, "lastEvent": null,
         },
     })
+}
+
+/// One request as the Monitor's list shows it (mirrors `RequestSummary`); the snapshot and the
+/// request inspector send the same fields, so the mapping lives in one place.
+fn request_summary_json(r: &RequestRecord) -> serde_json::Value {
+    serde_json::json!({
+        "id": r.id, "startedAt": r.started_at, "method": "POST", "path": "/chat", "model": r.model,
+        "state": r.state, "stream": true, "httpStatus": null, "wallS": r.wall_s, "loadS": null,
+        "queueS": null, "firstTokenS": r.first_token_s, "promptTokens": r.prompt_tokens,
+        "reusedTokens": r.reused_tokens, "outputTokens": r.output_tokens, "reasoningTokens": 0,
+        "decodeTps": r.decode_tps, "prefillTps": r.prefill_tps, "responseFormat": "text",
+        "session": "chat", "tool": null,
+    })
+}
+
+/// How many characters of one capture field the inspector receives.
+const CAPTURE_CAP: usize = 256 * 1024;
+
+/// A capture field cut at [`CAPTURE_CAP`] characters; the flag says whether anything was cut.
+fn cut_capture(text: &str) -> (String, bool) {
+    if let Some((at, _)) = text.char_indices().nth(CAPTURE_CAP) {
+        (text[..at].to_owned(), true)
+    } else {
+        (text.to_owned(), false)
+    }
+}
+
+/// One request's capture: the summary the list shows, plus the bodies the engine kept (cut at
+/// [`CAPTURE_CAP`] characters each) and the error when the request failed.
+#[tauri::command(async)]
+pub fn request_detail(engine: State<'_, Engine>, id: String) -> Result<serde_json::Value, String> {
+    if id.is_empty() || id.len() > 64 {
+        return Err("That is not a request id.".to_owned());
+    }
+    let s = engine.status.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(r) = s.requests.iter().find(|r| r.id == id) else {
+        return Err("That request is no longer kept (the Monitor keeps the last 100).".to_owned());
+    };
+    let (input, input_cut) = cut_capture(&r.input);
+    let (output, output_cut) = cut_capture(&r.output);
+    let error = if r.state == "error" { r.error.clone() } else { None };
+    let mut detail = request_summary_json(r);
+    if let Some(o) = detail.as_object_mut() {
+        o.insert("input".into(), input.into());
+        o.insert("output".into(), output.clone().into());
+        o.insert("reasoning".into(), String::new().into());
+        o.insert("response".into(), output.into());
+        o.insert("truncated".into(), serde_json::json!({ "input": input_cut, "output": output_cut, "reasoning": false, "response": output_cut }));
+        o.insert("error".into(), serde_json::json!(error));
+    }
+    Ok(detail)
+}
+
+/// One column of a stored per-second series as its own series, oldest first.
+fn column<const N: usize>(history: &std::collections::VecDeque<[Option<f64>; N]>, i: usize) -> Vec<Option<f64>> {
+    history.iter().map(|row| row[i]).collect()
+}
+
+/// The seconds of history and the seconds per point of each named range.
+fn range_shape(range: &str) -> Result<(usize, usize), String> {
+    match range {
+        "1m" => Ok((1, 60)),
+        "15m" => Ok((5, 180)),
+        "1h" => Ok((20, 180)),
+        "24h" => Ok((480, 180)),
+        _ => Err("That is not a history range.".to_owned()),
+    }
+}
+
+/// One series' step means, oldest first. `samples` holds one sample per second with the newest
+/// sample being now, so the point at `j` means the samples `(points - 1 - j) * step_s` seconds
+/// back. A step with no sample inside it is null (the app may be younger than the range); null
+/// samples inside a step are skipped, never counted as zero.
+fn downsample(samples: &[Option<f64>], step_s: usize, points: usize) -> Vec<Option<f64>> {
+    let mut out = Vec::with_capacity(points);
+    for j in 0..points {
+        let newest_age = (points - 1 - j) * step_s;
+        let end = samples.len() as isize - 1 - newest_age as isize;
+        let start = end - step_s as isize + 1;
+        let mut sum = 0.0;
+        let mut n = 0usize;
+        for i in start.max(0)..=end {
+            if let Some(v) = samples.get(i as usize).copied().flatten() {
+                sum += v;
+                n += 1;
+            }
+        }
+        out.push((n > 0).then(|| sum / n as f64));
+    }
+    out
+}
+
+/// The Monitor's history for one range of the series the live snapshot charts, each point the mean
+/// of its step's seconds, oldest first, ending now. Missing time (the app is younger than the
+/// range) is null.
+#[tauri::command(async)]
+pub fn metrics_history(engine: State<'_, Engine>, tele: State<'_, Telemetry>, range: String) -> Result<serde_json::Value, String> {
+    let (step_s, points) = range_shape(&range)?;
+    let (decode, prefill, expert, vram, ram) = {
+        let s = engine.status.lock().unwrap_or_else(|e| e.into_inner());
+        (column(&s.history, 0), column(&s.history, 1), column(&s.history, 2), column(&s.history, 3), column(&s.history, 4))
+    };
+    let [gpu_util, gpu_temp, gpu_power, pcie_rx, cpu, disk_read] = tele.columns();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    Ok(serde_json::json!({
+        "stepS": step_s,
+        "end": now,
+        "series": {
+            "decodeTps": downsample(&decode, step_s, points),
+            "prefillTps": downsample(&prefill, step_s, points),
+            "gpuUtil": downsample(&gpu_util, step_s, points),
+            "vramUsedGiB": downsample(&vram, step_s, points),
+            "gpuTempC": downsample(&gpu_temp, step_s, points),
+            "gpuPowerW": downsample(&gpu_power, step_s, points),
+            "pcieRxMBs": downsample(&pcie_rx, step_s, points),
+            "cpu": downsample(&cpu, step_s, points),
+            "ramUsedGiB": downsample(&ram, step_s, points),
+            "diskReadMBs": downsample(&disk_read, step_s, points),
+            "expertHitPct": downsample(&expert, step_s, points),
+            "draftAcceptPct": vec![None::<f64>; points],
+        },
+    }))
 }
 
 // ---- Model Hub (network: huggingface.co only) ----
@@ -462,8 +571,9 @@ pub fn load_switches<R: Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
-/// Live GPU/CPU telemetry (NVML + OS), sampled on each Monitor poll, with the last 60 samples of the
-/// series the Monitor charts: GPU load, temperature, power, PCIe receive and CPU load.
+/// Live GPU/CPU telemetry (NVML + OS), sampled on each Monitor poll. The series the Monitor charts
+/// (GPU load, temperature, power, PCIe receive, CPU load, disk read) keeps one sample per second
+/// for 24 hours; the live snapshot reads only the newest 60 of them.
 #[derive(Default)]
 pub struct Telemetry {
     inner: std::sync::Mutex<TelemetryState>,
@@ -477,6 +587,9 @@ struct TelemetryState {
     /// The latest reading; callers inside FRESH share it instead of sampling again.
     last: Option<(std::time::Instant, cerebro_engine::telemetry::Sample)>,
 }
+
+/// Telemetry history kept: 24 hours at one sample per second.
+const TELEMETRY_KEPT: usize = 24 * 3600;
 
 /// The UI polls at 3 Hz from more than one place (status bar, Monitor); within this window they all
 /// get the same reading, so the hardware is asked at most ~3 times a second.
@@ -493,7 +606,7 @@ impl Telemetry {
                 if s.new_second {
                     let gp = s.gpus.first();
                     st.history.push_back([gp.and_then(|x| x.util_pct), gp.and_then(|x| x.temp_c), gp.and_then(|x| x.power_w), gp.and_then(|x| x.pcie_rx_mbs), s.cpu_pct, s.disk_read_mbs]);
-                    while st.history.len() > 60 {
+                    while st.history.len() > TELEMETRY_KEPT {
                         st.history.pop_front();
                     }
                 }
@@ -502,12 +615,26 @@ impl Telemetry {
             }
         };
         let hist = &st.history;
+        // Only the newest 60 samples go to the live snapshot; the rest wait for history queries.
+        let n = hist.len().min(60);
         let col = |i: usize| -> Vec<Option<f64>> {
-            let mut v = vec![None; 60 - hist.len()];
-            v.extend(hist.iter().map(|x| x[i]));
+            let mut v = vec![None; 60 - n];
+            v.extend(hist.iter().skip(hist.len() - n).map(|x| x[i]));
             v
         };
         (sample, [col(0), col(1), col(2), col(3), col(4), col(5)])
+    }
+
+    /// The stored per-second series (up to 24 h), one column per value, oldest first.
+    fn columns(&self) -> [Vec<Option<f64>>; 6] {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out: [Vec<Option<f64>>; 6] = Default::default();
+        for row in &g.history {
+            for (i, v) in row.iter().enumerate() {
+                out[i].push(*v);
+            }
+        }
+        out
     }
 }
 
@@ -1024,5 +1151,64 @@ mod api_real_tests {
         println!("{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
         assert!(out.status.success() && stdout.contains("ALL PASS"), "{stdout}");
         api.set_enabled(false).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::{downsample, range_shape};
+
+    /// A history of `n` seconds, one sample per second, oldest first.
+    fn samples(n: usize, f: impl Fn(usize) -> Option<f64>) -> Vec<Option<f64>> {
+        (0..n).map(f).collect()
+    }
+
+    #[test]
+    fn an_empty_history_is_all_gaps() {
+        assert_eq!(downsample(&[], 1, 60), vec![None; 60]);
+        assert_eq!(downsample(&[], 480, 180), vec![None; 180]);
+    }
+
+    #[test]
+    fn a_step_of_only_nulls_is_null() {
+        assert_eq!(downsample(&[None; 10], 1, 10), vec![None; 10]);
+        // The newest step is all null while the older one holds a sample.
+        assert_eq!(downsample(&[Some(4.0), None, None], 2, 2), vec![Some(4.0), None]);
+    }
+
+    #[test]
+    fn time_before_the_app_started_is_null() {
+        // 30 seconds of data read as a full minute: the oldest 30 points are gaps.
+        let out = downsample(&samples(30, |_| Some(1.0)), 1, 60);
+        assert!(out[..30].iter().all(|v| v.is_none()));
+        assert!(out[30..].iter().all(|v| *v == Some(1.0)));
+    }
+
+    #[test]
+    fn each_point_is_the_mean_of_its_step() {
+        let out = downsample(&samples(10, |i| Some(i as f64 + 1.0)), 5, 2);
+        assert_eq!(out, vec![Some(3.0), Some(8.0)]);
+        // Nulls are skipped inside a step, never counted as zero.
+        assert_eq!(downsample(&[Some(1.0), None, None, Some(3.0)], 4, 1), vec![Some(2.0)]);
+    }
+
+    #[test]
+    fn the_newest_samples_fall_in_the_last_point() {
+        // 120 seconds read as two minute points: 1..=60 and 61..=120.
+        let out = downsample(&samples(120, |i| Some(i as f64 + 1.0)), 60, 2);
+        assert_eq!(out, vec![Some(30.5), Some(90.5)]);
+    }
+
+    #[test]
+    fn every_range_names_its_step_and_point_count() {
+        assert_eq!(range_shape("1m"), Ok((1, 60)));
+        assert_eq!(range_shape("15m"), Ok((5, 180)));
+        assert_eq!(range_shape("1h"), Ok((20, 180)));
+        assert_eq!(range_shape("24h"), Ok((480, 180)));
+        assert!(range_shape("2h").is_err());
+        for range in ["1m", "15m", "1h", "24h"] {
+            let (step_s, points) = range_shape(range).expect("a known range");
+            assert_eq!(downsample(&samples(30, |_| Some(1.0)), step_s, points).len(), points);
+        }
     }
 }

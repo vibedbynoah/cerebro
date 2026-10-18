@@ -61,6 +61,8 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::kv_store_clear,
             commands::live_stats,
             commands::metrics,
+            commands::metrics_history,
+            commands::request_detail,
             commands::hub_search,
             commands::hub_files,
             commands::hub_file_meta,

@@ -505,6 +505,8 @@ pub struct RequestRecord {
     pub prefill_tps: Option<f64>,
     pub input: String,
     pub output: String,
+    /// Why the request failed, when its state is "error".
+    pub error: Option<String>,
 }
 
 /// Shared status read by polling commands.
@@ -1047,8 +1049,9 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
             output_tokens: 0,
             decode_tps: None,
             prefill_tps: None,
-            input: input.chars().take(256 * 1024).collect(),
+            input,
             output: String::new(),
+            error: None,
         });
         while s.requests.len() > 100 {
             s.requests.pop_back();
@@ -1305,11 +1308,12 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
     }
 
     if let Some(message) = failed {
-        events(ChatEvent::Error { message });
+        events(ChatEvent::Error { message: message.clone() });
         set(st, |s| {
             s.totals.errors += 1;
             if let Some(r) = s.requests.iter_mut().find(|r| r.id == id) {
                 r.state = "error";
+                r.error = Some(message);
             }
         });
         return;
@@ -1347,7 +1351,7 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
             r.output_tokens = out_tokens;
             r.decode_tps = Some(decode_tps);
             r.prefill_tps = Some(prefill_tps);
-            r.output = answer.chars().take(256 * 1024).collect();
+            r.output = answer;
         }
     });
 }
@@ -1453,8 +1457,9 @@ fn run_orchestrate(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Ar
             output_tokens: 0,
             decode_tps: None,
             prefill_tps: None,
-            input: goal.chars().take(256 * 1024).collect(),
+            input: goal.clone(),
             output: String::new(),
+            error: None,
         });
         while s.requests.len() > 100 {
             s.requests.pop_back();
@@ -1477,11 +1482,12 @@ fn run_orchestrate(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Ar
         Ok(text) => text,
         Err(_) if stopped => std::fs::read_to_string(ledger.dir().join("result.md")).unwrap_or_default(),
         Err(e) => {
-            events(ChatEvent::Error { message: e });
+            events(ChatEvent::Error { message: e.clone() });
             set(st, |s| {
                 s.totals.errors += 1;
                 if let Some(r) = s.requests.iter_mut().find(|r| r.id == id) {
                     r.state = "error";
+                    r.error = Some(e);
                 }
             });
             return;
@@ -1509,7 +1515,7 @@ fn run_orchestrate(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Ar
             r.reused_tokens = reused_tokens;
             r.output_tokens = tokens;
             r.decode_tps = Some(tps);
-            r.output = answer.chars().take(256 * 1024).collect();
+            r.output = answer;
         }
     });
 }

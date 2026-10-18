@@ -176,11 +176,8 @@ export function createDesktopService(local: CerebroService): CerebroService {
     resumeTune: () => NOT_YET("Tune"),
 
     getMetrics: () => invoke<MetricsSnapshot>("metrics"),
-    async getMetricsHistory(range: HistoryRange): Promise<MetricsSeries> {
-      if (range !== "1m") return NOT_YET("History longer than a minute");
-      return (await invoke<MetricsSnapshot>("metrics")).history;
-    },
-    getRequest: (): Promise<RequestDetail> => NOT_YET("Request bodies"),
+    getMetricsHistory: (range: HistoryRange) => invoke<MetricsSeries>("metrics_history", { range }),
+    getRequest: (id: string) => invoke<RequestDetail>("request_detail", { id }),
 
     listSwitches: () => invoke<EngineSwitch[]>("switches_list"),
     setSwitch: (id, value) => invoke<number>("switch_set", { id, value }),

@@ -22,6 +22,8 @@
     "allow-hub-file-meta",
     "allow-hub-search",
     "allow-metrics",
+    "allow-metrics-history",
+    "allow-request-detail",
     "allow-live-stats",
     "allow-chat-stop",
     "allow-chat-send",
