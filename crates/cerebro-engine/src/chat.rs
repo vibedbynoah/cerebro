@@ -26,7 +26,8 @@ pub fn lookup_draft_min(seq: &[u32], max: usize, min_n: usize) -> Vec<u32> {
             i -= 1;
             if &seq[i..i + n] == tail {
                 let start = i + n;
-                return seq[start..(start + max).min(seq.len())].to_vec();
+                // Image slots (high bit set) are not tokens: never draft them.
+                return seq[start..(start + max).min(seq.len())].iter().copied().take_while(|t| t & 0x8000_0000 == 0).collect();
             }
         }
     }

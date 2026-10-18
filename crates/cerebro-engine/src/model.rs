@@ -38,6 +38,10 @@ pub struct Config {
     pub rope_dim: usize,
     /// The query projection also produces a per-head output gate (Qwen3.8 full-attention layers).
     pub attn_gate: bool,
+    /// Interleaved multi-axis rotary positions (Qwen3-VL / Qwen3.5): frequency sections for the
+    /// time, height and width position of a token. Text tokens use one position on every axis, so
+    /// only image tokens see a difference. None for plain rotary models.
+    pub rope_sections: Option<[usize; 4]>,
     /// Gated DeltaNet linear-attention layers (Qwen3.8 hybrid); None for pure attention models.
     pub ssm: Option<Ssm>,
 }
@@ -187,6 +191,10 @@ impl Model {
             expert_ffn: g.u64(&k("expert_feed_forward_length")).unwrap_or(0) as usize,
             rope_dim: g.u64(&k("rope.dimension_count")).map_or(head_dim, |v| v as usize).min(head_dim),
             attn_gate: arch == "qwen35",
+            rope_sections: g.meta.get(&k("rope.dimension_sections")).and_then(|v| v.as_array()).and_then(|a| {
+                let v: Vec<usize> = a.iter().filter_map(|x| x.as_u64()).map(|x| x as usize).collect();
+                (v.len() >= 3 && v.iter().sum::<usize>() > 0).then(|| [v[0], v[1], v[2], v.get(3).copied().unwrap_or(0)])
+            }),
             ssm: if g.u64(&k("ssm.state_size")).is_ok() {
                 let nv = g.u64(&k("ssm.time_step_rank"))? as usize;
                 Some(Ssm {
@@ -336,6 +344,37 @@ impl Model {
     /// RoPE inverse frequencies (rope_dim / 2).
     pub fn inv_freq(&self) -> &[f32] {
         &self.inv_freq
+    }
+
+    /// The rotary (cos, sin) pairs for a token at position `p` = (time, height, width). With
+    /// interleaved sections (Qwen3-VL style), frequency j follows the height position when
+    /// j mod 3 == 1, the width position when j mod 3 == 2 (within each section's span) and the time
+    /// position otherwise; a text token has all three equal, which is plain RoPE.
+    pub fn rope_cs(&self, p: [usize; 3]) -> Vec<(f32, f32)> {
+        self.inv_freq
+            .iter()
+            .enumerate()
+            .map(|(j, f)| {
+                let pos = match self.cfg.rope_sections {
+                    Some(sec) => {
+                        let total = (sec[0] + sec[1] + sec[2] + sec[3]).max(1);
+                        let sector = j % total;
+                        if sector % 3 == 1 && sector < 3 * sec[1] {
+                            p[1]
+                        } else if sector % 3 == 2 && sector < 3 * sec[2] {
+                            p[2]
+                        } else if sector % 3 == 0 && sector < 3 * sec[0] {
+                            p[0]
+                        } else {
+                            0
+                        }
+                    }
+                    None => p[0],
+                };
+                let (sn, cs) = (pos as f32 * f).sin_cos();
+                (cs, sn)
+            })
+            .collect()
     }
 
     /// True when the output projection reuses the token embedding table.
@@ -865,6 +904,49 @@ fn rope(x: &mut [f32], cs: &[(f32, f32)]) {
     }
 }
 
+/// `Session::rope_pos` for a list of image spans (sorted by slot).
+fn rope_pos_in(images: &[ImageSpan], slot: usize) -> [usize; 3] {
+    let mut saved = 0;
+    for im in images {
+        let end = im.slot0 + im.nx * im.ny;
+        if slot < im.slot0 {
+            break;
+        }
+        if slot < end {
+            let i = slot - im.slot0;
+            let p0 = im.slot0 - saved;
+            return [p0, p0 + i / im.nx, p0 + i % im.nx];
+        }
+        saved += im.nx * im.ny - im.nx.max(im.ny);
+    }
+    let p = slot - saved;
+    [p, p, p]
+}
+
+/// An image in a session's cache: `nx * ny` slots from `slot0`, laid out row by row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageSpan {
+    pub slot0: usize,
+    pub nx: usize,
+    pub ny: usize,
+}
+
+/// Image encoder output as a language model takes it: `rows * cols` tokens of `dim` values.
+#[derive(Debug, Clone, Copy)]
+pub struct ImageTokens<'a> {
+    pub cols: usize,
+    pub rows: usize,
+    pub dim: usize,
+    pub data: &'a [f32],
+}
+
+/// One piece of a prompt with images (`Session::feed_parts`).
+#[derive(Debug, Clone, Copy)]
+pub enum Part<'a> {
+    Text(&'a [u32]),
+    Image(ImageTokens<'a>),
+}
+
 /// How far the current prompt read has got, shared with readers on other threads (the Monitor):
 /// `base` tokens came from the conversation cache, `pos` are in the cache now, since `started`.
 #[derive(Debug, Default)]
@@ -922,6 +1004,9 @@ pub struct Session {
     k: Vec<Vec<u16>>,
     v: Vec<Vec<u16>>,
     pub tokens: Vec<u32>,
+    /// Image spans in the cache, in slot order: `nx * ny` slots each, whose tokens have 2D rotary
+    /// positions; text after an image continues `max(nx, ny)` positions on, not `nx * ny`.
+    pub images: Vec<ImageSpan>,
     // Scratch buffers, reused every step.
     x: Vec<f32>,
     h: Vec<f32>,
@@ -1052,6 +1137,7 @@ impl Session {
             gpu: None,
             #[cfg(feature = "portable")]
             portable: None,
+            images: Vec::new(),
         }
     }
 
@@ -1080,6 +1166,15 @@ impl Session {
                 g.reset_recurrent()?;
             }
         }
+        // An image the common prefix cuts into is read again whole.
+        if let Some(im) = self.images.iter().find(|im| im.slot0 < common && common < im.slot0 + im.nx * im.ny) {
+            common = im.slot0;
+            if m.cfg.ssm.is_some() {
+                common = 0;
+                self.reset_recurrent();
+            }
+        }
+        self.images.retain(|im| im.slot0 + im.nx * im.ny <= common);
         self.tokens.truncate(common);
         let t0 = Instant::now();
         self.progress.begin(common);
@@ -1222,6 +1317,99 @@ impl Session {
         Ok(s)
     }
 
+    /// Whether a GPU backend runs this session's layers.
+    fn gpu_active(&self) -> bool {
+        #[cfg(feature = "cuda")]
+        if self.gpu.is_some() {
+            return true;
+        }
+        #[cfg(feature = "portable")]
+        if self.portable.is_some() {
+            return true;
+        }
+        false
+    }
+
+    /// Like `feed`, for a prompt with images: `parts` in order, text as token ids and each image
+    /// as its encoder output (`vision::ImageEmbedding`, one row of `dim` values per image token,
+    /// `cols` across). Image tokens sit in the cache as pseudo-tokens derived from the image's
+    /// values, so the conversation cache reuses an image only when it is the same image. Runs on
+    /// the processor (GPU sessions refuse images for now). Returns the reused prefix length.
+    pub fn feed_parts(&mut self, m: &Model, parts: &[Part<'_>]) -> Result<usize, Error> {
+        if !parts.iter().any(|p| matches!(p, Part::Image(_))) {
+            let ids: Vec<u32> = parts.iter().flat_map(|p| if let Part::Text(t) = p { t.to_vec() } else { Vec::new() }).collect();
+            return self.feed(m, &ids);
+        }
+        if self.gpu_active() {
+            return Err(Error::Unsupported("images are read on the processor for now: load the model with no layers on the graphics card to use them".into()));
+        }
+        // The full slot sequence, with image tokens as pseudo-ids.
+        let mut ids = Vec::new();
+        let mut spans = Vec::new();
+        for p in parts {
+            match p {
+                Part::Text(t) => ids.extend_from_slice(t),
+                Part::Image(e) => {
+                    if e.dim != m.cfg.dim {
+                        return Err(Error::Request(format!("the image encoder gives {} values per token; this model takes {}", e.dim, m.cfg.dim)));
+                    }
+                    let h = e.data.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, v| (h ^ v.to_bits() as u64).wrapping_mul(0x0100_0000_01b3));
+                    spans.push((ids.len(), e.cols, e.rows, *e));
+                    for i in 0..e.cols * e.rows {
+                        ids.push(0x8000_0000 | ((h as u32 ^ (i as u32).wrapping_mul(0x9e37_79b9)) & 0x7fff_ffff));
+                    }
+                }
+            }
+        }
+        if ids.len() >= self.max_ctx {
+            return Err(Error::Request(format!("prompt of {} tokens exceeds the {}-token context", ids.len(), self.max_ctx)));
+        }
+        let mut common = self.tokens.iter().zip(&ids).take_while(|(a, b)| a == b).count();
+        if common == ids.len() {
+            common -= 1;
+        }
+        if m.cfg.ssm.is_some() && common < self.tokens.len() {
+            common = 0;
+            self.reset_recurrent();
+        }
+        if let Some(&(s0, _, _, _)) = spans.iter().find(|(s0, nx, ny, _)| *s0 < common && common < s0 + nx * ny) {
+            common = s0;
+            if m.cfg.ssm.is_some() {
+                common = 0;
+                self.reset_recurrent();
+            }
+        }
+        self.tokens.truncate(common);
+        self.images.retain(|im| im.slot0 + im.nx * im.ny <= common);
+        let t0 = Instant::now();
+        self.progress.begin(common);
+        for &(s0, nx, ny, _) in &spans {
+            if s0 >= common || s0 + nx * ny <= common {
+                if s0 >= common {
+                    self.images.push(ImageSpan { slot0: s0, nx, ny });
+                }
+            }
+        }
+        self.images.sort_by_key(|im| im.slot0);
+        crate::pool::for_reading();
+        for slot in common..ids.len() {
+            let id = ids[slot];
+            match spans.iter().find(|(s0, nx, ny, _)| *s0 <= slot && slot < s0 + nx * ny) {
+                Some(&(s0, _, _, e)) => {
+                    let i = slot - s0;
+                    self.x.copy_from_slice(&e.data[i * e.dim..(i + 1) * e.dim]);
+                }
+                None => m.embed_row(id, &mut self.x),
+            }
+            self.layers_from(m, 0, slot);
+            self.tokens.push(id);
+            self.progress.set(self.tokens.len());
+        }
+        self.head(m);
+        self.stats = Stats { prompt_tokens: ids.len(), reused_tokens: common, prefill_ms: t0.elapsed().as_secs_f64() * 1000.0, ..Default::default() };
+        Ok(common)
+    }
+
     /// Appends `toks` (dense models): the same math as `step` for a chunk of tokens, with every
     /// matrix applied to the whole chunk at once (`Model::matmul_batch`). Writes logits for the last.
     fn step_batch(&mut self, m: &Model, toks: &[u32]) {
@@ -1257,9 +1445,7 @@ impl Session {
                 m.embed_row(tok, &mut x[t * dim..(t + 1) * dim]);
             }
         }
-        let cs: Vec<Vec<(f32, f32)>> = (0..nt)
-            .map(|t| m.inv_freq.iter().map(|f| ((pos0 + t) as f32 * f).sin_cos()).map(|(s, c)| (c, s)).collect())
-            .collect();
+        let cs: Vec<Vec<(f32, f32)>> = (0..nt).map(|t| m.rope_cs(self.rope_pos(pos0 + t))).collect();
         let norm_quant = |x: &[f32], w: &[f32], h: &mut [f32], qa: &mut [QAct]| {
             for t in 0..nt {
                 rmsnorm(&x[t * dim..(t + 1) * dim], w, c.eps, &mut h[t * dim..(t + 1) * dim]);
@@ -1418,6 +1604,12 @@ impl Session {
         self.tokens.push(token);
     }
 
+    /// The rotary position of cache slot `slot`: inside an image span its 2D grid position, else the
+    /// text position (the slot minus what earlier images saved).
+    pub fn rope_pos(&self, slot: usize) -> [usize; 3] {
+        rope_pos_in(&self.images, slot)
+    }
+
     /// Layers `from`.. for the token at `pos`, on the activation in `self.x`.
     fn layers_from(&mut self, m: &Model, from: usize, pos: usize) {
         self.layers_range(m, from, m.cfg.n_layer, pos);
@@ -1442,7 +1634,7 @@ impl Session {
         let kvd = c.n_kv * hd;
         let group = c.n_head / c.n_kv;
         let scale = 1.0 / (hd as f32).sqrt();
-        let cs: Vec<(f32, f32)> = m.inv_freq.iter().map(|f| (pos as f32 * f).sin_cos()).map(|(s, c)| (c, s)).collect();
+        let cs: Vec<(f32, f32)> = m.rope_cs(self.rope_pos(pos));
         for (li, l) in m.layers.iter().enumerate().take(to).skip(from) {
             rmsnorm(&self.x, &l.attn_norm, c.eps, &mut self.h);
             self.qa_dim.quantize(&self.h);
@@ -1612,6 +1804,9 @@ impl Session {
         let n = self.tokens.len();
         let kvd = c.n_kv * c.head_dim;
         let io = |e: std::io::Error| Error::Request(format!("could not write the cache: {e}"));
+        if !self.images.is_empty() {
+            return Err(Error::Unsupported("saving a chat with images is not available yet".into()));
+        }
         #[cfg(feature = "portable")]
         if self.portable.is_some() {
             return Err(Error::Unsupported("saving the cache is not available on the portable GPU backend yet".into()));
@@ -1687,6 +1882,7 @@ impl Session {
         let res = self.load_kv_body(m, r, n, kvd);
         if res.is_err() {
             self.tokens.clear();
+            self.images.clear();
             self.reset_recurrent();
             #[cfg(feature = "cuda")]
             if let Some(g) = self.gpu.as_mut() {
@@ -1893,5 +2089,27 @@ impl Session {
         });
         self.qa_dout.quantize(&self.dout);
         m.matvec(&d.out, &self.dout, &self.qa_dout, &mut self.tmp[..c.dim]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_slots_get_grid_positions_and_text_after_skips_ahead() {
+        // Text 0..3, a 4x2 image at slots 3..11, then text.
+        let ims = [ImageSpan { slot0: 3, nx: 4, ny: 2 }];
+        assert_eq!(rope_pos_in(&ims, 2), [2, 2, 2]);
+        assert_eq!(rope_pos_in(&ims, 3), [3, 3, 3]);
+        assert_eq!(rope_pos_in(&ims, 4), [3, 3, 4]);
+        assert_eq!(rope_pos_in(&ims, 7), [3, 4, 3]);
+        assert_eq!(rope_pos_in(&ims, 10), [3, 4, 6]);
+        // The image used max(4, 2) = 4 positions: text resumes at 3 + 4.
+        assert_eq!(rope_pos_in(&ims, 11), [7, 7, 7]);
+        let two = [ImageSpan { slot0: 3, nx: 4, ny: 2 }, ImageSpan { slot0: 12, nx: 1, ny: 3 }];
+        assert_eq!(rope_pos_in(&two, 12), [8, 8, 8]);
+        assert_eq!(rope_pos_in(&two, 14), [8, 10, 8]);
+        assert_eq!(rope_pos_in(&two, 15), [11, 11, 11]);
     }
 }
