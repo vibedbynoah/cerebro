@@ -265,32 +265,238 @@ unsafe fn dot_f32_fma(a: &[f32], b: &[f32]) -> f32 {
     hsum_ps(_mm256_add_ps(s0, s1))
 }
 
-/// y += a * x.
-#[inline]
-pub(crate) fn axpy(y: &mut [f32], a: f32, x: &[f32]) {
+fn has_f16c() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
-        if y.len() % 8 == 0 && std::arch::is_x86_feature_detected!("fma") {
-            // SAFETY: FMA support checked at run time; lengths are equal multiples of 8.
-            unsafe { axpy_fma(y, a, x) };
+        static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *F.get_or_init(|| std::arch::is_x86_feature_detected!("f16c") && std::arch::is_x86_feature_detected!("fma"))
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    false
+}
+
+/// f32 -> IEEE half bits, round to nearest even (the conversion F16C does).
+pub(crate) fn to_f16(x: f32) -> u16 {
+    let b = x.to_bits();
+    let sign = ((b >> 16) & 0x8000) as u16;
+    let exp = ((b >> 23) & 0xff) as i32;
+    let man = b & 0x7f_ffff;
+    if exp == 0xff {
+        return sign | 0x7c00 | if man != 0 { 0x200 } else { 0 };
+    }
+    let e = exp - 127 + 15;
+    if e >= 0x1f {
+        return sign | 0x7c00;
+    }
+    if e <= 0 {
+        if e < -10 {
+            return sign;
+        }
+        let m = man | 0x80_0000;
+        let shift = (14 - e) as u32;
+        let half = 1u32 << (shift - 1);
+        let rest = m & ((1 << shift) - 1);
+        let mut v = m >> shift;
+        if rest > half || (rest == half && v & 1 == 1) {
+            v += 1;
+        }
+        return sign | v as u16;
+    }
+    let mut v = ((e as u32) << 10) | (man >> 13);
+    let rest = man & 0x1fff;
+    if rest > 0x1000 || (rest == 0x1000 && v & 1 == 1) {
+        v += 1;
+    }
+    sign | v as u16
+}
+
+/// dst = src as halves (the CPU conversation cache's storage).
+pub(crate) fn store_f16(dst: &mut [u16], src: &[f32]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_f16c() && src.len() % 8 == 0 {
+            // SAFETY: F16C checked at run time; lengths are equal multiples of 8.
+            unsafe { store_f16_c(dst, src) };
             return;
         }
     }
-    for (o, v) in y.iter_mut().zip(x) {
-        *o += a * v;
+    for (o, &v) in dst.iter_mut().zip(src) {
+        *o = to_f16(v);
     }
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-unsafe fn axpy_fma(y: &mut [f32], a: f32, x: &[f32]) {
+#[target_feature(enable = "avx2,f16c")]
+unsafe fn store_f16_c(dst: &mut [u16], src: &[f32]) {
+    use std::arch::x86_64::*;
+    let n = src.len().min(dst.len());
+    let mut i = 0;
+    while i < n {
+        let h = _mm256_cvtps_ph::<_MM_FROUND_TO_NEAREST_INT>(_mm256_loadu_ps(src.as_ptr().add(i)));
+        _mm_storeu_si128(dst.as_mut_ptr().add(i).cast(), h);
+        i += 8;
+    }
+}
+
+/// q . k with k stored as halves.
+#[inline]
+pub(crate) fn dot_f16(q: &[f32], k: &[u16]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_f16c() && q.len() % 16 == 0 {
+            // SAFETY: F16C and FMA checked at run time; lengths are equal multiples of 16.
+            return unsafe { dot_f16_c(q, k) };
+        }
+    }
+    q.iter().zip(k).map(|(a, &b)| a * f16_to_f32(b)).sum()
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn dot_f16_c(q: &[f32], k: &[u16]) -> f32 {
+    use std::arch::x86_64::*;
+    let (mut s0, mut s1) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+    let n = q.len().min(k.len());
+    let mut i = 0;
+    while i < n {
+        let k0 = _mm256_cvtph_ps(_mm_loadu_si128(k.as_ptr().add(i).cast()));
+        let k1 = _mm256_cvtph_ps(_mm_loadu_si128(k.as_ptr().add(i + 8).cast()));
+        s0 = _mm256_fmadd_ps(_mm256_loadu_ps(q.as_ptr().add(i)), k0, s0);
+        s1 = _mm256_fmadd_ps(_mm256_loadu_ps(q.as_ptr().add(i + 8)), k1, s1);
+        i += 16;
+    }
+    hsum_ps(_mm256_add_ps(s0, s1))
+}
+
+/// Attention scores over cached keys: out[i] = q . k[i * stride .. + q.len()] for i < out.len().
+/// Four keys share each load of q and one final reduction (a dot per key, with its own horizontal
+/// sum, measured at ~11 GB/s on the i9-12900H: overhead, not memory).
+pub(crate) fn scores_f16(q: &[f32], k: &[u16], stride: usize, out: &mut [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_f16c() && q.len() % 8 == 0 {
+            // SAFETY: F16C and FMA checked at run time; every key row lies inside `k` (asserted).
+            assert!(out.is_empty() || (out.len() - 1) * stride + q.len() <= k.len());
+            unsafe { scores_f16_c(q, k, stride, out) };
+            return;
+        }
+    }
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = dot_f16(q, &k[i * stride..i * stride + q.len()]);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn scores_f16_c(q: &[f32], k: &[u16], stride: usize, out: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let hd = q.len();
+    let n = out.len();
+    let kp = k.as_ptr();
+    let ld = |row: usize, c: usize| _mm256_cvtph_ps(_mm_loadu_si128(kp.add(row * stride + c).cast()));
+    let mut i = 0;
+    while i + 4 <= n {
+        let (mut a0, mut a1, mut a2, mut a3) = (_mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps());
+        let mut c = 0;
+        while c < hd {
+            let qv = _mm256_loadu_ps(q.as_ptr().add(c));
+            a0 = _mm256_fmadd_ps(qv, ld(i, c), a0);
+            a1 = _mm256_fmadd_ps(qv, ld(i + 1, c), a1);
+            a2 = _mm256_fmadd_ps(qv, ld(i + 2, c), a2);
+            a3 = _mm256_fmadd_ps(qv, ld(i + 3, c), a3);
+            c += 8;
+        }
+        // Reduce the four accumulators into four lanes at once.
+        let s01 = _mm256_hadd_ps(a0, a1);
+        let s23 = _mm256_hadd_ps(a2, a3);
+        let s = _mm256_hadd_ps(s01, s23);
+        let r = _mm_add_ps(_mm256_castps256_ps128(s), _mm256_extractf128_ps(s, 1));
+        _mm_storeu_ps(out.as_mut_ptr().add(i), r);
+        i += 4;
+    }
+    while i < n {
+        let mut a = _mm256_setzero_ps();
+        let mut c = 0;
+        while c < hd {
+            a = _mm256_fmadd_ps(_mm256_loadu_ps(q.as_ptr().add(c)), ld(i, c), a);
+            c += 8;
+        }
+        out[i] = hsum_ps(a);
+        i += 1;
+    }
+}
+
+/// out += sum_i p[i] * v[i * stride .. + out.len()]: the attention-weighted values. The output
+/// stays in registers, 64 values at a time, across every position.
+pub(crate) fn weighted_f16(p: &[f32], v: &[u16], stride: usize, out: &mut [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_f16c() && out.len() % 64 == 0 {
+            // SAFETY: F16C and FMA checked at run time; every value row lies inside `v` (asserted).
+            assert!(p.is_empty() || (p.len() - 1) * stride + out.len() <= v.len());
+            unsafe { weighted_f16_c(p, v, stride, out) };
+            return;
+        }
+    }
+    let hd = out.len();
+    for (i, &w) in p.iter().enumerate() {
+        axpy_f16(out, w, &v[i * stride..i * stride + hd]);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn weighted_f16_c(p: &[f32], v: &[u16], stride: usize, out: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let vp = v.as_ptr();
+    let mut b = 0;
+    while b < out.len() {
+        let o = out.as_mut_ptr().add(b);
+        let mut acc = [_mm256_setzero_ps(); 8];
+        for (r, a) in acc.iter_mut().enumerate() {
+            *a = _mm256_loadu_ps(o.add(r * 8));
+        }
+        for (i, &w) in p.iter().enumerate() {
+            let wv = _mm256_set1_ps(w);
+            let row = vp.add(i * stride + b);
+            for (r, a) in acc.iter_mut().enumerate() {
+                *a = _mm256_fmadd_ps(wv, _mm256_cvtph_ps(_mm_loadu_si128(row.add(r * 8).cast())), *a);
+            }
+        }
+        for (r, a) in acc.iter().enumerate() {
+            _mm256_storeu_ps(o.add(r * 8), *a);
+        }
+        b += 64;
+    }
+}
+
+/// y += a * x with x stored as halves.
+#[inline]
+pub(crate) fn axpy_f16(y: &mut [f32], a: f32, x: &[u16]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_f16c() && y.len() % 8 == 0 {
+            // SAFETY: F16C and FMA checked at run time; lengths are equal multiples of 8.
+            unsafe { axpy_f16_c(y, a, x) };
+            return;
+        }
+    }
+    for (o, &v) in y.iter_mut().zip(x) {
+        *o += a * f16_to_f32(v);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn axpy_f16_c(y: &mut [f32], a: f32, x: &[u16]) {
     use std::arch::x86_64::*;
     let av = _mm256_set1_ps(a);
     let n = y.len().min(x.len());
     let mut i = 0;
     while i < n {
         let p = y.as_mut_ptr().add(i);
-        _mm256_storeu_ps(p, _mm256_fmadd_ps(av, _mm256_loadu_ps(x.as_ptr().add(i)), _mm256_loadu_ps(p)));
+        let xv = _mm256_cvtph_ps(_mm_loadu_si128(x.as_ptr().add(i).cast()));
+        _mm256_storeu_ps(p, _mm256_fmadd_ps(av, xv, _mm256_loadu_ps(p)));
         i += 8;
     }
 }
@@ -988,6 +1194,46 @@ mod q8_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blocked_attention_kernels_match_one_key_at_a_time() {
+        let (hd, stride, n) = (128, 1024, 37);
+        let k: Vec<u16> = (0..n * stride).map(|i| to_f16(((i * 7919 % 2003) as f32 - 1000.0) * 0.001)).collect();
+        let q: Vec<f32> = (0..hd).map(|i| (i as f32 * 0.37).cos()).collect();
+        let mut s = vec![0f32; n];
+        scores_f16(&q, &k[64..], stride, &mut s);
+        for (i, v) in s.iter().enumerate() {
+            let want = dot_f16(&q, &k[64 + i * stride..64 + i * stride + hd]);
+            assert!((v - want).abs() <= 1e-4 * want.abs().max(1.0), "score {i}: {v} vs {want}");
+        }
+        let p: Vec<f32> = (0..n).map(|i| 1.0 / (1.0 + i as f32)).collect();
+        let mut o = vec![0.25f32; hd];
+        weighted_f16(&p, &k[64..], stride, &mut o);
+        let mut want = vec![0.25f32; hd];
+        for (i, &w) in p.iter().enumerate() {
+            axpy_f16(&mut want, w, &k[64 + i * stride..64 + i * stride + hd]);
+        }
+        for (a, b) in o.iter().zip(&want) {
+            assert!((a - b).abs() <= 1e-4 * b.abs().max(1.0));
+        }
+    }
+
+    #[test]
+    fn f16_cache_kernels_match_the_scalar_definitions() {
+        let src: Vec<f32> = (0..64).map(|i| ((i * 37 % 101) as f32 - 50.0) * 0.0371 + if i == 5 { 65504.0 } else { 0.0 }).collect();
+        let mut h = vec![0u16; 64];
+        store_f16(&mut h, &src);
+        let scalar: Vec<u16> = src.iter().map(|&v| to_f16(v)).collect();
+        assert_eq!(h, scalar, "F16C and the scalar rounding differ");
+        let q: Vec<f32> = (0..64).map(|i| (i as f32 * 0.13).sin()).collect();
+        let want: f32 = q.iter().zip(&h).map(|(a, &b)| a * f16_to_f32(b)).sum();
+        assert!((dot_f16(&q, &h) - want).abs() < 1e-3 * want.abs().max(1.0));
+        let mut y = vec![1.0f32; 64];
+        axpy_f16(&mut y, 0.5, &h);
+        for (i, v) in y.iter().enumerate() {
+            assert!((v - (1.0 + 0.5 * f16_to_f32(h[i]))).abs() < 1e-3);
+        }
+    }
 
     #[test]
     fn f16_round_trips_known_values() {

@@ -685,40 +685,6 @@ fn read_kv_header(m: &Model, r: &mut dyn std::io::Read) -> Result<(usize, usize)
     Ok((num(1) as usize, num(2) as usize))
 }
 
-/// f32 -> IEEE half bits, rounding to nearest even.
-fn f32_to_f16(x: f32) -> u16 {
-    let b = x.to_bits();
-    let sign = ((b >> 16) & 0x8000) as u16;
-    let exp = ((b >> 23) & 0xff) as i32;
-    let man = b & 0x7f_ffff;
-    if exp == 0xff {
-        return sign | 0x7c00 | if man != 0 { 0x200 } else { 0 };
-    }
-    let e = exp - 127 + 15;
-    if e >= 0x1f {
-        return sign | 0x7c00;
-    }
-    if e <= 0 {
-        if e < -10 {
-            return sign;
-        }
-        let m = man | 0x80_0000;
-        let shift = (14 - e) as u32;
-        let half = 1u32 << (shift - 1);
-        let rest = m & ((1 << shift) - 1);
-        let mut v = m >> shift;
-        if rest > half || (rest == half && v & 1 == 1) {
-            v += 1;
-        }
-        return sign | v as u16;
-    }
-    let mut v = ((e as u32) << 10) | (man >> 13);
-    let rest = man & 0x1fff;
-    if rest > 0x1000 || (rest == 0x1000 && v & 1 == 1) {
-        v += 1;
-    }
-    sign | v as u16
-}
 
 /// The file ranges of one layer's weight matrices.
 fn layer_ranges(l: &Layer) -> Vec<(usize, usize)> {
@@ -797,8 +763,9 @@ impl Stats {
 /// One conversation's state: KV cache plus the tokens it holds.
 pub struct Session {
     pub max_ctx: usize,
-    k: Vec<Vec<f32>>,
-    v: Vec<Vec<f32>>,
+    /// The processor's conversation cache, f16 (as on the GPU): half the bytes attention reads.
+    k: Vec<Vec<u16>>,
+    v: Vec<Vec<u16>>,
     pub tokens: Vec<u32>,
     // Scratch buffers, reused every step.
     x: Vec<f32>,
@@ -882,8 +849,8 @@ impl Session {
         let ssm = c.ssm.unwrap_or(Ssm { conv: 1, nk: 0, dk: 0, nv: 0, dv: 0 });
         Self {
             max_ctx,
-            k: (0..c.n_layer).map(|i| if mine(i) && attn(i) { vec![0f32; max_ctx * kv] } else { Vec::new() }).collect(),
-            v: (0..c.n_layer).map(|i| if mine(i) && attn(i) { vec![0f32; max_ctx * kv] } else { Vec::new() }).collect(),
+            k: (0..c.n_layer).map(|i| if mine(i) && attn(i) { vec![0u16; max_ctx * kv] } else { Vec::new() }).collect(),
+            v: (0..c.n_layer).map(|i| if mine(i) && attn(i) { vec![0u16; max_ctx * kv] } else { Vec::new() }).collect(),
             conv_hist: (0..c.n_layer).map(|i| if !mine(i) || attn(i) { Vec::new() } else { vec![0f32; (ssm.conv - 1) * ssm.channels()] }).collect(),
             ssm_state: (0..c.n_layer).map(|i| if !mine(i) || attn(i) { Vec::new() } else { vec![0f32; ssm.nv * ssm.dk * ssm.dv] }).collect(),
             dmix: vec![0.0; ssm.channels()],
@@ -1150,8 +1117,8 @@ impl Session {
                     rope(kk, &cs[t]);
                 }
                 let p = pos0 + t;
-                self.k[li][p * kvd..(p + 1) * kvd].copy_from_slice(&kb[t * kvd..(t + 1) * kvd]);
-                self.v[li][p * kvd..(p + 1) * kvd].copy_from_slice(&vb[t * kvd..(t + 1) * kvd]);
+                crate::quant::store_f16(&mut self.k[li][p * kvd..(p + 1) * kvd], &kb[t * kvd..(t + 1) * kvd]);
+                crate::quant::store_f16(&mut self.v[li][p * kvd..(p + 1) * kvd], &vb[t * kvd..(t + 1) * kvd]);
             }
             // Causal attention, one work item per (token, query head).
             let (kc, vc, qr) = (&self.k[li], &self.v[li], &q);
@@ -1165,11 +1132,11 @@ impl Session {
                 SC.with(|sc| {
                     let mut sc = sc.borrow_mut();
                     sc.resize(len, 0.0);
+                    crate::quant::scores_f16(qv, &kc[kvh * hd..], kvd, &mut sc[..len]);
                     let mut mx = f32::NEG_INFINITY;
-                    for p in 0..len {
-                        let v = crate::quant::dot_f32(qv, &kc[p * kvd + kvh * hd..p * kvd + (kvh + 1) * hd]) * scale;
-                        sc[p] = v;
-                        mx = mx.max(v);
+                    for v in sc.iter_mut() {
+                        *v *= scale;
+                        mx = mx.max(*v);
                     }
                     let mut sum = 0.0;
                     for v in sc.iter_mut() {
@@ -1179,9 +1146,7 @@ impl Session {
                     // SAFETY: (t, hh) owns this head slice of att.
                     let o = unsafe { std::slice::from_raw_parts_mut(out.at(t * qd + hh * hd), hd) };
                     o.fill(0.0);
-                    for p in 0..len {
-                        crate::quant::axpy(o, sc[p], &vc[p * kvd + kvh * hd..p * kvd + (kvh + 1) * hd]);
-                    }
+                    crate::quant::weighted_f16(&sc[..len], &vc[kvh * hd..], kvd, o);
                     // Normalise last, in the same order as `step`, so both paths give identical results.
                     for v in o.iter_mut() {
                         *v /= sum;
@@ -1336,14 +1301,18 @@ impl Session {
                 }
                 rope(&mut kk[..rd], &cs);
             }
-            self.k[li][pos * kvd..(pos + 1) * kvd].copy_from_slice(&self.kb);
-            self.v[li][pos * kvd..(pos + 1) * kvd].copy_from_slice(&self.vb);
+            crate::quant::store_f16(&mut self.k[li][pos * kvd..(pos + 1) * kvd], &self.kb);
+            crate::quant::store_f16(&mut self.v[li][pos * kvd..(pos + 1) * kvd], &self.vb);
             // Attention, one work item per (KV head, span of up to 256 positions): every query head
             // of the group is computed from one read of each key and value (GQA shares them), and
             // long contexts split across threads; partial softmaxes are merged per head after.
             let (kc, vc, q) = (&self.k[li], &self.v[li], &self.q);
             let len = pos + 1;
-            let spans = len.div_ceil(ATT_SPAN);
+            // Span length: about two work items per thread (16 items on 12 threads left most of them
+            // idle for the second round at 512 positions), at most ATT_SPAN, at least 32.
+            let threads = crate::pool::global().threads();
+            let span = (len * c.n_kv).div_ceil(2 * threads).next_multiple_of(16).clamp(32, ATT_SPAN);
+            let spans = len.div_ceil(span);
             let part = hd + 2;
             struct Ptr(*mut f32);
             // SAFETY: each item writes only its own (head, span) partial.
@@ -1367,18 +1336,20 @@ impl Session {
                 let (hs, item) = (item % hsplit, item / hsplit);
                 let (kvh, sp) = (item / spans, item % spans);
                 let gr = hs * gper..(hs + 1) * gper;
-                let (t0, t1) = (sp * ATT_SPAN, ((sp + 1) * ATT_SPAN).min(len));
+                let (t0, t1) = (sp * span, ((sp + 1) * span).min(len));
                 let n = t1 - t0;
                 thread_local!(static SC: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) });
                 SC.with(|sc| {
                     let mut sc = sc.borrow_mut();
                     sc.resize(group * ATT_SPAN, 0.0);
                     // Scores for every head of the group, key-major so each key is read once.
-                    for t in t0..t1 {
-                        let kt = &kc[t * kvd + kvh * hd..t * kvd + (kvh + 1) * hd];
-                        for g in gr.clone() {
-                            let hh = kvh * group + g;
-                            sc[g * ATT_SPAN + (t - t0)] = crate::quant::dot_f32(&q[hh * hd..(hh + 1) * hd], kt) * scale;
+                    let kbase = &kc[t0 * kvd + kvh * hd..];
+                    for g in gr.clone() {
+                        let hh = kvh * group + g;
+                        let row = &mut sc[g * ATT_SPAN..g * ATT_SPAN + n];
+                        crate::quant::scores_f16(&q[hh * hd..(hh + 1) * hd], kbase, kvd, row);
+                        for v in row.iter_mut() {
+                            *v *= scale;
                         }
                     }
                     for g in gr.clone() {
@@ -1396,15 +1367,12 @@ impl Session {
                         o[hd + 1] = l;
                         o[..hd].fill(0.0);
                     }
-                    for t in t0..t1 {
-                        let vt = &vc[t * kvd + kvh * hd..t * kvd + (kvh + 1) * hd];
-                        for g in gr.clone() {
-                            let hh = kvh * group + g;
-                            let p = sc[g * ATT_SPAN + (t - t0)];
-                            // SAFETY: as above.
-                            let o = unsafe { std::slice::from_raw_parts_mut(parts.at((hh * spans + sp) * part), hd) };
-                            crate::quant::axpy(o, p, vt);
-                        }
+                    let vbase = &vc[t0 * kvd + kvh * hd..];
+                    for g in gr.clone() {
+                        let hh = kvh * group + g;
+                        // SAFETY: as above.
+                        let o = unsafe { std::slice::from_raw_parts_mut(parts.at((hh * spans + sp) * part), hd) };
+                        crate::quant::weighted_f16(&sc[g * ATT_SPAN..g * ATT_SPAN + n], vbase, kvd, o);
                     }
                 });
             });
@@ -1493,8 +1461,7 @@ impl Session {
                     }
                 }
             } else if attn {
-                let k: Vec<u16> = self.k[li][..n * kvd].iter().map(|&x| f32_to_f16(x)).collect();
-                let v: Vec<u16> = self.v[li][..n * kvd].iter().map(|&x| f32_to_f16(x)).collect();
+                let (k, v) = (&self.k[li][..n * kvd], &self.v[li][..n * kvd]);
                 w.write_all(&[0]).map_err(io)?;
                 w.write_all(&bytes16(&k)).map_err(io)?;
                 w.write_all(&bytes16(&v)).map_err(io)?;
@@ -1569,12 +1536,8 @@ impl Session {
                     #[cfg(feature = "cuda")]
                     self.gpu.as_mut().expect("gpu").kv_set(li, &k, &v)?;
                 } else {
-                    for (dst, src) in self.k[li][..n * kvd].iter_mut().zip(&k) {
-                        *dst = crate::quant::f16_to_f32(*src);
-                    }
-                    for (dst, src) in self.v[li][..n * kvd].iter_mut().zip(&v) {
-                        *dst = crate::quant::f16_to_f32(*src);
-                    }
+                    self.k[li][..n * kvd].copy_from_slice(&k);
+                    self.v[li][..n * kvd].copy_from_slice(&v);
                 }
             } else {
                 let hl = u64::from_le_bytes(rd(r, 8)?.try_into().expect("8 bytes")) as usize;
