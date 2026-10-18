@@ -838,7 +838,7 @@ fn loaded_info(l: &Loaded, ctx: usize) -> LoadedInfo {
         last_prefill_tps: None,
         dialect: l.dialect,
         placement: l.placement.clone(),
-        gpu_layers: g.map_or(0, |g| g.gpu_layers()) + portable.map_or(0, |_| l.model.cfg.n_layer),
+        gpu_layers: g.map_or(0, |g| g.gpu_layers()) + portable.map_or(0, |p| p.gpu_layers()),
     }
 }
 
