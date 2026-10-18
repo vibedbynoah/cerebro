@@ -6,6 +6,18 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=src/kernels.cu");
     println!("cargo:rerun-if-changed=src/kernels_mma.cu");
+    // The exact source a build came from, for measurements (the Tune screen keys results to it).
+    let commit = Command::new("git").args(["rev-parse", "--short=10", "HEAD"]).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default();
+    let dirty = Command::new("git").args(["status", "--porcelain", "--untracked-files=no", "--", "src"]).output().ok().is_some_and(|o| !o.stdout.is_empty());
+    println!("cargo:rustc-env=CEREBRO_ENGINE_COMMIT={}{}", if commit.is_empty() { "unknown" } else { &commit }, if dirty { "+changes" } else { "" });
+    // Rebuilt when the source or the checked-out commit changes (HEAD and its branch ref, wherever
+    // git keeps them: this may be a worktree).
+    println!("cargo:rerun-if-changed=src");
+    let git_path = |p: &str| Command::new("git").args(["rev-parse", "--git-path", p]).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).filter(|s| !s.is_empty());
+    let branch = Command::new("git").args(["symbolic-ref", "-q", "HEAD"]).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).filter(|s| !s.is_empty());
+    for p in [git_path("HEAD"), branch.as_deref().and_then(git_path), git_path("packed-refs")].into_iter().flatten() {
+        println!("cargo:rerun-if-changed={p}");
+    }
     if std::env::var("CARGO_FEATURE_CUDA").is_err() {
         return;
     }

@@ -2,6 +2,10 @@
 //! used: GGUF parsing, tokenisation, the model graph, quantised kernels, sampling and the
 //! conversation cache are all implemented here.
 
+/// The engine's version and the commit it was built from ("+changes" when its source differed).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const COMMIT: &str = env!("CEREBRO_ENGINE_COMMIT");
+
 pub mod chat;
 pub mod gguf;
 #[cfg(feature = "cuda")]
