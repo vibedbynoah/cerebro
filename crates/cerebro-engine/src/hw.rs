@@ -25,28 +25,40 @@ impl Cores {
     }
 }
 
-/// Core layout from the OS (Windows: GetLogicalProcessorInformationEx); a flat layout of the
-/// logical CPU count elsewhere or on failure.
-pub fn cores() -> Cores {
-    let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
-    let flat = Cores { physical: logical, logical, performance_physical: logical, performance_logical: logical };
+/// The logical CPUs (processor group 0) of the performance cores, as an affinity mask; None when
+/// the processor is not hybrid or the layout cannot be read.
+pub fn performance_mask() -> Option<u64> {
+    static M: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *M.get_or_init(|| {
+        let list = core_list()?;
+        let top = list.iter().map(|c| c.0).max()?;
+        if list.iter().all(|c| c.0 == top) {
+            return None;
+        }
+        Some(list.iter().filter(|c| c.0 == top).fold(0u64, |m, c| m | c.2))
+    })
+}
+
+/// Per physical core: (efficiency class, logical threads, group-0 affinity mask).
+fn core_list() -> Option<Vec<(u8, usize, u64)>> {
     #[cfg(windows)]
     {
         let mut len = 0u32;
         // SAFETY: a size query with a null buffer.
         unsafe { win::GetLogicalProcessorInformationEx(0, std::ptr::null_mut(), &mut len) };
         if len == 0 {
-            return flat;
+            return None;
         }
         let mut buf = vec![0u8; len as usize];
         // SAFETY: buf holds len bytes; RelationProcessorCore (0).
         if unsafe { win::GetLogicalProcessorInformationEx(0, buf.as_mut_ptr(), &mut len) } == 0 {
-            return flat;
+            return None;
         }
         let mut list = Vec::new();
         let mut off = 0usize;
         // SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX: Relationship u32, Size u32, then PROCESSOR_RELATIONSHIP:
-        // Flags u8, EfficiencyClass u8, Reserved[20], GroupCount u16, GROUP_AFFINITY[GroupCount] (16 bytes each, mask first).
+        // Flags u8, EfficiencyClass u8, Reserved[20], GroupCount u16, GROUP_AFFINITY[GroupCount]
+        // (16 bytes each: mask u64, group u16, reserved).
         while off + 32 <= len as usize {
             let size = u32::from_le_bytes(buf[off + 4..off + 8].try_into().expect("4 bytes")) as usize;
             if size == 0 || off + size > len as usize {
@@ -54,20 +66,44 @@ pub fn cores() -> Cores {
             }
             let class = buf[off + 9];
             let groups = u16::from_le_bytes([buf[off + 30], buf[off + 31]]) as usize;
-            let mut threads = 0usize;
+            let (mut threads, mut mask0) = (0usize, 0u64);
             for g in 0..groups {
                 let at = off + 32 + g * 16;
-                if at + 8 <= off + size {
-                    threads += u64::from_le_bytes(buf[at..at + 8].try_into().expect("8 bytes")).count_ones() as usize;
+                if at + 10 <= off + size {
+                    let mask = u64::from_le_bytes(buf[at..at + 8].try_into().expect("8 bytes"));
+                    threads += mask.count_ones() as usize;
+                    if u16::from_le_bytes([buf[at + 8], buf[at + 9]]) == 0 {
+                        mask0 |= mask;
+                    }
                 }
             }
-            list.push((class, threads.max(1)));
+            list.push((class, threads.max(1), mask0));
             off += size;
         }
-        return layout(&list).unwrap_or(flat);
+        return Some(list);
     }
     #[allow(unreachable_code)]
-    flat
+    None
+}
+
+/// Core layout from the OS (Windows: GetLogicalProcessorInformationEx); a flat layout of the
+/// logical CPU count elsewhere or on failure.
+pub fn cores() -> Cores {
+    let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let flat = Cores { physical: logical, logical, performance_physical: logical, performance_logical: logical };
+    core_list().and_then(|l| layout(&l.iter().map(|c| (c.0, c.1)).collect::<Vec<_>>())).unwrap_or(flat)
+}
+
+/// Restricts the calling thread to `mask` (0: every logical CPU of group 0). Windows only.
+pub(crate) fn pin_current_thread(mask: u64) {
+    #[cfg(windows)]
+    {
+        let all = if mask == 0 { (1u64 << std::thread::available_parallelism().map_or(1, |n| n.get()).min(63)) - 1 } else { mask };
+        // SAFETY: the pseudo-handle of the calling thread and a non-zero mask within group 0.
+        unsafe { win::SetThreadAffinityMask(win::GetCurrentThread(), all as usize) };
+    }
+    #[cfg(not(windows))]
+    let _ = mask;
 }
 
 /// Cores from (efficiency class, logical threads) per physical core.
@@ -211,6 +247,8 @@ mod win {
     #[link(name = "kernel32")]
     extern "system" {
         pub fn GetLogicalProcessorInformationEx(relation: u32, buf: *mut u8, len: *mut u32) -> i32;
+        pub fn GetCurrentThread() -> *mut c_void;
+        pub fn SetThreadAffinityMask(thread: *mut c_void, mask: usize) -> usize;
         pub fn GetCurrentProcess() -> *mut c_void;
         pub fn GetProcessTimes(process: *mut c_void, creation: *mut u64, exit: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
     }

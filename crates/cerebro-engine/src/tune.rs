@@ -20,7 +20,7 @@ use serde::Serialize;
 
 use crate::model::{model_fingerprint, Model, Session};
 use crate::sample::argmax;
-use crate::switches::{self, CPU_CHUNK_DIV, CPU_ROWS4, CPU_THREADS};
+use crate::switches::{self, CPU_CHUNK_DIV, CPU_DECODE_THREADS as CPU_THREADS, CPU_ROWS4};
 use crate::Error;
 
 /// One switch value.
@@ -77,7 +77,11 @@ const HEAT_SECONDS: f64 = 5.0;
 const BUSY_LIMIT: f64 = 0.25;
 
 fn current() -> Vec<Setting> {
-    [CPU_THREADS, CPU_CHUNK_DIV, CPU_ROWS4].into_iter().map(|id| Setting { id, value: switches::get(id) }).collect()
+    // Writing threads as in effect (the switch's 0 means automatic).
+    [CPU_THREADS, CPU_CHUNK_DIV, CPU_ROWS4]
+        .into_iter()
+        .map(|id| Setting { id, value: if id == CPU_THREADS { crate::pool::writing_threads() as i64 } else { switches::get(id) } })
+        .collect()
 }
 
 fn apply(set: &[Setting]) -> Result<(), Error> {

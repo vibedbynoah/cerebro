@@ -573,12 +573,15 @@ pub struct QAct {
     pub kd: Vec<f32>,
     /// Sums of kq per 16 values (minimum terms and the Q6_K offset).
     pub ks: Vec<i32>,
+    /// `q + 128` as unsigned bytes: the unsigned operand VNNI multiplies natively, so the prefill
+    /// tiles need no per-pair sign fix-up (the 128 offset is taken back with each weight block's sum).
+    pub qu: Vec<u8>,
 }
 
 impl QAct {
     pub fn new(len: usize) -> Self {
         let k = if len % 256 == 0 { len } else { 0 };
-        Self { d: vec![0.0; len / 32], q: vec![0; len], s: vec![0; len / 32], kq: vec![0; k], kd: vec![0.0; k / 256], ks: vec![0; k / 16] }
+        Self { d: vec![0.0; len / 32], q: vec![0; len], s: vec![0; len / 32], kq: vec![0; k], kd: vec![0.0; k / 256], ks: vec![0; k / 16], qu: vec![128; len] }
     }
 
     pub fn quantize(&mut self, x: &[f32]) {
@@ -591,6 +594,7 @@ impl QAct {
             for (i, v) in xb.iter().enumerate() {
                 let q = round_i8(v * id);
                 self.q[bi * 32 + i] = q;
+                self.qu[bi * 32 + i] = (q as i16 + 128) as u8;
                 sum += q as i32;
             }
             self.s[bi] = sum;
@@ -701,6 +705,320 @@ unsafe fn dot_q8_0_q8_x4_vnni(row: &[u8], a: [&QAct; 4]) -> [f32; 4] {
         let s = _mm_add_ps(s, _mm_movehl_ps(s, s));
         let s = _mm_add_ss(s, _mm_shuffle_ps(s, s, 1));
         out[k] = _mm_cvtss_f32(s);
+    }
+    out
+}
+
+/// Bytes per (8-row group, 32-column block) in the interleaved Q8_0 layout: the eight rows' f16
+/// scales, then for each of the block's eight 4-byte chunks the eight rows' 4 bytes, each weight +
+/// 128. Exactly the file's size: decode reads weights at memory speed, so every byte counts (f32
+/// scales, 6% more bytes, measured 6% slower writing).
+pub const Q8X8_BLOCK: usize = 16 + 256;
+const Q8X8_Q: usize = 16;
+
+/// Q8_0 rows (`rows` a multiple of 8) re-laid for the processor: eight rows interleaved per block so
+/// one VNNI instruction yields eight rows' partial sums in its eight lanes (no horizontal sums), the
+/// weights offset to unsigned (the activations stay signed; their block sums take the offset back)
+/// and the eight scales together for one F16C conversion. 272 bytes per 8 x 32 weights, as in the file.
+pub fn repack_q8_0_x8(src: &[u8], rows: usize, cols: usize) -> Vec<u8> {
+    let nb = cols / 32;
+    let rb = nb * 34;
+    let mut out = vec![0u8; rows / 8 * nb * Q8X8_BLOCK];
+    for g in 0..rows / 8 {
+        for b in 0..nb {
+            let o = &mut out[(g * nb + b) * Q8X8_BLOCK..(g * nb + b + 1) * Q8X8_BLOCK];
+            for r in 0..8 {
+                let blk = &src[(g * 8 + r) * rb + b * 34..];
+                o[r * 2..r * 2 + 2].copy_from_slice(&blk[0..2]);
+                for k in 0..8 {
+                    for j in 0..4 {
+                        o[Q8X8_Q + k * 32 + r * 4 + j] = (blk[2 + k * 4 + j] as i8 as i16 + 128) as u8;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// One 8-row group of an interleaved Q8_0 matrix times one activation vector: the eight rows' dots.
+pub fn gemv_q8_0_x8(packed: &[u8], nb: usize, g: usize, a: &QAct) -> [f32; 8] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avxvnni") && has_f16c() {
+            // SAFETY: AVX-VNNI (implies AVX2) and F16C checked at run time; the group lies inside `packed`.
+            assert!((g + 1) * nb * Q8X8_BLOCK <= packed.len());
+            return unsafe { gemv_q8_0_x8_vnni(packed, nb, g, a) };
+        }
+    }
+    let mut out = [0f32; 8];
+    for b in 0..nb {
+        let o = &packed[(g * nb + b) * Q8X8_BLOCK..];
+        for (r, v) in out.iter_mut().enumerate() {
+            let d = f16_to_f32(u16::from_le_bytes([o[r * 2], o[r * 2 + 1]]));
+            let mut s = 0i32;
+            for k in 0..8 {
+                for j in 0..4 {
+                    s += (o[Q8X8_Q + k * 32 + r * 4 + j] as i32 - 128) * a.q[b * 32 + k * 4 + j] as i32;
+                }
+            }
+            *v += d * a.d[b] * s as f32;
+        }
+    }
+    out
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,avxvnni,f16c")]
+unsafe fn gemv_q8_0_x8_vnni(packed: &[u8], nb: usize, g: usize, a: &QAct) -> [f32; 8] {
+    use std::arch::x86_64::*;
+    let base = packed.as_ptr().add(g * nb * Q8X8_BLOCK);
+    let xq = a.q.as_ptr();
+    let mut acc = _mm256_setzero_ps();
+    for b in 0..nb {
+        let o = base.add(b * Q8X8_BLOCK);
+        // Two independent chains: one VNNI accumulator would make each instruction wait for the last.
+        let (mut d0, mut d1) = (_mm256_setzero_si256(), _mm256_setzero_si256());
+        for k in (0..8).step_by(2) {
+            let x0 = _mm256_set1_epi32((xq.add(b * 32 + k * 4) as *const i32).read_unaligned());
+            let x1 = _mm256_set1_epi32((xq.add(b * 32 + k * 4 + 4) as *const i32).read_unaligned());
+            d0 = _mm256_dpbusd_avx_epi32(d0, _mm256_loadu_si256(o.add(Q8X8_Q + k * 32) as *const __m256i), x0);
+            d1 = _mm256_dpbusd_avx_epi32(d1, _mm256_loadu_si256(o.add(Q8X8_Q + 32 + k * 32) as *const __m256i), x1);
+        }
+        // (w + 128) . x = w . x + 128 * sum(x).
+        let dot = _mm256_sub_epi32(_mm256_add_epi32(d0, d1), _mm256_set1_epi32(128 * a.s[b]));
+        let sc = _mm256_mul_ps(_mm256_cvtph_ps(_mm_loadu_si128(o as *const __m128i)), _mm256_set1_ps(a.d[b]));
+        acc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(dot), sc, acc);
+    }
+    let mut out = [0f32; 8];
+    _mm256_storeu_ps(out.as_mut_ptr(), acc);
+    out
+}
+
+/// One 8-row group times four tokens: each block's weights are loaded once for the four.
+pub fn gemm_q8_0_x8_4(packed: &[u8], nb: usize, g: usize, a: [&QAct; 4]) -> [[f32; 8]; 4] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avxvnni") && has_f16c() {
+            // SAFETY: as gemv_q8_0_x8.
+            assert!((g + 1) * nb * Q8X8_BLOCK <= packed.len());
+            return unsafe { gemm_q8_0_x8_4_vnni(packed, nb, g, a) };
+        }
+    }
+    a.map(|qa| gemv_q8_0_x8(packed, nb, g, qa))
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,avxvnni,f16c")]
+unsafe fn gemm_q8_0_x8_4_vnni(packed: &[u8], nb: usize, g: usize, a: [&QAct; 4]) -> [[f32; 8]; 4] {
+    use std::arch::x86_64::*;
+    let base = packed.as_ptr().add(g * nb * Q8X8_BLOCK);
+    let mut acc = [_mm256_setzero_ps(); 4];
+    for b in 0..nb {
+        let o = base.add(b * Q8X8_BLOCK);
+        let w: [__m256i; 8] = std::array::from_fn(|k| _mm256_loadu_si256(o.add(Q8X8_Q + k * 32) as *const __m256i));
+        let ws = _mm256_cvtph_ps(_mm_loadu_si128(o as *const __m128i));
+        for t in 0..4 {
+            let xq = a[t].q.as_ptr().add(b * 32);
+            let mut dot = _mm256_setzero_si256();
+            for (k, wk) in w.iter().enumerate() {
+                dot = _mm256_dpbusd_avx_epi32(dot, *wk, _mm256_set1_epi32((xq.add(k * 4) as *const i32).read_unaligned()));
+            }
+            let dot = _mm256_sub_epi32(dot, _mm256_set1_epi32(128 * a[t].s[b]));
+            acc[t] = _mm256_fmadd_ps(_mm256_cvtepi32_ps(dot), _mm256_mul_ps(ws, _mm256_set1_ps(a[t].d[b])), acc[t]);
+        }
+    }
+    let mut out = [[0f32; 8]; 4];
+    for t in 0..4 {
+        _mm256_storeu_ps(out[t].as_mut_ptr(), acc[t]);
+    }
+    out
+}
+
+/// Bytes per (8-row group, 256-column block) in the interleaved Q4_K layout: d and dmin (f16) for
+/// the eight rows, the eight sub-blocks' 6-bit scales and minimums decoded (sub-block-major, eight
+/// rows each), then for each nibble pair j (sub-blocks 2j, 2j+1) and 4-byte chunk k the eight rows'
+/// 4 bytes of nibbles exactly as stored (low nibble: sub-block 2j, high: 2j + 1).
+pub const Q4KX8_BLOCK: usize = 16 + 16 + 64 + 64 + 1024;
+const Q4KX8_SC: usize = 32;
+const Q4KX8_M: usize = 96;
+const Q4KX8_Q: usize = 160;
+
+/// Q4_K rows (`rows` a multiple of 8) re-laid for the processor: one VNNI instruction takes the
+/// unsigned nibbles of eight rows against four signed activations, giving eight rows' partial
+/// sums in its lanes. 1184 bytes per 8 x 256 weights against 1152 in the file.
+pub fn repack_q4k_x8(src: &[u8], rows: usize, cols: usize) -> Vec<u8> {
+    let nb = cols / 256;
+    let rb = nb * 144;
+    let mut out = vec![0u8; rows / 8 * nb * Q4KX8_BLOCK];
+    for g in 0..rows / 8 {
+        for b in 0..nb {
+            let o = &mut out[(g * nb + b) * Q4KX8_BLOCK..(g * nb + b + 1) * Q4KX8_BLOCK];
+            for r in 0..8 {
+                let blk = &src[(g * 8 + r) * rb + b * 144..(g * 8 + r) * rb + (b + 1) * 144];
+                o[r * 2..r * 2 + 2].copy_from_slice(&blk[0..2]);
+                o[16 + r * 2..16 + r * 2 + 2].copy_from_slice(&blk[2..4]);
+                for s in 0..8 {
+                    let (sc, m) = scale_min_k4(s, &blk[4..16]);
+                    o[Q4KX8_SC + s * 8 + r] = sc;
+                    o[Q4KX8_M + s * 8 + r] = m;
+                }
+                for j in 0..4 {
+                    for k in 0..8 {
+                        let dst = Q4KX8_Q + (j * 8 + k) * 32 + r * 4;
+                        o[dst..dst + 4].copy_from_slice(&blk[16 + j * 32 + k * 4..16 + j * 32 + k * 4 + 4]);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// One 8-row group of an interleaved Q4_K matrix times one activation vector (`QAct::kq`).
+pub fn gemv_q4k_x8(packed: &[u8], nb: usize, g: usize, a: &QAct) -> [f32; 8] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avxvnni") && has_f16c() && !a.kq.is_empty() {
+            // SAFETY: AVX-VNNI (implies AVX2) checked at run time; the group lies inside `packed`.
+            assert!((g + 1) * nb * Q4KX8_BLOCK <= packed.len() && a.kq.len() >= nb * 256);
+            return unsafe { gemm_q4k_x8_vnni::<1>(packed, nb, g, [a])[0] };
+        }
+    }
+    let mut out = [0f32; 8];
+    for b in 0..nb {
+        let o = &packed[(g * nb + b) * Q4KX8_BLOCK..];
+        let f = |i: usize| f16_to_f32(u16::from_le_bytes([o[i], o[i + 1]]));
+        for (r, v) in out.iter_mut().enumerate() {
+            let (mut acc, mut msum) = (0i32, 0i32);
+            for s in 0..8 {
+                let (j, hi) = (s / 2, s % 2 == 1);
+                let mut dot = 0i32;
+                for k in 0..8 {
+                    for i in 0..4 {
+                        let byte = o[Q4KX8_Q + (j * 8 + k) * 32 + r * 4 + i];
+                        let q = if hi { byte >> 4 } else { byte & 15 } as i32;
+                        dot += q * a.kq[b * 256 + j * 64 + if hi { 32 } else { 0 } + k * 4 + i] as i32;
+                    }
+                }
+                acc += o[Q4KX8_SC + s * 8 + r] as i32 * dot;
+                msum += o[Q4KX8_M + s * 8 + r] as i32 * (a.ks[b * 16 + 2 * s] + a.ks[b * 16 + 2 * s + 1]);
+            }
+            *v += a.kd[b] * (f(r * 2) * acc as f32 - f(16 + r * 2) * msum as f32);
+        }
+    }
+    out
+}
+
+/// One 8-row group times four tokens: each block's nibbles are loaded and split once for the four.
+pub fn gemm_q4k_x8_4(packed: &[u8], nb: usize, g: usize, a: [&QAct; 4]) -> [[f32; 8]; 4] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avxvnni") && has_f16c() && a.iter().all(|q| !q.kq.is_empty()) {
+            // SAFETY: as gemv_q4k_x8.
+            assert!((g + 1) * nb * Q4KX8_BLOCK <= packed.len() && a.iter().all(|q| q.kq.len() >= nb * 256));
+            return unsafe { gemm_q4k_x8_vnni::<4>(packed, nb, g, a) };
+        }
+    }
+    a.map(|qa| gemv_q4k_x8(packed, nb, g, qa))
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,avxvnni,f16c")]
+unsafe fn gemm_q4k_x8_vnni<const T: usize>(packed: &[u8], nb: usize, g: usize, a: [&QAct; T]) -> [[f32; 8]; T] {
+    use std::arch::x86_64::*;
+    let base = packed.as_ptr().add(g * nb * Q4KX8_BLOCK);
+    let m4 = _mm256_set1_epi8(0xF);
+    let mut facc = [_mm256_setzero_ps(); T];
+    for b in 0..nb {
+        let o = base.add(b * Q4KX8_BLOCK);
+        let mut acc = [_mm256_setzero_si256(); T];
+        let mut msum = [_mm256_setzero_si256(); T];
+        for j in 0..4 {
+            let mut dl = [_mm256_setzero_si256(); T];
+            let mut dh = [_mm256_setzero_si256(); T];
+            for k in 0..8 {
+                let v = _mm256_loadu_si256(o.add(Q4KX8_Q + (j * 8 + k) * 32) as *const __m256i);
+                let lo = _mm256_and_si256(v, m4);
+                let hi = _mm256_and_si256(_mm256_srli_epi16(v, 4), m4);
+                for t in 0..T {
+                    let xq = a[t].kq.as_ptr().add(b * 256 + j * 64 + k * 4);
+                    dl[t] = _mm256_dpbusd_avx_epi32(dl[t], lo, _mm256_set1_epi32((xq as *const i32).read_unaligned()));
+                    dh[t] = _mm256_dpbusd_avx_epi32(dh[t], hi, _mm256_set1_epi32((xq.add(32) as *const i32).read_unaligned()));
+                }
+            }
+            let s0 = _mm256_cvtepu8_epi32(_mm_loadl_epi64(o.add(Q4KX8_SC + 2 * j * 8) as *const __m128i));
+            let s1 = _mm256_cvtepu8_epi32(_mm_loadl_epi64(o.add(Q4KX8_SC + (2 * j + 1) * 8) as *const __m128i));
+            let n0 = _mm256_cvtepu8_epi32(_mm_loadl_epi64(o.add(Q4KX8_M + 2 * j * 8) as *const __m128i));
+            let n1 = _mm256_cvtepu8_epi32(_mm_loadl_epi64(o.add(Q4KX8_M + (2 * j + 1) * 8) as *const __m128i));
+            for t in 0..T {
+                acc[t] = _mm256_add_epi32(acc[t], _mm256_add_epi32(_mm256_mullo_epi32(dl[t], s0), _mm256_mullo_epi32(dh[t], s1)));
+                let ks = a[t].ks.as_ptr().add(b * 16 + 4 * j);
+                let x0 = _mm256_set1_epi32(*ks + *ks.add(1));
+                let x1 = _mm256_set1_epi32(*ks.add(2) + *ks.add(3));
+                msum[t] = _mm256_add_epi32(msum[t], _mm256_add_epi32(_mm256_mullo_epi32(n0, x0), _mm256_mullo_epi32(n1, x1)));
+            }
+        }
+        let d = _mm256_cvtph_ps(_mm_loadu_si128(o as *const __m128i));
+        let dmin = _mm256_cvtph_ps(_mm_loadu_si128(o.add(16) as *const __m128i));
+        for t in 0..T {
+            let kd = _mm256_set1_ps(*a[t].kd.get_unchecked(b));
+            let v = _mm256_fmsub_ps(d, _mm256_cvtepi32_ps(acc[t]), _mm256_mul_ps(dmin, _mm256_cvtepi32_ps(msum[t])));
+            facc[t] = _mm256_fmadd_ps(v, kd, facc[t]);
+        }
+    }
+    let mut out = [[0f32; 8]; T];
+    for t in 0..T {
+        _mm256_storeu_ps(out[t].as_mut_ptr(), facc[t]);
+    }
+    out
+}
+
+/// A prefill tile: two Q8_0 rows times four tokens' activations, out[r][t]. Every loaded block
+/// serves several products, the activations enter VNNI unsigned (`QAct::qu`; each weight block's
+/// sum, shared by the four tokens, takes the offset back), and per block the float steps are those
+/// of `dot_q8_0_q8_x4` in the same order, so results are bit-identical to it. None without
+/// AVX-VNNI.
+pub fn gemm_q8_0_2x4(rows: [&[u8]; 2], a: [&QAct; 4]) -> Option<[[f32; 4]; 2]> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avxvnni") {
+            // SAFETY: AVX-VNNI (which implies AVX2) was checked at run time just above.
+            return Some(unsafe { gemm_q8_0_2x4_vnni(rows, a) });
+        }
+    }
+    let _ = (rows, a);
+    None
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,avxvnni")]
+unsafe fn gemm_q8_0_2x4_vnni(rows: [&[u8]; 2], a: [&QAct; 4]) -> [[f32; 4]; 2] {
+    use std::arch::x86_64::*;
+    let mut acc = [[_mm256_setzero_ps(); 4]; 2];
+    let ones = _mm256_set1_epi8(1);
+    let zero = _mm256_setzero_si256();
+    for bi in 0..a[0].d.len() {
+        let b0 = rows[0].as_ptr().add(bi * 34);
+        let b1 = rows[1].as_ptr().add(bi * 34);
+        let wd = [f16_to_f32(u16::from_le_bytes([*b0, *b0.add(1)])), f16_to_f32(u16::from_le_bytes([*b1, *b1.add(1)]))];
+        let w = [_mm256_loadu_si256(b0.add(2) as *const __m256i), _mm256_loadu_si256(b1.add(2) as *const __m256i)];
+        // 128 * (sum of each lane's four weights): what the unsigned offset added.
+        let corr = [_mm256_slli_epi32(_mm256_dpbusd_avx_epi32(zero, ones, w[0]), 7), _mm256_slli_epi32(_mm256_dpbusd_avx_epi32(zero, ones, w[1]), 7)];
+        for t in 0..4 {
+            let x = _mm256_loadu_si256(a[t].qu.as_ptr().add(bi * 32) as *const __m256i);
+            let dx = a[t].d[bi];
+            for r in 0..2 {
+                let p = _mm256_sub_epi32(_mm256_dpbusd_avx_epi32(zero, x, w[r]), corr[r]);
+                acc[r][t] = _mm256_fmadd_ps(_mm256_cvtepi32_ps(p), _mm256_set1_ps(wd[r] * dx), acc[r][t]);
+            }
+        }
+    }
+    let mut out = [[0f32; 4]; 2];
+    for r in 0..2 {
+        for t in 0..4 {
+            out[r][t] = hsum_ps(acc[r][t]);
+        }
     }
     out
 }
@@ -1194,6 +1512,118 @@ mod q8_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interleaved_q4k_matches_the_file_layout() {
+        let (rows, cols) = (16, 512);
+        let nb = cols / 256;
+        let mut src = Vec::new();
+        let mut x = 777u32;
+        let mut rnd = || {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (x >> 16) as u8
+        };
+        for r in 0..rows {
+            for b in 0..nb {
+                src.extend_from_slice(&to_f16(0.01 + 0.001 * (r + b) as f32).to_le_bytes());
+                src.extend_from_slice(&to_f16(0.003 + 0.0005 * r as f32).to_le_bytes());
+                for _ in 0..140 {
+                    src.push(rnd());
+                }
+            }
+        }
+        let packed = repack_q4k_x8(&src, rows, cols);
+        let acts: Vec<QAct> = (0..4)
+            .map(|t| {
+                let mut a = QAct::new(cols);
+                a.quantize(&(0..cols).map(|i| ((i * 7 + t * 31) % 23) as f32 / 11.0 - 1.0).collect::<Vec<_>>());
+                a
+            })
+            .collect();
+        for g in 0..rows / 8 {
+            let tile = gemm_q4k_x8_4(&packed, nb, g, [&acts[0], &acts[1], &acts[2], &acts[3]]);
+            for (t, a) in acts.iter().enumerate() {
+                let one = gemv_q4k_x8(&packed, nb, g, a);
+                for r in 0..8 {
+                    let want = dot_k_q8(DType::Q4K, &src[(g * 8 + r) * nb * 144..(g * 8 + r + 1) * nb * 144], a);
+                    for got in [one[r], tile[t][r]] {
+                        assert!((got - want).abs() <= 1e-3 * want.abs().max(1e-2), "g{g} r{r} t{t}: {got} vs {want}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn interleaved_q8_0_matches_the_file_layout() {
+        let (rows, cols) = (16, 128);
+        let nb = cols / 32;
+        let mut src = Vec::new();
+        let mut x = 12345u32;
+        for r in 0..rows {
+            for b in 0..nb {
+                src.extend_from_slice(&to_f16(0.002 * (1 + r + b) as f32).to_le_bytes());
+                for i in 0..32 {
+                    x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                    src.push(if i == 3 { 0x80 } else { (x >> 16) as u8 });
+                }
+            }
+        }
+        let packed = repack_q8_0_x8(&src, rows, cols);
+        let acts: Vec<QAct> = (0..4)
+            .map(|t| {
+                let mut a = QAct::new(cols);
+                a.quantize(&(0..cols).map(|i| ((i * 7 + t * 31) % 23) as f32 / 11.0 - 1.0).collect::<Vec<_>>());
+                a
+            })
+            .collect();
+        for g in 0..rows / 8 {
+            let tile = gemm_q8_0_x8_4(&packed, nb, g, [&acts[0], &acts[1], &acts[2], &acts[3]]);
+            for (t, a) in acts.iter().enumerate() {
+                let one = gemv_q8_0_x8(&packed, nb, g, a);
+                for r in 0..8 {
+                    let want = dot_q8_0_q8(&src[(g * 8 + r) * nb * 34..(g * 8 + r + 1) * nb * 34], a);
+                    for got in [one[r], tile[t][r]] {
+                        assert!((got - want).abs() <= 1e-4 * want.abs().max(1e-3), "g{g} r{r} t{t}: {got} vs {want}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn prefill_tile_is_bit_identical_to_the_four_token_kernel() {
+        let cols = 256;
+        let nb = cols / 32;
+        // Two Q8_0 rows: per block an f16 scale and 32 int8 weights, including -128 and 127.
+        let mk = |seed: u32| -> Vec<u8> {
+            let mut row = Vec::new();
+            let mut x = seed;
+            for b in 0..nb {
+                row.extend_from_slice(&to_f16(0.01 + b as f32 * 0.003).to_le_bytes());
+                for i in 0..32 {
+                    x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                    let v = if i == 0 { -128i8 } else if i == 1 { 127 } else { (x >> 16) as i8 };
+                    row.push(v as u8);
+                }
+            }
+            row
+        };
+        let (r0, r1) = (mk(1), mk(7));
+        let acts: Vec<QAct> = (0..4)
+            .map(|t| {
+                let mut a = QAct::new(cols);
+                let x: Vec<f32> = (0..cols).map(|i| ((i * 13 + t * 101) % 61) as f32 / 30.0 - 1.0).collect();
+                a.quantize(&x);
+                a
+            })
+            .collect();
+        let Some(tile) = gemm_q8_0_2x4([&r0, &r1], [&acts[0], &acts[1], &acts[2], &acts[3]]) else { return };
+        for (r, row) in [&r0, &r1].into_iter().enumerate() {
+            let want = dot_q8_0_q8_x4(row, [&acts[0], &acts[1], &acts[2], &acts[3]]);
+            assert_eq!(tile[r].map(f32::to_bits), want.map(f32::to_bits), "row {r}");
+        }
+    }
 
     #[test]
     fn blocked_attention_kernels_match_one_key_at_a_time() {

@@ -74,6 +74,12 @@ fn zero() -> i64 {
     0
 }
 fn threads_default() -> i64 {
+    // Hybrid processors: the performance cores' threads (pinned there; see CPU_PIN). Otherwise
+    // every logical CPU but four, leaving room for the OS, the GPU driver and the UI.
+    let c = crate::hw::cores();
+    if c.hybrid() {
+        return c.performance_logical as i64;
+    }
     std::thread::available_parallelism().map_or(4, |n| n.get()).saturating_sub(4).max(1) as i64
 }
 fn four() -> i64 {
@@ -89,6 +95,7 @@ pub const GPU_DECODE_GQA: &str = "gpu_decode_gqa";
 pub const CPU_BATCH_PREFILL: &str = "cpu_batch_prefill";
 pub const CPU_ROWS4: &str = "cpu_rows4";
 pub const CPU_THREADS: &str = "cpu_threads";
+pub const CPU_DECODE_THREADS: &str = "cpu_decode_threads";
 pub const CPU_CHUNK_DIV: &str = "cpu_chunk_div";
 pub const PREFAULT: &str = "prefault";
 pub const EXPERT_VRAM_MB: &str = "expert_vram_mb";
@@ -96,6 +103,8 @@ pub const GPU_ENABLED: &str = "gpu_enabled";
 pub const GPU_LAYERS: &str = "gpu_layers";
 pub const SPEC_LOOKUP: &str = "spec_lookup";
 pub const PORTABLE_GPU: &str = "portable_gpu";
+pub const CPU_REPACK: &str = "cpu_repack";
+pub const CPU_PIN: &str = "cpu_pin";
 pub const PORTABLE_INTEGRATED: &str = "portable_integrated";
 
 fn registry() -> &'static [Switch] {
@@ -169,10 +178,22 @@ fn registry() -> &'static [Switch] {
                 kind: Kind::Number { min: 1, max: logical(), zero_auto: false, unit: "threads" },
                 channel: Channel::Stable,
                 applies: Applies::Live,
-                beginner: "How many processor threads the model may use. The default leaves room for your other apps.",
-                advanced: "Size of the engine's worker pool (logical CPUs minus four by default). Measured on an i9-12900H: 6 -> 47.5, 12 -> 61.3, 16 -> 64.5 tok/s decode (0.6B Q8_0).",
+                beginner: "How many processor threads read your prompt. The default uses the fast cores and leaves room for your other apps.",
+                advanced: "Threads for prompt reading and other batched work: the performance cores' threads on hybrid CPUs (pinned there), else logical CPUs minus four. Writing has its own count.",
                 env: "CEREBRO_THREADS",
                 default: threads_default,
+            },
+            Switch {
+                id: CPU_DECODE_THREADS,
+                name: "Threads while writing",
+                group: "CPU",
+                kind: Kind::Number { min: 0, max: logical(), zero_auto: true, unit: "threads" },
+                channel: Channel::Stable,
+                applies: Applies::Live,
+                beginner: "How many processor threads write the reply. Writing waits on memory, so more cores help even when they are slower ones.",
+                advanced: "Threads for token-by-token decode. Automatic on hybrid processors: every logical CPU while the conversation is under 256 tokens (writing streams weights), then the Processor threads on the performance cores (attention dominates). i9-12900H, 0.6B Q4_K_M: 91 vs 81 tok/s at 32 tokens, 44.6 vs 36.7 at 2048, in each case for the automatic choice.",
+                env: "CEREBRO_DECODE_THREADS",
+                default: zero,
             },
             Switch {
                 id: CPU_CHUNK_DIV,
@@ -245,6 +266,30 @@ fn registry() -> &'static [Switch] {
                 advanced: "Dense models larger than free VRAM split by layer: the first N on the GPU in their own K-quant format, the rest and the output head on the CPU, one activation copy each way per token. 0 = as many as fit (600 MB margin). Larger values are clamped to what fits.",
                 env: "CEREBRO_GPU_LAYERS",
                 default: zero,
+            },
+            Switch {
+                id: CPU_PIN,
+                name: "Performance cores only",
+                group: "CPU",
+                kind: Kind::Toggle,
+                channel: Channel::Stable,
+                applies: Applies::Live,
+                beginner: "Keeps the model on your processor's fast cores. Without it Windows moves the work to the slow cores after a pause.",
+                advanced: "On hybrid CPUs, while the thread count fits the performance cores, every pool thread is pinned to them (SetThreadAffinityMask). Measured on an i9-12900H: reading a 512-token prompt after a pause 220 -> 339 tok/s, writing 41 -> 52 tok/s. More threads than performance cores unpins.",
+                env: "CEREBRO_NO_PIN",
+                default: on,
+            },
+            Switch {
+                id: CPU_REPACK,
+                name: "Interleaved weights on the processor",
+                group: "CPU",
+                kind: Kind::Toggle,
+                channel: Channel::Beta,
+                applies: Applies::Reload,
+                beginner: "Rearranges Q8_0 and Q4_K weights once when a model loads so the processor reads prompts and writes faster.",
+                advanced: "Q8_0 and Q4_K rows interleaved eight at a time (Q8_0 offset to unsigned; scales as f32; Q4_K 6-bit scales decoded): one VNNI instruction gives eight rows' partial sums. The original file pages are released from the working set, so RAM use stays about the same.",
+                env: "CEREBRO_NO_REPACK",
+                default: on,
             },
             Switch {
                 id: PORTABLE_GPU,
@@ -320,6 +365,9 @@ pub fn set(id: &str, value: i64) -> Result<i64, String> {
     overrides().write().map_err(|_| "switch table poisoned".to_string())?.insert(s.id, v);
     if s.id == CPU_THREADS {
         crate::pool::apply_threads(v as usize);
+    }
+    if s.id == CPU_PIN {
+        crate::pool::apply_pin();
     }
     Ok(v)
 }

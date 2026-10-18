@@ -140,6 +140,8 @@ pub struct Model {
     output: Mat,
     /// RoPE inverse frequencies, head_dim/2.
     inv_freq: Vec<f32>,
+    /// Q8_0 matrices re-laid for the processor (`quant::repack_q8_0_x8`), by file offset.
+    packs: std::sync::RwLock<std::collections::HashMap<usize, Arc<Vec<u8>>>>,
 }
 
 fn vec_f32(g: &Gguf, name: &str) -> Result<Vec<f32>, Error> {
@@ -253,11 +255,70 @@ impl Model {
         let output = g.tensors.get("output.weight").map(Mat::of).unwrap_or_else(|| Mat::of(embed_t));
         let rd = cfg.rope_dim;
         let inv_freq = (0..rd / 2).map(|i| 1.0 / cfg.rope_base.powf(2.0 * i as f32 / rd as f32)).collect();
-        Ok(Self { path: path.to_path_buf(), embed: Mat::of(embed_t), out_norm: vec_f32(&g, "output_norm.weight")?, layers, output, inv_freq, cfg, gguf: g })
+        Ok(Self { path: path.to_path_buf(), embed: Mat::of(embed_t), out_norm: vec_f32(&g, "output_norm.weight")?, layers, output, inv_freq, cfg, gguf: g, packs: Default::default() })
     }
 
     pub fn gguf(&self) -> &Gguf {
         &self.gguf
+    }
+
+    /// Re-lays the processor's Q8_0 matrices (layers `from`.. and the output head) for the
+    /// interleaved kernels, once per model, and releases their file pages from the working set.
+    pub fn prepare_cpu(&self, from: usize) {
+        if !crate::switches::enabled(crate::switches::CPU_REPACK) {
+            return;
+        }
+        let mut mats: Vec<&Mat> = Vec::new();
+        for l in &self.layers[from.min(self.layers.len())..] {
+            if l.delta.is_none() {
+                mats.extend([&l.q, &l.k, &l.v, &l.o]);
+            }
+            if let Ffn::Dense { gate, up, down } = &l.ffn {
+                mats.extend([gate, up, down]);
+            }
+        }
+        mats.push(&self.output);
+        let todo: Vec<&Mat> = {
+            let have = self.packs.read().unwrap_or_else(|e| e.into_inner());
+            mats.into_iter().filter(|m| packable(m) && !have.contains_key(&m.offset)).collect()
+        };
+        use rayon::prelude::*;
+        let made: Vec<(usize, Arc<Vec<u8>>)> = todo
+            .par_iter()
+            .map(|m| {
+                let src = self.gguf.bytes_at(m.offset, m.rows * m.row_bytes);
+                let p = if m.dtype == DType::Q4K { crate::quant::repack_q4k_x8(src, m.rows, m.cols) } else { crate::quant::repack_q8_0_x8(src, m.rows, m.cols) };
+                (m.offset, Arc::new(p))
+            })
+            .collect();
+        let tied = self.tied();
+        for m in &todo {
+            // The embedding table is still read by token; a tied output head shares it.
+            if !(tied && m.offset == self.embed.offset) {
+                self.gguf.release(m.offset, m.rows * m.row_bytes);
+            }
+        }
+        self.packs.write().unwrap_or_else(|e| e.into_inner()).extend(made);
+    }
+
+    /// The file ranges the processor still reads directly for layers `from`.. (everything but the
+    /// interleaved copies), plus the output head and embedding table: what a prefault should touch.
+    fn direct_ranges(&self, from: usize) -> Vec<(usize, usize)> {
+        let packs = self.packs.read().unwrap_or_else(|e| e.into_inner());
+        let mut v: Vec<(usize, usize)> = self.layers[from.min(self.layers.len())..].iter().flat_map(layer_ranges).filter(|r| !packs.contains_key(&r.0)).collect();
+        if !packs.contains_key(&self.output.offset) {
+            v.push((self.output.offset, self.output.rows * self.output.row_bytes));
+        }
+        v.push((self.embed.offset, self.embed.rows * self.embed.row_bytes));
+        v
+    }
+
+    /// The interleaved copy of `m`, if `prepare_cpu` made one.
+    fn pack(&self, m: &Mat) -> Option<Arc<Vec<u8>>> {
+        if !packable(m) {
+            return None;
+        }
+        self.packs.read().ok()?.get(&m.offset).cloned()
     }
 
     pub fn layers(&self) -> &[Layer] {
@@ -316,7 +377,8 @@ impl Model {
         let pool = crate::pool::global();
         // Small items keep the slowest core (an E-core) from holding up the end of each job.
         let div = crate::switches::get(crate::switches::CPU_CHUNK_DIV).max(1) as usize;
-        let chunk = (total / (pool.threads() * div)).clamp(4, 512);
+        // A multiple of eight rows: the interleaved kernels work on eight-row groups.
+        let chunk = (total / (pool.threads() * div)).clamp(8, 512).next_multiple_of(8);
         // Each work item is (job index, first row, row count); outputs are disjoint slices.
         let mut items = Vec::with_capacity(total / chunk + jobs.len());
         for (ji, j) in jobs.iter().enumerate() {
@@ -334,12 +396,23 @@ impl Model {
         let outs: Vec<Out> = jobs.iter_mut().map(|j| Out(j.3.as_mut_ptr())).collect();
         let ins: Vec<(&Mat, &[f32], &QAct)> = jobs.iter().map(|j| (j.0, j.1, j.2)).collect();
         let rows4 = crate::switches::enabled(crate::switches::CPU_ROWS4);
+        let packs: Vec<Option<Arc<Vec<u8>>>> = jobs.iter().map(|j| self.pack(j.0)).collect();
         pool.run(items.len(), &|ii| {
             let (ji, r0, n) = items[ii];
             let (m, x, qa) = ins[ji];
             let all = g.bytes_at(m.offset, m.rows * m.row_bytes);
             let rb = m.row_bytes;
             let mut r = r0;
+            if let Some(p) = &packs[ji] {
+                while r % 8 == 0 && r + 8 <= r0 + n {
+                    let v = gemv_packed(m, p, r / 8, qa);
+                    for (k, v) in v.into_iter().enumerate() {
+                        // SAFETY: r + k < m.rows == the job's output length; ranges never overlap.
+                        unsafe { *outs[ji].0.add(r + k) = v };
+                    }
+                    r += 8;
+                }
+            }
             // Q8_0 decode: four rows per call share the activation loads (bit-identical results).
             if rows4 && m.dtype == DType::Q8_0 {
                 while r + 4 <= r0 + n {
@@ -517,11 +590,64 @@ impl Model {
         let (cols, rows, rb) = (m.cols, m.rows, m.row_bytes);
         assert!(out.len() >= qas.len() * rows && xs.len() >= qas.len() * cols);
         let pool = crate::pool::global();
-        let chunk = (rows / (pool.threads() * 4)).clamp(4, 256);
+        let chunk = (rows / (pool.threads() * 4)).clamp(8, 256).next_multiple_of(8);
         let o = SyncPtr(out.as_mut_ptr());
+        let pack = self.pack(m);
         pool.run(rows.div_ceil(chunk), &|i| {
             let all = g.bytes_at(m.offset, rows * rb);
-            for r in i * chunk..((i + 1) * chunk).min(rows) {
+            let (r0, r1) = (i * chunk, ((i + 1) * chunk).min(rows));
+            let mut r = r0;
+            if let Some(p) = &pack {
+                while r % 8 == 0 && r + 8 <= r1 {
+                    let mut t0 = 0;
+                    while t0 + 4 <= qas.len() {
+                        let v = gemm_packed(m, p, r / 8, [&qas[t0], &qas[t0 + 1], &qas[t0 + 2], &qas[t0 + 3]]);
+                        for (t, row) in v.iter().enumerate() {
+                            for (k, &x) in row.iter().enumerate() {
+                                // SAFETY: (t0 + t, r + k) is written by exactly this item.
+                                unsafe { *o.at((t0 + t) * rows + r + k) = x };
+                            }
+                        }
+                        t0 += 4;
+                    }
+                    for (t, qa) in qas.iter().enumerate().skip(t0) {
+                        for (k, &x) in gemv_packed(m, p, r / 8, qa).iter().enumerate() {
+                            // SAFETY: as above.
+                            unsafe { *o.at(t * rows + r + k) = x };
+                        }
+                    }
+                    r += 8;
+                }
+            }
+            // Q8_0: tiles of two rows by four tokens; what does not fill a tile goes below.
+            if m.dtype == DType::Q8_0 && qas.len() >= 4 {
+                while r + 2 <= r1 {
+                    let pair = [&all[r * rb..(r + 1) * rb], &all[(r + 1) * rb..(r + 2) * rb]];
+                    let mut t0 = 0;
+                    while t0 + 4 <= qas.len() {
+                        let Some(v) = crate::quant::gemm_q8_0_2x4(pair, [&qas[t0], &qas[t0 + 1], &qas[t0 + 2], &qas[t0 + 3]]) else { break };
+                        for (k, row) in v.iter().enumerate() {
+                            for (t, &x) in row.iter().enumerate() {
+                                // SAFETY: (t0 + t, r + k) is written by exactly this item.
+                                unsafe { *o.at((t0 + t) * rows + r + k) = x };
+                            }
+                        }
+                        t0 += 4;
+                    }
+                    if t0 == 0 {
+                        break;
+                    }
+                    for (t, qa) in qas.iter().enumerate().skip(t0) {
+                        for k in 0..2 {
+                            let v = dot_any(m.dtype, pair[k], &xs[t * cols..(t + 1) * cols], qa);
+                            // SAFETY: as above.
+                            unsafe { *o.at(t * rows + r + k) = v };
+                        }
+                    }
+                    r += 2;
+                }
+            }
+            for r in r..r1 {
                 let row = &all[r * rb..(r + 1) * rb];
                 let mut t0 = 0;
                 if m.dtype == DType::Q8_0 {
@@ -578,7 +704,9 @@ const ATT_SPAN: usize = 256;
 
 /// Tokens per batched CPU prefill step: a chunk's activations stay in L2 while each weight row is
 /// reused across them.
-const CPU_CHUNK: usize = 32;
+fn cpu_chunk() -> usize {
+    std::env::var("EXP_CPU_CHUNK").ok().and_then(|v| v.parse().ok()).unwrap_or(32)
+}
 
 /// A raw output pointer shared by parallel work items that write disjoint elements.
 struct SyncPtr(*mut f32);
@@ -685,6 +813,33 @@ fn read_kv_header(m: &Model, r: &mut dyn std::io::Read) -> Result<(usize, usize)
     Ok((num(1) as usize, num(2) as usize))
 }
 
+
+/// Whether `m` has an interleaved processor layout (Q8_0 and Q4_K, rows in eights).
+fn packable(m: &Mat) -> bool {
+    m.rows % 8 == 0 && match m.dtype {
+        DType::Q8_0 => m.cols % 32 == 0,
+        DType::Q4K => m.cols % 256 == 0,
+        _ => false,
+    }
+}
+
+/// Eight rows' outputs of an interleaved matrix for one token.
+fn gemv_packed(m: &Mat, p: &[u8], g: usize, qa: &QAct) -> [f32; 8] {
+    if m.dtype == DType::Q4K {
+        crate::quant::gemv_q4k_x8(p, m.cols / 256, g, qa)
+    } else {
+        crate::quant::gemv_q8_0_x8(p, m.cols / 32, g, qa)
+    }
+}
+
+/// Eight rows' outputs of an interleaved matrix for four tokens.
+fn gemm_packed(m: &Mat, p: &[u8], g: usize, qa: [&QAct; 4]) -> [[f32; 8]; 4] {
+    if m.dtype == DType::Q4K {
+        crate::quant::gemm_q4k_x8_4(p, m.cols / 256, g, qa)
+    } else {
+        crate::quant::gemm_q8_0_x8_4(p, m.cols / 32, g, qa)
+    }
+}
 
 /// The file ranges of one layer's weight matrices.
 fn layer_ranges(l: &Layer) -> Vec<(usize, usize)> {
@@ -822,13 +977,23 @@ impl Session {
     /// (see `Gguf::touch`); `CEREBRO_PREFAULT=0` turns that off.
     pub fn new(m: &Model, max_ctx: usize) -> Self {
         let g = m.gguf();
+        m.prepare_cpu(0);
         if crate::switches::enabled(crate::switches::PREFAULT) {
-            // As much of the file as available RAM holds (all of it when it fits).
-            let room = (crate::gguf::available_ram() as f64 * 0.9) as usize;
+            // As much of what the processor reads from the file as available RAM holds (interleaved
+            // copies are in memory already).
+            let mut room = (crate::gguf::available_ram() as f64 * 0.9) as usize;
             let t = Instant::now();
-            g.touch(&[(0, g.len().min(room))]);
+            let mut ranges = m.direct_ranges(0);
+            ranges.retain_mut(|r| {
+                let keep = r.1.min(room);
+                room -= keep;
+                r.1 = keep;
+                keep > 0
+            });
+            g.touch(&ranges);
             if std::env::var_os("CEREBRO_PROFILE").is_some() {
-                eprintln!("touched {:.1} of {:.1} GB in {:.2}s", g.len().min(room) as f64 / 1e9, g.len() as f64 / 1e9, t.elapsed().as_secs_f64());
+                let touched: usize = ranges.iter().map(|r| r.1).sum();
+                eprintln!("touched {:.1} of {:.1} GB in {:.2}s", touched as f64 / 1e9, g.len() as f64 / 1e9, t.elapsed().as_secs_f64());
             }
         }
         Self::empty(m, max_ctx)
@@ -893,6 +1058,7 @@ impl Session {
     /// Makes the cache hold exactly `prompt`, reusing the longest prefix already present
     /// (conversation cache), and leaves the logits for the next token. Returns tokens reused.
     pub fn feed(&mut self, m: &Model, prompt: &[u32]) -> Result<usize, Error> {
+        crate::pool::for_reading();
         if prompt.is_empty() {
             return Err(Error::Request("empty prompt".into()));
         }
@@ -977,7 +1143,7 @@ impl Session {
         }
         let dense = m.layers.iter().all(|l| matches!(l.ffn, Ffn::Dense { .. })) && m.cfg.ssm.is_none() && !m.cfg.attn_gate;
         if dense && crate::switches::enabled(crate::switches::CPU_BATCH_PREFILL) {
-            for c in prompt[common..].chunks(CPU_CHUNK) {
+            for c in prompt[common..].chunks(cpu_chunk()) {
                 self.step_batch(m, c);
                 self.progress.set(self.tokens.len());
             }
@@ -1008,12 +1174,13 @@ impl Session {
             return Err(Error::Unsupported("no layers on the graphics card (chosen when loading)".into()));
         }
         let g = crate::gpu::GpuState::load_with(m, max_ctx, force_layers)?;
+        if g.is_split() {
+            m.prepare_cpu(g.gpu_layers());
+        }
         if g.is_split() && crate::switches::enabled(crate::switches::PREFAULT) {
             // The CPU's share is read into RAM now (as a CPU session does at start), not by page
             // faults during the first prompt; as much as available RAM holds.
-            let mut ranges: Vec<(usize, usize)> = m.layers[g.gpu_layers()..].iter().flat_map(layer_ranges).collect();
-            ranges.push((m.output.offset, m.output.rows * m.output.row_bytes));
-            ranges.push((m.embed.offset, m.embed.rows * m.embed.row_bytes));
+            let mut ranges = m.direct_ranges(g.gpu_layers());
             let mut room = (crate::gguf::available_ram() as f64 * 0.9) as usize;
             ranges.retain_mut(|r| {
                 let keep = r.1.min(room);
@@ -1041,11 +1208,12 @@ impl Session {
         }
         let p = crate::portable::PortableState::load(m, max_ctx)?;
         let from = p.gpu_layers();
+        if p.is_split() {
+            m.prepare_cpu(from);
+        }
         if p.is_split() && crate::switches::enabled(crate::switches::PREFAULT) {
             // The processor's share is read into RAM now, as for a CUDA split.
-            let mut ranges: Vec<(usize, usize)> = m.layers[from..].iter().flat_map(layer_ranges).collect();
-            ranges.push((m.output.offset, m.output.rows * m.output.row_bytes));
-            m.gguf().touch(&ranges);
+            m.gguf().touch(&m.direct_ranges(from));
         }
         // A split keeps the KV cache of the processor's layers here; a whole-GPU model keeps none.
         let mut s = Self::empty_from(m, max_ctx, from);
@@ -1063,6 +1231,8 @@ impl Session {
     /// `step_batch` from layer `from`, on activations `x0` (tokens x width) when a GPU ran the
     /// layers before; embeddings otherwise.
     fn step_batch_from(&mut self, m: &Model, toks: &[u32], x0: Option<Vec<f32>>, from: usize) {
+        // Section times for this chunk (the same indices as `prof`), added to `prof` at the end.
+        let mut pp = [0f64; 7];
         let c = &m.cfg;
         let (nt, dim, hd, ffn) = (toks.len(), c.dim, c.head_dim, c.ffn);
         let (qd, kvd) = (c.n_head * hd, c.n_kv * hd);
@@ -1097,7 +1267,14 @@ impl Session {
             }
         };
         for (li, l) in m.layers.iter().enumerate().skip(from) {
+            let mut tp = Instant::now();
+            let mut lap = |k: usize, pp: &mut [f64; 7]| {
+                let n = Instant::now();
+                pp[k] += (n - tp).as_secs_f64();
+                tp = n;
+            };
             norm_quant(&x, &l.attn_norm, &mut h, &mut qa_dim);
+            lap(1, &mut pp);
             m.matmul_batch(&l.q, &h, &qa_dim, &mut q);
             m.matmul_batch(&l.k, &h, &qa_dim, &mut kb);
             m.matmul_batch(&l.v, &h, &qa_dim, &mut vb);
@@ -1120,6 +1297,7 @@ impl Session {
                 crate::quant::store_f16(&mut self.k[li][p * kvd..(p + 1) * kvd], &kb[t * kvd..(t + 1) * kvd]);
                 crate::quant::store_f16(&mut self.v[li][p * kvd..(p + 1) * kvd], &vb[t * kvd..(t + 1) * kvd]);
             }
+            lap(0, &mut pp);
             // Causal attention, one work item per (token, query head).
             let (kc, vc, qr) = (&self.k[li], &self.v[li], &q);
             let out = SyncPtr(att.as_mut_ptr());
@@ -1156,7 +1334,9 @@ impl Session {
             for t in 0..nt {
                 qa_att[t].quantize(&att[t * qd..(t + 1) * qd]);
             }
+            lap(2, &mut pp);
             m.matmul_batch(&l.o, &att, &qa_att, &mut tmp);
+            lap(3, &mut pp);
             for i in 0..nt * dim {
                 x[i] += tmp[i];
             }
@@ -1172,6 +1352,7 @@ impl Session {
                 qa_ffn[t].quantize(&gt[t * ffn..(t + 1) * ffn]);
             }
             m.matmul_batch(down, &gt, &qa_ffn, &mut tmp);
+            lap(5, &mut pp);
             for i in 0..nt * dim {
                 x[i] += tmp[i];
             }
@@ -1181,9 +1362,13 @@ impl Session {
         self.qa_dim.quantize(last);
         m.matvec(&m.output, last, &self.qa_dim, &mut self.logits);
         self.tokens.extend_from_slice(toks);
+        for (a, b) in self.prof.iter_mut().zip(pp) {
+            *a += b;
+        }
     }
 
     pub fn step(&mut self, m: &Model, token: u32) {
+        crate::pool::for_writing(self.tokens.len());
         #[cfg(feature = "portable")]
         if let Some(p) = self.portable.as_mut() {
             let pos = self.tokens.len();
@@ -1310,7 +1495,9 @@ impl Session {
             let len = pos + 1;
             // Span length: about two work items per thread (16 items on 12 threads left most of them
             // idle for the second round at 512 positions), at most ATT_SPAN, at least 32.
-            let threads = crate::pool::global().threads();
+            // Attention is arithmetic more than memory: it runs on the performance cores' threads.
+            let reading = (crate::switches::get(crate::switches::CPU_THREADS).max(1) as usize).min(crate::pool::global().threads());
+            let threads = reading;
             let span = (len * c.n_kv).div_ceil(2 * threads).next_multiple_of(16).clamp(32, ATT_SPAN);
             let spans = len.div_ceil(span);
             let part = hd + 2;
@@ -1328,11 +1515,11 @@ impl Session {
             let parts = Ptr(self.att_part.as_mut_ptr());
             // Split each group's heads across items too when there are fewer (KV head, span) pairs
             // than threads (short contexts would otherwise use n_kv threads).
-            let hsplit = (crate::pool::global().threads() / (c.n_kv * spans)).clamp(1, group);
+            let hsplit = (threads / (c.n_kv * spans)).clamp(1, group);
             let hsplit = (1..=hsplit).rev().find(|d| group % d == 0).unwrap_or(1);
             let gper = group / hsplit;
             lap(1, &mut self.prof);
-            crate::pool::global().run(c.n_kv * spans * hsplit, &|item| {
+            crate::pool::global().run_limited(reading, c.n_kv * spans * hsplit, &|item| {
                 let (hs, item) = (item % hsplit, item / hsplit);
                 let (kvh, sp) = (item / spans, item % spans);
                 let gr = hs * gper..(hs + 1) * gper;

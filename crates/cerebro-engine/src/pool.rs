@@ -18,6 +18,9 @@ struct Job {
     f: *const (dyn Fn(usize) + Sync),
     n: usize,
     gen: usize,
+    /// Threads that take part in this job (the caller included): workers numbered at or above it
+    /// leave it to the others.
+    limit: usize,
 }
 
 struct Shared {
@@ -32,6 +35,10 @@ struct Shared {
     stop: AtomicBool,
     /// Threads that take part in jobs, the caller included; workers numbered at or above it rest.
     limit: AtomicUsize,
+    /// The affinity every thread taking part should have (0: any CPU), and a counter that changes
+    /// with it so each thread re-applies it once.
+    mask: AtomicUsize,
+    mask_gen: AtomicUsize,
 }
 
 // SAFETY: the job pointer is only used by workers counted in `active`, and `run` waits for `active`
@@ -76,6 +83,8 @@ impl Pool {
             active: AtomicUsize::new(0),
             stop: AtomicBool::new(false),
             limit: AtomicUsize::new(threads.max(1)),
+            mask: AtomicUsize::new(0),
+            mask_gen: AtomicUsize::new(0),
         });
         let handles = (0..workers)
             .map(|i| {
@@ -100,22 +109,50 @@ impl Pool {
     /// worker past the limit rests (sleeps between checks) instead of spinning.
     pub fn set_threads(&self, n: usize) {
         self.shared.limit.store(n.clamp(1, self.workers + 1), Ordering::Relaxed);
+        self.apply_pinning();
+    }
+
+    /// Keeps the working threads on the performance cores of a hybrid processor while they all fit
+    /// there (switch "Performance cores only"); otherwise lets them run anywhere. Windows moved
+    /// the threads to efficiency cores after a pause: reading a 512-token prompt measured 220 tok/s
+    /// unpinned against 339 pinned (Qwen3-0.6B Q8_0, 12 threads, i9-12900H).
+    pub fn apply_pinning(&self) {
+        // Only while every thread fits the performance cores (prompt reading): pinning each thread
+        // to its own core measured 13-16% slower writing at short contexts (Q8_0 64 -> 54, Q4_K_M
+        // 87 -> 76 tok/s), where every core's memory traffic helps.
+        let want = match crate::hw::performance_mask() {
+            Some(m) if crate::switches::enabled(crate::switches::CPU_PIN) && self.threads() <= m.count_ones() as usize => m as usize,
+            _ => 0,
+        };
+        if self.shared.mask.swap(want, Ordering::SeqCst) != want {
+            self.shared.mask_gen.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// `run` with at most `threads` threads taking part (e.g. the performance cores' share).
+    pub fn run_limited(&self, threads: usize, n: usize, f: &(dyn Fn(usize) + Sync)) {
+        self.run_with(threads.clamp(1, self.threads()), n, f);
     }
 
     pub fn run(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
+        self.run_with(self.threads(), n, f);
+    }
+
+    fn run_with(&self, limit: usize, n: usize, f: &(dyn Fn(usize) + Sync)) {
         if n == 0 {
             return;
         }
-        if self.workers == 0 || n == 1 || self.threads() == 1 {
+        if self.workers == 0 || n == 1 || limit == 1 {
             (0..n).for_each(f);
             return;
         }
         let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let sh = &*self.shared;
+        repin(sh, 0);
         // SAFETY: lifetime erased; see the Send/Sync note on Shared.
         let fp: *const (dyn Fn(usize) + Sync + 'static) = unsafe { std::mem::transmute(f as *const (dyn Fn(usize) + Sync)) };
         let gen = sh.gen.load(Ordering::Relaxed) + 1;
-        let mut job = Job { f: fp, n, gen };
+        let mut job = Job { f: fp, n, gen, limit };
         sh.next.store(0, Ordering::Relaxed);
         sh.completed.store(0, Ordering::Relaxed);
         sh.job.store(&mut job, Ordering::SeqCst);
@@ -132,6 +169,19 @@ impl Pool {
         }
         drop(job);
     }
+}
+
+/// Applies the pool's current affinity to the calling thread when it changed since this thread last
+/// applied it.
+fn repin(sh: &Shared, _index: usize) {
+    thread_local!(static SEEN: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) });
+    let g = sh.mask_gen.load(Ordering::Relaxed);
+    SEEN.with(|s| {
+        if s.get() != g {
+            s.set(g);
+            crate::hw::pin_current_thread(sh.mask.load(Ordering::Relaxed) as u64);
+        }
+    });
 }
 
 fn worker(sh: &Shared, index: usize) {
@@ -163,11 +213,12 @@ fn worker(sh: &Shared, index: usize) {
             }
         };
         seen = g;
+        repin(sh, index);
         sh.active.fetch_add(1, Ordering::SeqCst);
         let jp = sh.job.load(Ordering::SeqCst);
         // SAFETY: registered in `active` before reading the pointer, so the job is alive if non-null.
         if let Some(j) = unsafe { jp.as_ref() } {
-            if j.gen == g {
+            if j.gen == g && index < j.limit {
                 drain(sh, unsafe { &*j.f }, j.n);
             }
         }
@@ -195,6 +246,7 @@ pub fn global() -> &'static Pool {
         let logical = std::thread::available_parallelism().map_or(1, |n| n.get());
         let p = Pool::new(logical);
         p.set_threads(crate::switches::get(crate::switches::CPU_THREADS).max(1) as usize);
+        p.apply_pinning();
         p
     })
 }
@@ -203,6 +255,56 @@ pub fn global() -> &'static Pool {
 pub(crate) fn apply_threads(n: usize) {
     if let Some(p) = GLOBAL.get() {
         p.set_threads(n);
+    }
+}
+
+/// Prompt reading and other batched work: compute-bound, fastest on the performance cores.
+pub(crate) fn for_reading() {
+    let p = global();
+    let n = crate::switches::get(crate::switches::CPU_THREADS).max(1) as usize;
+    if p.threads() != n.clamp(1, p.capacity()) {
+        p.set_threads(n);
+    }
+}
+
+/// Token-by-token writing at context position `pos`.
+pub(crate) fn for_writing(pos: usize) {
+    let p = global();
+    let n = writing_threads_at(pos);
+    if p.threads() != n.clamp(1, p.capacity()) {
+        p.set_threads(n);
+    }
+}
+
+/// Below this context, writing streams weights: every core's memory traffic helps. Above it the
+/// attention over the conversation is most of the work and the performance cores win.
+/// i9-12900H, Qwen3-0.6B, 12 pinned vs 20 threads (tok/s): at 32 tokens Q4_K_M 81 vs 91; at 512
+/// Q8_0 47.7 vs 44.5 and Q4_K_M 63.2 vs 60.8; at 2048 Q8_0 33.1 vs 30.3, Q4_K_M 44.6 vs 36.7.
+pub const WRITE_ALL_CORES_BELOW: usize = 256;
+
+/// The thread count for writing at a short context: the switch, or automatically every logical CPU
+/// on hybrid processors and the reading count elsewhere.
+pub fn writing_threads() -> usize {
+    match crate::switches::get(crate::switches::CPU_DECODE_THREADS) {
+        0 if crate::hw::cores().hybrid() => std::thread::available_parallelism().map_or(1, |n| n.get()),
+        0 => crate::switches::get(crate::switches::CPU_THREADS).max(1) as usize,
+        v => v as usize,
+    }
+}
+
+/// The thread count for writing at position `pos`: automatic (switch 0) moves to the reading
+/// count, the performance cores, once the context is long.
+pub fn writing_threads_at(pos: usize) -> usize {
+    if crate::switches::get(crate::switches::CPU_DECODE_THREADS) == 0 && pos >= WRITE_ALL_CORES_BELOW {
+        return crate::switches::get(crate::switches::CPU_THREADS).max(1) as usize;
+    }
+    writing_threads()
+}
+
+/// Re-evaluates core pinning if the pool is running (the switch is live).
+pub(crate) fn apply_pin() {
+    if let Some(p) = GLOBAL.get() {
+        p.apply_pinning();
     }
 }
 
