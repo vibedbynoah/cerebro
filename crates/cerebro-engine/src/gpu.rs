@@ -89,6 +89,8 @@ struct GDelta {
 }
 
 struct Funcs {
+    /// Tensor-core flash prefill attention for head size 256 (None below sm_80 or switched off).
+    attn_mma256: Option<CudaFunction>,
     delta_conv: CudaFunction,
     delta_l2: CudaFunction,
     delta_rule: CudaFunction,
@@ -465,14 +467,15 @@ impl GpuState {
         let lf = |n: &str| module.load_function(n).map_err(gerr);
         let cc8 = ctx.compute_capability().map_err(gerr)?.0 >= 8;
         let (mm_on, at_on) = (cc8 && switches::enabled(switches::GPU_MMA_MATMUL), cc8 && switches::enabled(switches::GPU_MMA_ATTENTION));
-        let (matmul_mma, attn_mma) = if mm_on || at_on {
+        let (matmul_mma, attn_mma, attn_mma256) = if mm_on || at_on {
             let m = ctx.load_module(Ptx::from_src(PTX_MMA)).map_err(gerr)?;
             let f = |on: bool, n: &str| if on { m.load_function(n).map(Some).map_err(gerr) } else { Ok(None) };
-            (f(mm_on, "matmul_q8_mma")?, f(at_on, "attn_prefill_mma")?)
+            (f(mm_on, "matmul_q8_mma")?, f(at_on, "attn_prefill_mma")?, f(at_on, "attn_prefill_mma256")?)
         } else {
-            (None, None)
+            (None, None, None)
         };
         let f = Funcs {
+            attn_mma256,
             delta_conv: lf("delta_conv")?,
             delta_l2: lf("delta_l2")?,
             delta_rule: lf("delta_rule")?,
@@ -1035,7 +1038,11 @@ impl GpuState {
         let (n_head, n_kv, hd) = (sh.n_head as i32, sh.n_kv as i32, sh.hd as i32);
         let group = (sh.n_head / sh.n_kv) as i32;
         let scale = 1.0f32 / (sh.hd as f32).sqrt();
-        if let (Some(k), 128) = (&f.attn_mma, sh.hd) {
+        if let (Some(k), 256) = (&f.attn_mma256, sh.hd) {
+            let ti = t as i32;
+            let cfg = LaunchConfig { grid_dim: (sh.n_head as u32, t.div_ceil(64) as u32, 2), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
+            unsafe { s.launch_builder(k).arg(qkv).arg(kc).arg(vc).arg(att).arg(&n_head).arg(&n_kv).arg(pos0).arg(&group).arg(&scale).arg(&ti).launch(cfg) }.map_err(gerr)?;
+        } else if let (Some(k), 128) = (&f.attn_mma, sh.hd) {
             let ti = t as i32;
             let cfg = LaunchConfig { grid_dim: (sh.n_head as u32, t.div_ceil(64) as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
             unsafe { s.launch_builder(k).arg(qkv).arg(kc).arg(vc).arg(att).arg(&n_head).arg(&n_kv).arg(pos0).arg(&group).arg(&scale).arg(&ti).launch(cfg) }.map_err(gerr)?;

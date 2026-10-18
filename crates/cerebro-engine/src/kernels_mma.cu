@@ -275,3 +275,129 @@ extern "C" __global__ void __launch_bounds__(128) attn_prefill_mma(
         if (qb < T) *reinterpret_cast<float2*>(out + (size_t)qb * n_head * FHD + h * FHD + d) = make_float2(o[n][2] * ib, o[n][3] * ib);
     }
 }
+
+// The same flash attention for head size 256 (Qwen3.8). Holding a 256-wide Q and O per thread would
+// need ~250 registers, so each (head, 64 tokens) runs as two blocks (blockIdx.z), each producing 128
+// of the 256 output dimensions: S = Q K^T over all 256 dims is computed by both (1.5x the FLOPs of one
+// block, no spills). Key tiles are 32 wide so K (256 dims) and V (128 dims) fit 48 KB of shared memory.
+#define GHD 256
+#define GDV 128
+#define GKT 32
+#define GLK (GHD + 8)
+#define GLV (GDV + 8)
+
+extern "C" __global__ void __launch_bounds__(128) attn_prefill_mma256(
+    const float* __restrict__ qkv, const __half* __restrict__ kc, const __half* __restrict__ vc,
+    float* __restrict__ out, int n_head, int n_kv, const int* __restrict__ posp, int group, float scale, int T) {
+    __shared__ __align__(16) __half ks[GKT * GLK];
+    __shared__ __align__(16) __half vs[GKT * GLV];
+    const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, tg = lane & 3;
+    const int h = blockIdx.x, kvh = h / group, t0 = blockIdx.y * 64, dz = blockIdx.z * GDV;
+    const int pos0 = *posp;
+    const int row = n_head * GHD + 2 * n_kv * GHD, kvd = n_kv * GHD;
+    const int qa = t0 + warp * 16 + g, qb = qa + 8;
+    const float qsc = scale * 1.4426950408889634f;
+
+    unsigned qf[16][4];
+    {
+        const float* ra = qkv + (size_t)min(qa, T - 1) * row + h * GHD;
+        const float* rb = qkv + (size_t)min(qb, T - 1) * row + h * GHD;
+        #pragma unroll
+        for (int k = 0; k < 16; ++k) {
+            int d = k * 16 + tg * 2;
+            float2 a0 = *reinterpret_cast<const float2*>(ra + d), a2 = *reinterpret_cast<const float2*>(ra + d + 8);
+            float2 b0 = *reinterpret_cast<const float2*>(rb + d), b2 = *reinterpret_cast<const float2*>(rb + d + 8);
+            qf[k][0] = pack_h2(a0.x * qsc, a0.y * qsc);
+            qf[k][1] = pack_h2(b0.x * qsc, b0.y * qsc);
+            qf[k][2] = pack_h2(a2.x * qsc, a2.y * qsc);
+            qf[k][3] = pack_h2(b2.x * qsc, b2.y * qsc);
+        }
+    }
+    float o[16][4];
+    #pragma unroll
+    for (int n = 0; n < 16; ++n) o[n][0] = o[n][1] = o[n][2] = o[n][3] = 0.f;
+    float ma = -1e30f, mb = -1e30f, la = 0.f, lb = 0.f;
+    const int lim_a = pos0 + qa, lim_b = pos0 + qb;
+    const int nkeys = pos0 + min(T, t0 + 64);
+    const int warp_last = pos0 + t0 + warp * 16 + 15;
+
+    for (int k0 = 0; k0 < nkeys; k0 += GKT) {
+        __syncthreads();
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            int c = tid + i * 128, r = c >> 5, d = (c & 31) * 8, p = k0 + r;
+            bool ok = p < nkeys;
+            cp_async16(&ks[r * GLK + d], kc + (ok ? (size_t)p * kvd + kvh * GHD + d : 0), ok);
+        }
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            int c = tid + i * 128, r = c >> 4, d = (c & 15) * 8, p = k0 + r;
+            bool ok = p < nkeys;
+            cp_async16(&vs[r * GLV + d], vc + (ok ? (size_t)p * kvd + kvh * GHD + dz + d : 0), ok);
+        }
+        cp_commit();
+        cp_wait<0>();
+        __syncthreads();
+        if (k0 > warp_last) continue;
+
+        float s[4][4];
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            s[j][0] = s[j][1] = s[j][2] = s[j][3] = 0.f;
+            const __half* kr = &ks[(j * 8 + g) * GLK + tg * 2];
+            #pragma unroll
+            for (int k = 0; k < 16; ++k)
+                mma16816(s[j], qf[k], *reinterpret_cast<const unsigned*>(kr + k * 16),
+                         *reinterpret_cast<const unsigned*>(kr + k * 16 + 8));
+        }
+        float xa = -1e30f, xb = -1e30f;
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            int p = k0 + j * 8 + tg * 2;
+            if (p > lim_a) s[j][0] = -INFINITY;
+            if (p + 1 > lim_a) s[j][1] = -INFINITY;
+            if (p > lim_b) s[j][2] = -INFINITY;
+            if (p + 1 > lim_b) s[j][3] = -INFINITY;
+            xa = fmaxf(xa, fmaxf(s[j][0], s[j][1]));
+            xb = fmaxf(xb, fmaxf(s[j][2], s[j][3]));
+        }
+        xa = fmaxf(xa, __shfl_xor_sync(0xffffffff, xa, 1)); xa = fmaxf(xa, __shfl_xor_sync(0xffffffff, xa, 2));
+        xb = fmaxf(xb, __shfl_xor_sync(0xffffffff, xb, 1)); xb = fmaxf(xb, __shfl_xor_sync(0xffffffff, xb, 2));
+        float na = fmaxf(ma, xa), nb = fmaxf(mb, xb);
+        float ca = exp2f(ma - na), cb = exp2f(mb - nb);
+        ma = na; mb = nb;
+        float sa = 0.f, sb = 0.f;
+        unsigned pf[2][4];
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            float p0 = exp2f(s[j][0] - na), p1 = exp2f(s[j][1] - na), p2 = exp2f(s[j][2] - nb), p3 = exp2f(s[j][3] - nb);
+            sa += p0 + p1; sb += p2 + p3;
+            pf[j >> 1][(j & 1) * 2] = pack_h2(p0, p1);
+            pf[j >> 1][(j & 1) * 2 + 1] = pack_h2(p2, p3);
+        }
+        la = la * ca + sa; lb = lb * cb + sb;
+        #pragma unroll
+        for (int n = 0; n < 16; ++n) { o[n][0] *= ca; o[n][1] *= ca; o[n][2] *= cb; o[n][3] *= cb; }
+        #pragma unroll
+        for (int kk = 0; kk < 2; ++kk) {
+            #pragma unroll
+            for (int n = 0; n < 16; n += 2) {
+                const __half* vp = &vs[(kk * 16 + (lane & 15)) * GLV + n * 8 + (lane >> 4) * 8];
+                unsigned sp = (unsigned)__cvta_generic_to_shared(vp), b0, b1, b2, b3;
+                asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                             : "=r"(b0), "=r"(b1), "=r"(b2), "=r"(b3) : "r"(sp));
+                mma16816(o[n], pf[kk], b0, b1);
+                mma16816(o[n + 1], pf[kk], b2, b3);
+            }
+        }
+    }
+    la += __shfl_xor_sync(0xffffffff, la, 1); la += __shfl_xor_sync(0xffffffff, la, 2);
+    lb += __shfl_xor_sync(0xffffffff, lb, 1); lb += __shfl_xor_sync(0xffffffff, lb, 2);
+    float ia = la > 0.f ? 1.f / la : 0.f, ib = lb > 0.f ? 1.f / lb : 0.f;
+    #pragma unroll
+    for (int n = 0; n < 16; ++n) {
+        int d = dz + n * 8 + tg * 2;
+        if (qa < T) *reinterpret_cast<float2*>(out + (size_t)qa * n_head * GHD + h * GHD + d) = make_float2(o[n][0] * ia, o[n][1] * ia);
+        if (qb < T) *reinterpret_cast<float2*>(out + (size_t)qb * n_head * GHD + h * GHD + d) = make_float2(o[n][2] * ib, o[n][3] * ib);
+    }
+}
