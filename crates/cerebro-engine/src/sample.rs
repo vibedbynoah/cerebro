@@ -36,8 +36,10 @@ impl Sampler {
         ((self.state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40) as f32) / (1u64 << 24) as f32
     }
 
-    pub fn sample(&mut self, logits: &[f32], recent: &[u32]) -> u32 {
-        let c = self.cfg.clone();
+    /// The distribution `sample` draws from, after the repetition penalty, temperature, top-k, min-p
+    /// and top-p: (token, probability) pairs, most likely first, summing to 1. Greedy is one token.
+    pub fn distribution(&self, logits: &[f32], recent: &[u32]) -> Vec<(u32, f32)> {
+        let c = &self.cfg;
         let mut l: Vec<f32> = logits.to_vec();
         if c.repeat_penalty != 1.0 {
             for &t in recent.iter().rev().take(64) {
@@ -47,7 +49,7 @@ impl Sampler {
             }
         }
         if c.temperature <= 0.0 {
-            return argmax(&l);
+            return vec![(argmax(&l), 1.0)];
         }
         let mut idx: Vec<u32> = (0..l.len() as u32).collect();
         let k = if c.top_k == 0 { l.len() } else { c.top_k.min(l.len()) };
@@ -71,14 +73,37 @@ impl Sampler {
             }
         }
         let total: f32 = p[..keep].iter().sum();
+        idx[..keep].iter().zip(&p[..keep]).map(|(&t, &v)| (t, v / total)).collect()
+    }
+
+    fn draw(&mut self, dist: &[(u32, f32)]) -> u32 {
+        let total: f32 = dist.iter().map(|d| d.1).sum();
         let mut r = self.next_f32() * total;
-        for i in 0..keep {
-            r -= p[i];
+        for &(t, v) in dist {
+            r -= v;
             if r <= 0.0 {
-                return idx[i];
+                return t;
             }
         }
-        idx[keep - 1]
+        dist.last().map_or(0, |d| d.0)
+    }
+
+    pub fn sample(&mut self, logits: &[f32], recent: &[u32]) -> u32 {
+        let d = self.distribution(logits, recent);
+        self.draw(&d)
+    }
+
+    /// Speculative sampling against a deterministic draft token: accepted with the probability the
+    /// sampler gives it; on rejection a token is drawn from the distribution without it. The tokens
+    /// that come out follow the sampler's distribution exactly. Ok = accepted, Err = the replacement.
+    pub fn speculate(&mut self, logits: &[f32], recent: &[u32], draft: u32) -> Result<(), u32> {
+        let d = self.distribution(logits, recent);
+        let pd = d.iter().find(|x| x.0 == draft).map_or(0.0, |x| x.1);
+        if pd >= 1.0 || (pd > 0.0 && self.next_f32() < pd) {
+            return Ok(());
+        }
+        let rest: Vec<(u32, f32)> = d.into_iter().filter(|x| x.0 != draft).collect();
+        Err(if rest.is_empty() { draft } else { self.draw(&rest) })
     }
 }
 
@@ -100,6 +125,32 @@ mod tests {
     fn greedy_picks_the_largest() {
         let mut s = Sampler::new(SamplerConfig { temperature: 0.0, ..Default::default() });
         assert_eq!(s.sample(&[0.1, 3.0, 2.0], &[]), 1);
+    }
+
+    #[test]
+    fn speculation_keeps_the_distribution() {
+        // Target distribution over 3 tokens; the draft always proposes token 1.
+        let logits = [1.0f32, 1.5, 0.2];
+        let cfg = SamplerConfig { temperature: 1.0, top_k: 0, top_p: 1.0, min_p: 0.0, repeat_penalty: 1.0, seed: 11 };
+        let want = Sampler::new(cfg.clone()).distribution(&logits, &[]);
+        let mut s = Sampler::new(cfg);
+        let mut n = [0usize; 3];
+        let trials = 200_000;
+        for _ in 0..trials {
+            let t = match s.speculate(&logits, &[], 1) {
+                Ok(()) => 1,
+                Err(t) => t,
+            };
+            n[t as usize] += 1;
+        }
+        for &(t, p) in &want {
+            let got = n[t as usize] as f32 / trials as f32;
+            assert!((got - p).abs() < 0.006, "token {t}: {got} vs {p}");
+        }
+        // Greedy: accepted exactly when the draft is the argmax.
+        let mut g = Sampler::new(SamplerConfig { temperature: 0.0, ..Default::default() });
+        assert_eq!(g.speculate(&logits, &[], 1), Ok(()));
+        assert_eq!(g.speculate(&logits, &[], 0), Err(1));
     }
 
     #[test]

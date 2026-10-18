@@ -66,6 +66,10 @@ fn on() -> i64 {
 fn off() -> i64 {
     0
 }
+fn spec_default() -> i64 {
+    8
+}
+
 fn zero() -> i64 {
     0
 }
@@ -90,6 +94,7 @@ pub const PREFAULT: &str = "prefault";
 pub const EXPERT_VRAM_MB: &str = "expert_vram_mb";
 pub const GPU_ENABLED: &str = "gpu_enabled";
 pub const GPU_LAYERS: &str = "gpu_layers";
+pub const SPEC_LOOKUP: &str = "spec_lookup";
 
 fn registry() -> &'static [Switch] {
     static R: OnceLock<Vec<Switch>> = OnceLock::new();
@@ -202,6 +207,18 @@ fn registry() -> &'static [Switch] {
                 advanced: "Caps the adaptive VRAM expert cache (0 = all free VRAM minus a 600 MB margin). Lower it to share the GPU with games or other apps.",
                 env: "CEREBRO_EXPERT_VRAM_MB",
                 default: zero,
+            },
+            Switch {
+                id: SPEC_LOOKUP,
+                name: "Draft from the conversation",
+                group: "Speculation",
+                kind: Kind::Number { min: 0, max: 15, zero_auto: false, unit: "tokens" },
+                channel: Channel::Beta,
+                applies: Applies::Live,
+                beginner: "When the reply repeats something already in the chat (code, names, quotes), the model checks several words at once instead of one by one. Its word choices keep the same likelihoods; exact wording can differ slightly.",
+                advanced: "Prompt-lookup speculation: the last 1-3 tokens are matched earlier in the context and the tokens that followed are drafted (up to this many), then verified in one batched pass with speculative sampling (accepted with the sampler's probability, resampled otherwise), so the output distribution is unchanged. Batched checks can flip near-ties, so text is not guaranteed identical. Drafts need a match of 2+ tokens, are sized by recent acceptance and pause after a full rejection. Whole-GPU attention models only. 0 turns it off.",
+                env: "CEREBRO_SPEC_LOOKUP",
+                default: spec_default,
             },
             Switch {
                 id: GPU_ENABLED,

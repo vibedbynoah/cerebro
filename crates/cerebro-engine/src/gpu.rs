@@ -304,6 +304,9 @@ const RING: usize = 6;
 /// are computed on the CPU (a 3 MB copy costs about as much as four CPU expert-token products).
 const STREAM_MIN_TOKENS: usize = 4;
 
+/// Most positions one speculative verify pass checks (the token plus its drafts).
+pub const SPEC_MAX: usize = 16;
+
 /// Prefill scratch: up to `CHUNK` tokens per batched pass.
 const CHUNK: usize = 512;
 /// Positions per split-K attention block.
@@ -401,6 +404,9 @@ pub struct GpuState {
     pub plan: crate::placement::Plan,
     /// Checking aid: batched prefill stops after this many layers (None: all of them).
     pub debug_stop: Option<usize>,
+    /// Logits of every position of a verify pass (SPEC_MAX x vocab); None where speculation
+    /// does not apply (split, mixture of experts, recurrent layers).
+    spec: Option<CudaSlice<f32>>,
     /// Split models: the activation after the last GPU layer, copied for the CPU.
     host_x: Option<PinnedHostSlice<f32>>,
 }
@@ -670,6 +676,7 @@ impl GpuState {
         }
         let sh = Shape { dim: c.dim, ffn: c.ffn, n_head: c.n_head, n_kv: c.n_kv, hd: c.head_dim, vocab: c.vocab, eps: c.eps, base: c.rope_base, rd: c.rope_dim, gate: c.attn_gate, delta: dsh };
         let ctx_pin = ctx.clone();
+        let spec = if split || c.n_expert > 0 || c.ssm.is_some() { None } else { Some(z(SPEC_MAX * c.vocab)?) };
         Ok(Self {
             out_norm: stream.clone_htod(model.out_norm()).map_err(gerr)?,
             output,
@@ -704,6 +711,7 @@ impl GpuState {
             vram_bytes: vram,
             plan,
             debug_stop: None,
+            spec,
             // SAFETY: a plain host buffer, read only after the stream is synchronized.
             host_x: if split { Some(unsafe { ctx_pin.alloc_pinned::<f32>(c.dim) }.map_err(gerr)?) } else { None },
         })
@@ -785,7 +793,7 @@ pub fn plan_for(model: &Model, max_ctx: usize, vram_free: u64, force_layers: Opt
         let int8_bytes = |m: &Mat| (m.rows * m.cols + m.rows * m.cols / 32 * 4) as u64;
         let qd = c.n_head * c.head_dim;
         let widest = c.dim.max(c.ffn).max(qd);
-        let scratch = (CHUNK * (c.dim + qd + 2 * kvd as usize + qd + 2 * c.ffn) * 4 + CHUNK * widest * 2 + c.vocab * 4 + 64 * (c.n_head * c.head_dim) * 4 * 4) as u64;
+        let scratch = (CHUNK * (c.dim + qd + 2 * kvd as usize + qd + 2 * c.ffn) * 4 + CHUNK * widest * 2 + (SPEC_MAX + 1) * c.vocab * 4 + 64 * (c.n_head * c.head_dim) * 4 * 4) as u64;
         if c.n_expert > 0 {
             let mut dense = scratch + c.n_layer as u64 * 2 * max_ctx as u64 * kvd * 2;
             let mut experts = 0u64;
@@ -1353,6 +1361,20 @@ impl GpuState {
         Ok(v)
     }
 
+    /// Speculation can verify drafts on this model (whole GPU, attention layers only).
+    pub fn can_verify(&self) -> bool {
+        self.spec.is_some()
+    }
+
+    /// One batched forward over `toks` at pos0.. (a token and its drafts, at most SPEC_MAX) that
+    /// writes the KV cache and returns the logits of every position (tokens x vocab) in `logits`.
+    pub fn verify(&mut self, model: &Model, toks: &[u32], pos0: usize, logits: &mut Vec<f32>) -> Result<(), Error> {
+        if !self.can_verify() || toks.is_empty() || toks.len() > SPEC_MAX || pos0 + toks.len() > self.max_ctx {
+            return Err(Error::Request("verify outside its limits".into()));
+        }
+        self.prefill_chunk_with(model, toks, pos0, None, Some(logits)).map(|_| ())
+    }
+
     /// Tokens per split prefill chunk.
     pub const SPLIT_CHUNK: usize = CHUNK;
 
@@ -1631,6 +1653,11 @@ impl GpuState {
     }
 
     fn prefill_chunk(&mut self, model: &Model, toks: &[u32], pos0: usize, out: Option<&mut [f32]>) -> Result<u32, Error> {
+        self.prefill_chunk_with(model, toks, pos0, out, None)
+    }
+
+    /// `prefill_chunk`, optionally returning the logits of every position (speculative verify).
+    fn prefill_chunk_with(&mut self, model: &Model, toks: &[u32], pos0: usize, out: Option<&mut [f32]>, all: Option<&mut Vec<f32>>) -> Result<u32, Error> {
         let t = toks.len();
         let sh = &self.sh;
         let s = &self.stream;
@@ -1743,6 +1770,14 @@ impl GpuState {
             // Split: the caller copies the activations to the CPU.
             return Ok(0);
         };
+        if let (Some(dst), Some(spec)) = (all, self.spec.as_mut()) {
+            // Every position's logits: final norm over all rows, the head as one batched matmul.
+            unsafe { s.launch_builder(&f.norm_b).arg(&b.x).arg(&self.out_norm).arg(&mut b.xq).arg(&mut b.xd).arg(&dim).arg(&eps).arg(&null_f).launch(norm_cfg) }.map_err(gerr)?;
+            mm(output, &b.xq, &b.xd, spec, false)?;
+            dst.resize(t * sh.vocab, 0.0);
+            s.memcpy_dtoh(&spec.slice(0..t * sh.vocab), dst.as_mut_slice()).map_err(gerr)?;
+            return Ok(0);
+        }
         // Logits for the last token only, through the decode buffers.
         {
             let last = b.x.slice((t - 1) * sh.dim..t * sh.dim);
