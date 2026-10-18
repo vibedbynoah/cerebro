@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 const VERSION = "v1.9.2609";
 const URL = `https://github.com/microsoft/DirectXShaderCompiler/releases/download/${VERSION}/dxc_2026_09_29.zip`;
 const SHA256 = "ad31b1fc8443175d204f77a611fdb3ef2ec42759bdc2f1167368de24a4a7e7f1";
+/** @type {Array<[string, string]>} Path in the zip, name in the output folder. */
 const FILES = [
   ["bin/x64/dxcompiler.dll", "dxcompiler.dll"],
   ["LICENSE-LLVM.txt", "LICENSE-LLVM.txt"],
