@@ -95,6 +95,8 @@ pub const EXPERT_VRAM_MB: &str = "expert_vram_mb";
 pub const GPU_ENABLED: &str = "gpu_enabled";
 pub const GPU_LAYERS: &str = "gpu_layers";
 pub const SPEC_LOOKUP: &str = "spec_lookup";
+pub const PORTABLE_GPU: &str = "portable_gpu";
+pub const PORTABLE_INTEGRATED: &str = "portable_integrated";
 
 fn registry() -> &'static [Switch] {
     static R: OnceLock<Vec<Switch>> = OnceLock::new();
@@ -243,6 +245,30 @@ fn registry() -> &'static [Switch] {
                 advanced: "Dense models larger than free VRAM split by layer: the first N on the GPU in their own K-quant format, the rest and the output head on the CPU, one activation copy each way per token. 0 = as many as fit (600 MB margin). Larger values are clamped to what fits.",
                 env: "CEREBRO_GPU_LAYERS",
                 default: zero,
+            },
+            Switch {
+                id: PORTABLE_GPU,
+                name: "Other graphics cards",
+                group: "Placement",
+                kind: Kind::Toggle,
+                channel: Channel::Beta,
+                applies: Applies::Reload,
+                beginner: "Runs models on AMD, Intel and Apple graphics cards too, not only NVIDIA ones.",
+                advanced: "The portable backend: WGSL kernels through Vulkan, DX12 or Metal, used when no NVIDIA GPU takes the model. Dense attention models only, whole on the GPU, weights repacked to int8. Kernels are timed per GPU at load.",
+                env: "CEREBRO_NO_PORTABLE",
+                default: on,
+            },
+            Switch {
+                id: PORTABLE_INTEGRATED,
+                name: "Integrated graphics",
+                group: "Placement",
+                kind: Kind::Toggle,
+                channel: Channel::Beta,
+                applies: Applies::Reload,
+                beginner: "Uses the graphics built into the processor. It shares the computer's memory, so it is rarely faster than the processor, but it leaves the processor free.",
+                advanced: "Lets the portable backend pick an integrated GPU. Measured on an Iris Xe (DX12, Qwen3-0.6B Q8_0): 43-47 tok/s writing against ~47 sustained on the i9-12900H itself, 58 vs 28 tok/s reading a 3k-token prompt.",
+                env: "CEREBRO_PORTABLE_INTEGRATED",
+                default: off,
             },
         ]
     })

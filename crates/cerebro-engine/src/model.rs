@@ -1057,6 +1057,9 @@ impl Session {
         if !crate::switches::enabled(crate::switches::GPU_ENABLED) {
             return Err(Error::Unsupported("the graphics card is switched off (Use the graphics card)".into()));
         }
+        if !crate::switches::enabled(crate::switches::PORTABLE_GPU) {
+            return Err(Error::Unsupported("other graphics cards are switched off (Turbo > Other graphics cards)".into()));
+        }
         let p = crate::portable::PortableState::load(m, max_ctx)?;
         let mut s = Self::empty_from(m, max_ctx, m.cfg.n_layer);
         s.max_ctx = max_ctx;

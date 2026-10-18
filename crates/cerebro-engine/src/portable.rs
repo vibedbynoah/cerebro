@@ -408,6 +408,9 @@ fn pick_adapter(inst: &wgpu::Instance) -> Result<wgpu::Adapter, Error> {
     // then an integrated one; Vulkan before DX12, except on Intel GPUs under Windows, where DX12
     // comes first: Intel's Vulkan driver crashed in device creation on an Iris Xe (driver
     // 30.0.101.1660) while DX12 ran the same shaders correctly.
+    // Integrated GPUs only when the switch allows it (or one is asked for by name).
+    let integrated_ok = crate::switches::enabled(crate::switches::PORTABLE_INTEGRATED) || std::env::var_os("CEREBRO_PORTABLE_GPU").is_some();
+    let all: Vec<wgpu::Adapter> = all.into_iter().filter(|a| integrated_ok || a.get_info().device_type != wgpu::DeviceType::IntegratedGpu).collect();
     let rank = |a: &wgpu::Adapter| {
         let i = a.get_info();
         let kind = match i.device_type {
@@ -422,7 +425,9 @@ fn pick_adapter(inst: &wgpu::Instance) -> Result<wgpu::Adapter, Error> {
         let w = want.to_lowercase();
         return all.into_iter().filter(|a| a.get_info().name.to_lowercase().contains(&w)).min_by_key(rank).ok_or_else(|| Error::Unsupported(format!("no GPU named like {want}")));
     }
-    all.into_iter().min_by_key(rank).ok_or_else(|| Error::Unsupported("no GPU found through Vulkan, DX12 or Metal".into()))
+    all.into_iter().min_by_key(rank).ok_or_else(|| {
+        Error::Unsupported(if integrated_ok { "no GPU found through Vulkan, DX12 or Metal".into() } else { "no separate graphics card found (integrated graphics is off: Turbo > Integrated graphics)".into() })
+    })
 }
 
 fn perr(e: impl std::fmt::Display) -> Error {
@@ -832,6 +837,27 @@ impl PortableState {
         }
         let kernels = words.join(", ");
         Ok(Self { device, error, queue, info, max_ctx, chunk, x, step, logits, readback, pipes, layer_calls, head_calls, pass_tokens: 4.min(chunk), pass_layers: n_layer, mv1, mv8, kernels, dim, vocab: c.vocab, bytes })
+    }
+
+    /// Where the model went, for the app (the same shape as the CUDA planner's): every layer on this
+    /// GPU. No speed estimate: the GPU's memory speed is not known here.
+    pub fn plan(&self, m: &Model) -> crate::placement::Plan {
+        let n = m.cfg.n_layer;
+        crate::placement::Plan {
+            layout: crate::placement::Layout::GpuInt8,
+            gpu_layers: n,
+            total_layers: n,
+            vram_bytes: self.bytes,
+            cpu_bytes: 0,
+            ram_resident: 0,
+            drive_bytes_per_token: 0,
+            est_decode_tps: 0.0,
+            drive: crate::placement::drive_of(&m.path),
+            notes: vec![
+                format!("All {n} layers on the {} through {}: weights as int8, the conversation cache as f16.", self.info.name, self.info.backend.replace("Dx12", "DirectX 12")),
+                format!("Kernels picked for this GPU when loading: {}.", self.kernels),
+            ],
+        }
     }
 
     /// The chunk's step record: token count, first position, RoPE pairs per token.
