@@ -20,6 +20,10 @@ cudarc = { version = "0.19", default-features = false, features = ["std", "drive
 wgpu = { version = "=30.0.1", optional = true, default-features = false, features = ["wgsl", "vulkan", "dx12", "metal"] }
 pollster = { version = "0.4", optional = true }
 
+[dev-dependencies]
+# Examples only (visionchat decodes a photo); the engine itself takes decoded pixels.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
 [[bin]]
 name = "cerebro-run"
 path = "src/bin/run.rs"

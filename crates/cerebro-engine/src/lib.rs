@@ -20,6 +20,7 @@ pub mod switches;
 pub mod telemetry;
 pub mod tokenizer;
 pub mod tune;
+pub mod vision;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
