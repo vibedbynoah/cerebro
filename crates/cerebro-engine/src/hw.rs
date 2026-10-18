@@ -82,12 +82,33 @@ fn layout(cores: &[(u8, usize)]) -> Option<Cores> {
     })
 }
 
-/// How busy the processor is, 0..1, measured over `window` (Windows: GetSystemTimes); None elsewhere.
+/// How busy the processor is with OTHER programs, 0..1, over `window`: the whole system's busy time
+/// minus this process's own (its worker threads keep spinning briefly after work). Windows:
+/// GetSystemTimes and GetProcessTimes; None elsewhere.
 pub fn cpu_busy(window: std::time::Duration) -> Option<f64> {
     let a = crate::telemetry::current_cpu_times()?;
+    let pa = own_cpu_time();
     std::thread::sleep(window);
     let b = crate::telemetry::current_cpu_times()?;
-    crate::telemetry::cpu_delta(a, b).map(|pct| pct / 100.0)
+    let pb = own_cpu_time();
+    // (idle, kernel, user) in 100 ns units over every core; kernel includes idle.
+    let total = (b.1.wrapping_sub(a.1) + b.2.wrapping_sub(a.2)) as f64;
+    let busy = total - b.0.wrapping_sub(a.0) as f64;
+    let own = pb.zip(pa).map_or(0.0, |(y, x)| y.saturating_sub(x) as f64);
+    (total > 0.0).then(|| ((busy - own) / total).clamp(0.0, 1.0))
+}
+
+/// This process's CPU time (kernel + user, 100 ns units, all threads).
+fn own_cpu_time() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        let (mut c, mut e, mut k, mut u) = (0u64, 0u64, 0u64, 0u64);
+        // SAFETY: the pseudo-handle of this process and four writable FILETIME-sized values.
+        let ok = unsafe { win::GetProcessTimes(win::GetCurrentProcess(), &mut c, &mut e, &mut k, &mut u) } != 0;
+        return ok.then_some(k + u);
+    }
+    #[allow(unreachable_code)]
+    None
 }
 
 /// A short key for the machine a tuning result belongs to: processor, GPUs and core layout.
@@ -190,6 +211,8 @@ mod win {
     #[link(name = "kernel32")]
     extern "system" {
         pub fn GetLogicalProcessorInformationEx(relation: u32, buf: *mut u8, len: *mut u32) -> i32;
+        pub fn GetCurrentProcess() -> *mut c_void;
+        pub fn GetProcessTimes(process: *mut c_void, creation: *mut u64, exit: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
     }
 
     #[link(name = "advapi32")]

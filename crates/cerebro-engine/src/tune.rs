@@ -61,7 +61,8 @@ pub struct Outcome {
     /// tuned / start - 1, from the alternating confirmation.
     pub gain: f64,
     pub kept: bool,
-    /// How busy the processor was (0..1) just before measuring, from other programs.
+    /// How busy the processor was (0..1) with other programs just before measuring (this one's own
+    /// threads not counted).
     pub busy: Option<f64>,
     pub note: String,
     pub trials: Vec<Trial>,
