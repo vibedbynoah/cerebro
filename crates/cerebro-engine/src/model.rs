@@ -981,6 +981,18 @@ impl Session {
             return Ok(common);
         }
         #[cfg(feature = "portable")]
+        if let Some(from) = self.portable.as_ref().filter(|p| p.is_split()).map(|p| p.gpu_layers()) {
+            // Split: each chunk through the GPU's layers, then the same chunk through the processor's.
+            for c in prompt[common..].chunks(32) {
+                let mut xs = Vec::new();
+                self.portable.as_mut().expect("portable").run_split(m, c, self.tokens.len(), &mut xs)?;
+                self.step_batch_from(m, c, Some(xs), from);
+                self.progress.set(self.tokens.len());
+            }
+            self.stats = Stats { prompt_tokens: prompt.len(), reused_tokens: common, prefill_ms: t0.elapsed().as_secs_f64() * 1000.0, ..Default::default() };
+            return Ok(common);
+        }
+        #[cfg(feature = "portable")]
         if let Some(p) = self.portable.as_mut() {
             p.run(m, &prompt[common..], common, &mut self.logits)?;
             self.tokens.extend_from_slice(&prompt[common..]);
@@ -1061,7 +1073,15 @@ impl Session {
             return Err(Error::Unsupported("other graphics cards are switched off (Turbo > Other graphics cards)".into()));
         }
         let p = crate::portable::PortableState::load(m, max_ctx)?;
-        let mut s = Self::empty_from(m, max_ctx, m.cfg.n_layer);
+        let from = p.gpu_layers();
+        if p.is_split() && crate::switches::enabled(crate::switches::PREFAULT) {
+            // The processor's share is read into RAM now, as for a CUDA split.
+            let mut ranges: Vec<(usize, usize)> = m.layers[from..].iter().flat_map(layer_ranges).collect();
+            ranges.push((m.output.offset, m.output.rows * m.output.row_bytes));
+            m.gguf().touch(&ranges);
+        }
+        // A split keeps the KV cache of the processor's layers here; a whole-GPU model keeps none.
+        let mut s = Self::empty_from(m, max_ctx, from);
         s.max_ctx = max_ctx;
         s.portable = Some(p);
         Ok(s)
@@ -1202,6 +1222,19 @@ impl Session {
         #[cfg(feature = "portable")]
         if let Some(p) = self.portable.as_mut() {
             let pos = self.tokens.len();
+            if p.is_split() {
+                // The GPU's layers, then the processor's layers and the output head here.
+                let from = p.gpu_layers();
+                let mut xs = Vec::new();
+                if let Err(e) = p.run_split(m, &[token], pos, &mut xs) {
+                    panic!("GPU step failed: {e}");
+                }
+                self.x.copy_from_slice(&xs);
+                self.layers_from(m, from, pos);
+                self.head(m);
+                self.tokens.push(token);
+                return;
+            }
             if let Err(e) = p.run(m, &[token], pos, &mut self.logits) {
                 panic!("GPU step failed: {e}");
             }

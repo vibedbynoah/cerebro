@@ -178,11 +178,11 @@ struct P { rows: u32, cols: u32, add: u32, off: u32, out_stride: u32, in_stride:
 @group(0) @binding(2) var<storage, read> w: array<u32>;
 @group(0) @binding(4) var<storage, read> x: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read_write> o: array<f32>;
-var<workgroup> red: array<f32, TB * 64u>;
+var<workgroup> red: array<f32, TB * WG>;
 fn sb(bw: u32, k: u32) -> u32 { return (w[bw + 1u + k / 4u] >> (8u * (k % 4u))) & 0xFFu; }
 fn lo(q: u32) -> vec4<f32> { return vec4<f32>(f32(q & 15u), f32((q >> 8u) & 15u), f32((q >> 16u) & 15u), f32((q >> 24u) & 15u)); }
 fn hi(q: u32) -> vec4<f32> { return vec4<f32>(f32((q >> 4u) & 15u), f32((q >> 12u) & 15u), f32((q >> 20u) & 15u), f32((q >> 28u) & 15u)); }
-@compute @workgroup_size(64)
+@compute @workgroup_size(WG)
 fn main(@builtin(workgroup_id) g: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
     let r = g.x + g.y * 65535u;
     let valid = r < p.rows;
@@ -195,7 +195,7 @@ fn main(@builtin(workgroup_id) g: vec3<u32>, @builtin(local_invocation_id) l: ve
         let rw = r * nb * 36u;
         let xs = p.in_stride / 4u;
         let one = vec4<f32>(1.0, 1.0, 1.0, 1.0);
-        for (var u = l.x; u < nb * 16u; u += 64u) {
+        for (var u = l.x; u < nb * 16u; u += WG) {
             let b = u / 16u;
             let j = (u % 16u) / 4u;
             let qq = u % 4u;
@@ -240,11 +240,11 @@ fn main(@builtin(workgroup_id) g: vec3<u32>, @builtin(local_invocation_id) l: ve
             }
         }
     }
-    for (var t = 0u; t < TB; t++) { red[t * 64u + l.x] = acc[t]; }
+    for (var t = 0u; t < TB; t++) { red[t * WG + l.x] = acc[t]; }
     workgroupBarrier();
-    for (var k = 32u; k > 0u; k >>= 1u) {
+    for (var k = WG / 2u; k > 0u; k >>= 1u) {
         if (l.x < k) {
-            for (var t = 0u; t < TB; t++) { red[t * 64u + l.x] += red[t * 64u + l.x + k]; }
+            for (var t = 0u; t < TB; t++) { red[t * WG + l.x] += red[t * WG + l.x + k]; }
         }
         workgroupBarrier();
     }
@@ -252,7 +252,103 @@ fn main(@builtin(workgroup_id) g: vec3<u32>, @builtin(local_invocation_id) l: ve
         for (var t = 0u; t < TB; t++) {
             if (t0 + t < nt) {
                 let oi = (t0 + t) * p.out_stride + p.off + r;
-                let v = red[t * 64u];
+                let v = red[t * WG];
+                if (p.add == 1u) { o[oi] += v; } else { o[oi] = v; }
+            }
+        }
+    }
+}
+"#;
+
+/// Q4_K, two rows per workgroup of 64 threads: a thread takes a whole 64-weight group (32
+/// contiguous bytes of nibbles, its two scales decoded once) and keeps its eight words in registers
+/// across tokens. More bytes in flight per thread than MATVEC_Q4K; `load` times both.
+const MATVEC_Q4K2: &str = r#"
+struct P { rows: u32, cols: u32, add: u32, off: u32, out_stride: u32, in_stride: u32, fixed: u32, _a: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(2) var<storage, read> w: array<u32>;
+@group(0) @binding(4) var<storage, read> x: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> o: array<f32>;
+var<workgroup> red: array<f32, TB * 64u>;
+fn sb(bw: u32, k: u32) -> u32 { return (w[bw + 1u + k / 4u] >> (8u * (k % 4u))) & 0xFFu; }
+fn lo(q: u32) -> vec4<f32> { return vec4<f32>(f32(q & 15u), f32((q >> 8u) & 15u), f32((q >> 16u) & 15u), f32((q >> 24u) & 15u)); }
+fn hi(q: u32) -> vec4<f32> { return vec4<f32>(f32((q >> 4u) & 15u), f32((q >> 12u) & 15u), f32((q >> 20u) & 15u), f32((q >> 28u) & 15u)); }
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) g: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
+    let lane = l.x % 32u;
+    let r = (g.x + g.y * 65535u) * 2u + l.x / 32u;
+    let valid = r < p.rows;
+    var nt = st.n;
+    if (p.fixed > 0u) { nt = p.fixed; }
+    let t0 = g.z * TB;
+    var acc: array<f32, TB>;
+    if (valid) {
+        let nb = p.cols / 256u;
+        let rw = r * nb * 36u;
+        let xs = p.in_stride / 4u;
+        let one = vec4<f32>(1.0, 1.0, 1.0, 1.0);
+        for (var u = lane; u < nb * 4u; u += 32u) {
+            let b = u / 4u;
+            let j = u % 4u;
+            let bw = rw + b * 36u;
+            let dd = unpack2x16float(w[bw]);
+            let is = 2u * j;
+            var sc1 = 0u;
+            var m1 = 0u;
+            var sc2 = 0u;
+            var m2 = 0u;
+            if (j < 2u) {
+                sc1 = sb(bw, is) & 63u;
+                m1 = sb(bw, is + 4u) & 63u;
+                sc2 = sb(bw, is + 1u) & 63u;
+                m2 = sb(bw, is + 5u) & 63u;
+            } else {
+                sc1 = (sb(bw, is + 4u) & 15u) | ((sb(bw, is - 4u) >> 6u) << 4u);
+                m1 = (sb(bw, is + 4u) >> 4u) | ((sb(bw, is) >> 6u) << 4u);
+                sc2 = (sb(bw, is + 5u) & 15u) | ((sb(bw, is - 3u) >> 6u) << 4u);
+                m2 = (sb(bw, is + 5u) >> 4u) | ((sb(bw, is + 1u) >> 6u) << 4u);
+            }
+            let d1 = dd.x * f32(sc1);
+            let n1 = dd.y * f32(m1);
+            let d2 = dd.x * f32(sc2);
+            let n2 = dd.y * f32(m2);
+            let qb = bw + 4u + j * 8u;
+            var q: array<u32, 8>;
+            for (var k = 0u; k < 8u; k++) { q[k] = w[qb + k]; }
+            let xl = (b * 256u + j * 64u) / 4u;
+            for (var t = 0u; t < TB; t++) {
+                if (t0 + t < nt) {
+                    let xb = (t0 + t) * xs + xl;
+                    var sl = 0.0;
+                    var sxl = 0.0;
+                    var sh = 0.0;
+                    var sxh = 0.0;
+                    for (var k = 0u; k < 8u; k++) {
+                        let a = x[xb + k];
+                        let c = x[xb + 8u + k];
+                        sl += dot(lo(q[k]), a);
+                        sxl += dot(a, one);
+                        sh += dot(hi(q[k]), c);
+                        sxh += dot(c, one);
+                    }
+                    acc[t] += d1 * sl - n1 * sxl + d2 * sh - n2 * sxh;
+                }
+            }
+        }
+    }
+    for (var t = 0u; t < TB; t++) { red[t * 64u + l.x] = acc[t]; }
+    workgroupBarrier();
+    for (var k = 16u; k > 0u; k >>= 1u) {
+        if (lane < k) {
+            for (var t = 0u; t < TB; t++) { red[t * 64u + l.x] += red[t * 64u + l.x + k]; }
+        }
+        workgroupBarrier();
+    }
+    if (valid && lane == 0u) {
+        for (var t = 0u; t < TB; t++) {
+            if (t0 + t < nt) {
+                let oi = (t0 + t) * p.out_stride + p.off + r;
+                let v = red[t * 64u + l.x];
                 if (p.add == 1u) { o[oi] += v; } else { o[oi] = v; }
             }
         }
@@ -709,6 +805,9 @@ struct Call {
     pipe: usize,
     bind: wgpu::BindGroup,
     dims: Dims,
+    /// A matrix call's input and output buffers, and whether it adds into the output: the
+    /// load-time kernel check runs candidates on them.
+    io: Option<(wgpu::Buffer, wgpu::Buffer, bool)>,
 }
 
 pub struct PortableState {
@@ -724,6 +823,8 @@ pub struct PortableState {
     step: wgpu::Buffer,
     logits: wgpu::Buffer,
     readback: wgpu::Buffer,
+    /// A split's activations after the GPU's layers, read back for the processor's layers.
+    readback_x: wgpu::Buffer,
     pipes: Vec<wgpu::ComputePipeline>,
     /// Each layer's dispatches in order, then the output head's.
     layer_calls: Vec<Vec<Call>>,
@@ -734,6 +835,9 @@ pub struct PortableState {
     /// The matrix kernels chosen at load for one token and for TB tokens: (pipeline, rows per workgroup).
     mv1: (usize, u32),
     mv8: (usize, u32),
+    /// The Q4_K kernels chosen at load, likewise.
+    qk1: (usize, u32),
+    qk8: (usize, u32),
     /// What the load-time timing chose, in words.
     pub kernels: String,
     dim: usize,
@@ -749,9 +853,19 @@ const P_SILU: usize = 4;
 const P_COMB: usize = 5;
 /// The one-workgroup-per-head attention (ATTENTION_HEAD), for GPUs where the split one is unsafe.
 const P_ATTN_HEAD: usize = 6;
-/// The Q4_K matrix kernel for one token and for TB tokens (P_MATVEC's layout).
+/// Q4_K matrix kernels (P_MATVEC's layout): (label, rows per workgroup, tokens per weight read),
+/// from pipeline P_Q4K on, in this order.
+const Q4K_VARIANTS: [(&str, u32, usize); 8] = [
+    ("Q4_K 1 row x 64 threads", 1, 1),
+    ("Q4_K 1 row x 64 threads", 1, 8),
+    ("Q4_K 2 rows x 32 threads", 2, 1),
+    ("Q4_K 2 rows x 32 threads", 2, 8),
+    ("Q4_K 1 row x 32 threads", 1, 1),
+    ("Q4_K 1 row x 32 threads", 1, 8),
+    ("Q4_K 1 row x 128 threads", 1, 1),
+    ("Q4_K 1 row x 128 threads", 1, 8),
+];
 const P_Q4K: usize = 7;
-const P_Q4K8: usize = 8;
 /// Attention positions per workgroup (SPAN in the shader).
 const SPAN: usize = 256;
 /// Matrix kernel variants, all with P_MATVEC's layout: (label, family, threads, tokens per weight read).
@@ -764,7 +878,7 @@ const MV_VARIANTS: [(&str, &str, u32, usize); 6] = [
     ("1 row x 32 threads", "row", 32, 8),
 ];
 /// Pipelines from index MV0 on are the MV_VARIANTS, in order.
-const MV0: usize = 9;
+const MV0: usize = 15;
 const TB: usize = 8;
 /// A submission should take about this long: Windows resets a GPU driver whose work runs past two
 /// seconds, and an integrated GPU shares itself with the desktop, which must stay responsive.
@@ -988,8 +1102,14 @@ impl PortableState {
             pipe(format!("{STEP}{SILU}"), P_SILU, "silu"),
             pipe(format!("{STEP}{ATTN_COMBINE}"), P_COMB, "attention combine"),
             pipe(format!("{STEP}{ATTENTION_HEAD}"), P_ATTN_HEAD, "attention per head"),
-            pipe(format!("const TB: u32 = 1u;{STEP}{MATVEC_Q4K}"), P_MATVEC, "matvec q4k"),
-            pipe(format!("const TB: u32 = {TB}u;{STEP}{MATVEC_Q4K}"), P_MATVEC, "matvec q4k batch"),
+            pipe(format!("const TB: u32 = 1u; const WG: u32 = 64u;{STEP}{MATVEC_Q4K}"), P_MATVEC, "matvec q4k"),
+            pipe(format!("const TB: u32 = {TB}u; const WG: u32 = 64u;{STEP}{MATVEC_Q4K}"), P_MATVEC, "matvec q4k batch"),
+            pipe(format!("const TB: u32 = 1u;{STEP}{MATVEC_Q4K2}"), P_MATVEC, "matvec q4k 2 rows"),
+            pipe(format!("const TB: u32 = {TB}u;{STEP}{MATVEC_Q4K2}"), P_MATVEC, "matvec q4k 2 rows batch"),
+            pipe(format!("const TB: u32 = 1u; const WG: u32 = 32u;{STEP}{MATVEC_Q4K}"), P_MATVEC, "matvec q4k 32"),
+            pipe(format!("const TB: u32 = {TB}u; const WG: u32 = 32u;{STEP}{MATVEC_Q4K}"), P_MATVEC, "matvec q4k 32 batch"),
+            pipe(format!("const TB: u32 = 1u; const WG: u32 = 128u;{STEP}{MATVEC_Q4K}"), P_MATVEC, "matvec q4k 128"),
+            pipe(format!("const TB: u32 = {TB}u; const WG: u32 = 128u;{STEP}{MATVEC_Q4K}"), P_MATVEC, "matvec q4k 128 batch"),
         ];
         let mut pipes = pipes;
         for (label, family, wg, tb) in MV_VARIANTS {
@@ -1005,158 +1125,273 @@ impl PortableState {
         let matvec = |g: &GMat, input: &wgpu::Buffer, in_stride: usize, out: &wgpu::Buffer, out_stride: usize, add: bool, fixed: bool, calls: &mut Vec<Call>| {
             for p in &g.parts {
                 let u = uni(&[p.rows as u32, g.cols as u32, add as u32, p.row0 as u32, out_stride as u32, in_stride as u32, fixed as u32, 0]);
-                calls.push(Call { pipe: P_MATVEC, bind: bind(P_MATVEC, &[&u, &step, &p.w, &p.s, input, out]), dims: Dims::Rows { rows: p.rows as u32, fixed, q4k: p.q4k } });
+                calls.push(Call { pipe: P_MATVEC, bind: bind(P_MATVEC, &[&u, &step, &p.w, &p.s, input, out]), dims: Dims::Rows { rows: p.rows as u32, fixed, q4k: p.q4k }, io: Some((input.clone(), out.clone(), add)) });
             }
         };
         let eps = c.eps.to_bits();
         let rms_u = uni(&[dim as u32, eps, 0, 0]);
         let comb_u = uni(&[hd as u32, maxs as u32, nh as u32, 0]);
+        // Layers go to the card until it is full (wgpu cannot say how much memory a card has, so
+        // filling it is the measurement); the layer that did not fit and one more, as headroom for
+        // the driver and the desktop, go back. The processor runs the rest and the output head.
+        // A non-zero Layers on the graphics card switch (or CEREBRO_PORTABLE_LAYERS) caps the count.
+        let n_layer = m.layers().len();
+        let cap = std::env::var("CEREBRO_PORTABLE_LAYERS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(crate::switches::get(crate::switches::GPU_LAYERS) as usize);
+        let limit = if cap == 0 { n_layer } else { cap.min(n_layer) };
+        let is_oom = |e: &str| e.to_lowercase().contains("memory");
         let mut layer_calls = Vec::new();
-        for l in m.layers() {
-            let mut calls = Vec::new();
-            let Ffn::Dense { gate, up, down } = &l.ffn else { unreachable!("checked in supports") };
-            let attn_norm = f32s(&l.attn_norm, "attn norm");
-            let ffn_norm = f32s(&l.ffn_norm, "ffn norm");
-            let wqkv = upload(&[&l.q, &l.k, &l.v], "qkv")?;
-            let wo = upload(&[&l.o], "o")?;
-            let wgu = upload(&[gate, up], "gate up")?;
-            let wd = upload(&[down], "down")?;
-            bytes += wqkv.size() + wo.size() + wgu.size() + wd.size();
-            let kc = buf(max_ctx * kvd * 2, "k cache");
-            let vc = buf(max_ctx * kvd * 2, "v cache");
-            bytes += (max_ctx * kvd * 4) as u64;
-            let qn = l.q_norm.as_ref().map(|v| f32s(v, "q norm"));
-            let kn = l.k_norm.as_ref().map(|v| f32s(v, "k norm"));
-            calls.push(Call { pipe: P_RMS, bind: bind(P_RMS, &[&rms_u, &step, &x, &attn_norm, &h]), dims: Dims::PerToken });
-            matvec(&wqkv, &h, dim, &qkv, row, false, false, &mut calls);
-            let post_u = uni(&[nh as u32, nkv as u32, hd as u32, c.rope_dim as u32, kvd as u32, qn.is_some() as u32, kn.is_some() as u32, eps, qd as u32, row as u32, 0, 0]);
-            calls.push(Call { pipe: P_POST, bind: bind(P_POST, &[&post_u, &step, &qkv, qn.as_ref().unwrap_or(&dummy), kn.as_ref().unwrap_or(&dummy), &kc, &vc]), dims: Dims::Heads((nh + nkv) as u32) });
-            let attn_u = uni(&[(nh / nkv) as u32, hd as u32, kvd as u32, maxs as u32, (1.0 / (hd as f32).sqrt()).to_bits(), row as u32, nh as u32, 0]);
-            if per_head {
-                let head_u = uni(&[(nh / nkv) as u32, hd as u32, kvd as u32, max_ctx as u32, (1.0 / (hd as f32).sqrt()).to_bits(), row as u32, nh as u32, 0]);
-                calls.push(Call { pipe: P_ATTN_HEAD, bind: bind(P_ATTN_HEAD, &[&head_u, &step, &qkv, &kc, &vc, &part, &ao]), dims: Dims::Heads(nh as u32) });
-            } else {
-                calls.push(Call { pipe: P_ATTN, bind: bind(P_ATTN, &[&attn_u, &step, &qkv, &kc, &vc, &part]), dims: Dims::Spans(nh as u32) });
-                calls.push(Call { pipe: P_COMB, bind: bind(P_COMB, &[&comb_u, &step, &part, &ao]), dims: Dims::Heads(nh as u32) });
+        let mut ran_out = false;
+        for l in m.layers().iter().take(limit) {
+            let built = (|| -> Result<(Vec<Call>, u64), Error> {
+                let mut calls = Vec::new();
+                let Ffn::Dense { gate, up, down } = &l.ffn else { unreachable!("checked in supports") };
+                let attn_norm = f32s(&l.attn_norm, "attn norm");
+                let ffn_norm = f32s(&l.ffn_norm, "ffn norm");
+                let wqkv = upload(&[&l.q, &l.k, &l.v], "qkv")?;
+                let wo = upload(&[&l.o], "o")?;
+                let wgu = upload(&[gate, up], "gate up")?;
+                let wd = upload(&[down], "down")?;
+                let mut lb = wqkv.size() + wo.size() + wgu.size() + wd.size();
+                let kc = buf(max_ctx * kvd * 2, "k cache");
+                let vc = buf(max_ctx * kvd * 2, "v cache");
+                lb += (max_ctx * kvd * 4) as u64;
+                let qn = l.q_norm.as_ref().map(|v| f32s(v, "q norm"));
+                let kn = l.k_norm.as_ref().map(|v| f32s(v, "k norm"));
+                calls.push(Call { pipe: P_RMS, bind: bind(P_RMS, &[&rms_u, &step, &x, &attn_norm, &h]), dims: Dims::PerToken, io: None });
+                matvec(&wqkv, &h, dim, &qkv, row, false, false, &mut calls);
+                let post_u = uni(&[nh as u32, nkv as u32, hd as u32, c.rope_dim as u32, kvd as u32, qn.is_some() as u32, kn.is_some() as u32, eps, qd as u32, row as u32, 0, 0]);
+                calls.push(Call { pipe: P_POST, bind: bind(P_POST, &[&post_u, &step, &qkv, qn.as_ref().unwrap_or(&dummy), kn.as_ref().unwrap_or(&dummy), &kc, &vc]), dims: Dims::Heads((nh + nkv) as u32), io: None });
+                let attn_u = uni(&[(nh / nkv) as u32, hd as u32, kvd as u32, maxs as u32, (1.0 / (hd as f32).sqrt()).to_bits(), row as u32, nh as u32, 0]);
+                if per_head {
+                    let head_u = uni(&[(nh / nkv) as u32, hd as u32, kvd as u32, max_ctx as u32, (1.0 / (hd as f32).sqrt()).to_bits(), row as u32, nh as u32, 0]);
+                    calls.push(Call { pipe: P_ATTN_HEAD, bind: bind(P_ATTN_HEAD, &[&head_u, &step, &qkv, &kc, &vc, &part, &ao]), dims: Dims::Heads(nh as u32), io: None });
+                } else {
+                    calls.push(Call { pipe: P_ATTN, bind: bind(P_ATTN, &[&attn_u, &step, &qkv, &kc, &vc, &part]), dims: Dims::Spans(nh as u32), io: None });
+                    calls.push(Call { pipe: P_COMB, bind: bind(P_COMB, &[&comb_u, &step, &part, &ao]), dims: Dims::Heads(nh as u32), io: None });
+                }
+                matvec(&wo, &ao, qd, &x, dim, true, false, &mut calls);
+                calls.push(Call { pipe: P_RMS, bind: bind(P_RMS, &[&rms_u, &step, &x, &ffn_norm, &h]), dims: Dims::PerToken, io: None });
+                matvec(&wgu, &h, dim, &gu, 2 * ffn, false, false, &mut calls);
+                let silu_u = uni(&[ffn as u32, 0, 0, 0]);
+                calls.push(Call { pipe: P_SILU, bind: bind(P_SILU, &[&silu_u, &step, &gu]), dims: Dims::Elems(ffn as u32), io: None });
+                matvec(&wd, &gu, 2 * ffn, &x, dim, true, false, &mut calls);
+                Ok((calls, lb))
+            })();
+            // Weights are written through staging copies that wgpu frees only after a submission:
+            // without one per layer they pile up and run the upload pool out of memory long before
+            // the card is full (an 8 GB card stopped at 3.2 GiB).
+            queue.submit([]);
+            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            let reported = error.lock().unwrap_or_else(|p| p.into_inner()).take();
+            match (built, reported) {
+                (Ok((calls, lb)), None) => {
+                    bytes += lb;
+                    layer_calls.push(calls);
+                }
+                (_, Some(e)) if !is_oom(&e) => return Err(Error::Unsupported(format!("portable GPU: {e}"))),
+                (Err(e), None) if !matches!(&e, Error::Unsupported(t) if t.starts_with("the model does not fit")) => return Err(e),
+                (built, reported) => {
+                    trace(&format!("layer {} did not fit: {}", layer_calls.len(), reported.unwrap_or_else(|| built.err().map_or_else(String::new, |e| e.to_string()))));
+                    ran_out = true;
+                    break;
+                }
             }
-            matvec(&wo, &ao, qd, &x, dim, true, false, &mut calls);
-            calls.push(Call { pipe: P_RMS, bind: bind(P_RMS, &[&rms_u, &step, &x, &ffn_norm, &h]), dims: Dims::PerToken });
-            matvec(&wgu, &h, dim, &gu, 2 * ffn, false, false, &mut calls);
-            let silu_u = uni(&[ffn as u32, 0, 0, 0]);
-            calls.push(Call { pipe: P_SILU, bind: bind(P_SILU, &[&silu_u, &step, &gu]), dims: Dims::Elems(ffn as u32) });
-            matvec(&wd, &gu, 2 * ffn, &x, dim, true, false, &mut calls);
-            layer_calls.push(calls);
         }
         trace("layers");
-        let out_norm = f32s(m.out_norm(), "output norm");
-        let wout = upload(&[m.output_mat()], "output")?;
-        bytes += wout.size();
-        let last_u = uni(&[dim as u32, eps, 1, 0]);
-        let mut head_calls = vec![Call { pipe: P_RMS, bind: bind(P_RMS, &[&last_u, &step, &x, &out_norm, &h]), dims: Dims::One }];
-        matvec(&wout, &h, dim, &logits, 0, false, true, &mut head_calls);
+        let mut head_calls = Vec::new();
+        if !ran_out && layer_calls.len() == n_layer {
+            let out_norm = f32s(m.out_norm(), "output norm");
+            let built = upload(&[m.output_mat()], "output");
+            let reported = error.lock().unwrap_or_else(|p| p.into_inner()).take();
+            match (built, reported) {
+                (Ok(wout), None) => {
+                    bytes += wout.size();
+                    let last_u = uni(&[dim as u32, eps, 1, 0]);
+                    head_calls.push(Call { pipe: P_RMS, bind: bind(P_RMS, &[&last_u, &step, &x, &out_norm, &h]), dims: Dims::One, io: None });
+                    matvec(&wout, &h, dim, &logits, 0, false, true, &mut head_calls);
+                }
+                (_, Some(e)) if !is_oom(&e) => return Err(Error::Unsupported(format!("portable GPU: {e}"))),
+                _ => ran_out = true,
+            }
+        }
+        if ran_out {
+            layer_calls.pop();
+        }
+        if layer_calls.is_empty() {
+            return Err(no_room());
+        }
+        let readback_x = device.create_buffer(&wgpu::BufferDescriptor { label: Some("split readback"), size: (chunk * dim * 4) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         // Buffers referenced by bind groups live as long as those.
         let n_layer = layer_calls.len();
-        // Time every matrix kernel variant on this GPU with the first layer's gate|up product (the
-        // largest matrix of a layer), for one token and for TB, and keep the fastest of each.
-        let probe = layer_calls.iter().flatten().filter(|c| matches!(c.dims, Dims::Rows { q4k: false, .. })).max_by_key(|c| if let Dims::Rows { rows, .. } = c.dims { rows } else { 0 }).map(|c| (&c.bind, c.dims));
-        let mut chosen = [(MV0, 4u32), (MV0 + 3, 4u32)];
+        // Pick each matrix kernel for this GPU: every candidate runs the model's largest matrix on
+        // the same pseudo-random input, the largest group that agrees is trusted (a variant that
+        // computes wrong results on some GPU must never be chosen there: one did, on every GPU,
+        // before a fix), and the fastest of that group is kept, for one token and for TB tokens.
         let fxc = ai.backend == wgpu::Backend::Dx12 && !has_dxc();
         let mut words = Vec::new();
-        if let Some((bindg, Dims::Rows { rows, .. })) = probe {
-            // Raise the GPU's clocks first: an idle laptop GPU starts slow and would flatter
-            // whichever variant runs last. About a quarter second of the first variant.
-            queue.write_buffer(&step, 0, &Self::step_record(m, 0, 1));
-            let warm = std::time::Instant::now();
-            while warm.elapsed().as_secs_f64() < 0.25 {
+        // (label, pipeline, rows per workgroup, tokens per weight read)
+        let int8: Vec<(&str, usize, u32, usize)> = MV_VARIANTS
+            .iter()
+            .enumerate()
+            // FXC-compiled one-row kernels hung over several tokens (see dxc_path).
+            .filter(|(_, v)| !(fxc && v.3 > 1 && v.1 == "row"))
+            .map(|(i, v)| (v.0, MV0 + i, if v.1 == "quad" { 4 } else { 1 }, v.3))
+            .collect();
+        let q4k: Vec<(&str, usize, u32, usize)> = Q4K_VARIANTS.iter().enumerate().map(|(i, v)| (v.0, P_Q4K + i, v.1, v.2)).collect();
+        let mut warmed = false;
+        let mut select = |family: &[(&str, usize, u32, usize)], want_q4k: bool, words: &mut Vec<String>| -> Result<Option<[(usize, u32); 2]>, Error> {
+            let probe = layer_calls
+                .iter()
+                .flatten()
+                .filter(|c| matches!(c.dims, Dims::Rows { q4k, .. } if q4k == want_q4k) && matches!(c.io, Some((_, _, false))))
+                .max_by_key(|c| if let Dims::Rows { rows, .. } = c.dims { rows } else { 0 });
+            let Some(Call { bind: bindg, dims: Dims::Rows { rows, .. }, io: Some((input, output, _)), .. }) = probe else { return Ok(None) };
+            let rows = *rows;
+            let run = |pipe: usize, per: u32, tb: usize, nt: usize, times: usize| -> Result<f64, Error> {
+                let wg = rows.div_ceil(per);
                 let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
                 {
                     let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
-                    pass.set_pipeline(&pipes[MV0]);
+                    pass.set_pipeline(&pipes[pipe]);
                     pass.set_bind_group(0, bindg, &[]);
-                    for _ in 0..50 {
-                        pass.dispatch_workgroups(rows.div_ceil(4).min(65535), rows.div_ceil(4).div_ceil(65535), 1);
+                    for _ in 0..times {
+                        pass.dispatch_workgroups(wg.min(65535), wg.div_ceil(65535), (nt as u32).div_ceil(tb as u32));
                     }
                 }
+                let t0 = std::time::Instant::now();
                 let idx = queue.submit([enc.finish()]);
                 device.poll(wgpu::PollType::Wait { submission_index: Some(idx), timeout: None }).map_err(perr)?;
+                Ok(t0.elapsed().as_secs_f64())
+            };
+            let staging = device.create_buffer(&wgpu::BufferDescriptor { label: Some("kernel check"), size: output.size(), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            let read_out = || -> Result<Vec<f32>, Error> {
+                let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                enc.copy_buffer_to_buffer(output, 0, &staging, 0, output.size());
+                queue.submit([enc.finish()]);
+                let slice = staging.slice(..);
+                slice.map_async(wgpu::MapMode::Read, |_| {});
+                device.poll(wgpu::PollType::wait_indefinitely()).map_err(perr)?;
+                let v = slice.get_mapped_range().map_err(perr)?.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+                staging.unmap();
+                Ok(v)
+            };
+            // Pseudo-random input in [-1, 1).
+            let n_in = (input.size() / 4) as usize;
+            let mut seed = 0x9e37_79b9u32;
+            let vals: Vec<u8> = (0..n_in)
+                .flat_map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    ((seed >> 8) as f32 / (1u32 << 23) as f32 - 1.0).to_le_bytes()
+                })
+                .collect();
+            if !warmed {
+                // Raise the GPU's clocks first: an idle laptop GPU starts slow and would flatter
+                // whichever variant runs last. About a quarter second of the first candidate.
+                queue.write_buffer(&step, 0, &Self::step_record(m, 0, 1));
+                let warm = std::time::Instant::now();
+                while warm.elapsed().as_secs_f64() < 0.25 {
+                    run(family[0].1, family[0].2, family[0].3, 1, 50)?;
+                }
+                warmed = true;
             }
+            let mut picked = [(family[0].1, family[0].2); 2];
             for (k, nt) in [(0usize, 1usize), (1, TB)] {
                 queue.write_buffer(&step, 0, &Self::step_record(m, 0, nt));
+                let cands: Vec<_> = family.iter().filter(|c| (c.3 == 1) == (nt == 1)).collect();
+                let mut outs = Vec::new();
+                for c in &cands {
+                    queue.write_buffer(input, 0, &vals);
+                    run(c.1, c.2, c.3, nt, 1)?;
+                    outs.push(read_out()?);
+                }
+                let agree = |a: &[f32], b: &[f32]| {
+                    let scale = a.iter().fold(0f32, |m, v| m.max(v.abs())).max(1e-6);
+                    a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 1e-3 * scale)
+                };
+                let support: Vec<usize> = (0..cands.len()).map(|i| (0..cands.len()).filter(|&j| agree(&outs[i], &outs[j])).count()).collect();
+                let top = support.iter().copied().max().unwrap_or(0);
+                if top < 2 && cands.len() > 1 {
+                    return Err(Error::Unsupported("this graphics card's matrix kernels disagree with each other; the model runs on the processor instead".into()));
+                }
                 let mut best = f64::MAX;
-                for (vi, (label, family, _, tb)) in MV_VARIANTS.iter().enumerate() {
-                    if (*tb == 1) != (nt == 1) {
+                for (ci, c) in cands.iter().enumerate() {
+                    if support[ci] < top {
+                        trace(&format!("{} ({} token(s)) disagrees with the other kernels: not used", c.0, nt));
                         continue;
                     }
-                    // FXC-compiled one-row kernels hung over several tokens (see dxc_path).
-                    if fxc && nt > 1 && *family == "row" {
-                        continue;
-                    }
-                    let per = if *family == "quad" { 4 } else { 1 };
-                    let wg = rows.div_ceil(per);
-                    let d = (wg.min(65535), wg.div_ceil(65535), (nt as u32).div_ceil(*tb as u32));
                     let mut time = f64::MAX;
-                    for rep in 0..3 {
-                        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-                        {
-                            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
-                            pass.set_pipeline(&pipes[MV0 + vi]);
-                            pass.set_bind_group(0, bindg, &[]);
-                            for _ in 0..if rep == 0 { 1 } else { 20 } {
-                                pass.dispatch_workgroups(d.0, d.1, d.2);
-                            }
-                        }
-                        let t0 = std::time::Instant::now();
-                        let idx = queue.submit([enc.finish()]);
-                        device.poll(wgpu::PollType::Wait { submission_index: Some(idx), timeout: None }).map_err(perr)?;
-                        if rep > 0 {
-                            time = time.min(t0.elapsed().as_secs_f64() / 20.0);
-                        }
+                    for _ in 0..2 {
+                        time = time.min(run(c.1, c.2, c.3, nt, 20)? / 20.0);
                     }
-                    trace(&format!("matvec {label}, {nt} token(s): {:.1} us", time * 1e6));
+                    trace(&format!("{}, {nt} token(s): {:.1} us", c.0, time * 1e6));
                     if time < best {
                         best = time;
-                        chosen[k] = (MV0 + vi, per);
+                        picked[k] = (c.1, c.2);
                     }
                 }
-                words.push(format!("{} for {}", MV_VARIANTS[chosen[k].0 - MV0].0, if nt == 1 { "one token" } else { "prompts" }));
+                let label = family.iter().find(|c| c.1 == picked[k].0).map_or("?", |c| c.0);
+                words.push(format!("{label} for {}", if nt == 1 { "one token" } else { "prompts" }));
             }
-        }
-        // CEREBRO_PORTABLE_MV8=i forces variant i of MV_VARIANTS for prompts (diagnosis).
+            Ok(Some(picked))
+        };
+        let chosen = select(&int8, false, &mut words)?.unwrap_or([(MV0, 4), (MV0 + 3, 4)]);
+        let qk = select(&q4k, true, &mut words)?.unwrap_or([(P_Q4K, 1), (P_Q4K + 1, 1)]);
+        let (mut mv1, mut mv8, qk1, mut qk8) = (chosen[0], chosen[1], qk[0], qk[1]);
+        // CEREBRO_PORTABLE_MV8 / _Q4K8 = i force variant i for prompts (diagnosis).
         if let Some(i) = std::env::var("CEREBRO_PORTABLE_MV8").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&i| i < MV_VARIANTS.len()) {
-            chosen[1] = (MV0 + i, if MV_VARIANTS[i].1 == "quad" { 4 } else { 1 });
+            mv8 = (MV0 + i, if MV_VARIANTS[i].1 == "quad" { 4 } else { 1 });
             words.push(format!("forced {} ({} per read) for prompts", MV_VARIANTS[i].0, MV_VARIANTS[i].3));
         }
-        let (mv1, mv8) = (chosen[0], chosen[1]);
-        if layer_calls.iter().flatten().chain(head_calls.iter()).any(|c| matches!(c.dims, Dims::Rows { q4k: true, .. })) {
-            words.push("Q4_K weights read as stored".into());
+        if let Some(i) = std::env::var("CEREBRO_PORTABLE_Q4K8").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&i| i < Q4K_VARIANTS.len()) {
+            qk8 = (P_Q4K + i, Q4K_VARIANTS[i].1);
         }
+        let _ = &mut mv1;
         words.push(if per_head { "attention one head per workgroup".into() } else { "attention in 256-position spans".into() });
         if ai.backend == wgpu::Backend::Dx12 {
             words.push(if fxc { "shaders compiled by FXC".into() } else { "shaders compiled by DXC".into() });
         }
         let kernels = words.join(", ");
-        Ok(Self { device, error, queue, info, max_ctx, chunk, x, step, logits, readback, pipes, layer_calls, head_calls, pass_tokens: 4.min(chunk), pass_layers: n_layer, mv1, mv8, kernels, dim, vocab: c.vocab, bytes })
+        Ok(Self { device, error, queue, info, max_ctx, chunk, x, step, logits, readback, readback_x, pipes, layer_calls, head_calls, pass_tokens: 4.min(chunk), pass_layers: n_layer, mv1, mv8, qk1, qk8, kernels, dim, vocab: c.vocab, bytes })
     }
 
     /// Where the model went, for the app (the same shape as the CUDA planner's): every layer on this
     /// GPU. No speed estimate: the GPU's memory speed is not known here.
     pub fn plan(&self, m: &Model) -> crate::placement::Plan {
         let n = m.cfg.n_layer;
+        let k = self.gpu_layers();
+        let api = self.info.backend.replace("Dx12", "DirectX 12");
+        // The processor's share, from the file: its layers' fraction of the weights plus the head.
+        let file = m.gguf().len() as u64;
+        let cpu = if self.is_split() { file * (n - k) as u64 / n as u64 + (m.output_mat().rows * m.output_mat().row_bytes) as u64 } else { 0 };
+        let first = if self.is_split() {
+            format!("The first {k} of {n} layers on the {} through {api}; the processor runs the other {} and the output head. The card filled up at layer {}.", self.info.name, n - k, k + 1)
+        } else {
+            format!("All {n} layers on the {} through {api}; the conversation cache as f16.", self.info.name)
+        };
         crate::placement::Plan {
-            layout: crate::placement::Layout::GpuInt8,
-            gpu_layers: n,
+            layout: if self.is_split() { crate::placement::Layout::Split } else { crate::placement::Layout::GpuInt8 },
+            gpu_layers: k,
             total_layers: n,
             vram_bytes: self.bytes,
-            cpu_bytes: 0,
-            ram_resident: 0,
+            cpu_bytes: cpu,
+            ram_resident: cpu,
             drive_bytes_per_token: 0,
             est_decode_tps: 0.0,
             drive: crate::placement::drive_of(&m.path),
-            notes: vec![
-                format!("All {n} layers on the {} through {}: weights as int8, the conversation cache as f16.", self.info.name, self.info.backend.replace("Dx12", "DirectX 12")),
-                format!("Kernels picked for this GPU when loading: {}.", self.kernels),
-            ],
+            notes: vec![first, format!("Kernels picked for this GPU when loading: {}.", self.kernels)],
         }
+    }
+
+    /// Layers on the GPU.
+    pub fn gpu_layers(&self) -> usize {
+        self.layer_calls.len()
+    }
+
+    /// The processor runs the layers from `gpu_layers()` on and the output head.
+    pub fn is_split(&self) -> bool {
+        self.head_calls.is_empty()
     }
 
     /// The chunk's step record: token count, first position, RoPE pairs per token.
@@ -1188,8 +1423,9 @@ impl PortableState {
                 Dims::Elems(n) => (call.pipe, ((ntu * n).div_ceil(256), 1, 1)),
                 Dims::Spans(h) => (call.pipe, (h, spans, ntu)),
                 Dims::Rows { rows, fixed, q4k: true } => {
-                    let (pipe, z) = if fixed || nt == 1 { (P_Q4K, 1) } else { (P_Q4K8, ntu.div_ceil(TB as u32)) };
-                    (pipe, (rows.min(65535), rows.div_ceil(65535), z))
+                    let ((pipe, per), z) = if fixed || nt == 1 { (self.qk1, 1) } else { (self.qk8, ntu.div_ceil(Q4K_VARIANTS[self.qk8.0 - P_Q4K].2 as u32)) };
+                    let wg = rows.div_ceil(per);
+                    (pipe, (wg.min(65535), wg.div_ceil(65535), z))
                 }
                 Dims::Rows { rows, fixed, q4k: false } => {
                     let ((pipe, per), z) = if fixed || nt == 1 { (self.mv1, 1) } else { (self.mv8, ntu.div_ceil(MV_VARIANTS[self.mv8.0 - MV0].3 as u32)) };
@@ -1215,31 +1451,48 @@ impl PortableState {
         Ok(t0.elapsed().as_secs_f64())
     }
 
-    /// Runs `toks` at positions pos0..; writes the last token's logits. Work goes to the GPU in
-    /// submissions of `pass_tokens` tokens through `pass_layers` layers, both adapted so each takes
-    /// about PASS_SECONDS: fewer tokens first, then fewer layers once a single token is too slow
-    /// (long contexts on small GPUs), and back up when there is room.
+    /// Runs `toks` at positions pos0.. through every layer and the head; writes the last token's
+    /// logits.
     pub fn run(&mut self, m: &Model, toks: &[u32], pos0: usize, logits: &mut Vec<f32>) -> Result<(), Error> {
+        if self.is_split() {
+            return Err(Error::Request("this model is split: the processor runs the head (run_split)".into()));
+        }
+        self.run_inner(m, toks, pos0, Some(logits), None)
+    }
+
+    /// A split: runs `toks` through the GPU's layers and returns their activations (tokens x width)
+    /// in `xs`, for the processor's layers.
+    pub fn run_split(&mut self, m: &Model, toks: &[u32], pos0: usize, xs: &mut Vec<f32>) -> Result<(), Error> {
+        xs.clear();
+        self.run_inner(m, toks, pos0, None, Some(xs))
+    }
+
+    /// Work goes to the GPU in submissions of `pass_tokens` tokens through `pass_layers` layers,
+    /// both adapted so each takes about PASS_SECONDS: fewer tokens first, then fewer layers once a
+    /// single token is too slow (long contexts on small GPUs), and back up when there is room.
+    fn run_inner(&mut self, m: &Model, toks: &[u32], pos0: usize, logits: Option<&mut Vec<f32>>, mut xs: Option<&mut Vec<f32>>) -> Result<(), Error> {
         if pos0 + toks.len() > self.max_ctx {
             return Err(Error::Request("the context is full".into()));
         }
         let n_layer = self.layer_calls.len();
+        let want_logits = logits.is_some();
         let mut emb = vec![0f32; self.dim];
         let mut i = 0;
         while i < toks.len() {
             let nt = self.pass_tokens.min(toks.len() - i);
-            let mut xs = Vec::with_capacity(nt * self.dim * 4);
+            let mut xb = Vec::with_capacity(nt * self.dim * 4);
             for &t in &toks[i..i + nt] {
                 m.embed_into(t, &mut emb);
-                xs.extend(emb.iter().flat_map(|v| v.to_le_bytes()));
+                xb.extend(emb.iter().flat_map(|v| v.to_le_bytes()));
             }
-            self.queue.write_buffer(&self.x, 0, &xs);
+            self.queue.write_buffer(&self.x, 0, &xb);
             self.queue.write_buffer(&self.step, 0, &Self::step_record(m, pos0 + i, nt));
             let last = i + nt == toks.len();
             let mut l0 = 0;
             while l0 < n_layer {
                 let pl = self.pass_layers.min(n_layer - l0);
-                let head = last && l0 + pl == n_layer;
+                let end = l0 + pl == n_layer;
+                let head = want_logits && last && end;
                 let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
                 {
                     let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
@@ -1249,9 +1502,25 @@ impl PortableState {
                 if head {
                     enc.copy_buffer_to_buffer(&self.logits, 0, &self.readback, 0, (self.vocab * 4) as u64);
                 }
+                let xbytes = (nt * self.dim * 4) as u64;
+                if end && xs.is_some() {
+                    enc.copy_buffer_to_buffer(&self.x, 0, &self.readback_x, 0, xbytes);
+                }
                 let secs = self.submit_wait(enc)?;
                 if std::env::var_os("CEREBRO_PORTABLE_TRACE").is_some() {
                     eprintln!("portable: {nt} tokens x {pl} layers at {}: {:.3} s", pos0 + i, secs);
+                }
+                if end {
+                    if let Some(out) = xs.as_deref_mut() {
+                        let slice = self.readback_x.slice(..xbytes);
+                        slice.map_async(wgpu::MapMode::Read, |_| {});
+                        self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(perr)?;
+                        {
+                            let data = slice.get_mapped_range().map_err(|e| Error::Unsupported(format!("the graphics driver stopped responding ({e})")))?;
+                            out.extend(data.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])));
+                        }
+                        self.readback_x.unmap();
+                    }
                 }
                 if secs > PASS_SECONDS {
                     if nt > 1 {
@@ -1270,15 +1539,17 @@ impl PortableState {
             }
             i += nt;
         }
-        let slice = self.readback.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(perr)?;
-        {
-            let data = slice.get_mapped_range().map_err(|e| Error::Unsupported(format!("the graphics driver stopped responding ({e})")))?;
-            logits.clear();
-            logits.extend(data.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])));
+        if let Some(lg) = logits {
+            let slice = self.readback.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+            self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(perr)?;
+            {
+                let data = slice.get_mapped_range().map_err(|e| Error::Unsupported(format!("the graphics driver stopped responding ({e})")))?;
+                lg.clear();
+                lg.extend(data.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])));
+            }
+            self.readback.unmap();
         }
-        self.readback.unmap();
         Ok(())
     }
 }
