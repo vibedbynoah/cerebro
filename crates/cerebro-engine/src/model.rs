@@ -167,7 +167,9 @@ impl Model {
         let arch = g.str("general.architecture").unwrap_or("").to_owned();
         // qwen3vl: Qwen3 with multi-axis rotary positions (the language model of Qwen3-VL and
         // Qwen3-ASR); deepstack (image features added into early layers) is not run yet.
-        if !matches!(arch.as_str(), "qwen3" | "qwen3moe" | "qwen2" | "llama" | "qwen35" | "qwen3vl") {
+        // qwen3tts: the Qwen3-TTS talker, a qwen3vl model whose output head covers only the codec
+        // tokens (logit i is the token `<|codec_0|>` + i; see tts.rs).
+        if !matches!(arch.as_str(), "qwen3" | "qwen3moe" | "qwen2" | "llama" | "qwen35" | "qwen3vl" | "qwen3tts") {
             return Err(Error::Unsupported(format!("architecture {arch}")));
         }
         if g.u64(&format!("{arch}.n_deepstack_layers")).unwrap_or(0) > 0 {
@@ -188,7 +190,8 @@ impl Model {
             rope_base: g.f32(&k("rope.freq_base")).unwrap_or(10000.0),
             eps: g.f32(&k("attention.layer_norm_rms_epsilon")).unwrap_or(1e-6),
             ctx_train: g.u64(&k("context_length")).unwrap_or(4096) as usize,
-            vocab: embed_t.rows(),
+            // Logits: as many as the output head has rows (usually the embedding table's).
+            vocab: g.tensors.get("output.weight").map_or(embed_t.rows(), |t| t.rows()),
             // Any layer: in Qwen3.5/3.8 layer 0 is a DeltaNet layer, without attention norms.
             qk_norm: g.tensors.keys().any(|k| k.starts_with("blk.") && k.ends_with(".attn_q_norm.weight")),
             n_expert: g.u64(&k("expert_count")).unwrap_or(0) as usize,
@@ -620,6 +623,11 @@ impl Model {
                 *a += w * b;
             }
         }
+    }
+
+    /// Token `token`'s embedding row (input side), into `out` (`cfg.dim` values).
+    pub fn embedding(&self, token: u32, out: &mut [f32]) {
+        self.embed_row(token, out);
     }
 
     fn embed_row(&self, token: u32, out: &mut [f32]) {
@@ -1062,6 +1070,9 @@ pub struct Session {
     /// Seconds per phase of CPU decoding: [q/k/v, rope+cache, attention, o, router, ffn/experts, output].
     pub prof: [f64; 7],
     pub logits: Vec<f32>,
+    /// The last position's hidden state after the final norm (the input to the output head):
+    /// what a TTS talker hands its code predictor. Processor sessions only.
+    pub hidden: Vec<f32>,
     pub stats: Stats,
     /// Live prompt-reading progress (Monitor).
     pub progress: Arc<Progress>,
@@ -1147,6 +1158,7 @@ impl Session {
             prof: [0.0; 7],
             att_part: Vec::new(),
             logits: vec![0.0; c.vocab],
+            hidden: vec![0.0; c.dim],
             stats: Stats::default(),
             progress: Arc::default(),
             #[cfg(feature = "cuda")]
@@ -1591,6 +1603,33 @@ impl Session {
         }
     }
 
+    /// Appends one position whose input is `row` (a raw embedding, `cfg.dim` values) instead of a
+    /// token's: a TTS talker's inputs are sums of text and codec embeddings. 1-D positions; the
+    /// cache holds a pseudo-token for it. Processor sessions only.
+    pub fn step_embedding(&mut self, m: &Model, row: &[f32]) -> Result<(), Error> {
+        if row.len() != m.cfg.dim {
+            return Err(Error::Request(format!("an embedding of {} values for a model {} wide", row.len(), m.cfg.dim)));
+        }
+        #[cfg(feature = "cuda")]
+        if self.gpu.is_some() {
+            return Err(Error::Unsupported("embedding inputs run on the processor for now".into()));
+        }
+        #[cfg(feature = "portable")]
+        if self.portable.is_some() {
+            return Err(Error::Unsupported("embedding inputs run on the processor for now".into()));
+        }
+        let pos = self.tokens.len();
+        if pos + 1 >= self.max_ctx {
+            return Err(Error::Request(format!("the {}-token context is full", self.max_ctx)));
+        }
+        crate::pool::for_writing(pos);
+        self.x.copy_from_slice(row);
+        self.layers_from(m, 0, pos);
+        self.tokens.push(0x8000_0000 | (pos as u32 & 0x7fff_ffff));
+        self.head(m);
+        Ok(())
+    }
+
     pub fn step(&mut self, m: &Model, token: u32) {
         crate::pool::for_writing(self.tokens.len());
         #[cfg(feature = "portable")]
@@ -1830,6 +1869,7 @@ impl Session {
     fn head(&mut self, m: &Model) {
         let to = Instant::now();
         rmsnorm_inplace(&mut self.x, &m.out_norm, m.cfg.eps);
+        self.hidden.copy_from_slice(&self.x);
         self.qa_dim.quantize(&self.x);
         m.matvec(&m.output, &self.x, &self.qa_dim, &mut self.logits);
         self.prof[6] += to.elapsed().as_secs_f64();
