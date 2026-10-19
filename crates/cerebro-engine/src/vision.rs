@@ -55,11 +55,11 @@ pub struct ImageEmbedding {
 }
 
 /// A weight matrix (out x in, row-major f32) and its bias.
-struct Lin {
-    rows: usize,
-    cols: usize,
-    w: Vec<f32>,
-    bias: Vec<f32>,
+pub(crate) struct Lin {
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) w: Vec<f32>,
+    pub(crate) bias: Vec<f32>,
 }
 
 struct Block {
@@ -83,7 +83,7 @@ pub struct VisionModel {
     mm2: Lin,
 }
 
-fn f32s(g: &Gguf, name: &str) -> Result<Vec<f32>, Error> {
+pub(crate) fn f32s(g: &Gguf, name: &str) -> Result<Vec<f32>, Error> {
     let t = g.tensor(name)?;
     if !matches!(t.dtype, DType::F32 | DType::F16 | DType::BF16 | DType::Q8_0) {
         return Err(Error::Unsupported(format!("vision tensor {name} in {:?}", t.dtype)));
@@ -93,7 +93,7 @@ fn f32s(g: &Gguf, name: &str) -> Result<Vec<f32>, Error> {
     Ok(out)
 }
 
-fn lin(g: &Gguf, name: &str) -> Result<Lin, Error> {
+pub(crate) fn lin(g: &Gguf, name: &str) -> Result<Lin, Error> {
     let t = g.tensor(&format!("{name}.weight"))?;
     let (cols, rows) = (t.cols(), t.rows());
     if cols % 8 != 0 {
@@ -104,7 +104,7 @@ fn lin(g: &Gguf, name: &str) -> Result<Lin, Error> {
     Ok(Lin { rows, cols, w, bias })
 }
 
-fn norm(g: &Gguf, name: &str) -> Result<(Vec<f32>, Vec<f32>), Error> {
+pub(crate) fn norm(g: &Gguf, name: &str) -> Result<(Vec<f32>, Vec<f32>), Error> {
     Ok((f32s(g, &format!("{name}.weight"))?, f32s(g, &format!("{name}.bias"))?))
 }
 
@@ -473,12 +473,15 @@ fn add_position(pos: &[f32], grid: usize, dim: usize, pw: usize, ph: usize, px: 
     }
 }
 
-struct Ptr<T>(*mut T);
+pub(crate) struct Ptr<T>(*mut T);
 unsafe impl<T> Sync for Ptr<T> {}
 unsafe impl<T> Send for Ptr<T> {}
 impl<T> Ptr<T> {
+    pub(crate) fn new(p: *mut T) -> Self {
+        Ptr(p)
+    }
     /// SAFETY: callers write disjoint indices from different tasks.
-    unsafe fn at(&self, i: usize) -> *mut T {
+    pub(crate) unsafe fn at(&self, i: usize) -> *mut T {
         self.0.add(i)
     }
 }
@@ -486,7 +489,7 @@ impl<T> Ptr<T> {
 /// out (n x rows) = x (n x cols) W^T + bias, or `+=` when `add` (a residual). Tasks take a block
 /// of rows for a block of tokens; inside, 3 rows x 4 tokens per pass over the inner dimension
 /// (12 accumulators in registers).
-fn linear(l: &Lin, x: &[f32], n: usize, out: &mut [f32], add: bool) {
+pub(crate) fn linear(l: &Lin, x: &[f32], n: usize, out: &mut [f32], add: bool) {
     let o = Ptr(out.as_mut_ptr());
     let (rows, cols, w) = (l.rows, l.cols, &l.w);
     const RB: usize = 48;
@@ -521,7 +524,7 @@ fn linear(l: &Lin, x: &[f32], n: usize, out: &mut [f32], add: bool) {
     });
 }
 
-fn layer_norm_all(x: &[f32], w: &[f32], b: &[f32], eps: f32, dim: usize, out: &mut [f32]) {
+pub(crate) fn layer_norm_all(x: &[f32], w: &[f32], b: &[f32], eps: f32, dim: usize, out: &mut [f32]) {
     let n = x.len() / dim;
     let o = Ptr(out.as_mut_ptr());
     crate::pool::global().run(n.div_ceil(64), &|i| {
@@ -543,7 +546,7 @@ pub fn gelu(x: f32) -> f32 {
     0.5 * x * (1.0 + (0.797_884_6 * (x + 0.044_715 * x * x * x)).tanh())
 }
 
-fn gelu_all(x: &mut [f32]) {
+pub(crate) fn gelu_all(x: &mut [f32]) {
     let n = x.len();
     let o = Ptr(x.as_mut_ptr());
     crate::pool::global().run(n.div_ceil(16384), &|i| {
@@ -583,7 +586,7 @@ fn rope_all(qkv: &mut [f32], n: usize, heads: usize, hd: usize, cs: &[(f32, f32)
 /// Keys are transposed per head (hd x n, padded to 8) so four queries' scores come out of one
 /// pass over them, eight keys at a time; values are copied per head so the weighted sum reads
 /// them contiguously.
-fn attention(qkv: &[f32], n: usize, heads: usize, hd: usize, out: &mut [f32]) {
+pub(crate) fn attention(qkv: &[f32], n: usize, heads: usize, hd: usize, out: &mut [f32]) {
     let dim = heads * hd;
     let n8 = n.next_multiple_of(8);
     let pool = crate::pool::global();

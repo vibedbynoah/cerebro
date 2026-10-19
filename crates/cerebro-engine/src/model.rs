@@ -165,8 +165,13 @@ impl Model {
         let g = Arc::new(Gguf::open(path)?);
 
         let arch = g.str("general.architecture").unwrap_or("").to_owned();
-        if !matches!(arch.as_str(), "qwen3" | "qwen3moe" | "qwen2" | "llama" | "qwen35") {
+        // qwen3vl: Qwen3 with multi-axis rotary positions (the language model of Qwen3-VL and
+        // Qwen3-ASR); deepstack (image features added into early layers) is not run yet.
+        if !matches!(arch.as_str(), "qwen3" | "qwen3moe" | "qwen2" | "llama" | "qwen35" | "qwen3vl") {
             return Err(Error::Unsupported(format!("architecture {arch}")));
+        }
+        if g.u64(&format!("{arch}.n_deepstack_layers")).unwrap_or(0) > 0 {
+            return Err(Error::Unsupported("deepstack layers (Qwen3-VL image features in early layers)".into()));
         }
         let k = |s: &str| format!("{arch}.{s}");
         let dim = g.u64(&k("embedding_length"))? as usize;
@@ -904,7 +909,7 @@ fn rope(x: &mut [f32], cs: &[(f32, f32)]) {
 
 /// How many rotary positions all of `images` saved: text after them lags its slots by this.
 fn rope_shift_of(images: &[ImageSpan]) -> usize {
-    images.iter().map(|im| im.nx * im.ny - im.nx.max(im.ny)).sum()
+    images.iter().filter(|im| !im.linear).map(|im| im.nx * im.ny - im.nx.max(im.ny)).sum()
 }
 
 /// `Session::rope_pos` for a list of image spans (sorted by slot).
@@ -914,6 +919,10 @@ fn rope_pos_in(images: &[ImageSpan], slot: usize) -> [usize; 3] {
         let end = im.slot0 + im.nx * im.ny;
         if slot < im.slot0 {
             break;
+        }
+        if im.linear {
+            // Audio: one position per token on every axis, like text.
+            continue;
         }
         if slot < end {
             let i = slot - im.slot0;
@@ -926,12 +935,14 @@ fn rope_pos_in(images: &[ImageSpan], slot: usize) -> [usize; 3] {
     [p, p, p]
 }
 
-/// An image in a session's cache: `nx * ny` slots from `slot0`, laid out row by row.
+/// An image (or audio) in a session's cache: `nx * ny` slots from `slot0`, laid out row by row.
+/// Audio is `linear`: its tokens take consecutive 1-D positions, as text does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImageSpan {
     pub slot0: usize,
     pub nx: usize,
     pub ny: usize,
+    pub linear: bool,
 }
 
 /// Image encoder output as a language model takes it: `rows * cols` tokens of `dim` values.
@@ -948,6 +959,8 @@ pub struct ImageTokens<'a> {
 pub enum Part<'a> {
     Text(&'a [u32]),
     Image(ImageTokens<'a>),
+    /// Audio encoder output (`audio::AudioEmbedding`): `cols` tokens in a row, `rows` = 1.
+    Audio(ImageTokens<'a>),
 }
 
 /// How far the current prompt read has got, shared with readers on other threads (the Monitor):
@@ -1330,7 +1343,7 @@ impl Session {
     /// values, so the conversation cache reuses an image only when it is the same image. Runs on
     /// the processor or wholly on a CUDA card. Returns the reused prefix length.
     pub fn feed_parts(&mut self, m: &Model, parts: &[Part<'_>]) -> Result<usize, Error> {
-        if !parts.iter().any(|p| matches!(p, Part::Image(_))) {
+        if !parts.iter().any(|p| matches!(p, Part::Image(_) | Part::Audio(_))) {
             let ids: Vec<u32> = parts.iter().flat_map(|p| if let Part::Text(t) = p { t.to_vec() } else { Vec::new() }).collect();
             return self.feed(m, &ids);
         }
@@ -1345,14 +1358,18 @@ impl Session {
         // The full slot sequence, with image tokens as pseudo-ids.
         let mut ids = Vec::new();
         let mut spans = Vec::new();
+        let mut linear: Vec<usize> = Vec::new();
         for p in parts {
             match p {
                 Part::Text(t) => ids.extend_from_slice(t),
-                Part::Image(e) => {
+                Part::Image(e) | Part::Audio(e) => {
                     if e.dim != m.cfg.dim {
-                        return Err(Error::Request(format!("the image encoder gives {} values per token; this model takes {}", e.dim, m.cfg.dim)));
+                        return Err(Error::Request(format!("the encoder gives {} values per token; this model takes {}", e.dim, m.cfg.dim)));
                     }
                     let h = e.data.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, v| (h ^ v.to_bits() as u64).wrapping_mul(0x0100_0000_01b3));
+                    if matches!(p, Part::Audio(_)) {
+                        linear.push(ids.len());
+                    }
                     spans.push((ids.len(), e.cols, e.rows, *e));
                     for i in 0..e.cols * e.rows {
                         ids.push(0x8000_0000 | ((h as u32 ^ (i as u32).wrapping_mul(0x9e37_79b9)) & 0x7fff_ffff));
@@ -1387,7 +1404,7 @@ impl Session {
         for &(s0, nx, ny, _) in &spans {
             if s0 >= common || s0 + nx * ny <= common {
                 if s0 >= common {
-                    self.images.push(ImageSpan { slot0: s0, nx, ny });
+                    self.images.push(ImageSpan { slot0: s0, nx, ny, linear: linear.contains(&s0) });
                 }
             }
         }
@@ -2124,7 +2141,7 @@ mod tests {
     #[test]
     fn image_slots_get_grid_positions_and_text_after_skips_ahead() {
         // Text 0..3, a 4x2 image at slots 3..11, then text.
-        let ims = [ImageSpan { slot0: 3, nx: 4, ny: 2 }];
+        let ims = [ImageSpan { slot0: 3, nx: 4, ny: 2, linear: false }];
         assert_eq!(rope_pos_in(&ims, 2), [2, 2, 2]);
         assert_eq!(rope_pos_in(&ims, 3), [3, 3, 3]);
         assert_eq!(rope_pos_in(&ims, 4), [3, 3, 4]);
@@ -2132,7 +2149,7 @@ mod tests {
         assert_eq!(rope_pos_in(&ims, 10), [3, 4, 6]);
         // The image used max(4, 2) = 4 positions: text resumes at 3 + 4.
         assert_eq!(rope_pos_in(&ims, 11), [7, 7, 7]);
-        let two = [ImageSpan { slot0: 3, nx: 4, ny: 2 }, ImageSpan { slot0: 12, nx: 1, ny: 3 }];
+        let two = [ImageSpan { slot0: 3, nx: 4, ny: 2, linear: false }, ImageSpan { slot0: 12, nx: 1, ny: 3, linear: false }];
         assert_eq!(rope_pos_in(&two, 12), [8, 8, 8]);
         assert_eq!(rope_pos_in(&two, 14), [8, 10, 8]);
         assert_eq!(rope_pos_in(&two, 15), [11, 11, 11]);

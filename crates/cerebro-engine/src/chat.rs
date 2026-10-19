@@ -69,7 +69,7 @@ pub fn generate(model: &Model, session: &mut Session, tok: &Tokenizer, prompt: &
 pub fn generate_parts(model: &Model, session: &mut Session, tok: &Tokenizer, parts: &[Part<'_>], cfg: &GenConfig, on_text: impl FnMut(&str) -> bool) -> Result<GenStats, Error> {
     let n = parts.iter().map(|p| match p {
         Part::Text(t) => t.len(),
-        Part::Image(e) => e.cols * e.rows,
+        Part::Image(e) | Part::Audio(e) => e.cols * e.rows,
     }).sum();
     generate_with(model, session, tok, n, |s| s.feed_parts(model, parts), cfg, on_text)
 }
