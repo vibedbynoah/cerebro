@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tts-read"
+description = "Enables the tts_read command without any pre-configured scope."
+commands.allow = ["tts_read"]
+
+[[permission]]
+identifier = "deny-tts-read"
+description = "Denies the tts_read command without any pre-configured scope."
+commands.deny = ["tts_read"]

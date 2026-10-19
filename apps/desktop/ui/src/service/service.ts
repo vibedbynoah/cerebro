@@ -113,8 +113,12 @@ export interface CerebroService {
   startRecording(): Promise<void>;
   /** The microphone's recent peak level while recording, 0..1, for the waveform. */
   recordingLevel(): Promise<number>;
-  /** Resolves with the length of the spoken audio, in seconds. */
+  /** Resolves with the length of the spoken audio, in seconds, as it starts playing. */
   speakSample(id: string, text: string): Promise<number>;
+  /** Reads a reply aloud with the speech model in use; resolves when it has finished or stopped. */
+  readAloud(text: string): Promise<void>;
+  /** Stops speech that is playing or being read. */
+  stopSpeaking(): Promise<void>;
 
   // ---- Tune screen. One tune at a time: it uses the GPU fully. ----
 

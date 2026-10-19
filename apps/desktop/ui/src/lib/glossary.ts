@@ -5,7 +5,7 @@
 export const GLOSSARY = {
   llamacpp: {
     term: "llama.cpp",
-    text: "An open-source inference engine: the program that runs a model on your CPU or GPU, and one of the backends Cerebro runs models on. Cerebro configures and drives it; it does not fork or replace it.",
+    text: "An open-source inference engine for GGUF files. Cerebro runs models on its own engine, which reads the same files; the official llama.cpp release is the speed reference Cerebro measures itself against.",
   },
   tokps: {
     term: "tok/s",

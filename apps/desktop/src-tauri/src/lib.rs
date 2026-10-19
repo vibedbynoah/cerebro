@@ -29,6 +29,7 @@ mod dedup;
 mod gguf_edit;
 mod tune_screen;
 mod stt;
+mod tts;
 mod vision_input;
 mod hub;
 mod kv_store;
@@ -66,6 +67,9 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::model_reveal,
             commands::tune_start,
             commands::mic_start,
+            commands::tts_sample,
+            commands::tts_read,
+            commands::tts_stop,
             commands::mic_level,
             commands::stt_transcribe,
             commands::model_describe_image,
@@ -135,6 +139,9 @@ pub fn run() -> Result<(), tauri::Error> {
         // Speech to text (stt.rs): the microphone and the speech model, beside the chat model.
         .manage(std::sync::Arc::new(stt::Mic::default()))
         .manage(std::sync::Arc::new(stt::Stt::default()))
+        // Text to speech (tts.rs): the speech model and the speaker.
+        .manage(std::sync::Arc::new(tts::Tts::default()))
+        .manage(std::sync::Arc::new(tts::Player::default()))
         .setup(|app| {
             commands::load_switches(app.handle());
             {

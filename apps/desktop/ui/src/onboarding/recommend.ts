@@ -82,7 +82,7 @@ function why(model: CatalogModel, fit: Fit, hw: HardwareProfile): string {
     case "split":
       return hw.gpu
         ? "Larger than your video memory and dense, so every token also reads system memory, which is slower. Cerebro measures what that costs after download."
-        : "No graphics card llama.cpp can use was found, so it runs on the processor from system memory. Cerebro measures what that costs after download.";
+        : "No graphics card the engine can use was found, so it runs on the processor from system memory. Cerebro measures what that costs after download.";
     case "too-large":
       return `Needs about ${gib(model.sizeGiB)}, more than this machine's video and system memory can spare together. It would not load here.`;
     case "unknown":

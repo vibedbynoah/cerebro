@@ -19,7 +19,6 @@ import type { ActivePatch, EngineSwitch, LocalApiView, McpServerView, RemotePair
 import type { MachineTuneEvent, MachineTuneOutcome, TuneEvent, TuneProfile, TuneRunInfo } from "./types";
 import { EMPTY_TWEAKS, profileNameError, sanitizeTweaks } from "../lib/tweaks";
 
-const NOT_YET = (what: string) => Promise.reject(new Error(`${what} is not available in this build yet.`));
 
 export function createDesktopService(local: CerebroService): CerebroService {
   // The Tune screen's feed: one channel for the app's life. The engine sends the run so far, then
@@ -201,7 +200,9 @@ export function createDesktopService(local: CerebroService): CerebroService {
     },
     startRecording: () => invoke<void>("mic_start"),
     recordingLevel: () => invoke<number>("mic_level"),
-    speakSample: () => NOT_YET("Text to speech"),
+    speakSample: (id, text) => invoke<number>("tts_sample", { modelId: id, text }),
+    readAloud: (text) => invoke<void>("tts_read", { text: text.slice(0, 100_000) }),
+    stopSpeaking: () => invoke<void>("tts_stop"),
 
     async startTune(modelId: string, profile: TuneProfile): Promise<TuneRunInfo> {
       const { integrityCheck } = await local.getSettings();

@@ -5,6 +5,8 @@ import { EFFORT_LABELS, REASONING_LABELS } from "../../lib/chat/prompt";
 import type { ChatMessage } from "../../lib/chat/store";
 import { LedgerPanel } from "./Ledger";
 import { Markdown } from "./Markdown";
+import { useService } from "../../service/context";
+import { notify } from "../../lib/toast";
 import { ToolCard, type ToolAnswer, type ToolDecision } from "./ToolCard";
 
 const ms = (n: number) => (n < 1000 ? `${Math.round(n)} ms` : `${(n / 1000).toFixed(1)} s`);
@@ -49,6 +51,7 @@ function UserMessage(props: { m: ChatMessage }): JSX.Element {
 function AssistantMessage(props: { m: ChatMessage; last: boolean; onRegenerate: () => void; onMore: () => void; onToolDecide?: (id: string, decision: ToolDecision) => void; onToolAnswer?: (id: string, answer: ToolAnswer) => void }): JSX.Element {
   const m = () => props.m;
   const [speaking, setSpeaking] = createSignal(false);
+  const service = useService();
   const [copied, setCopied] = createSignal(false);
   let timer: ReturnType<typeof setTimeout> | undefined;
   onCleanup(() => clearTimeout(timer));
@@ -72,16 +75,18 @@ function AssistantMessage(props: { m: ChatMessage; last: boolean; onRegenerate: 
     wasStreaming = now;
   });
 
-  // Read-aloud is simulated in this build (no audio leaves a sound; the engine's TTS will play it).
+  // Read aloud with the speech model in use (the desktop plays it; the preview only times it).
   const readAloud = () => {
     if (speaking()) {
-      clearTimeout(timer);
+      void service.stopSpeaking().catch(() => {});
       setSpeaking(false);
       return;
     }
     setSpeaking(true);
-    const words = plainText(parseMarkdown(m().text)).split(/\s+/).length;
-    timer = setTimeout(() => setSpeaking(false), Math.min(15000, words * 380));
+    service
+      .readAloud(plainText(parseMarkdown(m().text)))
+      .catch((e: unknown) => notify("Read aloud failed", e instanceof Error && e.message ? e.message : "Try again.", "error"))
+      .finally(() => setSpeaking(false));
   };
 
   return (

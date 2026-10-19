@@ -157,6 +157,8 @@ pub fn models_loaded(engine: State<'_, Engine>, stt: SttState<'_>) -> serde_json
 }
 
 type SttState<'a> = State<'a, std::sync::Arc<crate::stt::Stt>>;
+/// The speech-synthesis model shown as loaded (it loads on first use; see tts.rs).
+static TTS_LOADED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 type MicState<'a> = State<'a, std::sync::Arc<crate::stt::Mic>>;
 
 fn loaded_json(engine: &Engine, stt: &crate::stt::Stt) -> serde_json::Value {
@@ -167,6 +169,9 @@ fn loaded_json(engine: &Engine, stt: &crate::stt::Stt) -> serde_json::Value {
     }
     if let Some(id) = stt.loaded_id() {
         out.push(serde_json::json!({ "id": id, "slot": "stt", "params": null, "tuned": false, "placement": null }));
+    }
+    if let Some(id) = TTS_LOADED.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        out.push(serde_json::json!({ "id": id, "slot": "tts", "params": null, "tuned": false, "placement": null }));
     }
     serde_json::Value::Array(out)
 }
@@ -201,6 +206,78 @@ pub async fn stt_transcribe(engine: State<'_, Engine>, mic: MicState<'_>, stt: S
     }
     let s = std::sync::Arc::clone(stt.inner());
     tauri::async_runtime::spawn_blocking(move || s.transcribe(&model, &samples)).await.map_err(|_| "Transcription failed.".to_owned())?
+}
+
+type TtsState<'a> = State<'a, std::sync::Arc<crate::tts::Tts>>;
+type PlayerState<'a> = State<'a, std::sync::Arc<crate::tts::Player>>;
+
+/// The speech-synthesis model `model_id`, or the one in use (loaded, else the first in the library).
+fn tts_model(engine: &Engine, tts: &crate::tts::Tts, model_id: Option<String>) -> Result<LibraryModel, String> {
+    let m = match model_id {
+        Some(id) => find_model(engine, &id)?,
+        None => {
+            let library = engine.library.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            crate::tts::default_model(tts, &library).ok_or("No text-to-speech model is in the library. Download one (for example Qwen3-TTS) from Model Hub.")?
+        }
+    };
+    if m.kind != "tts" {
+        return Err("That model does not speak.".to_owned());
+    }
+    *TTS_LOADED.lock().unwrap_or_else(|e| e.into_inner()) = Some(m.id.clone());
+    Ok(m)
+}
+
+/// The Models screen's speech test: speaks `text` with `model_id` and starts playing it; resolves
+/// with its length in seconds as playback begins.
+#[tauri::command]
+pub async fn tts_sample(engine: State<'_, Engine>, tts: TtsState<'_>, player: PlayerState<'_>, model_id: String, text: String) -> Result<f64, String> {
+    if text.trim().is_empty() || text.chars().count() > 280 {
+        return Err("Use a sentence of 1 to 280 characters.".to_owned());
+    }
+    let m = tts_model(&engine, &tts, Some(model_id))?;
+    let (t, p) = (std::sync::Arc::clone(tts.inner()), std::sync::Arc::clone(player.inner()));
+    tauri::async_runtime::spawn_blocking(move || {
+        p.stop();
+        let x = t.synthesize(&m, &text)?;
+        p.play(&x)
+    })
+    .await
+    .map_err(|_| "Speech failed.".to_owned())?
+}
+
+/// Reads `text` aloud with the speech model in use, sentence by sentence (each plays while the
+/// next is made); resolves when the reading has finished or was stopped.
+#[tauri::command]
+pub async fn tts_read(engine: State<'_, Engine>, tts: TtsState<'_>, player: PlayerState<'_>, text: String) -> Result<(), String> {
+    let m = tts_model(&engine, &tts, None)?;
+    let (t, p) = (std::sync::Arc::clone(tts.inner()), std::sync::Arc::clone(player.inner()));
+    tauri::async_runtime::spawn_blocking(move || {
+        p.stop();
+        t.stopping.store(false, std::sync::atomic::Ordering::SeqCst);
+        for s in crate::tts::sentences(&text).into_iter().take(40) {
+            if t.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(());
+            }
+            let x = t.synthesize(&m, &s)?;
+            if t.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(());
+            }
+            p.play(&x)?;
+        }
+        while p.remaining() > 0.0 && !t.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| "Reading aloud failed.".to_owned())?
+}
+
+/// Stops speech: the queued audio is dropped and a reading ends after the sentence being made.
+#[tauri::command]
+pub fn tts_stop(tts: TtsState<'_>, player: PlayerState<'_>) {
+    tts.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+    player.stop();
 }
 
 /// The Models screen's image test: the loaded vision model describes one image (a data: URL).

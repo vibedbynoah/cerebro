@@ -306,6 +306,8 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
   const machineTune = createMachineTunePlayer();
   let lastTuneOutcome: MachineTuneOutcome | null = null;
   let nextId = 1;
+  let speechTimer: ReturnType<typeof setTimeout> | undefined;
+  let speechDone: (() => void) | undefined;
   const multiGpu = options.multiGpu === true;
   const monitor = createMonitorSim({
     random,
@@ -699,6 +701,17 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
       }),
 
     startRecording: () => later(0, () => undefined),
+    // The preview has no audio: reading aloud takes about as long as speaking would.
+    readAloud: (text) =>
+      new Promise<void>((resolve) => {
+        speechTimer = setTimeout(resolve, Math.min(15000, text.split(/\s+/).length * 380));
+        speechDone = resolve;
+      }),
+    stopSpeaking: () =>
+      later(0, () => {
+        clearTimeout(speechTimer);
+        speechDone?.();
+      }),
     recordingLevel: () => later(0, () => 0.15 + Math.random() * 0.85),
 
     transcribeSample: (id, seconds) =>

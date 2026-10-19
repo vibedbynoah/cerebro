@@ -26,7 +26,7 @@ pub struct Projector {
     pub file: String,
     pub size_gi_b: f64,
     pub path: String,
-    /// "vision" (images) or "audio" (speech).
+    /// "vision" (images), "audio" (speech in) or "tts" (speech out).
     pub kind: &'static str,
 }
 
@@ -45,7 +45,11 @@ pub fn find_projector(model_path: &Path, embedding: u64, basename: &str) -> Opti
             continue;
         }
         let Ok(g) = Gguf::open(&p) else { continue };
-        let kind = if g.u64("clip.vision.projection_dim").ok() == Some(embedding) {
+        // A speech decoder (text to speech) first: its file also carries a speaker encoder that
+        // looks like an audio input.
+        let kind = if g.u64("clip.gen.audio.projection_dim").ok() == Some(embedding) {
+            "tts"
+        } else if g.u64("clip.vision.projection_dim").ok() == Some(embedding) {
             "vision"
         } else if g.u64("clip.audio.projection_dim").ok() == Some(embedding) {
             "audio"

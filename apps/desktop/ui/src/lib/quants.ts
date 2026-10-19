@@ -30,7 +30,7 @@ export const FORMAT_NOTES: Readonly<Record<QuantFormat, string>> = {
 };
 
 export const BACKEND_LABELS: Readonly<Record<QuantBackend, string>> = {
-  "llama.cpp": "llama.cpp",
+  "llama.cpp": "Cerebro",
   strata: "Strata",
   exllamav3: "ExLlamaV3",
   vllm: "vLLM",

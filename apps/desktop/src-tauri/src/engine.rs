@@ -134,7 +134,7 @@ fn file_type_name(t: u64) -> &'static str {
 }
 
 /// Architectures Cerebro Engine runs. qwen35 is the Qwen3.5/3.8 hybrid (Gated DeltaNet + gated attention).
-const SUPPORTED_ARCHS: &[&str] = &["qwen3", "qwen3moe", "qwen2", "llama", "qwen35", "qwen3vl"];
+const SUPPORTED_ARCHS: &[&str] = &["qwen3", "qwen3moe", "qwen2", "llama", "qwen35", "qwen3vl", "qwen3tts"];
 
 /// A short, stable id from the path (FNV-1a).
 fn id_of(path: &Path) -> String {
@@ -175,11 +175,13 @@ fn describe(path: &Path, source: &'static str) -> Option<LibraryModel> {
         provenance: "measured",
         kind: match projector.as_ref().map(|p| p.kind) {
             Some("audio") => "stt",
+            Some("tts") => "tts",
             Some(_) => "vision",
             None => "text",
         },
         modalities: match projector.as_ref().map(|p| p.kind) {
             Some("audio") => vec!["audio-in"],
+            Some("tts") => vec!["audio-out"],
             Some(_) => vec!["text", "vision"],
             None => vec!["text"],
         },

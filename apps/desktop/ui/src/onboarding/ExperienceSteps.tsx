@@ -378,12 +378,15 @@ function AdvancedConfig(props: {
         </p>
       </section>
 
-      <section class="adv__block" aria-labelledby="adv-flags-title">
-        <h2 class="adv__title" id="adv-flags-title">
-          Backend flags
-        </h2>
-        <CodeBlock title="Backend command" lines={configFlags(props.model, props.config)} label="Copy flags" oneCommand />
-      </section>
+      {/* The desktop engine runs inside the app with no command line, so there are no flags to copy. */}
+      <Show when={!__DESKTOP__}>
+        <section class="adv__block" aria-labelledby="adv-flags-title">
+          <h2 class="adv__title" id="adv-flags-title">
+            Backend flags
+          </h2>
+          <CodeBlock title="Backend command" lines={configFlags(props.model, props.config)} label="Copy flags" oneCommand />
+        </section>
+      </Show>
     </div>
   );
 }
