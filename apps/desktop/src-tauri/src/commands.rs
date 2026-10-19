@@ -105,15 +105,21 @@ fn find_model(engine: &Engine, id: &str) -> Result<LibraryModel, String> {
 
 /// Loads a library model into the engine (replacing the one loaded). `context` in tokens.
 #[tauri::command]
-pub async fn model_load(engine: State<'_, Engine>, id: String, context: Option<u32>, gpu_layers: Option<u32>) -> Result<serde_json::Value, String> {
+pub async fn model_load(engine: State<'_, Engine>, stt: SttState<'_>, id: String, context: Option<u32>, gpu_layers: Option<u32>) -> Result<serde_json::Value, String> {
     let model = find_model(&engine, &id)?;
+    // A speech model loads into its own engine beside the chat model (stt.rs).
+    if model.kind == "stt" {
+        let s = std::sync::Arc::clone(stt.inner());
+        tauri::async_runtime::spawn_blocking(move || s.load(&model)).await.map_err(|_| "The load failed.".to_owned())??;
+        return Ok(loaded_json(&engine, &stt));
+    }
     let ctx = context.unwrap_or(8192).clamp(512, 1 << 20) as usize;
     // Every layer (or more) means "as many as fit"; fewer forces a split; 0 the processor only.
     let force = gpu_layers.map(|n| n as usize).filter(|&n| n < model.arch.layers as usize);
     // The load runs on the engine thread; a blocking task waits for it.
     let eng = engine.inner().handle();
     tauri::async_runtime::spawn_blocking(move || eng.load(model, ctx, force)).await.map_err(|_| "The load failed.".to_owned())??;
-    Ok(loaded_json(&engine))
+    Ok(loaded_json(&engine, &stt))
 }
 
 /// Where a model would go if loaded now: GPU layers, RAM, the drive, and an estimated speed. The
@@ -139,23 +145,72 @@ pub async fn placement_preview(engine: State<'_, Engine>, id: String, context: O
 }
 
 #[tauri::command]
-pub async fn model_unload(engine: State<'_, Engine>) -> Result<serde_json::Value, String> {
+pub async fn model_unload(engine: State<'_, Engine>, stt: SttState<'_>) -> Result<serde_json::Value, String> {
     let eng = engine.inner().handle();
     tauri::async_runtime::spawn_blocking(move || eng.unload()).await.map_err(|_| "The unload failed.".to_owned())??;
-    Ok(loaded_json(&engine))
+    Ok(loaded_json(&engine, &stt))
 }
 
 #[tauri::command]
-pub fn models_loaded(engine: State<'_, Engine>) -> serde_json::Value {
-    loaded_json(&engine)
+pub fn models_loaded(engine: State<'_, Engine>, stt: SttState<'_>) -> serde_json::Value {
+    loaded_json(&engine, &stt)
 }
 
-fn loaded_json(engine: &Engine) -> serde_json::Value {
+type SttState<'a> = State<'a, std::sync::Arc<crate::stt::Stt>>;
+type MicState<'a> = State<'a, std::sync::Arc<crate::stt::Mic>>;
+
+fn loaded_json(engine: &Engine, stt: &crate::stt::Stt) -> serde_json::Value {
     let s = engine.status.lock().unwrap_or_else(|e| e.into_inner());
-    match &s.loaded {
-        Some(l) => serde_json::json!([{ "id": l.model.id, "slot": "llm", "params": null, "tuned": false, "placement": l.placement }]),
-        None => serde_json::json!([]),
+    let mut out = Vec::new();
+    if let Some(l) = &s.loaded {
+        out.push(serde_json::json!({ "id": l.model.id, "slot": "llm", "params": null, "tuned": false, "placement": l.placement }));
     }
+    if let Some(id) = stt.loaded_id() {
+        out.push(serde_json::json!({ "id": id, "slot": "stt", "params": null, "tuned": false, "placement": null }));
+    }
+    serde_json::Value::Array(out)
+}
+
+/// Starts recording from the default microphone (push-to-talk, or a speech model's test).
+#[tauri::command]
+pub async fn mic_start(mic: MicState<'_>) -> Result<(), String> {
+    let mic = std::sync::Arc::clone(mic.inner());
+    tauri::async_runtime::spawn_blocking(move || mic.start()).await.map_err(|_| "The microphone could not start.".to_owned())?
+}
+
+/// The microphone's recent peak level, 0..1 (0 when not recording), for the waveform.
+#[tauri::command]
+pub fn mic_level(mic: MicState<'_>) -> f32 {
+    if mic.recording() { mic.level() } else { 0.0 }
+}
+
+/// Stops the recording and transcribes it with `model_id`, or the speech model in use (the
+/// loaded one, else the first in the library).
+#[tauri::command]
+pub async fn stt_transcribe(engine: State<'_, Engine>, mic: MicState<'_>, stt: SttState<'_>, model_id: Option<String>) -> Result<String, String> {
+    let samples = mic.stop()?;
+    let model = match model_id {
+        Some(id) => find_model(&engine, &id)?,
+        None => {
+            let library = engine.library.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            crate::stt::default_model(&stt, &library).ok_or("No speech-to-text model is in the library. Download one (for example Qwen3-ASR) from Model Hub.")?
+        }
+    };
+    if model.kind != "stt" {
+        return Err("That model does not transcribe speech.".to_owned());
+    }
+    let s = std::sync::Arc::clone(stt.inner());
+    tauri::async_runtime::spawn_blocking(move || s.transcribe(&model, &samples)).await.map_err(|_| "Transcription failed.".to_owned())?
+}
+
+/// The Models screen's image test: the loaded vision model describes one image (a data: URL).
+#[tauri::command]
+pub async fn model_describe_image(engine: State<'_, Engine>, id: String, data: String) -> Result<String, String> {
+    if !data.starts_with("data:image/") || data.len() > 28_000_000 {
+        return Err("Use a PNG, JPEG, WebP or GIF image under 20 MB.".to_owned());
+    }
+    let eng = engine.inner().handle();
+    tauri::async_runtime::spawn_blocking(move || eng.describe(id, data)).await.map_err(|_| "The test failed.".to_owned())?
 }
 
 // ---- Disk space (dedup.rs): the same file kept in more than one folder. Hashing takes seconds,

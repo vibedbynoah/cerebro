@@ -190,8 +190,17 @@ export function createDesktopService(local: CerebroService): CerebroService {
     deduplicate: (groupId, keepPath) => invoke<DedupeResult>("disk_deduplicate", { groupId, keepPath }),
     unlink: (groupId) => invoke<DuplicateGroup>("disk_unlink", { groupId }),
     revealInFolder: (id) => invoke<boolean>("model_reveal", { id }),
-    describeImage: () => NOT_YET("Image input"),
-    transcribeSample: () => NOT_YET("Speech to text"),
+    async describeImage(id, image) {
+      if (!image.data) throw new Error("The image could not be read.");
+      const text = await invoke<string>("model_describe_image", { id, data: image.data });
+      return { text, provenance: "measured" };
+    },
+    async transcribeSample(id) {
+      const text = await invoke<string>("stt_transcribe", { modelId: id });
+      return { text, provenance: "measured" };
+    },
+    startRecording: () => invoke<void>("mic_start"),
+    recordingLevel: () => invoke<number>("mic_level"),
     speakSample: () => NOT_YET("Text to speech"),
 
     async startTune(modelId: string, profile: TuneProfile): Promise<TuneRunInfo> {
@@ -299,7 +308,7 @@ export function createDesktopService(local: CerebroService): CerebroService {
     },
     chatToolDecide: (id, allow) => invoke<boolean>("chat_tool_decide", { id, allow }),
     chatToolAnswer: (id, answer) => invoke<boolean>("chat_tool_answer", { id, answer }),
-    transcribe: () => NOT_YET("Speech to text"),
+    transcribe: () => invoke<string>("stt_transcribe", {}),
 
     hubSearch: (query) => invoke<HubRepo[]>("hub_search", { query }),
     hubFiles: (repo) => invoke<HubFile[]>("hub_files", { repo }),

@@ -399,6 +399,8 @@ export function Chat(): JSX.Element {
           onSend={send}
           onStop={() => abort?.abort()}
           onTranscribe={(s) => service.transcribe(s)}
+          onRecordStart={() => service.startRecording()}
+          onLevel={() => service.recordingLevel()}
           onOpenPrompt={() => setPanel("prompt")}
         />
       </section>

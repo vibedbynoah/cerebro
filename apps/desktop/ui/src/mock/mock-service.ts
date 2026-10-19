@@ -698,6 +698,9 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
         };
       }),
 
+    startRecording: () => later(0, () => undefined),
+    recordingLevel: () => later(0, () => 0.15 + Math.random() * 0.85),
+
     transcribeSample: (id, seconds) =>
       later(latency.test, () => {
         if (model(id).kind !== "stt") throw new TypeError("Not a speech-to-text model");

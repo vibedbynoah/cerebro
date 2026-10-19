@@ -51,6 +51,10 @@ export function Composer(props: {
   onSend: (text: string, atts: Attachment[]) => void;
   onStop: () => void;
   onTranscribe: (seconds: number) => Promise<string>;
+  /** Starts the microphone when push-to-talk is pressed (desktop records natively). */
+  onRecordStart?: () => Promise<void>;
+  /** The microphone's level, 0..1, polled for the waveform while recording. */
+  onLevel?: () => Promise<number>;
   onOpenPrompt: () => void;
 }): JSX.Element {
   const [text, setText] = createSignal("");
@@ -128,12 +132,20 @@ export function Composer(props: {
     }
   };
 
-  // Push-to-talk: hold the button (or press Space on it). The waveform is simulated in this build.
+  // Push-to-talk: hold the button (or press Space on it). The waveform shows the microphone's level.
   const startRec = () => {
     if (recording()) return;
     setRecording(true);
     recStart = performance.now();
-    wave = setInterval(() => setLevel((l) => [...l.slice(1), 0.15 + Math.random() * 0.85]), 70);
+    props.onRecordStart?.().catch((e: unknown) => {
+      setRecording(false);
+      clearInterval(wave);
+      setError(e instanceof Error ? e.message : "The microphone could not start.");
+    });
+    wave = setInterval(() => {
+      const read = props.onLevel ? props.onLevel() : Promise.resolve(0.15 + Math.random() * 0.85);
+      void read.then((v) => setLevel((l) => [...l.slice(1), Math.max(0.1, Math.min(1, v * 3))])).catch(() => {});
+    }, 70);
   };
   const stopRec = async () => {
     if (!recording()) return;
@@ -148,8 +160,8 @@ export function Composer(props: {
       area.value = next;
       grow();
       area.focus();
-    } catch {
-      setError("Could not transcribe that recording.");
+    } catch (e) {
+      setError(e instanceof Error && e.message ? e.message : "Could not transcribe that recording.");
     }
   };
 

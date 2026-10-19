@@ -28,6 +28,7 @@ mod engine;
 mod dedup;
 mod gguf_edit;
 mod tune_screen;
+mod stt;
 mod vision_input;
 mod hub;
 mod kv_store;
@@ -64,6 +65,10 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::disk_unlink,
             commands::model_reveal,
             commands::tune_start,
+            commands::mic_start,
+            commands::mic_level,
+            commands::stt_transcribe,
+            commands::model_describe_image,
             commands::tune_subscribe,
             commands::tune_cancel,
             commands::tune_resume,
@@ -127,6 +132,9 @@ pub fn run() -> Result<(), tauri::Error> {
         .manage(std::sync::Arc::new(dedup::Disk::default()))
         // The Tune screen's run (tune_screen.rs): its event log, listeners and finished steps.
         .manage(std::sync::Arc::new(tune_screen::TuneHub::default()))
+        // Speech to text (stt.rs): the microphone and the speech model, beside the chat model.
+        .manage(std::sync::Arc::new(stt::Mic::default()))
+        .manage(std::sync::Arc::new(stt::Stt::default()))
         .setup(|app| {
             commands::load_switches(app.handle());
             {

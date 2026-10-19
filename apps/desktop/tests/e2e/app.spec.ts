@@ -96,7 +96,7 @@ test.describe("keyboard", () => {
     await openScreen(page, "home");
     await page.keyboard.press("Control+b");
     await expect(page.locator("nav.sidebar")).toHaveClass(/is-collapsed/);
-    await expect(page.getByRole("link", { name: "Documents" })).toBeVisible();
+    await expect(page.locator("nav.sidebar").getByRole("link", { name: "Documents" })).toBeVisible();
     const width = await page.locator("nav.sidebar").evaluate((el) => el.getBoundingClientRect().width);
     expect(width).toBeLessThan(80);
     // Hovering a collapsed entry shows its tooltip (a real pointer moves more than once).

@@ -26,6 +26,8 @@ pub struct Projector {
     pub file: String,
     pub size_gi_b: f64,
     pub path: String,
+    /// "vision" (images) or "audio" (speech).
+    pub kind: &'static str,
 }
 
 /// The projector for the model at `model_path` with hidden width `embedding`: among the
@@ -43,12 +45,16 @@ pub fn find_projector(model_path: &Path, embedding: u64, basename: &str) -> Opti
             continue;
         }
         let Ok(g) = Gguf::open(&p) else { continue };
-        if g.u64("clip.vision.projection_dim").ok() != Some(embedding) {
+        let kind = if g.u64("clip.vision.projection_dim").ok() == Some(embedding) {
+            "vision"
+        } else if g.u64("clip.audio.projection_dim").ok() == Some(embedding) {
+            "audio"
+        } else {
             continue;
-        }
+        };
         let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
         let named = !basename.is_empty() && lower.contains(&basename.to_lowercase());
-        found.push((named, Projector { file: name, size_gi_b: size as f64 / (1u64 << 30) as f64, path: p.to_string_lossy().into_owned() }));
+        found.push((named, Projector { file: name, size_gi_b: size as f64 / (1u64 << 30) as f64, path: p.to_string_lossy().into_owned(), kind }));
     }
     found.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.file.cmp(&b.1.file)));
     found.into_iter().next().map(|(_, p)| p)

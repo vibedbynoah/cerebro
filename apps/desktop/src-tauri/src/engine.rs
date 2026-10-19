@@ -134,7 +134,7 @@ fn file_type_name(t: u64) -> &'static str {
 }
 
 /// Architectures Cerebro Engine runs. qwen35 is the Qwen3.5/3.8 hybrid (Gated DeltaNet + gated attention).
-const SUPPORTED_ARCHS: &[&str] = &["qwen3", "qwen3moe", "qwen2", "llama", "qwen35"];
+const SUPPORTED_ARCHS: &[&str] = &["qwen3", "qwen3moe", "qwen2", "llama", "qwen35", "qwen3vl"];
 
 /// A short, stable id from the path (FNV-1a).
 fn id_of(path: &Path) -> String {
@@ -173,8 +173,16 @@ fn describe(path: &Path, source: &'static str) -> Option<LibraryModel> {
         context_max: u("context_length").unwrap_or(0),
         tune: if kept.is_some() { "tuned" } else { "untuned" },
         provenance: "measured",
-        kind: if projector.is_some() { "vision" } else { "text" },
-        modalities: if projector.is_some() { vec!["text", "vision"] } else { vec!["text"] },
+        kind: match projector.as_ref().map(|p| p.kind) {
+            Some("audio") => "stt",
+            Some(_) => "vision",
+            None => "text",
+        },
+        modalities: match projector.as_ref().map(|p| p.kind) {
+            Some("audio") => vec!["audio-in"],
+            Some(_) => vec!["text", "vision"],
+            None => vec!["text"],
+        },
         family,
         file: path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
         path: path.to_string_lossy().into_owned(),
@@ -593,6 +601,8 @@ enum Job {
     Unload { reply: Sender<()> },
     Chat { req: ChatRequest, events: ChatSink, reply: Sender<()> },
     Tune { events: TuneSink, reply: Sender<Result<tune::Outcome, String>> },
+    /// The Models screen's image test: one image, one question, on the loaded vision model.
+    Describe { id: String, data: String, reply: Sender<Result<String, String>> },
     /// The Tune screen's run (tune_screen.rs): measured on the engine thread, which owns the model.
     TuneModel { hub: Arc<crate::tune_screen::TuneHub> },
 }
@@ -656,12 +666,30 @@ struct Loaded {
 /// Encoded images kept for reuse (a few chats' worth).
 const MAX_CACHED_IMAGES: usize = 16;
 
+/// The image test: what the model says about one image (greedy, short).
+fn describe_image(l: &mut Loaded, data: &str) -> Result<String, String> {
+    let pics = vec![data.to_owned()];
+    let embeds = encode_images(l, &pics)?;
+    let e = embeds.first().ok_or("The image could not be read.")?;
+    let before = l.tok.encode("<|im_start|>user\n<|vision_start|>");
+    let after = l.tok.encode("<|vision_end|>Describe this image in two sentences.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
+    let parts = [Part::Text(&before), Part::Image(ImageTokens { cols: e.cols, rows: e.rows, dim: e.dim, data: &e.data }), Part::Text(&after)];
+    let cfg = GenConfig { sampler: SamplerConfig { temperature: 0.0, top_k: 1, top_p: 1.0, min_p: 0.0, repeat_penalty: 1.0, seed: 0 }, max_tokens: 160 };
+    let mut out = String::new();
+    generate_parts(&l.model, &mut l.session, &l.tok, &parts, &cfg, |p| {
+        out.push_str(p);
+        true
+    })
+    .map_err(|e| format!("The model could not read the image: {e}"))?;
+    Ok(out.trim().to_owned())
+}
+
 /// Encodes `pics` (data: URLs) for the loaded model, reusing earlier encodings of the same image.
 fn encode_images(l: &mut Loaded, pics: &[String]) -> Result<Vec<Arc<cerebro_engine::vision::ImageEmbedding>>, String> {
     if pics.is_empty() {
         return Ok(Vec::new());
     }
-    let Some(proj) = l.info.projector.clone() else {
+    let Some(proj) = l.info.projector.clone().filter(|p| p.kind == "vision") else {
         return Err("This model cannot see images: load one with a vision projector (an mmproj file) beside it.".to_owned());
     };
     if l.vision.is_none() {
@@ -771,6 +799,13 @@ impl Engine {
                             set(&st, |s| s.activity = "idle");
                             let _ = reply.send(());
                         }
+                        Job::Describe { id, data, reply } => {
+                            let r = match loaded.as_mut() {
+                                Some(l) if l.info.id == id => describe_image(l, &data),
+                                _ => Err("Load this model first, then test it.".to_owned()),
+                            };
+                            let _ = reply.send(r);
+                        }
                         Job::TuneModel { hub } => {
                             let Some(spec) = hub.spec() else { continue };
                             set(&st, |s| s.activity = "tuning");
@@ -801,12 +836,15 @@ impl Engine {
                                     let place_fn = |m: &Model, ctx: usize, layers: Option<usize>| -> Result<(Session, usize, usize, bool), String> {
                                         let (s, _) = place(m, ctx, layers);
                                         let on = s.gpu.as_ref().map_or(0, |g| g.gpu_layers()) + s.portable.as_ref().map_or(0, |p| p.gpu_layers());
-                                        if let (Some(want), true) = (layers, s.gpu.is_none()) {
-                                            if want > 0 {
-                                                return Err(format!("{want} layers did not fit on the graphics card."));
-                                            }
+                                        // A forced count the planner could not honour is not the candidate it
+                                        // claims to be: measuring it would compare the baseline with itself.
+                                        if let Some(want) = layers.filter(|&w| w > 0 && w != on) {
+                                            return Err(format!("Only {on} of the requested {want} layers fit on the graphics card at this context."));
                                         }
                                         let cuda = s.gpu.is_some();
+                                        if std::env::var_os("CEREBRO_TUNE_DEBUG").is_some() {
+                                            eprintln!("place {layers:?}: {on} layers on a card (cuda {cuda}), spec {}, threads {}, free {:.2} GiB", cerebro_engine::switches::get(cerebro_engine::switches::SPEC_LOOKUP), cerebro_engine::switches::get(cerebro_engine::switches::CPU_DECODE_THREADS), cerebro_engine::hw::gpus().first().map_or(0.0, |g| g.vram_free as f64 / (1u64 << 30) as f64));
+                                        }
                                         Ok((s, on, m.cfg.n_layer, cuda))
                                     };
                                     let done = crate::tune_screen::run_job(&hub, &model, &tok, &place_fn);
@@ -927,6 +965,13 @@ impl Engine {
         let (reply, rx) = channel();
         self.send(Job::Chat { req, events, reply })?;
         rx.recv().map_err(|_| "The engine stopped during the reply.".to_owned())
+    }
+
+    /// The image test on the loaded vision model `id`.
+    pub fn describe(&self, id: String, data: String) -> Result<String, String> {
+        let (reply, rx) = channel();
+        self.send(Job::Describe { id, data, reply })?;
+        rx.recv().map_err(|_| "The engine stopped during the test.".to_owned())?
     }
 
     /// Queues the Tune screen's current run (or its resume) on the engine thread; returns at once.

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-model-describe-image"
+description = "Enables the model_describe_image command without any pre-configured scope."
+commands.allow = ["model_describe_image"]
+
+[[permission]]
+identifier = "deny-model-describe-image"
+description = "Denies the model_describe_image command without any pre-configured scope."
+commands.deny = ["model_describe_image"]

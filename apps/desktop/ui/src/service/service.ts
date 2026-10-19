@@ -104,8 +104,15 @@ export interface CerebroService {
   unlink(groupId: string): Promise<DuplicateGroup>;
   /** Opens File Explorer at the file (desktop). Resolves false where that is not possible. */
   revealInFolder(id: string): Promise<boolean>;
-  describeImage(id: string, image: { name: string; type: string; bytes: number }): Promise<TestOutput>;
+  /** The image test: `data` is the image as a data: URL (desktop reads it; the preview does not). */
+  describeImage(id: string, image: { name: string; type: string; bytes: number; data?: string }): Promise<TestOutput>;
+  /** Stops the recording `startRecording` began and transcribes it with model `id`. */
   transcribeSample(id: string, seconds: number): Promise<TestOutput>;
+  /** Starts recording from the microphone (push-to-talk, or a speech model's test); `transcribe`
+   *  and `transcribeSample` stop it. */
+  startRecording(): Promise<void>;
+  /** The microphone's recent peak level while recording, 0..1, for the waveform. */
+  recordingLevel(): Promise<number>;
   /** Resolves with the length of the spoken audio, in seconds. */
   speakSample(id: string, text: string): Promise<number>;
 

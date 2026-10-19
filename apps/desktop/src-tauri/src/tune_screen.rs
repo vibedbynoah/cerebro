@@ -626,34 +626,47 @@ fn vram_free_gib() -> f64 {
     cerebro_engine::hw::gpus().first().map_or(0.0, |g| g.vram_free as f64 / (1u64 << 30) as f64)
 }
 
-/// Greedy writing for `secs`, calling `tick(tokens so far, seconds so far)` about every half
-/// second; starts again from the prompt when the model ends its answer early.
-fn write_for(m: &Model, s: &mut Session, tok: &Tokenizer, prompt: &[u32], secs: f64, cancel: &AtomicBool, mut tick: impl FnMut(usize, f64)) -> Result<(usize, f64), Stop> {
+/// Fewest tokens a measurement writes, so slow models are not judged on a handful of tokens.
+const MIN_TOKENS: usize = 64;
+
+/// Greedy writing for `secs` of writing time (and at least MIN_TOKENS tokens when measuring,
+/// within four times `secs`), calling `tick(tokens so far, writing seconds so
+/// far)` about every half second; starts again from the prompt when the model ends its answer
+/// early. Reading the prompt is not counted: each call's clock starts at its first written token,
+/// and the tokens are those after it. Returns (tokens, writing seconds).
+fn write_for(m: &Model, s: &mut Session, tok: &Tokenizer, prompt: &[u32], secs: f64, min_tokens: usize, cancel: &AtomicBool, mut tick: impl FnMut(usize, f64)) -> Result<(usize, f64), Stop> {
+    let enough = |n: usize, e: f64| e >= secs * 4.0 || (e >= secs && n >= min_tokens);
     let cfg = GenConfig { sampler: SamplerConfig { temperature: 0.0, ..Default::default() }, max_tokens: 100_000 };
-    let t0 = Instant::now();
     let mut n = 0usize;
-    let mut decode_s = 0.0;
-    let mut last = 0.0;
-    while t0.elapsed().as_secs_f64() < secs {
+    let mut done_s = 0.0;
+    let mut last_tick = 0.0;
+    while !enough(n, done_s) {
+        let mut first: Option<Instant> = None;
+        let mut call_s = 0.0;
         let g = generate(m, s, tok, prompt, &cfg, |_| {
+            let Some(f) = first else {
+                first = Some(Instant::now());
+                return !cancel.load(Ordering::SeqCst);
+            };
             n += 1;
-            let e = t0.elapsed().as_secs_f64();
-            if e - last >= 0.5 {
+            call_s = f.elapsed().as_secs_f64();
+            let e = done_s + call_s;
+            if e - last_tick >= 0.5 {
                 tick(n, e);
-                last = e;
+                last_tick = e;
             }
-            e < secs && !cancel.load(Ordering::SeqCst)
+            !enough(n, e) && !cancel.load(Ordering::SeqCst)
         })
         .map_err(|e| Stop::Failed(format!("Writing failed: {e}")))?;
-        decode_s += g.total_ms / 1000.0 - g.ttft_ms / 1000.0;
+        done_s += call_s;
         if cancel.load(Ordering::SeqCst) {
             return Err(Stop::Cancelled);
         }
-        if g.output_tokens == 0 {
+        if g.output_tokens <= 1 {
             break;
         }
     }
-    Ok((n, decode_s))
+    Ok((n, done_s))
 }
 
 /// Runs (or resumes) the hub's current run on `model`, emitting events; returns the placement
@@ -753,13 +766,13 @@ pub fn run(hub: &TuneHub, model: &Model, tok: &Tokenizer, place: &Place<'_>) -> 
             }
         };
         // Warm-up, then three bursts; the first is discarded (the screen says so).
-        write_for(model, &mut s, tok, &screen_prompt, 0.5, &cancel, |_, _| {})?;
+        write_for(model, &mut s, tok, &screen_prompt, 0.5, 0, &cancel, |_, _| {})?;
         let mut kept_tps = Vec::new();
         let c0 = Instant::now();
         for rep in 1..=3 {
             let mut prev = (0usize, 0.0f64);
             let id = c.id.clone();
-            let (n, secs) = write_for(model, &mut s, tok, &screen_prompt, 2.0, &cancel, |n, e| {
+            let (n, secs) = write_for(model, &mut s, tok, &screen_prompt, 2.0, 0, &cancel, |n, e| {
                 let tps = (n - prev.0) as f64 / (e - prev.1).max(1e-3);
                 prev = (n, e);
                 hub.emit(json!({ "kind": "sample", "candidateId": id, "rep": rep, "t": ((c0.elapsed().as_secs_f64()) * 100.0).round() / 100.0, "tps": (tps * 100.0).round() / 100.0 }));
@@ -808,13 +821,13 @@ pub fn run(hub: &TuneHub, model: &Model, tok: &Tokenizer, place: &Place<'_>) -> 
         }
         // Writing with an empty context.
         let short = chat_ids(tok, "Tell me about the ocean.");
-        let (n0, s0) = write_for(model, &mut s, tok, &short, 3.0, &cancel, |_, _| {})?;
+        let (n0, s0) = write_for(model, &mut s, tok, &short, 3.0, MIN_TOKENS, &cancel, |_, _| {})?;
         // Writing at depth: the document fills the context up to `depth`, then a question.
         let tail = chat_ids(tok, "Summarise the document above in detail.");
         let fill = depth.saturating_sub(tail.len() + 64).min(doc_ids_full.len());
         let mut deep: Vec<u32> = doc_ids_full[..fill].to_vec();
         deep.extend_from_slice(&tail);
-        let (nd, sd) = write_for(model, &mut s, tok, &deep, 3.0, &cancel, |_, _| {})?;
+        let (nd, sd) = write_for(model, &mut s, tok, &deep, 3.0, MIN_TOKENS, &cancel, |_, _| {})?;
         // The quality gate's next-token distributions.
         let mut dists = Vec::new();
         for p in QUALITY_PROMPTS {
@@ -880,7 +893,7 @@ pub fn run(hub: &TuneHub, model: &Model, tok: &Tokenizer, place: &Place<'_>) -> 
         let mut next_at = 4.0;
         let mut prev = (0usize, 0.0f64);
         let id = c.id.clone();
-        write_for(model, &mut s, tok, &prompt, soak_s as f64, &cancel, |n, e| {
+        write_for(model, &mut s, tok, &prompt, soak_s as f64, 0, &cancel, |n, e| {
             if e >= next_at {
                 let tps = (n - prev.0) as f64 / (e - prev.1).max(1e-3);
                 prev = (n, e);
@@ -1038,7 +1051,7 @@ mod real_tests {
         hub.begin(spec.clone(), run_info(&spec)).expect("begin");
         engine.tune_model(hub.clone()).expect("queue");
         let t0 = Instant::now();
-        while hub.running() && t0.elapsed().as_secs() < 900 {
+        while hub.running() && t0.elapsed().as_secs() < 3600 {
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
         let ev = hub.events();

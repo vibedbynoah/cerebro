@@ -54,17 +54,23 @@ export function VisionTry(props: { model: LibraryModel }): JSX.Element {
     }
     setFileName(file.name.slice(0, 120));
     const reader = new FileReader();
-    reader.onload = () => {
-      if (current() && typeof reader.result === "string" && reader.result.startsWith("data:image/")) setPreview(reader.result);
-    };
-    reader.onerror = () => current() && setError("That image could not be read from disk. Try another one.");
-    reader.readAsDataURL(file);
     setBusy(true);
-    service
-      .describeImage(props.model.id, { name: file.name.slice(0, 120), type: file.type, bytes: file.size })
-      .then((o) => current() && setOutput(o))
-      .catch(() => current() && setError("The model could not read that image. Try another one."))
-      .finally(() => current() && setBusy(false));
+    reader.onload = () => {
+      if (!current() || typeof reader.result !== "string" || !reader.result.startsWith("data:image/")) return;
+      const data = reader.result;
+      setPreview(data);
+      service
+        .describeImage(props.model.id, { name: file.name.slice(0, 120), type: file.type, bytes: file.size, data })
+        .then((o) => current() && setOutput(o))
+        .catch((e: unknown) => current() && setError(e instanceof Error && e.message ? e.message : "The model could not read that image. Try another one."))
+        .finally(() => current() && setBusy(false));
+    };
+    reader.onerror = () => {
+      if (!current()) return;
+      setError("That image could not be read from disk. Try another one.");
+      setBusy(false);
+    };
+    reader.readAsDataURL(file);
   };
 
   return (
@@ -166,6 +172,13 @@ export function SpeechToTextTry(props: { model: LibraryModel }): JSX.Element {
     setOutput(null);
     setLeft(RECORD_SECONDS);
     setPhase("recording");
+    service.startRecording().catch((e: unknown) => {
+      clearInterval(timer);
+      if (alive) {
+        setPhase("idle");
+        notify("The microphone could not start", e instanceof Error ? e.message : "Check that a microphone is connected.", "error");
+      }
+    });
     timer = setInterval(() => {
       const next = left() - 1;
       setLeft(next);

@@ -55,6 +55,8 @@ rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs"] }
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 sha2 = "0.10"
 base64 = "0.22"
+# The microphone for push-to-talk and speech-model tests (stt.rs), through WASAPI on Windows.
+cpal = "0.15"
 # Images attached in Chat, decoded for a vision model (vision_input.rs).
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
