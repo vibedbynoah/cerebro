@@ -124,10 +124,11 @@ extern "C" __global__ void __launch_bounds__(256) gemm_f16(
 }
 
 // ---- implicit-GEMM convolution ------------------------------------------------------------------------
-// out[p][o] = bias[o] + sum_{ky,kx,ch} W[o][(ky*k + kx)*c + ch] * x[iy][ix][ch] (+ out when add) for
-// output pixel p, iy = oy*s + ky - k/2, ix = ox*s + kx - k/2 (zero outside). x is f32 [h][w][c] with
-// c % 8 == 0; W is f16 with rows of k*k*c values ordered (ky, kx, channel), so each 8-value k chunk is
-// 8 consecutive channels of one input pixel. The patch matrix is never built: B tiles are gathered
+// out[p][o] = bias[o] + sum_{ky,kx,ch} W[o][(ky*kw + kx)*c + ch] * x[iy][ix][ch] (+ out when add) for
+// output pixel p, iy = oy*s + ky*d - ph, ix = ox*s + kx*d - pw (zero outside): square kernels with
+// padding k/2, and 1-D causal or dilated ones (h = 1, kh = 1, pw = (k-1)*d). x is f32 [h][w][c] with
+// c % 8 == 0; W is f16 with rows of kh*kw*c values ordered (ky, kx, channel), so each 8-value k chunk
+// is 8 consecutive channels of one input pixel. The patch matrix is never built: B tiles are gathered
 // from x straight into shared memory (as f16) while the previous tile multiplies. A 1x1 convolution
 // over n pixels is a linear layer with f32 input.
 // Block tile 128 output channels x BN pixels x 32 k, 8 warps. BN 64: 4x2 warps of 32x32;
@@ -137,7 +138,7 @@ extern "C" __global__ void __launch_bounds__(256) gemm_f16(
 template <int BN, bool HACC>
 __device__ __forceinline__ void conv_body(
     const __half* __restrict__ W, int ldw, const float* __restrict__ x, float* __restrict__ Y, int oc,
-    int h, int w, int c, int k, int s, int oh, int ow, const float* __restrict__ bias, int add) {
+    int h, int w, int c, int kh, int kw, int s, int ph, int pw, int d, int oh, int ow, const float* __restrict__ bias, int add) {
     constexpr int WNW = BN / 32, WMW = 8 / WNW; // warps along pixels and along channels
     constexpr int MI = GBM / WMW / 16, NJ = 4;  // 16-row and 8-pixel MMA tiles per warp
     constexpr int BCH = BN / 64;                // B chunks per thread
@@ -147,7 +148,7 @@ __device__ __forceinline__ void conv_body(
     const int g = lane >> 2, tg = lane & 3;
     const int r0 = blockIdx.x * GBM, t0 = blockIdx.y * BN;
     const int wm = (warp % WMW) * (GBM / WMW), wn = (warp / WMW) * 32;
-    const int K = k * k * c, np = oh * ow, pad = k / 2;
+    const int K = kh * kw * c, np = oh * ow;
     const int stages = (K + GBK - 1) / GBK;
     int br[BCH], oy[BCH], ox[BCH];
     #pragma unroll
@@ -171,11 +172,11 @@ __device__ __forceinline__ void conv_body(
     float4 lo[BCH], hi[BCH];
     auto fetch_b = [&](int k0) {
         int kk = k0 + bk;
-        int tap = kk / c, ch = kk - tap * c, ky = tap / k, kx = tap - ky * k;
+        int tap = kk / c, ch = kk - tap * c, ky = tap / kw, kx = tap - ky * kw;
         #pragma unroll
         for (int u = 0; u < BCH; ++u) {
             lo[u] = hi[u] = make_float4(0.f, 0.f, 0.f, 0.f);
-            int iy = oy[u] * s + ky - pad, ix = ox[u] * s + kx - pad;
+            int iy = oy[u] * s + ky * d - ph, ix = ox[u] * s + kx * d - pw;
             if (t0 + br[u] < np && kk < K && iy >= 0 && iy < h && ix >= 0 && ix < w) {
                 const float4* src = reinterpret_cast<const float4*>(x + ((size_t)iy * w + ix) * c + ch);
                 lo[u] = src[0];
@@ -276,26 +277,26 @@ __device__ __forceinline__ void conv_body(
 
 extern "C" __global__ void __launch_bounds__(256) conv_f16(
     const __half* __restrict__ W, int ldw, const float* __restrict__ x, float* __restrict__ Y, int oc,
-    int h, int w, int c, int k, int s, int oh, int ow, const float* __restrict__ bias, int add) {
-    conv_body<64, false>(W, ldw, x, Y, oc, h, w, c, k, s, oh, ow, bias, add);
+    int h, int w, int c, int kh, int kw, int s, int ph, int pw, int d, int oh, int ow, const float* __restrict__ bias, int add) {
+    conv_body<64, false>(W, ldw, x, Y, oc, h, w, c, kh, kw, s, ph, pw, d, oh, ow, bias, add);
 }
 
 extern "C" __global__ void __launch_bounds__(256) conv_f16_h(
     const __half* __restrict__ W, int ldw, const float* __restrict__ x, float* __restrict__ Y, int oc,
-    int h, int w, int c, int k, int s, int oh, int ow, const float* __restrict__ bias, int add) {
-    conv_body<64, true>(W, ldw, x, Y, oc, h, w, c, k, s, oh, ow, bias, add);
+    int h, int w, int c, int kh, int kw, int s, int ph, int pw, int d, int oh, int ow, const float* __restrict__ bias, int add) {
+    conv_body<64, true>(W, ldw, x, Y, oc, h, w, c, kh, kw, s, ph, pw, d, oh, ow, bias, add);
 }
 
 extern "C" __global__ void __launch_bounds__(256) conv_f16_wide_h(
     const __half* __restrict__ W, int ldw, const float* __restrict__ x, float* __restrict__ Y, int oc,
-    int h, int w, int c, int k, int s, int oh, int ow, const float* __restrict__ bias, int add) {
-    conv_body<128, true>(W, ldw, x, Y, oc, h, w, c, k, s, oh, ow, bias, add);
+    int h, int w, int c, int kh, int kw, int s, int ph, int pw, int d, int oh, int ow, const float* __restrict__ bias, int add) {
+    conv_body<128, true>(W, ldw, x, Y, oc, h, w, c, kh, kw, s, ph, pw, d, oh, ow, bias, add);
 }
 
 extern "C" __global__ void __launch_bounds__(256) conv_f16_wide(
     const __half* __restrict__ W, int ldw, const float* __restrict__ x, float* __restrict__ Y, int oc,
-    int h, int w, int c, int k, int s, int oh, int ow, const float* __restrict__ bias, int add) {
-    conv_body<128, false>(W, ldw, x, Y, oc, h, w, c, k, s, oh, ow, bias, add);
+    int h, int w, int c, int kh, int kw, int s, int ph, int pw, int d, int oh, int ow, const float* __restrict__ bias, int add) {
+    conv_body<128, false>(W, ldw, x, Y, oc, h, w, c, kh, kw, s, ph, pw, d, oh, ow, bias, add);
 }
 
 // ---- flash attention, head size 64 ---------------------------------------------------------------------
@@ -315,13 +316,13 @@ __device__ __forceinline__ unsigned fa_pack(float a, float b) {
 
 extern "C" __global__ void __launch_bounds__(128) flash_attn64(
     const float* __restrict__ q, int ldq, const float* __restrict__ k, int ldk, const float* __restrict__ v, int ldv,
-    float* __restrict__ out, int ldo, int nq, int nk, float scale, int causal) {
+    float* __restrict__ out, int ldo, int nq, int nk, float scale, int causal, int window, int group) {
     __shared__ __align__(16) __half qs[FA_T * FA_LD];
     __shared__ __align__(16) __half ks[FA_T * FA_LD];
     __shared__ __align__(16) __half vt[FA_D * FA_LD];
     const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
     const int g = lane >> 2, tg = lane & 3;
-    const int q0 = blockIdx.x * FA_T, hoff = blockIdx.y * FA_D;
+    const int q0 = blockIdx.x * FA_T, hoff = blockIdx.y * FA_D, kvoff = (blockIdx.y / group) * FA_D;
     const float qscale = scale * 1.44269504f;
 
     // Q tile: 64 rows x 64 dims, 32 values per thread (8 float4).
@@ -351,15 +352,16 @@ extern "C" __global__ void __launch_bounds__(128) flash_attn64(
     float m0 = -1e30f, m1 = -1e30f, l0 = 0.f, l1 = 0.f;
     const int row0 = q0 + wr + g, row1 = row0 + 8;
     const int kend = causal ? min(nk, q0 + FA_T) : nk;
+    const int kbeg = (causal && window > 0) ? max(0, (q0 - window + 1) / FA_T * FA_T) : 0;
 
-    for (int k0 = 0; k0 < kend; k0 += FA_T) {
+    for (int k0 = kbeg; k0 < kend; k0 += FA_T) {
         __syncthreads();
         for (int i = tid; i < FA_T * FA_D / 4; i += 128) {
             int r = i / (FA_D / 4), c4 = (i % (FA_D / 4)) * 4;
             float4 x = make_float4(0.f, 0.f, 0.f, 0.f), y = x;
             if (k0 + r < nk) {
-                x = *reinterpret_cast<const float4*>(k + (size_t)(k0 + r) * ldk + hoff + c4);
-                y = *reinterpret_cast<const float4*>(v + (size_t)(k0 + r) * ldv + hoff + c4);
+                x = *reinterpret_cast<const float4*>(k + (size_t)(k0 + r) * ldk + kvoff + c4);
+                y = *reinterpret_cast<const float4*>(v + (size_t)(k0 + r) * ldv + kvoff + c4);
             }
             *reinterpret_cast<uint2*>(&ks[r * FA_LD + c4]) = make_uint2(fa_pack(x.x, x.y), fa_pack(x.z, x.w));
             vt[(c4 + 0) * FA_LD + r] = __float2half(y.x);
@@ -383,10 +385,11 @@ extern "C" __global__ void __launch_bounds__(128) flash_attn64(
         #pragma unroll
         for (int j = 0; j < 8; ++j) {
             int c = k0 + j * 8 + tg * 2;
-            if (c >= nk || (causal && c > row0)) s[j][0] = -1e30f;
-            if (c + 1 >= nk || (causal && c + 1 > row0)) s[j][1] = -1e30f;
-            if (c >= nk || (causal && c > row1)) s[j][2] = -1e30f;
-            if (c + 1 >= nk || (causal && c + 1 > row1)) s[j][3] = -1e30f;
+            const int w0 = window > 0 ? row0 - window : -1, w1 = window > 0 ? row1 - window : -1;
+            if (c >= nk || (causal && (c > row0 || c <= w0))) s[j][0] = -1e30f;
+            if (c + 1 >= nk || (causal && (c + 1 > row0 || c + 1 <= w0))) s[j][1] = -1e30f;
+            if (c >= nk || (causal && (c > row1 || c <= w1))) s[j][2] = -1e30f;
+            if (c + 1 >= nk || (causal && (c + 1 > row1 || c + 1 <= w1))) s[j][3] = -1e30f;
             mx0 = fmaxf(mx0, fmaxf(s[j][0], s[j][1]));
             mx1 = fmaxf(mx1, fmaxf(s[j][2], s[j][3]));
         }
@@ -552,6 +555,238 @@ extern "C" __global__ void rope_halves(float* __restrict__ x, const float2* __re
     float a0 = b[k], a1 = b[k + half];
     b[k] = a0 * c.x - a1 * c.y;
     b[k + half] = a0 * c.y + a1 * c.x;
+}
+
+// ---- one-query attention -------------------------------------------------------------------------------
+// out[h*hd..] = softmax(q_h . k_j * scale) v_j over keys j < nk, query head h reading key/value head
+// h / group; any head size. One block per query head; scores in dynamic shared memory (nk floats).
+extern "C" __global__ void attn_decode(const float* __restrict__ q, const float* __restrict__ k, const float* __restrict__ v, float* __restrict__ out,
+                                       int nk, int hd, int ldk, int group, float scale) {
+    extern __shared__ float sc[];
+    __shared__ float red[32];
+    const int h = blockIdx.x, kh = h / group, warp = threadIdx.x >> 5, lane = threadIdx.x & 31, nw = blockDim.x >> 5;
+    const float* qh = q + (size_t)h * hd;
+    for (int j = warp; j < nk; j += nw) {
+        const float* kj = k + (size_t)j * ldk + kh * hd;
+        float acc = 0.f;
+        for (int d = lane; d < hd; d += 32) acc += qh[d] * kj[d];
+        for (int o = 16; o > 0; o >>= 1) acc += __shfl_xor_sync(0xffffffff, acc, o);
+        if (lane == 0) sc[j] = acc * scale;
+    }
+    __syncthreads();
+    float m = -1e30f;
+    for (int j = 0; j < nk; ++j) m = fmaxf(m, sc[j]);
+    float sum = 0.f;
+    for (int j = threadIdx.x; j < nk; j += blockDim.x) sum += __expf(sc[j] - m);
+    sum = block_sum(sum, red);
+    for (int d = threadIdx.x; d < hd; d += blockDim.x) {
+        float acc = 0.f;
+        for (int j = 0; j < nk; ++j) acc += __expf(sc[j] - m) * v[(size_t)j * ldk + kh * hd + d];
+        out[(size_t)h * hd + d] = acc / sum;
+    }
+}
+
+// ---- sampling on the card -----------------------------------------------------------------------------
+// The processor sampler's top-k draw (temperature 1, no top-p or min-p): the k largest logits (ties to
+// the lower index, as a stable sort gives), softmax over them, then the first whose running sum
+// reaches u[slot] * total. Writes the index to codes[slot]. One block of 1024 threads, n <= 4096.
+extern "C" __global__ void sample_topk(const float* __restrict__ logits, int n, int k, const float* __restrict__ u, int slot, int* __restrict__ codes) {
+    __shared__ unsigned char taken[4096];
+    __shared__ float bv[32];
+    __shared__ int bi[32];
+    __shared__ int top[64];
+    __shared__ float topv[64];
+    for (int i = threadIdx.x; i < n; i += blockDim.x) taken[i] = 0;
+    __syncthreads();
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    for (int r = 0; r < k; ++r) {
+        float best = -3.4e38f;
+        int bidx = 0x7fffffff;
+        for (int i = threadIdx.x; i < n; i += blockDim.x) {
+            float v = logits[i];
+            if (!taken[i] && (v > best || (v == best && i < bidx))) { best = v; bidx = i; }
+        }
+        for (int o = 16; o > 0; o >>= 1) {
+            float ov = __shfl_xor_sync(0xffffffff, best, o);
+            int oi = __shfl_xor_sync(0xffffffff, bidx, o);
+            if (ov > best || (ov == best && oi < bidx)) { best = ov; bidx = oi; }
+        }
+        if (lane == 0) { bv[warp] = best; bi[warp] = bidx; }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            float b = bv[0];
+            int ix = bi[0];
+            for (int w = 1; w < (int)(blockDim.x >> 5); ++w)
+                if (bv[w] > b || (bv[w] == b && bi[w] < ix)) { b = bv[w]; ix = bi[w]; }
+            top[r] = ix;
+            topv[r] = b;
+            taken[ix] = 1;
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        float m = topv[0], s = 0.f;
+        for (int i = 0; i < k; ++i) s += expf(topv[i] - m);
+        float rr = u[slot] * s;
+        int pick = top[k - 1];
+        for (int i = 0; i < k; ++i) {
+            rr -= expf(topv[i] - m);
+            if (rr <= 0.f) { pick = top[i]; break; }
+        }
+        codes[slot] = pick;
+    }
+}
+
+// out = table[codes[slot]] (rows of dim).
+extern "C" __global__ void gather_row(const float* __restrict__ table, const int* __restrict__ codes, int slot, float* __restrict__ out, int dim) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < dim) out[i] = table[(size_t)codes[slot] * dim + i];
+}
+
+// ---- one-token transformer steps (fused) ---------------------------------------------------------------
+// y[r] = bias[r] + W[r] . in(x) (+ y), one warp per row, where in(x) is x, or RMSNorm(x) * nw when nw is
+// set (eps), or silu(x[i]) * x[cols + i] when glu is set (x holds [gate | up]).
+extern "C" __global__ void gemv_fused(const __half* __restrict__ W, int ldw, const float* __restrict__ x, float* __restrict__ y,
+                                      int rows, int cols, const float* __restrict__ bias, int add,
+                                      const float* __restrict__ nw, float eps, int glu) {
+    int r = blockIdx.x * 8 + (threadIdx.x >> 5), lane = threadIdx.x & 31;
+    if (r >= rows) return;
+    float s = 1.f;
+    if (nw) {
+        float ss = 0.f;
+        for (int i = lane; i < cols; i += 32) ss += x[i] * x[i];
+        for (int o = 16; o > 0; o >>= 1) ss += __shfl_xor_sync(0xffffffff, ss, o);
+        s = rsqrtf(ss / cols + eps);
+    }
+    const __half2* w2 = reinterpret_cast<const __half2*>(W + (size_t)r * ldw);
+    float acc = 0.f;
+    for (int i = lane; i < cols / 2; i += 32) {
+        float2 wv = __half22float2(w2[i]);
+        float a = x[2 * i], b = x[2 * i + 1];
+        if (nw) {
+            a *= s * nw[2 * i];
+            b *= s * nw[2 * i + 1];
+        } else if (glu) {
+            a = a / (1.f + __expf(-a)) * x[cols + 2 * i];
+            b = b / (1.f + __expf(-b)) * x[cols + 2 * i + 1];
+        }
+        acc += wv.x * a + wv.y * b;
+    }
+    for (int o = 16; o > 0; o >>= 1) acc += __shfl_xor_sync(0xffffffff, acc, o);
+    if (lane == 0) {
+        float v = acc + (bias ? bias[r] : 0.f);
+        y[r] = add ? y[r] + v : v;
+    }
+}
+
+// After a fused [q | k | v] product for one token at `pos`: per head RMSNorm (weights qn / kn when
+// set) and NeoX rotary (cs: hd/2 (cos, sin) pairs for this position) on q in place and on k into
+// kc[pos]; v copied into vc[pos]. Grid heads + 2 * kv_heads, block hd / 2.
+extern "C" __global__ void qk_norm_rope_cache(float* __restrict__ qkv, const float* __restrict__ qn, const float* __restrict__ kn, const float2* __restrict__ cs,
+                                              float* __restrict__ kc, float* __restrict__ vc, int pos, int heads, int kv_heads, int hd, float eps) {
+    __shared__ float red[32];
+    const int b = blockIdx.x, i = threadIdx.x, half = hd / 2;
+    const int qd = heads * hd, kvd = kv_heads * hd;
+    if (b >= heads + kv_heads) {
+        int vh = b - heads - kv_heads;
+        const float* src = qkv + qd + kvd + vh * hd;
+        float* dst = vc + (size_t)pos * kvd + vh * hd;
+        dst[i] = src[i];
+        dst[i + half] = src[i + half];
+        return;
+    }
+    const bool isq = b < heads;
+    float* x = isq ? qkv + b * hd : qkv + qd + (b - heads) * hd;
+    const float* w = isq ? qn : kn;
+    float a = x[i], c = x[i + half];
+    if (w) {
+        float s = rsqrtf(block_sum(a * a + c * c, red) / hd + eps);
+        a *= s * w[i];
+        c *= s * w[i + half];
+    }
+    float2 r = cs[i];
+    float a2 = a * r.x - c * r.y, c2 = a * r.y + c * r.x;
+    float* out = isq ? x : kc + (size_t)pos * kvd + (b - heads) * hd;
+    out[i] = a2;
+    out[i + half] = c2;
+}
+
+// ---- matrix-vector products --------------------------------------------------------------------------
+// y[t][r] = bias[r] + W[r] . x[t] (+ y) for a few tokens: one warp per row, half2 weight loads, the
+// tokens' rows read from f32. For one-token steps, where the tiled GEMM would use a handful of blocks.
+extern "C" __global__ void gemv_f16(const __half* __restrict__ W, int ldw, const float* __restrict__ x, float* __restrict__ y,
+                                    int rows, int cols, int T, const float* __restrict__ bias, int add) {
+    int r = blockIdx.x * 8 + (threadIdx.x >> 5), lane = threadIdx.x & 31;
+    if (r >= rows) return;
+    const __half2* w2 = reinterpret_cast<const __half2*>(W + (size_t)r * ldw);
+    for (int t = 0; t < T; ++t) {
+        const float2* x2 = reinterpret_cast<const float2*>(x + (size_t)t * cols);
+        float acc = 0.f;
+        for (int i = lane; i < cols / 2; i += 32) {
+            float2 wv = __half22float2(w2[i]);
+            float2 xv = x2[i];
+            acc += wv.x * xv.x + wv.y * xv.y;
+        }
+        for (int o = 16; o > 0; o >>= 1) acc += __shfl_xor_sync(0xffffffff, acc, o);
+        if (lane == 0) {
+            float v = acc + (bias ? bias[r] : 0.f);
+            float* o = y + (size_t)t * rows + r;
+            *o = add ? *o + v : v;
+        }
+    }
+}
+
+// ---- speech decoder pieces ------------------------------------------------------------------------------
+
+// Transposed convolution's overlap-add: col [T][oc*k] (rows (oc, tap)) to y [T*s][oc] + bias; taps past
+// the end are dropped.
+extern "C" __global__ void overlap_add(const float* __restrict__ col, const float* __restrict__ bias, float* __restrict__ y, int T, int oc, int k, int s) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= (size_t)T * s * oc) return;
+    int c = (int)(i % oc), o = (int)(i / oc);
+    float v = bias[c];
+    for (int kk = o % s; kk < k; kk += s) {
+        int t = (o - kk) / s;
+        if (t >= 0 && t < T) v += col[((size_t)t * oc + c) * k + kk];
+    }
+    y[i] = v;
+}
+
+// Snake: x + sin(x * alpha)^2 * beta per channel (alpha and beta as the file stores them).
+extern "C" __global__ void snake(const float* __restrict__ x, float* __restrict__ y, const float* __restrict__ alpha, const float* __restrict__ beta, size_t n, int c) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    int ch = (int)(i % c);
+    float v = x[i], sn = __sinf(v * alpha[ch]);
+    y[i] = v + sn * sn * beta[ch];
+}
+
+// Depthwise causal convolution: y[t][c] = b[c] + sum_kk w[c][kk] * x[t - (k-1-kk)][c].
+extern "C" __global__ void dwconv_causal(const float* __restrict__ x, const float* __restrict__ w, const float* __restrict__ b, float* __restrict__ y, int T, int c, int k) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= (size_t)T * c) return;
+    int ch = (int)(i % c), t = (int)(i / c);
+    float v = b[ch];
+    for (int kk = 0; kk < k; ++kk) {
+        int src = t - (k - 1 - kk);
+        if (src >= 0) v += w[ch * k + kk] * x[(size_t)src * c + ch];
+    }
+    y[i] = v;
+}
+
+// x += y * v[channel] (v null: x += y).
+extern "C" __global__ void add_scaled(float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ v, size_t n, int c) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    x[i] += y[i] * (v ? v[i % c] : 1.f);
+}
+
+// g = silu(g) * u.
+extern "C" __global__ void swiglu(float* __restrict__ g, const float* __restrict__ u, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float v = g[i];
+    g[i] = v / (1.f + __expf(-v)) * u[i];
 }
 
 // ---- elementwise --------------------------------------------------------------------------------------

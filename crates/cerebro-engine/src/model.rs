@@ -1603,16 +1603,46 @@ impl Session {
         }
     }
 
+    /// Forgets every position, keeping the session's buffers (and its graphics-card copy of the
+    /// model) for the next prompt.
+    pub fn clear(&mut self) -> Result<(), Error> {
+        self.tokens.clear();
+        self.images.clear();
+        self.reset_recurrent();
+        #[cfg(feature = "cuda")]
+        if let Some(g) = self.gpu.as_mut() {
+            g.reset_recurrent()?;
+            g.rope_shift = 0;
+        }
+        Ok(())
+    }
+
     /// Appends one position whose input is `row` (a raw embedding, `cfg.dim` values) instead of a
     /// token's: a TTS talker's inputs are sums of text and codec embeddings. 1-D positions; the
-    /// cache holds a pseudo-token for it. Processor sessions only.
+    /// cache holds a pseudo-token for it. Processor sessions, and whole-model CUDA sessions (where
+    /// the row goes in as the image path's rows do).
     pub fn step_embedding(&mut self, m: &Model, row: &[f32]) -> Result<(), Error> {
         if row.len() != m.cfg.dim {
             return Err(Error::Request(format!("an embedding of {} values for a model {} wide", row.len(), m.cfg.dim)));
         }
         #[cfg(feature = "cuda")]
-        if self.gpu.is_some() {
-            return Err(Error::Unsupported("embedding inputs run on the processor for now".into()));
+        if let Some(g) = self.gpu.as_mut() {
+            if g.is_split() {
+                return Err(Error::Unsupported("embedding inputs on a model split between the graphics card and the processor".into()));
+            }
+            let pos = self.tokens.len();
+            if pos + 1 >= self.max_ctx {
+                return Err(Error::Request(format!("the {}-token context is full", self.max_ctx)));
+            }
+            let id = 0x8000_0000 | (pos as u32 & 0x7fff_ffff);
+            g.image = Some(crate::gpu::ImagePrefill { from: pos, rope: Vec::new(), rows: vec![(pos, row.to_vec())] });
+            g.hidden = Some(std::mem::take(&mut self.hidden));
+            let r = g.prefill(m, &[id], pos, Some(&mut self.logits));
+            g.image = None;
+            self.hidden = g.hidden.take().unwrap_or_default();
+            r?;
+            self.tokens.push(id);
+            return Ok(());
         }
         #[cfg(feature = "portable")]
         if self.portable.is_some() {

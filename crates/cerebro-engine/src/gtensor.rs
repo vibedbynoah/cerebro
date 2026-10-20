@@ -30,12 +30,15 @@ pub struct DW {
     bias: Option<CudaSlice<f32>>,
 }
 
-/// A k x k convolution on the card (weights rows over (channel, ky, kx)).
+/// A k x k convolution on the card (weights rows over (channel, ky, kx)), or a 1-D one over time
+/// (rows over (channel, tap); `causal` with dilation `dil`).
 pub struct DConv {
     pub w: DW,
     pub ic: usize,
     pub k: usize,
     pub stride: usize,
+    /// 1-D: (dilation); the input is [T][ic] and the padding all on the left.
+    causal: Option<usize>,
     /// Weights reordered (ky, kx, channel) for the implicit-GEMM kernel (ic % 8 == 0, k > 1).
     implicit: Option<CudaSlice<u16>>,
 }
@@ -44,6 +47,17 @@ struct Funcs {
     gemm: CudaFunction,
     conv: CudaFunction,
     rope_halves: CudaFunction,
+    gemv: CudaFunction,
+    gemv_fused: CudaFunction,
+    qk_norm_rope_cache: CudaFunction,
+    sample_topk: CudaFunction,
+    gather_row: CudaFunction,
+    attn_decode: CudaFunction,
+    overlap_add: CudaFunction,
+    snake: CudaFunction,
+    dwconv: CudaFunction,
+    add_scaled: CudaFunction,
+    swiglu: CudaFunction,
     conv_wide: CudaFunction,
     conv_h: CudaFunction,
     conv_wide_h: CudaFunction,
@@ -144,6 +158,17 @@ impl Gx {
             gemm: lf("gemm_f16")?,
             conv: lf("conv_f16")?,
             rope_halves: lf("rope_halves")?,
+            gemv: lf("gemv_f16")?,
+            gemv_fused: lf("gemv_fused")?,
+            qk_norm_rope_cache: lf("qk_norm_rope_cache")?,
+            sample_topk: lf("sample_topk")?,
+            gather_row: lf("gather_row")?,
+            attn_decode: lf("attn_decode")?,
+            overlap_add: lf("overlap_add")?,
+            snake: lf("snake")?,
+            dwconv: lf("dwconv_causal")?,
+            add_scaled: lf("add_scaled")?,
+            swiglu: lf("swiglu")?,
             conv_wide: lf("conv_f16_wide")?,
             conv_h: lf("conv_f16_h")?,
             conv_wide_h: lf("conv_f16_wide_h")?,
@@ -202,9 +227,21 @@ impl Gx {
         Ok(DW { rows: l.rows, cols: l.cols, ld, w: self.s.clone_htod(&h).map_err(gerr)?, bias: if has_bias { Some(self.s.clone_htod(&l.bias).map_err(gerr)?) } else { None } })
     }
 
+    /// A causal 1-D convolution over time (k taps, dilation `dil`), weights rows over (channel, tap).
+    pub(crate) fn conv1d(&self, l: &Lin, ic: usize, k: usize, dil: usize) -> Result<DConv, Error> {
+        let mut c = self.conv_taps(l, ic, k, 1, k)?;
+        c.causal = Some(dil);
+        Ok(c)
+    }
+
     pub(crate) fn conv(&self, l: &Lin, ic: usize, k: usize, stride: usize) -> Result<DConv, Error> {
-        let implicit = if ic % 8 == 0 && k > 1 {
-            let kk = k * k;
+        self.conv_taps(l, ic, k, stride, k * k)
+    }
+
+    /// Weights rows (channel, tap) for `taps` taps, reordered (tap, channel) when ic % 8 == 0.
+    fn conv_taps(&self, l: &Lin, ic: usize, k: usize, stride: usize, taps: usize) -> Result<DConv, Error> {
+        let implicit = if ic % 8 == 0 && taps > 1 {
+            let kk = taps;
             let mut h = vec![0u16; l.rows * ic * kk];
             for o in 0..l.rows {
                 for ch in 0..ic {
@@ -217,7 +254,7 @@ impl Gx {
         } else {
             None
         };
-        Ok(DConv { w: self.weights(l)?, ic, k, stride, implicit })
+        Ok(DConv { w: self.weights(l)?, ic, k, stride, causal: None, implicit })
     }
 
     /// f16 copy of `rows` x `cols` f32 values (row stride `ldx`) with rows padded to `ld`.
@@ -251,12 +288,14 @@ impl Gx {
 
     /// The implicit-GEMM kernel: out = conv(x [h][w][c], weights wt with rows of k*k*c) (+ out).
     #[allow(clippy::too_many_arguments)]
-    fn conv_launch(&self, wt: &CudaSlice<u16>, ldw: usize, bias: Option<&CudaSlice<f32>>, x: &DBuf, out: &mut DBuf, oc: usize, h: usize, w: usize, c: usize, k: usize, s: usize, oh: usize, ow: usize, add: bool) -> Result<(), Error> {
+    fn conv_launch(&self, wt: &CudaSlice<u16>, ldw: usize, bias: Option<&CudaSlice<f32>>, x: &DBuf, out: &mut DBuf, oc: usize, h: usize, w: usize, c: usize, geo: (usize, usize, usize, usize, usize, usize), oh: usize, ow: usize, add: bool) -> Result<(), Error> {
+        let (kh, kw, s, ph, pw, d) = geo;
         // Wide pixel tiles once there are enough tiles to fill the card twice over.
         let wide = (oc.div_ceil(128) * (oh * ow).div_ceil(128)) >= 2 * self.sms && std::env::var_os("CEREBRO_CONV_NARROW").is_none();
         let bn = if wide { 128 } else { 64 };
         let cfg = LaunchConfig { grid_dim: ((oc as u32).div_ceil(128), ((oh * ow) as u32).div_ceil(bn), 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
-        let (ldw, oci, hi, wi, ci, ki, si, ohi, owi, addi) = (ldw as i32, oc as i32, h as i32, w as i32, c as i32, k as i32, s as i32, oh as i32, ow as i32, add as i32);
+        let (ldw, oci, hi, wi, ci, ohi, owi, addi) = (ldw as i32, oc as i32, h as i32, w as i32, c as i32, oh as i32, ow as i32, add as i32);
+        let (khi, kwi, si, phi, pwi, di) = (kh as i32, kw as i32, s as i32, ph as i32, pw as i32, d as i32);
         let null: u64 = 0;
         let h16 = self.half_acc.load(std::sync::atomic::Ordering::Relaxed);
         let f = match (wide, h16) {
@@ -266,7 +305,7 @@ impl Gx {
             (false, false) => &self.f.conv,
         };
         let mut b = self.s.launch_builder(f);
-        b.arg(wt).arg(&ldw).arg(x).arg(out).arg(&oci).arg(&hi).arg(&wi).arg(&ci).arg(&ki).arg(&si).arg(&ohi).arg(&owi);
+        b.arg(wt).arg(&ldw).arg(x).arg(out).arg(&oci).arg(&hi).arg(&wi).arg(&ci).arg(&khi).arg(&kwi).arg(&si).arg(&phi).arg(&pwi).arg(&di).arg(&ohi).arg(&owi);
         match bias {
             Some(bb) => b.arg(bb),
             None => b.arg(&null),
@@ -278,9 +317,22 @@ impl Gx {
     /// out (n x w.rows) = x (n x w.cols) W^T + bias (+ out when `add`).
     pub fn linear(&self, x: &DBuf, n: usize, w: &DW, out: &mut DBuf, add: bool) -> Result<(), Error> {
         let _sp = self.span("linear");
+        if n <= 4 && w.cols % 2 == 0 {
+            // A few tokens: one warp per weight row.
+            let (ldw, ri, ci, ti, ai) = (w.ld as i32, w.rows as i32, w.cols as i32, n as i32, add as i32);
+            let null: u64 = 0;
+            let mut b = self.s.launch_builder(&self.f.gemv);
+            b.arg(&w.w).arg(&ldw).arg(x).arg(out).arg(&ri).arg(&ci).arg(&ti);
+            match &w.bias {
+                Some(bb) => b.arg(bb),
+                None => b.arg(&null),
+            };
+            b.arg(&ai);
+            return unsafe { b.launch(LaunchConfig { grid_dim: ((w.rows as u32).div_ceil(8), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map(|_| ()).map_err(gerr);
+        }
         if w.cols % 8 == 0 {
             // Reads x as f32 directly: a 1x1 convolution over n pixels.
-            return self.conv_launch(&w.w, w.ld, w.bias.as_ref(), x, out, w.rows, 1, n, w.cols, 1, 1, 1, n, add);
+            return self.conv_launch(&w.w, w.ld, w.bias.as_ref(), x, out, w.rows, 1, n, w.cols, (1, 1, 1, 0, 0, 1), 1, n, add);
         }
         let xh = self.f16(&x.slice(..), w.cols, n, w.cols, w.ld)?;
         self.gemm(&w.w.slice(..), w.ld, &xh.slice(..), w.ld, &mut out.slice_mut(..), w.rows, w.rows, n, w.ld, w.bias.as_ref(), add, 1.0)
@@ -299,7 +351,7 @@ impl Gx {
             return Ok((out, oh, ow));
         }
         if let Some(wi) = &cv.implicit {
-            self.conv_launch(wi, ic * k * k, cv.w.bias.as_ref(), x, &mut out, oc, h, w, ic, k, s, oh, ow, false)?;
+            self.conv_launch(wi, ic * k * k, cv.w.bias.as_ref(), x, &mut out, oc, h, w, ic, (k, k, s, pad, pad, 1), oh, ow, false)?;
             return Ok((out, oh, ow));
         }
         let ld = cv.w.ld;
@@ -425,14 +477,41 @@ impl Gx {
     /// `causal`. Per head: S = Q K^T and O = softmax(S) V as tensor-core matrix products.
     #[allow(clippy::too_many_arguments)]
     pub fn attention(&self, q: &CudaView<f32>, ldq: usize, k: &CudaView<f32>, ldk: usize, v: &CudaView<f32>, ldv: usize, nq: usize, nk: usize, heads: usize, hd: usize, causal: bool, out: &mut DBuf) -> Result<(), Error> {
+        self.attention_window(q, ldq, k, ldk, v, ldv, nq, nk, heads, hd, causal, 0, out)
+    }
+
+    /// `attention`, causal with each query seeing at most `window` keys back (0: no limit).
+    #[allow(clippy::too_many_arguments)]
+    pub fn attention_window(&self, q: &CudaView<f32>, ldq: usize, k: &CudaView<f32>, ldk: usize, v: &CudaView<f32>, ldv: usize, nq: usize, nk: usize, heads: usize, hd: usize, causal: bool, window: usize, out: &mut DBuf) -> Result<(), Error> {
+        self.attention_gqa(q, ldq, k, ldk, v, ldv, nq, nk, heads, heads, hd, causal, window, out)
+    }
+
+    /// `attention_window` with `kv_heads` key/value heads shared by groups of query heads.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attention_gqa(&self, q: &CudaView<f32>, ldq: usize, k: &CudaView<f32>, ldk: usize, v: &CudaView<f32>, ldv: usize, nq: usize, nk: usize, heads: usize, kv_heads: usize, hd: usize, causal: bool, window: usize, out: &mut DBuf) -> Result<(), Error> {
+        if nq == 1 && ldk == ldv && window == 0 {
+            // One query (a decoding step): every key so far, any head size.
+            let _sp = self.span("attention");
+            let (nki, hdi, ldki, gi) = (nk as i32, hd as i32, ldk as i32, (heads / kv_heads.max(1)) as i32);
+            let scale = 1.0 / (hd as f32).sqrt();
+            let _ = ldq;
+            let mut b = self.s.launch_builder(&self.f.attn_decode);
+            b.arg(q).arg(k).arg(v).arg(out).arg(&nki).arg(&hdi).arg(&ldki).arg(&gi).arg(&scale);
+            let cfg = LaunchConfig { grid_dim: (heads as u32, 1, 1), block_dim: (128, 1, 1), shared_mem_bytes: (nk * 4) as u32 };
+            return unsafe { b.launch(cfg) }.map(|_| ()).map_err(gerr);
+        }
         let _sp = self.span("attention");
         if hd == 64 && ldq % 4 == 0 && ldk % 4 == 0 && ldv % 4 == 0 {
             let cfg = LaunchConfig { grid_dim: ((nq as u32).div_ceil(64), heads as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
             let (ldqi, ldki, ldvi, ldoi, nqi, nki, ci) = (ldq as i32, ldk as i32, ldv as i32, (heads * hd) as i32, nq as i32, nk as i32, causal as i32);
             let scale = 1.0 / (hd as f32).sqrt();
             let mut b = self.s.launch_builder(&self.f.flash64);
-            b.arg(q).arg(&ldqi).arg(k).arg(&ldki).arg(v).arg(&ldvi).arg(out).arg(&ldoi).arg(&nqi).arg(&nki).arg(&scale).arg(&ci);
+            let (wi, gi) = (window as i32, (heads / kv_heads.max(1)) as i32);
+            b.arg(q).arg(&ldqi).arg(k).arg(&ldki).arg(v).arg(&ldvi).arg(out).arg(&ldoi).arg(&nqi).arg(&nki).arg(&scale).arg(&ci).arg(&wi).arg(&gi);
             return unsafe { b.launch(cfg) }.map(|_| ()).map_err(gerr);
+        }
+        if window > 0 || kv_heads != heads {
+            return Err(Error::Unsupported(format!("windowed or grouped attention with head size {hd} on the graphics card")));
         }
         let nkp = pad8(nk);
         let hdp = pad8(hd);
@@ -460,6 +539,94 @@ impl Gx {
         Ok(())
     }
 
+    /// One token: y = W in(x) + bias (+ y), in(x) = RMSNorm(x) * nw (`norm` = Some((nw, eps))), or
+    /// silu(gate) * up of x = [gate | up] (`glu`), or x.
+    pub fn gemv(&self, w: &DW, x: &DBuf, y: &mut DBuf, add: bool, norm: Option<(&DBuf, f32)>, glu: bool) -> Result<(), Error> {
+        let (ldw, ri, ci, ai, gi) = (w.ld as i32, w.rows as i32, w.cols as i32, add as i32, glu as i32);
+        let null: u64 = 0;
+        let eps = norm.map_or(0.0, |n| n.1);
+        let mut b = self.s.launch_builder(&self.f.gemv_fused);
+        b.arg(&w.w).arg(&ldw).arg(x).arg(y).arg(&ri).arg(&ci);
+        match &w.bias {
+            Some(bb) => b.arg(bb),
+            None => b.arg(&null),
+        };
+        b.arg(&ai);
+        match norm {
+            Some((nw, _)) => b.arg(nw),
+            None => b.arg(&null),
+        };
+        b.arg(&eps).arg(&gi);
+        unsafe { b.launch(LaunchConfig { grid_dim: ((w.rows as u32).div_ceil(8), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map(|_| ()).map_err(gerr)
+    }
+
+    /// See `qk_norm_rope_cache` in tensor.cu.
+    #[allow(clippy::too_many_arguments)]
+    pub fn qk_norm_rope_cache(&self, qkv: &mut DBuf, qn: Option<&DBuf>, kn: Option<&DBuf>, cs: &DBuf, kc: &mut DBuf, vc: &mut DBuf, pos: usize, heads: usize, kv_heads: usize, hd: usize, eps: f32) -> Result<(), Error> {
+        let null: u64 = 0;
+        let (pi, hi, ki, hdi) = (pos as i32, heads as i32, kv_heads as i32, hd as i32);
+        let mut b = self.s.launch_builder(&self.f.qk_norm_rope_cache);
+        b.arg(qkv);
+        match qn {
+            Some(v) => b.arg(v),
+            None => b.arg(&null),
+        };
+        match kn {
+            Some(v) => b.arg(v),
+            None => b.arg(&null),
+        };
+        b.arg(cs).arg(kc).arg(vc).arg(&pi).arg(&hi).arg(&ki).arg(&hdi).arg(&eps);
+        unsafe { b.launch(LaunchConfig { grid_dim: ((heads + 2 * kv_heads) as u32, 1, 1), block_dim: ((hd / 2) as u32, 1, 1), shared_mem_bytes: 0 }) }.map(|_| ()).map_err(gerr)
+    }
+
+    /// One-query attention reading q at the start of `q` (see `attn_decode`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn attend_one(&self, q: &DBuf, kc: &DBuf, vc: &DBuf, nk: usize, heads: usize, kv_heads: usize, hd: usize, out: &mut DBuf) -> Result<(), Error> {
+        let (nki, hdi, ldki, gi) = (nk as i32, hd as i32, (kv_heads * hd) as i32, (heads / kv_heads.max(1)) as i32);
+        let scale = 1.0 / (hd as f32).sqrt();
+        let mut b = self.s.launch_builder(&self.f.attn_decode);
+        b.arg(q).arg(kc).arg(vc).arg(out).arg(&nki).arg(&hdi).arg(&ldki).arg(&gi).arg(&scale);
+        let cfg = LaunchConfig { grid_dim: (heads as u32, 1, 1), block_dim: (128, 1, 1), shared_mem_bytes: (nk * 4) as u32 };
+        unsafe { b.launch(cfg) }.map(|_| ()).map_err(gerr)
+    }
+
+    /// codes[slot] = a top-k draw from `logits` (n values) with uniform u[slot] (see `sample_topk`).
+    pub fn sample_topk(&self, logits: &DBuf, n: usize, k: usize, u: &DBuf, slot: usize, codes: &mut CudaSlice<i32>) -> Result<(), Error> {
+        if n > 4096 || k > 64 || k == 0 {
+            return Err(Error::Unsupported(format!("sampling top {k} of {n} on the graphics card")));
+        }
+        let (ni, ki, si) = (n as i32, k as i32, slot as i32);
+        let mut b = self.s.launch_builder(&self.f.sample_topk);
+        b.arg(logits).arg(&ni).arg(&ki).arg(u).arg(&si).arg(codes);
+        unsafe { b.launch(LaunchConfig { grid_dim: (1, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 }) }.map(|_| ()).map_err(gerr)
+    }
+
+    /// out = table row codes[slot] (rows of dim).
+    pub fn gather_row(&self, table: &DBuf, codes: &CudaSlice<i32>, slot: usize, out: &mut DBuf, dim: usize) -> Result<(), Error> {
+        let (si, di) = (slot as i32, dim as i32);
+        let mut b = self.s.launch_builder(&self.f.gather_row);
+        b.arg(table).arg(codes).arg(&si).arg(out).arg(&di);
+        unsafe { b.launch(grid(dim)) }.map(|_| ()).map_err(gerr)
+    }
+
+    pub fn codes(&self, n: usize) -> Result<CudaSlice<i32>, Error> {
+        self.s.alloc_zeros::<i32>(n.max(1)).map_err(gerr)
+    }
+
+    pub fn down_codes(&self, c: &CudaSlice<i32>) -> Result<Vec<i32>, Error> {
+        self.s.clone_dtoh(c).map_err(gerr)
+    }
+
+    /// Copies n values of `src` from value `at` into the start of `dst`.
+    pub fn copy_into_from(&self, src: &DBuf, at: usize, n: usize, dst: &mut DBuf) -> Result<(), Error> {
+        self.s.memcpy_dtod(&src.slice(at..at + n), &mut dst.slice_mut(..n)).map_err(gerr)
+    }
+
+    /// Copies `src` into `dst` from value `at`.
+    pub fn copy_into(&self, src: &DBuf, n: usize, dst: &mut DBuf, at: usize) -> Result<(), Error> {
+        self.s.memcpy_dtod(&src.slice(..n), &mut dst.slice_mut(at..at + n)).map_err(gerr)
+    }
+
     pub fn copy(&self, x: &DBuf) -> Result<DBuf, Error> {
         let _sp = self.span("copy");
         self.s.clone_dtod(x).map_err(gerr)
@@ -481,6 +648,78 @@ impl Gx {
         v.sort_by(|a, b| b.2.total_cmp(&a.2));
         v.iter().map(|(k, n, t)| format!("{k:>12} {n:5} x {:8.2} ms
 ", t * 1e3)).collect()
+    }
+
+    /// A causal 1-D convolution over x [T][ic] -> [T][oc].
+    pub fn conv1d_run(&self, x: &DBuf, t: usize, cv: &DConv) -> Result<DBuf, Error> {
+        let _sp = self.span("conv1d");
+        let dil = cv.causal.expect("a 1-D convolution");
+        let oc = cv.w.rows;
+        let mut out = self.buf(t * oc)?;
+        match &cv.implicit {
+            Some(wi) => self.conv_launch(wi, cv.ic * cv.k, cv.w.bias.as_ref(), x, &mut out, oc, 1, t, cv.ic, (1, cv.k, 1, 0, (cv.k - 1) * dil, dil), 1, t, false)?,
+            // One tap, or channels not a multiple of 8: a linear over each time step's taps.
+            None if cv.k == 1 => self.linear(x, t, &cv.w, &mut out, false)?,
+            None => return Err(Error::Unsupported(format!("a {}-tap convolution over {} channels on the graphics card", cv.k, cv.ic))),
+        }
+        Ok(out)
+    }
+
+    /// Transposed convolution, stride s: x [T][ic] -> [T*s][oc]; `w` rows (oc, tap), `bias` [oc].
+    pub fn conv_transpose(&self, x: &DBuf, t: usize, w: &DW, oc: usize, k: usize, s: usize, bias: &DBuf) -> Result<DBuf, Error> {
+        let _sp = self.span("convT");
+        let mut col = self.buf(t * oc * k)?;
+        self.linear(x, t, w, &mut col, false)?;
+        let mut y = self.buf(t * s * oc)?;
+        let (ti, oci, ki, si) = (t as i32, oc as i32, k as i32, s as i32);
+        let mut b = self.s.launch_builder(&self.f.overlap_add);
+        b.arg(&col).arg(bias).arg(&mut y).arg(&ti).arg(&oci).arg(&ki).arg(&si);
+        unsafe { b.launch(grid(t * s * oc)) }.map_err(gerr)?;
+        Ok(y)
+    }
+
+    pub fn snake(&self, x: &DBuf, n: usize, c: usize, alpha: &DBuf, beta: &DBuf) -> Result<DBuf, Error> {
+        let _sp = self.span("snake");
+        let mut y = self.buf(n)?;
+        let (nn, ci) = (n as u64, c as i32);
+        let mut b = self.s.launch_builder(&self.f.snake);
+        b.arg(x).arg(&mut y).arg(alpha).arg(beta).arg(&nn).arg(&ci);
+        unsafe { b.launch(grid(n)) }.map_err(gerr)?;
+        Ok(y)
+    }
+
+    pub fn dwconv_causal(&self, x: &DBuf, t: usize, c: usize, w: &DBuf, bias: &DBuf, k: usize) -> Result<DBuf, Error> {
+        let _sp = self.span("dwconv");
+        let mut y = self.buf(t * c)?;
+        let (ti, ci, ki) = (t as i32, c as i32, k as i32);
+        let mut b = self.s.launch_builder(&self.f.dwconv);
+        b.arg(x).arg(w).arg(bias).arg(&mut y).arg(&ti).arg(&ci).arg(&ki);
+        unsafe { b.launch(grid(t * c)) }.map_err(gerr)?;
+        Ok(y)
+    }
+
+    /// x += y * v[channel] (v None: x += y), n values in rows of c.
+    pub fn add_scaled(&self, x: &mut DBuf, y: &DBuf, v: Option<&DBuf>, n: usize, c: usize) -> Result<(), Error> {
+        let _sp = self.span("add");
+        let (nn, ci) = (n as u64, c as i32);
+        let null: u64 = 0;
+        let mut b = self.s.launch_builder(&self.f.add_scaled);
+        b.arg(x).arg(y);
+        match v {
+            Some(vv) => b.arg(vv),
+            None => b.arg(&null),
+        };
+        b.arg(&nn).arg(&ci);
+        unsafe { b.launch(grid(n)) }.map(|_| ()).map_err(gerr)
+    }
+
+    /// g = silu(g) * u.
+    pub fn swiglu(&self, g: &mut DBuf, u: &DBuf, n: usize) -> Result<(), Error> {
+        let _sp = self.span("swiglu");
+        let nn = n as u64;
+        let mut b = self.s.launch_builder(&self.f.swiglu);
+        b.arg(g).arg(u).arg(&nn);
+        unsafe { b.launch(grid(n)) }.map(|_| ()).map_err(gerr)
     }
 
     /// Rotary positions on the first `parts` blocks of heads x hd values of each of n rows

@@ -438,6 +438,10 @@ pub struct GpuState {
     pub rope_shift: i32,
     /// The image prompt being read, during `Session::feed_parts`.
     pub image: Option<ImagePrefill>,
+    /// When set, a prefill also returns the last position's final-normed hidden state here (a
+    /// speech talker's code predictor reads it).
+    pub hidden: Option<Vec<f32>>,
+    hidden_dev: Option<CudaSlice<f32>>,
     /// Logits of every position of a verify pass (SPEC_MAX x vocab); None where speculation
     /// does not apply (split, mixture of experts, recurrent layers).
     spec: Option<CudaSlice<f32>>,
@@ -749,6 +753,8 @@ impl GpuState {
             progress: None,
             rope_shift: 0,
             image: None,
+            hidden: None,
+            hidden_dev: None,
             spec,
             // SAFETY: a plain host buffer, read only after the stream is synchronized.
             host_x: if split { Some(unsafe { ctx_pin.alloc_pinned::<f32>(c.dim) }.map_err(gerr)?) } else { None },
@@ -1881,11 +1887,24 @@ impl GpuState {
             s.memcpy_dtoh(&spec.slice(0..t * sh.vocab), dst.as_mut_slice()).map_err(gerr)?;
             return Ok(0);
         }
-        // Logits for the last token only, through the decode buffers.
+        // Logits for the last token only, through the decode buffers (and the normed state when asked).
         {
             let last = b.x.slice((t - 1) * sh.dim..t * sh.dim);
             let one = LaunchConfig { grid_dim: (1, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
-            unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&last).arg(&self.out_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
+            if self.hidden.is_some() && self.hidden_dev.is_none() {
+                self.hidden_dev = Some(s.alloc_zeros::<f32>(sh.dim).map_err(gerr)?);
+            }
+            let mut lb = s.launch_builder(&f.rmsnorm_quant);
+            lb.arg(&last).arg(&self.out_norm).arg(&mut self.xq).arg(&mut self.xd);
+            match (self.hidden.is_some(), self.hidden_dev.as_mut()) {
+                (true, Some(h)) => lb.arg(h),
+                _ => lb.arg(&null_f),
+            };
+            unsafe { lb.arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
+        }
+        if let (Some(h), Some(hd)) = (self.hidden.as_mut(), self.hidden_dev.as_ref()) {
+            h.resize(sh.dim, 0.0);
+            s.memcpy_dtoh(hd, h.as_mut_slice()).map_err(gerr)?;
         }
         Self::matvec(s, f, output, &self.xq, &self.xd, &mut self.logits, false)?;
         let vocab = sh.vocab as i32;

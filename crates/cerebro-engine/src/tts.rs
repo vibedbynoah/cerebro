@@ -117,6 +117,7 @@ fn rope(x: &mut [f32], pos: usize, theta: f32) {
 }
 
 /// A small deterministic random source (xorshift64*).
+#[derive(Clone)]
 pub struct Rng(u64);
 
 impl Rng {
@@ -427,8 +428,19 @@ struct Dac {
     res: Vec<Res>,
 }
 
+#[cfg(feature = "cuda")]
+#[path = "tts_gpu.rs"]
+mod gpu;
+
 /// The projector half of Qwen3-TTS: code predictor and code2wav.
 pub struct TtsDecoder {
+    path: std::path::PathBuf,
+    /// code2wav on the graphics card, built on first use (None: no card this backend runs on).
+    #[cfg(feature = "cuda")]
+    gpu: std::sync::OnceLock<Option<gpu::GDecoder>>,
+    /// The code predictor on the graphics card, likewise.
+    #[cfg(feature = "cuda")]
+    gpu_pred: std::sync::OnceLock<Option<gpu::GPredictor>>,
     // code predictor
     cp_layers: Vec<Layer>,
     cp_heads: usize,
@@ -522,6 +534,11 @@ impl TtsDecoder {
             dac.push(Dac { snake: (f32s(&g, &format!("{p}.snake.alpha"))?, f32s(&g, &format!("{p}.snake.beta"))?), up: upw, stride, res });
         }
         Ok(TtsDecoder {
+            path: path.to_path_buf(),
+            #[cfg(feature = "cuda")]
+            gpu: std::sync::OnceLock::new(),
+            #[cfg(feature = "cuda")]
+            gpu_pred: std::sync::OnceLock::new(),
             cp_layers,
             cp_heads: u("attention.head_count")?,
             cp_kv_heads: u("attention.head_count_kv")?,
@@ -555,9 +572,38 @@ impl TtsDecoder {
         &table[i * dim..(i + 1) * dim]
     }
 
+    /// Uploads the graphics-card copies now (otherwise the first sentence pays for it).
+    pub fn prepare(&self) {
+        #[cfg(feature = "cuda")]
+        if let Some(g) = crate::gtensor::Gx::get() {
+            self.gpu.get_or_init(|| gpu::GDecoder::load(g, &self.path).map_err(|e| eprintln!("speech decoder on the graphics card: {e}")).ok());
+            self.gpu_pred.get_or_init(|| gpu::GPredictor::load(g, &self.path, self).map_err(|e| eprintln!("code predictor on the graphics card: {e}")).ok());
+        }
+    }
+
     /// One frame's 16 codes from the talker's hidden state and its first code; also the summed
-    /// embedding of all 16 (the talker's next input, before the text overlay).
+    /// embedding of all 16 (the talker's next input, before the text overlay). On the graphics
+    /// card when there is one the tensor backend runs on.
     pub fn predict_frame(&self, h_state: &[f32], code0: usize, top_k: usize, top_p: f32, rng: &mut Rng) -> (Vec<usize>, Vec<f32>) {
+        #[cfg(feature = "cuda")]
+        if let Some(g) = crate::gtensor::Gx::get() {
+            self.prepare();
+            if let Some(p) = self.gpu_pred.get().and_then(|p| p.as_ref()) {
+                let mut r2 = rng.clone();
+                match p.predict_frame(g, self, h_state, code0, top_k, top_p, &mut r2) {
+                    Ok(out) => {
+                        *rng = r2;
+                        return out;
+                    }
+                    Err(e) => eprintln!("code predictor on the graphics card: {e}; using the processor"),
+                }
+            }
+        }
+        self.predict_frame_cpu(h_state, code0, top_k, top_p, rng)
+    }
+
+    /// `predict_frame` on the processor.
+    pub fn predict_frame_cpu(&self, h_state: &[f32], code0: usize, top_k: usize, top_p: f32, rng: &mut Rng) -> (Vec<usize>, Vec<f32>) {
         let td = self.talker_dim;
         let n_ac = self.cp_heads_w.len();
         let mut kv: Vec<(Vec<f32>, Vec<f32>)> = vec![(Vec::new(), Vec::new()); self.cp_layers.len()];
@@ -591,8 +637,26 @@ impl TtsDecoder {
         (codes, sum)
     }
 
-    /// Audio (24 kHz, -1..1) for frames of 16 codes each.
+    /// Audio (24 kHz, -1..1) for frames of 16 codes each: on the graphics card when there is one
+    /// the tensor backend runs on (CEREBRO_TENSOR_CPU forces the processor).
     pub fn decode(&self, frames: &[Vec<usize>]) -> Vec<f32> {
+        #[cfg(feature = "cuda")]
+        if !frames.is_empty() {
+            if let Some(g) = crate::gtensor::Gx::get() {
+                let dec = self.gpu.get_or_init(|| gpu::GDecoder::load(g, &self.path).map_err(|e| eprintln!("speech decoder on the graphics card: {e}")).ok());
+                if let Some(dec) = dec {
+                    match dec.decode(g, self, frames) {
+                        Ok(s) => return s,
+                        Err(e) => eprintln!("speech decoder on the graphics card: {e}; using the processor"),
+                    }
+                }
+            }
+        }
+        self.decode_cpu(frames)
+    }
+
+    /// `decode` on the processor.
+    pub fn decode_cpu(&self, frames: &[Vec<usize>]) -> Vec<f32> {
         let n = frames.len();
         if n == 0 {
             return Vec::new();
@@ -697,6 +761,8 @@ impl TtsDecoder {
 pub struct Speech {
     pub samples: Vec<f32>,
     pub frames: usize,
+    /// The 16 codes of each frame (what the decoder turned into audio).
+    pub codes: Vec<Vec<usize>>,
 }
 
 /// Token ids the talker's prompt is built from.
@@ -713,10 +779,30 @@ struct Specials {
     tts_eos: u32,
 }
 
-/// Speaks `text` with the talker `m` (a qwen3tts model, on a processor session) and `dec`.
+/// A session for the talker: on the graphics card when the model fits there whole (and
+/// CEREBRO_TENSOR_CPU is not set), otherwise on the processor. Keep it for the next sentence:
+/// building it uploads the model.
+pub fn talker_session(m: &Model, max_ctx: usize) -> Session {
+    #[cfg(feature = "cuda")]
+    if std::env::var_os("CEREBRO_TENSOR_CPU").is_none() && crate::switches::enabled(crate::switches::GPU_ENABLED) {
+        if let Some(s) = Session::new_gpu(m, max_ctx).ok().filter(|s| s.gpu.as_ref().is_some_and(|g| !g.is_split())) {
+            return s;
+        }
+    }
+    Session::new(m, max_ctx)
+}
+
+/// Speaks `text` with the talker `m` (a qwen3tts model) and `dec`, in a new session.
 /// `lang` is a codec language name ("english", "chinese", ...). Sampling as the model card sets
 /// it (temperature 0.9, top-k 50) with a fixed seed, so a sentence sounds the same each time.
 pub fn speak(m: &Model, tok: &crate::tokenizer::Tokenizer, dec: &TtsDecoder, text: &str, lang: &str, seed: u64, max_frames: usize) -> Result<Speech, Error> {
+    let mut s = talker_session(m, 4096);
+    speak_in(m, &mut s, tok, dec, text, lang, seed, max_frames)
+}
+
+/// `speak` in an existing session (`talker_session`), cleared first.
+#[allow(clippy::too_many_arguments)]
+pub fn speak_in(m: &Model, s: &mut Session, tok: &crate::tokenizer::Tokenizer, dec: &TtsDecoder, text: &str, lang: &str, seed: u64, max_frames: usize) -> Result<Speech, Error> {
     let find = |s: &str| tok.token_id(s).ok_or_else(|| Error::Format(format!("the speech model has no token {s}")));
     let sp = Specials {
         codec_0: find("<|codec_0|>")?,
@@ -758,7 +844,10 @@ pub fn speak(m: &Model, tok: &crate::tokenizer::Tokenizer, dec: &TtsDecoder, tex
     }
     prompt.push(sum(sp.tts_eos, sp.codec_pad));
     prompt.push(sum(sp.tts_pad, sp.codec_bos));
-    let mut s = Session::new(m, prompt.len() + max_frames + 8);
+    if prompt.len() + max_frames + 8 > s.max_ctx {
+        return Err(Error::Request(format!("the text is too long to say in one go ({} tokens)", prompt.len())));
+    }
+    s.clear()?;
     for r in &prompt {
         s.step_embedding(m, r)?;
     }
@@ -789,7 +878,7 @@ pub fn speak(m: &Model, tok: &crate::tokenizer::Tokenizer, dec: &TtsDecoder, tex
     if prof {
         eprintln!("tts {} frames: talker {t_talk:.2} s, code predictor {t_pred:.2} s, audio decoder {:.2} s", frames.len(), t0.elapsed().as_secs_f64());
     }
-    Ok(Speech { samples, frames: frames.len() })
+    Ok(Speech { samples, frames: frames.len(), codes: frames })
 }
 
 /// 16-bit PCM WAV bytes for mono samples.
