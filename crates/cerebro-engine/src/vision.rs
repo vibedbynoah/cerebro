@@ -71,8 +71,15 @@ struct Block {
     down: Lin,
 }
 
+#[cfg(feature = "cuda")]
+#[path = "vision_gpu.rs"]
+mod gpu;
+
 pub struct VisionModel {
     pub cfg: VisionConfig,
+    /// The encoder on the graphics card, built on first use (None: no card this backend runs on).
+    #[cfg(feature = "cuda")]
+    gpu: std::sync::OnceLock<Option<gpu::GVision>>,
     patch: Lin,
     /// Learned positions, `grid * grid` rows of `dim`, row-major over (y, x).
     pos: Vec<f32>,
@@ -187,7 +194,18 @@ impl VisionModel {
         if mm0.cols != cfg.dim * 4 || mm2.rows != cfg.proj {
             return Err(Error::Format("vision projection has an unexpected shape".into()));
         }
-        Ok(VisionModel { cfg, patch, pos, grid, blocks, post, mm0, mm2 })
+        Ok(VisionModel {
+            cfg,
+            #[cfg(feature = "cuda")]
+            gpu: std::sync::OnceLock::new(),
+            patch,
+            pos,
+            grid,
+            blocks,
+            post,
+            mm0,
+            mm2,
+        })
     }
 
     /// The size an image is resized to: the aspect ratio kept, both sides multiples of
@@ -217,14 +235,26 @@ impl VisionModel {
         self.encode(&debug_image(kind, side)?)
     }
 
-    /// Runs the encoder.
+    /// Runs the encoder: on the graphics card when there is one the tensor backend runs on
+    /// (CEREBRO_TENSOR_CPU forces the processor), otherwise on the processor.
     pub fn encode(&self, img: &ImageInput) -> Result<ImageEmbedding, Error> {
+        #[cfg(feature = "cuda")]
+        if let Some(g) = crate::gtensor::Gx::get() {
+            let enc = self.gpu.get_or_init(|| gpu::GVision::new(g, self).map_err(|e| eprintln!("vision encoder on the graphics card: {e}")).ok());
+            if let Some(enc) = enc {
+                let (patches, pos, cs, n, pw, ph) = self.inputs(img)?;
+                let out = enc.encode(g, self, &patches, &pos, &cs, n)?;
+                return Ok(ImageEmbedding { cols: pw / 2, rows: ph / 2, dim: self.cfg.proj, data: out });
+            }
+        }
         self.encode_traced(img, &mut |_, _| {})
     }
 
-    /// `encode`, handing intermediate results to `trace` (name, tokens x width values): the
-    /// reference's names `inp_pos_emb`, `layer_out.<i>`, `post_ln`, `out`.
-    pub fn encode_traced(&self, img: &ImageInput, trace: &mut dyn FnMut(&str, &[f32])) -> Result<ImageEmbedding, Error> {
+    /// The encoder's inputs: patches as rows of [channel][ky][kx] in 2x2-block token order, the
+    /// learned positions interpolated to the patch grid, and the rotary (cos, sin) per token and
+    /// frequency (rows on the first half of the frequencies, columns on the second).
+    #[allow(clippy::type_complexity)]
+    fn inputs(&self, img: &ImageInput) -> Result<(Vec<f32>, Vec<f32>, Vec<(f32, f32)>, usize, usize, usize), Error> {
         let c = &self.cfg;
         let a = c.patch * c.merge;
         if img.width == 0 || img.height == 0 || img.width % a != 0 || img.height % a != 0 || img.rgb.len() != img.width * img.height * 3 {
@@ -234,15 +264,16 @@ impl VisionModel {
         let n = pw * ph;
         let dim = c.dim;
         let hd = dim / c.heads;
-        // Token t in 2x2-block order -> its patch (row, column).
         let at = |t: usize| -> (usize, usize) {
             let (blk, sub) = (t / 4, t % 4);
             let (yb, xb) = (blk / (pw / 2), blk % (pw / 2));
             (2 * yb + sub / 2, 2 * xb + sub % 2)
         };
-        // Patches as rows of [channel][ky][kx], the kernel's layout.
         let kin = c.patch * c.patch * 3;
         let mut patches = vec![0f32; n * kin];
+        let mut pos = vec![0f32; n * dim];
+        let (half, quarter) = (hd / 2, hd / 4);
+        let mut cs = vec![(0f32, 0f32); n * half];
         for t in 0..n {
             let (py, px) = at(t);
             let row = &mut patches[t * kin..(t + 1) * kin];
@@ -254,23 +285,7 @@ impl VisionModel {
                     }
                 }
             }
-        }
-        let mut x = vec![0f32; n * dim];
-        linear(&self.patch, &patches, n, &mut x, false);
-        drop(patches);
-        // Learned positions, interpolated to the patch grid (bilinear, corners aligned).
-        for t in 0..n {
-            let (py, px) = at(t);
-            let row = &mut x[t * dim..(t + 1) * dim];
-            add_position(&self.pos, self.grid, dim, pw, ph, px, py, row);
-        }
-        trace("inp_pos_emb", &x);
-        // Rotary tables per token: rows on the first half of the frequencies, columns on the second.
-        let half = hd / 2;
-        let quarter = hd / 4;
-        let mut cs = vec![(0f32, 0f32); n * half];
-        for t in 0..n {
-            let (py, px) = at(t);
+            add_position(&self.pos, self.grid, dim, pw, ph, px, py, &mut pos[t * dim..(t + 1) * dim]);
             for i in 0..half {
                 let p = if i < quarter { py } else { px } as f32;
                 let theta = p * 10000f32.powf(-((i % quarter) as f32) / quarter as f32);
@@ -278,6 +293,20 @@ impl VisionModel {
                 cs[t * half + i] = (co, s);
             }
         }
+        Ok((patches, pos, cs, n, pw, ph))
+    }
+
+    /// `encode`, handing intermediate results to `trace` (name, tokens x width values): the
+    /// reference's names `inp_pos_emb`, `layer_out.<i>`, `post_ln`, `out`.
+    pub fn encode_traced(&self, img: &ImageInput, trace: &mut dyn FnMut(&str, &[f32])) -> Result<ImageEmbedding, Error> {
+        let c = &self.cfg;
+        let (patches, pos, cs, n, pw, ph) = self.inputs(img)?;
+        let dim = c.dim;
+        let hd = dim / c.heads;
+        let mut x = pos;
+        linear(&self.patch, &patches, n, &mut x, true);
+        drop(patches);
+        trace("inp_pos_emb", &x);
         let mut h = vec![0f32; n * dim];
         let mut qkv = vec![0f32; n * 3 * dim];
         let mut att = vec![0f32; n * dim];

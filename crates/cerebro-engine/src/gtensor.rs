@@ -43,6 +43,7 @@ pub struct DConv {
 struct Funcs {
     gemm: CudaFunction,
     conv: CudaFunction,
+    rope_halves: CudaFunction,
     conv_wide: CudaFunction,
     conv_h: CudaFunction,
     conv_wide_h: CudaFunction,
@@ -142,6 +143,7 @@ impl Gx {
         let f = Funcs {
             gemm: lf("gemm_f16")?,
             conv: lf("conv_f16")?,
+            rope_halves: lf("rope_halves")?,
             conv_wide: lf("conv_f16_wide")?,
             conv_h: lf("conv_f16_h")?,
             conv_wide_h: lf("conv_f16_wide_h")?,
@@ -479,6 +481,17 @@ impl Gx {
         v.sort_by(|a, b| b.2.total_cmp(&a.2));
         v.iter().map(|(k, n, t)| format!("{k:>12} {n:5} x {:8.2} ms
 ", t * 1e3)).collect()
+    }
+
+    /// Rotary positions on the first `parts` blocks of heads x hd values of each of n rows
+    /// (stride ld): pair (i, i + hd/2) rotated by cs[t][i] = (cos, sin) (n x hd/2 pairs).
+    #[allow(clippy::too_many_arguments)]
+    pub fn rope_halves(&self, x: &mut DBuf, cs: &DBuf, n: usize, heads: usize, hd: usize, ld: usize, parts: usize) -> Result<(), Error> {
+        let _sp = self.span("rope");
+        let (ni, hi, hdi, ldi, pi) = (n as i32, heads as i32, hd as i32, ld as i32, parts as i32);
+        let mut b = self.s.launch_builder(&self.f.rope_halves);
+        b.arg(x).arg(cs).arg(&ni).arg(&hi).arg(&hdi).arg(&ldi).arg(&pi);
+        unsafe { b.launch(grid(n * parts * heads * hd / 2)) }.map(|_| ()).map_err(gerr)
     }
 
     /// Whether convolutions and linears accumulate each 32-value slice in f16 (see `half_acc`).

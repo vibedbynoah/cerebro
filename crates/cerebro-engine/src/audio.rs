@@ -42,7 +42,14 @@ struct Block {
     down: Lin,
 }
 
+#[cfg(feature = "cuda")]
+#[path = "audio_gpu.rs"]
+mod gpu;
+
 pub struct AudioModel {
+    /// The encoder on the graphics card, built on first use (None: no card this backend runs on).
+    #[cfg(feature = "cuda")]
+    gpu: std::sync::OnceLock<Option<gpu::GAudio>>,
     n_mel: usize,
     dim: usize,
     heads: usize,
@@ -167,7 +174,12 @@ impl AudioModel {
         let hann: Vec<f32> = (0..N_FFT).map(|i| (0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / N_FFT as f64).cos())) as f32).collect();
         let cos = (0..N_FFT).map(|i| (2.0 * std::f64::consts::PI * i as f64 / N_FFT as f64).cos() as f32).collect();
         let sin = (0..N_FFT).map(|i| (2.0 * std::f64::consts::PI * i as f64 / N_FFT as f64).sin() as f32).collect();
-        Ok(AudioModel { n_mel, dim, heads, eps, proj: mm2.rows, conv, conv_out, pos, blocks, post, mm1, mm2, filters: mel_filters(n_mel, N_FFT, SAMPLE_RATE as f64), hann, cos, sin })
+        Ok(AudioModel {
+            #[cfg(feature = "cuda")]
+            gpu: std::sync::OnceLock::new(),
+            n_mel,
+            dim,
+            heads, eps, proj: mm2.rows, conv, conv_out, pos, blocks, post, mm1, mm2, filters: mel_filters(n_mel, N_FFT, SAMPLE_RATE as f64), hann, cos, sin })
     }
 
     /// The log-mel windows of 16 kHz mono samples.
@@ -241,8 +253,25 @@ impl AudioModel {
         out
     }
 
-    /// Encodes 16 kHz mono samples.
+    /// Encodes 16 kHz mono samples: on the graphics card when there is one the tensor backend
+    /// runs on (CEREBRO_TENSOR_CPU forces the processor), otherwise on the processor.
     pub fn encode(&self, samples: &[f32]) -> Result<AudioEmbedding, Error> {
+        #[cfg(feature = "cuda")]
+        if let Some(g) = crate::gtensor::Gx::get() {
+            let enc = self.gpu.get_or_init(|| gpu::GAudio::new(g, self).map_err(|e| eprintln!("speech encoder on the graphics card: {e}")).ok());
+            if let Some(enc) = enc {
+                return self.encode_with(samples, &|w| enc.encode_window(g, self, w));
+            }
+        }
+        self.encode_cpu(samples)
+    }
+
+    /// `encode` on the processor.
+    pub fn encode_cpu(&self, samples: &[f32]) -> Result<AudioEmbedding, Error> {
+        self.encode_with(samples, &|w| self.encode_window(w))
+    }
+
+    fn encode_with(&self, samples: &[f32], window: &dyn Fn(&MelWindow) -> Result<Vec<f32>, Error>) -> Result<AudioEmbedding, Error> {
         let windows = self.mel(samples);
         if windows.is_empty() {
             return Err(Error::Request("the recording is empty".into()));
@@ -250,7 +279,7 @@ impl AudioModel {
         let mut data = Vec::new();
         let mut tokens = 0;
         for w in &windows {
-            let e = self.encode_window(w)?;
+            let e = window(w)?;
             tokens += e.len() / self.proj;
             data.extend(e);
         }

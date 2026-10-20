@@ -536,6 +536,24 @@ extern "C" __global__ void concat_rows(const float* __restrict__ a, int ca, cons
     y[i] = c < ca ? a[(size_t)r * ca + c] : b[(size_t)r * cb + (c - ca)];
 }
 
+// Rotary positions on `parts` consecutive blocks (Q, then K) of `heads` x hd values per row (row
+// stride ld): pair (i, i + hd/2) of each head rotated by the token's (cos, sin) for frequency i.
+extern "C" __global__ void rope_halves(float* __restrict__ x, const float2* __restrict__ cs, int n, int heads, int hd, int ld, int parts) {
+    int half = hd / 2;
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= (size_t)n * parts * heads * half) return;
+    int k = (int)(i % half);
+    size_t r = i / half;
+    int h = (int)(r % heads);
+    r /= heads;
+    int part = (int)(r % parts), t = (int)(r / parts);
+    float* b = x + (size_t)t * ld + (size_t)part * heads * hd + h * hd;
+    float2 c = cs[(size_t)t * half + k];
+    float a0 = b[k], a1 = b[k + half];
+    b[k] = a0 * c.x - a1 * c.y;
+    b[k + half] = a0 * c.y + a1 * c.x;
+}
+
 // ---- elementwise --------------------------------------------------------------------------------------
 
 // op: 0 SiLU, 1 GELU (tanh), 2 GELU (erf).
