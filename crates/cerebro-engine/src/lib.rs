@@ -44,7 +44,8 @@ pub enum Error {
 }
 
 /// Formats a chat for Qwen-family models (ChatML). `think: false` adds the empty think block that
-/// tells Qwen3 hybrid-reasoning models to answer directly.
+/// tells Qwen3 hybrid-reasoning models to answer directly; `think: true` opens the think block, as
+/// the models' own templates do (left open, Qwen3.5 measured closing it at once: 1 of 8 right).
 pub fn chatml(system: Option<&str>, turns: &[(&str, &str)], think: bool) -> String {
     let mut s = String::new();
     if let Some(sys) = system {
@@ -54,8 +55,6 @@ pub fn chatml(system: Option<&str>, turns: &[(&str, &str)], think: bool) -> Stri
         s.push_str(&format!("<|im_start|>{role}\n{text}<|im_end|>\n"));
     }
     s.push_str("<|im_start|>assistant\n");
-    if !think {
-        s.push_str("<think>\n\n</think>\n\n");
-    }
+    s.push_str(if think { "<think>\n" } else { "<think>\n\n</think>\n\n" });
     s
 }
