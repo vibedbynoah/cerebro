@@ -8,9 +8,12 @@ pub const COMMIT: &str = env!("CEREBRO_ENGINE_COMMIT");
 
 pub mod audio;
 pub mod chat;
+pub mod diffusion;
 pub mod gguf;
 #[cfg(feature = "cuda")]
 pub mod gpu;
+#[cfg(feature = "cuda")]
+pub mod gtensor;
 pub mod hw;
 mod iq_tables;
 pub mod model;

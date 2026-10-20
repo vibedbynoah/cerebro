@@ -6,6 +6,7 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=src/kernels.cu");
     println!("cargo:rerun-if-changed=src/kernels_mma.cu");
+    println!("cargo:rerun-if-changed=src/tensor.cu");
     // The exact source a build came from, for measurements (the Tune screen keys results to it).
     let commit = Command::new("git").args(["rev-parse", "--short=10", "HEAD"]).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default();
     let dirty = Command::new("git").args(["status", "--porcelain", "--untracked-files=no", "--", "src"]).output().ok().is_some_and(|o| !o.stdout.is_empty());
@@ -23,7 +24,7 @@ fn main() {
     }
     let dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     // Base kernels target sm_75 (dp4a); tensor-core kernels a separate sm_80 module loaded when present.
-    for (src, ptx, arch) in [("src/kernels.cu", "kernels.ptx", "compute_75"), ("src/kernels_mma.cu", "kernels_mma.ptx", "compute_80")] {
+    for (src, ptx, arch) in [("src/kernels.cu", "kernels.ptx", "compute_75"), ("src/kernels_mma.cu", "kernels_mma.ptx", "compute_80"), ("src/tensor.cu", "tensor.ptx", "compute_80")] {
         let status = Command::new("nvcc")
             .args(["--ptx", "-O3", "--use_fast_math", &format!("-arch={arch}"), "-o"])
             .arg(dir.join(ptx))
