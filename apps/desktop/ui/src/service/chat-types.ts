@@ -87,6 +87,8 @@ export type ChatEvent =
   | { type: "thinking"; text: string }
   | { type: "token"; text: string }
   | { type: "check"; pass: 1 | 2; text: string }
+  /** A review pass corrected the reply: `text` replaces everything streamed so far. */
+  | { type: "revise"; text: string }
   | { type: "image"; prompt: string; seed: number; width: number; height: number }
   | { type: "tool"; id: string; server: string; name: string; arguments: unknown; state: ToolState; result: string | null; error: string | null }
   /** Orchestrate mode: a role started (`step`), or a ledger file changed (`file` + whole new text). */

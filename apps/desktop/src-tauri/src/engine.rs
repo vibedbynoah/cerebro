@@ -299,6 +299,10 @@ pub struct ChatRequest {
     /// Orchestrate mode (GVS5H, orchestrate.rs): several instances of the model and a shared ledger.
     #[serde(default)]
     pub orchestrate: Option<OrchestrateRequest>,
+    /// Review passes after the reply (effort levels): 1 rereads and corrects it in the same
+    /// conversation, 2 also checks it in a fresh context. 0 = none.
+    #[serde(default)]
+    pub passes: u8,
     /// Settings > Protections "Keep long chats ready": save this conversation's cache to disk after
     /// a slow, long reply and restore it when the same chat returns. Absent means on.
     #[serde(default = "yes")]
@@ -475,6 +479,15 @@ pub enum ChatEvent {
         text: String,
     },
     Token {
+        text: String,
+    },
+    /// A review pass finished (`pass` 1 or 2) and what it found.
+    Check {
+        pass: u8,
+        text: String,
+    },
+    /// A review pass corrected the reply: `text` replaces everything streamed so far.
+    Revise {
         text: String,
     },
     Done {
@@ -1202,9 +1215,61 @@ fn run_tune(l: &mut Loaded, events: &TuneSink, cancel: &Arc<AtomicBool>) -> Resu
     }
 }
 
+/// Whether the model thinks, and for how many pieces: the UI's `native` parameters
+/// ({reasoningEffort, thinkingBudget}); absent or a budget of 0 means thinking off, and a budget
+/// the UI sends as null (no limit) means as long as the reply allows.
+fn thinking(native: Option<&serde_json::Value>) -> (bool, usize) {
+    let Some(n) = native else { return (false, 0) };
+    match n.get("thinkingBudget") {
+        Some(serde_json::Value::Number(b)) => {
+            let b = b.as_f64().unwrap_or(0.0);
+            if b <= 0.0 {
+                (false, 0)
+            } else {
+                (true, if b >= usize::MAX as f64 { usize::MAX } else { b as usize })
+            }
+        }
+        _ => (true, usize::MAX),
+    }
+}
+
+/// Tokens of the reply kept for the answer when thinking has a budget (ui/src/lib/chat/prompt.ts).
+const ANSWER_RESERVE: usize = 1024;
+
+const REVIEW_SELF: &str = "Check your answer above for mistakes in facts, numbers, logic or code, and for any part of my question it does not answer. Recompute every number. Reply with one word only: CORRECT if it has no mistake and answers everything, WRONG otherwise.";
+const REVIEW_SYSTEM: &str = "You check answers carefully. Recompute numbers, retrace logic and code, and test each claim.";
+const REVIEW_FRESH: &str = "Is the proposed answer correct and complete for the question? Recompute every number. Reply with one word only: CORRECT or WRONG.";
+/// After a WRONG verdict: the correction, in the same conversation as the verdict.
+const REVIEW_FIX: &str = "Write the full corrected answer to the original question, for the person who asked it. Do not mention the check or the earlier answer.";
+
+/// A reply without any <think> block.
+fn strip_think(s: &str) -> String {
+    let mut t = s.to_owned();
+    while let Some(a) = t.find("<think>") {
+        match t[a..].find("</think>") {
+            Some(b) => t.replace_range(a..a + b + 8, ""),
+            None => t.truncate(a),
+        }
+    }
+    t.trim().to_owned()
+}
+
+/// A review's verdict: Some(true) for CORRECT, Some(false) for WRONG, None when it gave neither
+/// (treated as nothing found, so an unclear review never replaces the answer).
+fn review_verdict(v: &str) -> Option<bool> {
+    let w = v.trim().trim_matches(|c: char| !c.is_ascii_alphabetic()).to_ascii_uppercase();
+    let first = w.split(|c: char| !c.is_ascii_alphabetic()).find(|s| !s.is_empty()).unwrap_or("");
+    match first {
+        "CORRECT" => Some(true),
+        "WRONG" | "INCORRECT" => Some(false),
+        _ => None,
+    }
+}
+
 fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex<Status>>, cancel: &Arc<AtomicBool>, tooling: Tooling<'_>, kv: Option<&Arc<Mutex<KvStore>>>) {
     use crate::toolcall::{self, Piece, Scanner};
-    let think = req.native.is_some();
+    let (think, think_budget) = thinking(req.native.as_ref());
+    let think_budget = think_budget.min(req.sampler.max_tokens.saturating_sub(ANSWER_RESERVE).max(ANSWER_RESERVE / 4));
     let plan_mode = req.client_tools.is_none() && req.tools.as_ref().is_some_and(|t| t.plan_mode);
     let mut ctx = ToolContext::from_request(req.tools.as_ref());
     if plan_mode {
@@ -1341,6 +1406,7 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
         // Reasoning (Qwen3: <think> ... </think>) streams as `thinking`; the answer goes through the
         // tool-call scanner, so tool markup never reaches the screen.
         let mut in_think = think;
+        let mut think_pieces = 0usize;
         let mut pending = String::new();
         let mut scanner = Scanner::new(l.dialect, &specs);
         let mut out = Round { raw: String::new(), calls: Vec::new(), bad: Vec::new() };
@@ -1356,7 +1422,25 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
                 }
             }
         };
+        // The thinking budget: once it is spent the generation stops, "</think>" is appended and it
+        // continues with the answer (`cont`); the cache makes the continuation free to read.
+        let mut cont: Option<Vec<u32>> = None;
+        let mut first_ttft: Option<f64> = None;
+        let result = loop {
+        let mut budget_hit = false;
         let on_piece = |piece: &str| {
+            if in_think {
+                think_pieces += 1;
+                if think_pieces > think_budget {
+                    let t = std::mem::take(&mut pending).replace("<think>", "");
+                    if !t.is_empty() {
+                        events(ChatEvent::Thinking { text: t });
+                    }
+                    in_think = false;
+                    budget_hit = true;
+                    return false;
+                }
+            }
             if !started_ev {
                 started_ev = true;
                 events(ChatEvent::Start { ttft_ms: t0.elapsed().as_secs_f64() * 1000.0 });
@@ -1383,7 +1467,6 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
                         if !t.is_empty() {
                             events(ChatEvent::Thinking { text: t });
                         }
-                        thinking_tokens += 1;
                         pending = pending[cut..].to_owned();
                     }
                 } else if !pending.is_empty() {
@@ -1400,7 +1483,9 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
             });
             !cancel.load(Ordering::SeqCst)
         };
-        let result = if embeds.is_empty() {
+        let r = if let Some(c) = &cont {
+            generate(&l.model, &mut l.session, &l.tok, c, &cfg, on_piece)
+        } else if embeds.is_empty() {
             generate(&l.model, &mut l.session, &l.tok, &ids, &cfg, on_piece)
         } else {
             let mut parts: Vec<Part<'_>> = Vec::with_capacity(pieces.len() * 2);
@@ -1413,6 +1498,21 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
             }
             generate_parts(&l.model, &mut l.session, &l.tok, &parts, &cfg, on_piece)
         };
+        match &r {
+            Ok(g) if budget_hit && !cancel.load(Ordering::SeqCst) => {
+                first_ttft.get_or_insert(g.ttft_ms);
+                out_tokens += g.output_tokens;
+                prompt_tokens += g.prompt_tokens;
+                reused_tokens += g.reused_tokens;
+                decode_ms += g.total_ms - g.ttft_ms;
+                let mut c = l.session.tokens.clone();
+                c.extend(l.tok.encode("\n</think>\n\n"));
+                cont = Some(c);
+            }
+            _ => break r,
+        }
+        };
+        thinking_tokens += think_pieces;
         if !pending.is_empty() {
             if in_think {
                 events(ChatEvent::Thinking { text: std::mem::take(&mut pending) });
@@ -1426,7 +1526,7 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
         match result {
             Ok(g) => {
                 if round == 0 {
-                    ttft_ms = g.ttft_ms;
+                    ttft_ms = first_ttft.unwrap_or(g.ttft_ms);
                 }
                 out_tokens += g.output_tokens;
                 prompt_tokens += g.prompt_tokens;
@@ -1587,6 +1687,60 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
         });
         return;
     }
+    // Review passes (effort levels): the reply reread in this conversation, then checked again in a
+    // fresh context; a pass that finds a problem replaces the reply with its correction.
+    let mut extra_ms = 0.0;
+    let tools_used = convo.len() > req.turns.len();
+    if req.passes > 0 && !stopped && !cancel.load(Ordering::SeqCst) && !answer.trim().is_empty() && !tools_used && pics.is_empty() {
+        let tp = Instant::now();
+        set(st, |s| s.activity = "checking");
+        let question = req.turns.last().map(|t| t.text.as_str()).unwrap_or("");
+        let rcfg = GenConfig { sampler: SamplerConfig { temperature: 0.2, top_k: 20, top_p: 0.9, min_p: 0.05, repeat_penalty: 1.0, seed: now_ms() }, max_tokens: cfg.max_tokens };
+        for pass in 1..=req.passes.min(2) {
+            let text = if pass == 1 {
+                let mut turns: Vec<(&str, &str)> = convo.iter().map(|(r, t)| (r.as_str(), t.as_str())).collect();
+                turns.push(("assistant", answer.trim()));
+                turns.push(("user", REVIEW_SELF));
+                cerebro_engine::chatml((!system.is_empty()).then_some(system.as_str()), &turns, false)
+            } else {
+                let ask = format!("Question:\n{question}\n\nProposed answer:\n{}\n\n{REVIEW_FRESH}", answer.trim());
+                cerebro_engine::chatml(Some(REVIEW_SYSTEM), &[("user", ask.as_str())], false)
+            };
+            let vcfg = GenConfig { sampler: rcfg.sampler.clone(), max_tokens: 8 };
+            let ids = l.tok.encode(&text);
+            let mut verdict = String::new();
+            let r = generate(&l.model, &mut l.session, &l.tok, &ids, &vcfg, |p| {
+                verdict.push_str(p);
+                !cancel.load(Ordering::SeqCst)
+            });
+            if r.is_err() || cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            if review_verdict(&strip_think(&verdict)) != Some(false) {
+                events(ChatEvent::Check { pass, text: if pass == 1 { "Reread the answer: no error found.".into() } else { "Checked again in a fresh context: no error found.".into() } });
+                continue;
+            }
+            // WRONG: the correction, continuing the same conversation (the cache holds it).
+            let fix = format!("{text}{}<|im_end|>\n<|im_start|>user\n{REVIEW_FIX}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n", strip_think(&verdict));
+            let ids = l.tok.encode(&fix);
+            let mut reply = String::new();
+            let r = generate(&l.model, &mut l.session, &l.tok, &ids, &rcfg, |p| {
+                reply.push_str(p);
+                !cancel.load(Ordering::SeqCst)
+            });
+            if r.is_err() || cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            let fixed = strip_think(&reply);
+            if fixed.is_empty() {
+                continue;
+            }
+            answer = fixed;
+            events(ChatEvent::Revise { text: answer.clone() });
+            events(ChatEvent::Check { pass, text: if pass == 1 { "Reread the answer, found a problem and corrected it.".into() } else { "Checked in a fresh context, found a problem and corrected it.".into() } });
+        }
+        extra_ms = tp.elapsed().as_secs_f64() * 1000.0;
+    }
     // Keep this conversation's cache for next time (Settings > Protections, "Keep long chats
     // ready"); the serialising happens here, the file itself is written on a background thread.
     if req.keep_cache {
@@ -1598,7 +1752,7 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
     let decode_tps = if decode_ms > 0.0 { out_tokens as f64 / (decode_ms / 1000.0) } else { 0.0 };
     let length = !stopped && out_tokens >= cfg.max_tokens;
     events(ChatEvent::Done {
-        stats: ChatStats { prompt_tokens, length, output_tokens: out_tokens, thinking_tokens, tok_per_sec: decode_tps, ttft_ms, total_ms, extra_ms: 0.0, stopped },
+        stats: ChatStats { prompt_tokens, length, output_tokens: out_tokens, thinking_tokens, tok_per_sec: decode_tps, ttft_ms, total_ms, extra_ms, stopped },
     });
     let info = loaded_info(l, l.session.max_ctx);
     set(st, |s| {
@@ -1739,7 +1893,7 @@ fn run_orchestrate(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Ar
         max_tokens: req.sampler.max_tokens.max(256),
     };
     let t0 = Instant::now();
-    let mut llm = EngineLlm { l, cfg, think: req.native.is_some(), events, st, cancel, t0, started: false, tokens: 0, decode_ms: 0.0, prompt_tokens: 0, reused_tokens: 0, ttft_ms: None };
+    let mut llm = EngineLlm { l, cfg, think: thinking(req.native.as_ref()).0, events, st, cancel, t0, started: false, tokens: 0, decode_ms: 0.0, prompt_tokens: 0, reused_tokens: 0, ttft_ms: None };
     let opts = crate::orchestrate::Options { workers: o.workers, rounds: o.rounds };
     let result = crate::orchestrate::run(&mut llm, &ledger, &goal, &context, opts, &mut |p| match p {
         crate::orchestrate::Progress::Step { role, round } => events(ChatEvent::Ledger { step: Some(role.to_owned()), round, file: None, content: None, dir: None }),
@@ -1934,6 +2088,7 @@ mod tool_loop_tests {
             native: None,
             tools: None,
             orchestrate: None,
+            passes: 0,
             keep_cache: false,
             client_tools: None,
         };
@@ -1967,6 +2122,7 @@ mod tool_loop_tests {
             native: None,
             tools: None,
             orchestrate: None,
+            passes: 0,
             keep_cache: false,
             client_tools: None,
         };
@@ -2009,6 +2165,7 @@ mod tool_loop_tests {
             native: None,
             tools: Some(ToolsRequest { rules: Default::default(), default_rule: "ask".into(), offline: false, allow_local_fetch: false, access: Access::Workspace, show_secrets: false, blind_writes: false, plan_mode: false }),
             orchestrate: None,
+            passes: 0,
             keep_cache: false,
             client_tools: None,
         };
@@ -2022,6 +2179,92 @@ mod tool_loop_tests {
         assert!(answer.contains("21"), "the answer uses the tool result");
         assert!(!answer.starts_with(char::is_whitespace), "no blank lead-in before the answer");
         assert!(matches!(events.last(), Some(ChatEvent::Done { .. })));
+    }
+
+    /// The Speed <-> Accuracy slider's five levels on a real model (ui/src/lib/chat/modes.ts and
+    /// prompt.ts, built here the way the window builds them): time, tokens and whether each answer
+    /// is right, per question. Measures; asserts only that every level answered.
+    /// `CEREBRO_TEST_MODEL=... cargo test --release -p cerebro-desktop slider_levels -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn slider_levels_on_a_real_model() {
+        let path = std::env::var("CEREBRO_TEST_MODEL").unwrap_or_else(|_| r"C:\models\dev\qwen35\Qwen3.5-4B-Q8_0.gguf".into());
+        let Some(model) = describe(Path::new(&path), "test") else { panic!("model not readable: {path}") };
+        let engine = Engine::start();
+        engine.load(model.clone(), 8192, None).unwrap();
+        let fastest = "Answer directly and briefly. No preamble, no restating the question.\n\nAnswer first, in as few words as the question needs. Give details only when asked.";
+        let fast = "You are a helpful assistant on this computer. Be concise and correct.\n\nAnswer first, in as few words as the question needs. Give details only when asked.";
+        let balanced = "You are a helpful assistant running locally on this computer.\n\nAnswer first, in as few words as the question needs. Give details only when asked.";
+        let accurate = std::env::var("CEREBRO_ACCURATE_PROMPT").unwrap_or_else(|_| "You are a careful assistant running locally on this computer. Correctness matters more than speed.\n\nBefore answering, work out exactly what is being asked. For math, logic and code, work step by step and recompute anything you are not sure of.\n\nAnswer clearly with the context a careful reader needs, without padding.\n\nAssume every part of your answer is wrong until you have checked it.".into());
+        let sampler = |t: f32, k: usize, p: f32, minp: f32, rp: f32, max: usize| ChatSampler { temperature: t, top_p: p, min_p: minp, top_k: k, repeat_penalty: rp, max_tokens: max };
+        // (label, system prompt, thinking budget (None: off), passes, sampler, orchestrate)
+        type Level = (&'static str, String, Option<f64>, u8, ChatSampler, Option<OrchestrateRequest>);
+        let levels: Vec<Level> = vec![
+            ("1 Fastest", fastest.into(), None, 0, sampler(0.0, 1, 1.0, 0.0, 1.0, 1024), None),
+            ("2 Fast", fast.into(), None, 0, sampler(0.5, 40, 0.95, 0.05, 1.05, 2048), None),
+            ("3 Balanced", balanced.into(), Some(1024.0), 0, sampler(0.7, 40, 0.95, 0.05, 1.05, 4096), None),
+            ("4 Accurate", accurate.clone(), Some(16384.0), 1, sampler(0.4, 40, 0.95, 0.05, 1.05, 8192), None),
+            ("5 Maximum", accurate, Some(16384.0), 2, sampler(0.4, 40, 0.95, 0.05, 1.05, 8192), std::env::var_os("CEREBRO_SLIDER_ORCH").map(|_| OrchestrateRequest { workers: 5, rounds: 3 })),
+        ];
+        // (question, every one of these must appear in the answer, lower-cased)
+        let questions: [(&str, &[&str]); 8] = [
+            ("A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the ball. How much does the ball cost?", &["0.05"]),
+            ("How many times does the letter r appear in the word strawberry?", &["3"]),
+            ("Is 391 a prime number? Answer yes or no, then give its factors if it has any.", &["17", "23"]),
+            ("What is 17 x 24 + 13 x 19?", &["655"]),
+            ("If today is Wednesday, what day of the week will it be 100 days from now?", &["friday"]),
+            ("How many positive divisors does 360 have?", &["24"]),
+            ("I have 3 apples. I eat 2, buy 5 more, then give half of what I have to a friend. How many apples do I have now?", &["3"]),
+            ("What is the sum of the digits of 2 to the power of 15?", &["26"]),
+        ];
+        let only = std::env::var("CEREBRO_SLIDER_LEVELS").unwrap_or_default();
+        for (label, sys, budget, passes, smp, orch) in levels {
+            if !only.is_empty() && !only.split(',').any(|n| label.starts_with(n.trim())) {
+                continue;
+            }
+            let mut line = format!("{label:<11}");
+            let (mut right, mut secs, mut toks, mut think) = (0, 0.0, 0usize, 0usize);
+            for (q, ok) in questions {
+                let events: Arc<Mutex<Vec<ChatEvent>>> = Arc::default();
+                let ev = events.clone();
+                let sink: ChatSink = Arc::new(move |e: ChatEvent| ev.lock().unwrap().push(e));
+                let req = ChatRequest {
+                    model_id: model.id.clone(),
+                    system_prompt: sys.clone(),
+                    turns: vec![ChatTurn { role: "user".into(), text: q.into(), attachments: Vec::new() }],
+                    sampler: smp.clone(),
+                    native: budget.map(|b| serde_json::json!({ "reasoningEffort": "high", "thinkingBudget": b })),
+                    tools: None,
+                    orchestrate: orch,
+                    passes,
+                    keep_cache: false,
+                    client_tools: None,
+                };
+                let t = Instant::now();
+                engine.chat(req, sink).unwrap();
+                secs += t.elapsed().as_secs_f64();
+                let events = events.lock().unwrap();
+                let mut answer = String::new();
+                for e in events.iter() {
+                    match e {
+                        ChatEvent::Token { text } => answer.push_str(text),
+                        ChatEvent::Revise { text } => answer = text.clone(),
+                        ChatEvent::Done { stats } => {
+                            toks += stats.output_tokens;
+                            think += stats.thinking_tokens;
+                        }
+                        _ => {}
+                    }
+                }
+                let low = answer.to_lowercase();
+                let good = ok.iter().all(|w| low.contains(w)) && !(q.contains("prime") && low.trim_start().starts_with("yes"));
+                right += good as usize;
+                assert!(!answer.trim().is_empty() || orch.is_some(), "{label}: no answer to {q}");
+                eprintln!("  [{label}] {}: {}", if good { "right" } else { "WRONG" }, answer.replace('\n', " ").chars().take(160).collect::<String>());
+            }
+            line.push_str(&format!(" {right}/{} right, {secs:6.1} s, {toks:5} tokens out, {think:5} thinking", questions.len()));
+            println!("{line}");
+        }
     }
 
     /// Orchestrate mode on the real engine: plan, ideate, manage, workers and finalize all run on
@@ -2047,6 +2290,7 @@ mod tool_loop_tests {
             native: None,
             tools: None,
             orchestrate: Some(OrchestrateRequest { workers: 2, rounds: 2 }),
+            passes: 0,
             keep_cache: false,
             client_tools: None,
         };

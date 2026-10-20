@@ -1000,6 +1000,7 @@ impl crate::remote::Backend for PhoneBackend {
             // A phone never drives tools: approvals belong at the computer.
             tools: None,
             orchestrate: None,
+            passes: 0,
             // The user's own conversation: worth a cache like a window chat.
             keep_cache: true,
             client_tools: None,
@@ -1009,7 +1010,7 @@ impl crate::remote::Backend for PhoneBackend {
             ChatEvent::Thinking { text } => sink(PhoneEvent::Thinking(text)),
             ChatEvent::Done { stats } => sink(PhoneEvent::Done { tokens: stats.output_tokens as u64, tps: stats.tok_per_sec }),
             ChatEvent::Error { message } => sink(PhoneEvent::Error(message)),
-            ChatEvent::Start { .. } | ChatEvent::Tool { .. } | ChatEvent::Ledger { .. } => {}
+            ChatEvent::Start { .. } | ChatEvent::Tool { .. } | ChatEvent::Ledger { .. } | ChatEvent::Check { .. } | ChatEvent::Revise { .. } => {}
         });
         engine.handle().chat(request, out)
     }
@@ -1173,6 +1174,7 @@ impl crate::mcp_server::McpBackend for McpEngineBackend {
             native: None,
             tools: None,
             orchestrate: None,
+            passes: 0,
             // Another app's own request: its conversations are not the user's window chats.
             keep_cache: false,
             client_tools: None,
@@ -1321,6 +1323,7 @@ impl crate::local_api::ApiBackend for ApiEngineBackend {
             native: req.think.then(|| serde_json::json!({})),
             tools: None,
             orchestrate: None,
+            passes: 0,
             // An API client manages its own context: no caches accumulate from its calls.
             keep_cache: false,
             client_tools: (!req.tools.is_empty()).then(|| req.tools.clone()),

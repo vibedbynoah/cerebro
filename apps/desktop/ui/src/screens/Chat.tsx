@@ -4,6 +4,7 @@ import { createStore, produce } from "solid-js/store";
 import { Icon } from "../components/icons";
 import { IllustrativeFlag } from "../components/Screen";
 import { SettingSwitch } from "../components/SettingSwitch";
+import { applyMode, loadSampler, MODE_PRESETS, modeOf, saveSampler, type Mode } from "../lib/chat/modes";
 import { buildRequest, DEFAULT_BASE_PROMPT, effectiveLevels, loadLevelEdits, loadPrefs, savePrefs, supportsNativeReasoning, type ChatPrefs, type Memory } from "../lib/chat/prompt";
 import {
   emptyConversation,
@@ -56,7 +57,8 @@ export function Chat(): JSX.Element {
     setPrefsSignal(next);
     savePrefs(next);
   };
-  const [sampler, setSampler] = createSignal<Sampler>({ ...DEFAULT_SAMPLER });
+  const [sampler, setSampler] = createSignal<Sampler>(loadSampler());
+  createEffect(on(sampler, (s) => saveSampler(s), { defer: true }));
 
   const [state, setState] = createStore<{ list: Conversation[] }>({ list: loadConversations() });
   const [currentId, setCurrentId] = createSignal<string>(state.list[0]?.id ?? "");
@@ -91,6 +93,21 @@ export function Chat(): JSX.Element {
       modelMaxThinking: MAX_THINKING,
     }),
   );
+
+  /** The Speed <-> Accuracy slider: every setting it covers, then a notice saying what changed. */
+  let modeNotice: ReturnType<typeof setTimeout> | undefined;
+  const pickMode = (m: Mode) => {
+    const next = applyMode(m, prefs(), sampler());
+    setPrefs(next.prefs);
+    setSampler(next.sampler);
+    // Dragging across levels shows only the one it stops on.
+    clearTimeout(modeNotice);
+    modeNotice = setTimeout(() => {
+      const p = MODE_PRESETS[m];
+      notify(`${p.label}`, `${p.summary} ${p.changes.join(". ")}.`, "info");
+    }, 350);
+  };
+  onCleanup(() => clearTimeout(modeNotice));
 
   let abort: AbortController | null = null;
   const streaming = () => current()?.messages.some((m) => m.streaming) ?? false;
@@ -211,6 +228,10 @@ export function Chat(): JSX.Element {
               break;
             case "check":
               updateMsg(cid, mid, (m) => void m.checks.push(e.text));
+              break;
+            case "revise":
+              pending = "";
+              updateMsg(cid, mid, (m) => void (m.text = e.text));
               break;
             case "tool": {
               cancelAnimationFrame(frame);
@@ -392,6 +413,8 @@ export function Chat(): JSX.Element {
 
         <Composer
           levels={levels}
+          mode={modeOf(prefs(), sampler())}
+          onMode={pickMode}
           prefs={prefs()}
           setPrefs={setPrefs}
           streaming={streaming()}

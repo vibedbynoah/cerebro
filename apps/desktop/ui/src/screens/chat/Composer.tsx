@@ -1,5 +1,6 @@
 import { createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { Icon } from "../../components/icons";
+import { MODE_PRESETS, MODES, type Mode } from "../../lib/chat/modes";
 import { EFFORT_LABELS, EFFORTS, REASONING_LABELS, REASONING_NOTES, REASONING_SOURCES, VERBOSITIES, VERBOSITY_LABELS, type ChatPrefs, type Effort, type EffortLevel } from "../../lib/chat/prompt";
 import type { Attachment } from "../../lib/chat/store";
 
@@ -44,6 +45,9 @@ const ORCHESTRATE_ROUNDS: readonly [number, number] = [1, 8];
 
 export function Composer(props: {
   levels: Readonly<Record<Effort, EffortLevel>>;
+  /** The Speed <-> Accuracy level the settings match (null: changed by hand). */
+  mode: Mode | null;
+  onMode: (m: Mode) => void;
   prefs: ChatPrefs;
   setPrefs: (p: Partial<ChatPrefs>) => void;
   streaming: boolean;
@@ -255,6 +259,33 @@ export function Composer(props: {
           {error()}
         </p>
       </Show>
+      <div class="composer__mode">
+        <label for="speed-mode" class="composer__mode-end">Speed</label>
+        <input
+          id="speed-mode"
+          type="range"
+          min="1"
+          max="5"
+          step="1"
+          value={props.mode ?? 3}
+          data-custom={props.mode === null ? "true" : undefined}
+          aria-valuetext={props.mode ? MODE_PRESETS[props.mode].label : "Custom"}
+          aria-describedby="mode-note"
+          onInput={(e) => props.onMode(Number(e.currentTarget.value) as Mode)}
+        />
+        <span class="composer__mode-end" aria-hidden="true">
+          Accuracy
+        </span>
+        <output class="composer__mode-level" for="speed-mode" data-testid="speed-mode">
+          {props.mode ? MODE_PRESETS[props.mode].label : "Custom"}
+        </output>
+        <span class="composer__mode-ticks" aria-hidden="true">
+          <For each={MODES}>{(m) => <span data-on={props.mode === m ? "true" : undefined} />}</For>
+        </span>
+      </div>
+      <p class="composer__hint composer__hint--mode" id="mode-note">
+        {props.mode ? MODE_PRESETS[props.mode].summary : "Custom: you changed one of the settings below by hand. Move the slider to pick a level again."}
+      </p>
       <div class="composer__controls">
         <fieldset class="segmented segmented--sm effort" aria-describedby="effort-note">
           <legend>Effort</legend>
