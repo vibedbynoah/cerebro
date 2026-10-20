@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use cerebro_engine::model::Model;
 use cerebro_engine::tokenizer::Tokenizer;
-use cerebro_engine::tts::{speak, TtsDecoder, SAMPLE_RATE};
+use cerebro_engine::tts::{speak_in, TtsDecoder, SAMPLE_RATE};
 
 use crate::engine::LibraryModel;
 
@@ -126,6 +126,8 @@ struct Loaded {
     model: Model,
     tok: Tokenizer,
     dec: TtsDecoder,
+    /// The talker's session, kept between sentences (on the graphics card it holds the model).
+    session: cerebro_engine::model::Session,
 }
 
 enum Job {
@@ -158,11 +160,13 @@ impl Default for Tts {
                             let model = Model::load(Path::new(&m.path)).map_err(|e| format!("Could not load the speech model: {e}"))?;
                             let tok = Tokenizer::from_gguf(model.gguf()).map_err(|e| format!("Could not read the speech model's tokenizer: {e}"))?;
                             let dec = TtsDecoder::load(Path::new(&proj.path)).map_err(|e| format!("Could not load the speech decoder: {e}"))?;
-                            loaded = Some(Loaded { id: m.id.clone(), model, tok, dec });
+                            dec.prepare();
+                            let session = cerebro_engine::tts::talker_session(&model, 4096);
+                            loaded = Some(Loaded { id: m.id.clone(), model, tok, dec, session });
                             *id.lock().unwrap_or_else(|e| e.into_inner()) = Some(m.id.clone());
                         }
-                        let l = loaded.as_ref().ok_or("The speech model is not loaded.")?;
-                        let sp = speak(&l.model, &l.tok, &l.dec, &text, "english", 42, MAX_FRAMES).map_err(|e| format!("Speech failed: {e}"))?;
+                        let l = loaded.as_mut().ok_or("The speech model is not loaded.")?;
+                        let sp = speak_in(&l.model, &mut l.session, &l.tok, &l.dec, &text, "english", 42, MAX_FRAMES).map_err(|e| format!("Speech failed: {e}"))?;
                         Ok(sp.samples)
                     })();
                     let _ = reply.send(r);
