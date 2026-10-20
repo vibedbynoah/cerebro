@@ -33,15 +33,15 @@ fn report(msg: &str) {
 
 #[cfg(windows)]
 fn alert(msg: &str) {
-    #[link(name = "user32")]
-    extern "system" {
-        fn MessageBoxW(hwnd: *mut core::ffi::c_void, text: *const u16, caption: *const u16, kind: u32) -> i32;
-    }
-    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
-    let (text, caption) = (wide(msg), wide("Cerebro"));
-    // MB_OK | MB_ICONERROR | MB_SETFOREGROUND
-    // SAFETY: both strings are NUL-terminated UTF-16 that outlive the call.
-    unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), 0x10 | 0x0001_0000) };
+    use std::os::windows::process::CommandExt;
+    // A message box from a hidden PowerShell (the crate forbids unsafe code, so no direct Win32
+    // call); the text goes through the environment, never through the command line.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let _ = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", "Add-Type -AssemblyName PresentationFramework; [void][System.Windows.MessageBox]::Show($env:CEREBRO_ERROR, 'Cerebro', 'OK', 'Error')"])
+        .env("CEREBRO_ERROR", msg)
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
 }
 
 #[cfg(not(windows))]
