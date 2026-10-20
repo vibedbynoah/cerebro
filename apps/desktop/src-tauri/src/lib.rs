@@ -30,6 +30,7 @@ mod gguf_edit;
 mod tune_screen;
 mod stt;
 mod tts;
+mod images;
 mod vision_input;
 mod hub;
 mod kv_store;
@@ -68,6 +69,8 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::tune_start,
             commands::mic_start,
             commands::tts_sample,
+            commands::image_generate,
+            commands::image_reveal,
             commands::tts_read,
             commands::tts_stop,
             commands::mic_level,
@@ -142,6 +145,8 @@ pub fn run() -> Result<(), tauri::Error> {
         // Text to speech (tts.rs): the speech model and the speaker.
         .manage(std::sync::Arc::new(tts::Tts::default()))
         .manage(std::sync::Arc::new(tts::Player::default()))
+        // Image Studio (images.rs).
+        .manage(std::sync::Arc::new(images::Images::default()))
         .setup(|app| {
             commands::load_switches(app.handle());
             {
@@ -161,6 +166,9 @@ pub fn run() -> Result<(), tauri::Error> {
                 app.state::<engine::Engine>().set_tool_host(std::sync::Arc::new(tools));
                 if let Ok(dir) = app.path().app_config_dir() {
                     app.state::<std::sync::Arc<tune_screen::TuneHub>>().set_results_path(dir.join("tune-results.json"));
+                }
+                if let Ok(dir) = app.path().app_data_dir() {
+                    app.state::<std::sync::Arc<images::Images>>().set_out_dir(dir.join("images"));
                 }
                 if let Ok(dir) = app.path().app_data_dir() {
                     app.state::<engine::Engine>().set_ledger_root(dir);

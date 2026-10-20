@@ -701,6 +701,9 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
       }),
 
     startRecording: () => later(0, () => undefined),
+    // The preview draws its own illustrative artwork (screens/ImageStudio.tsx); it never calls these.
+    generateImage: () => Promise.reject(new Error("The browser preview does not make images.")),
+    revealImage: () => later(0, () => false),
     // The preview has no audio: reading aloud takes about as long as speaking would.
     readAloud: (text) =>
       new Promise<void>((resolve) => {

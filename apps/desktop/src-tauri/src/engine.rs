@@ -87,7 +87,10 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
-            if depth < 6 {
+            // An image model is a folder (diffusers layout): listed whole, not searched inside.
+            if crate::images::is_image_model(&p) {
+                out.push(p);
+            } else if depth < 6 {
                 walk(&p, depth + 1, out);
             }
         } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("gguf")) {
@@ -228,7 +231,8 @@ pub fn scan_library() -> Vec<LibraryModel> {
         for f in &files {
             let key = f.to_string_lossy().to_lowercase();
             if seen.insert(key) {
-                if let Some(m) = describe(f, source) {
+                let m = if f.is_dir() { crate::images::describe(f, source, id_of(f)) } else { describe(f, source) };
+                if let Some(m) = m {
                     out.push(m);
                 }
             }

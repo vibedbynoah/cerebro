@@ -280,6 +280,40 @@ pub fn tts_stop(tts: TtsState<'_>, player: PlayerState<'_>) {
     player.stop();
 }
 
+type ImagesState<'a> = State<'a, std::sync::Arc<crate::images::Images>>;
+
+/// Image Studio: an image for `prompt` from image model `model_id`, `size` pixels square (a
+/// multiple of 64, at most 1024), `steps` denoising steps (1 to 8), `seed` (random when absent).
+/// Saved as a PNG under the app's data; resolves with it as a data: URL and its path.
+#[tauri::command]
+pub async fn image_generate(engine: State<'_, Engine>, images: ImagesState<'_>, model_id: String, prompt: String, size: u32, steps: u32, seed: Option<u64>) -> Result<crate::images::Generated, String> {
+    let m = find_model(&engine, &model_id)?;
+    if m.kind != "image" || !m.supported {
+        return Err("That model does not make images (Stable Diffusion 2.x-family models such as SD-Turbo do).".to_owned());
+    }
+    if size % 64 != 0 || !(256..=1024).contains(&size) || !(1..=8).contains(&steps) || prompt.chars().count() > 2000 {
+        return Err("Use a size of 256 to 1,024 pixels in steps of 64, 1 to 8 steps, and a prompt under 2,000 characters.".to_owned());
+    }
+    let seed = seed.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64 & 0xffff_ffff));
+    let img = std::sync::Arc::clone(images.inner());
+    tauri::async_runtime::spawn_blocking(move || img.generate(&m, crate::images::Request { prompt, size: size as usize, steps: steps as usize, seed }))
+        .await
+        .map_err(|_| "The image could not be made.".to_owned())?
+}
+
+/// Opens File Explorer at a generated image (only files in Cerebro's images folder).
+#[tauri::command]
+pub fn image_reveal<R: Runtime>(app: tauri::AppHandle<R>, path: String) -> Result<bool, String> {
+    use tauri::Manager;
+    let dir = app.path().app_data_dir().map_err(|_| "The images folder is unknown.".to_owned())?.join("images");
+    let p = std::path::Path::new(&path);
+    let inside = p.canonicalize().ok().zip(dir.canonicalize().ok()).is_some_and(|(f, d)| f.starts_with(d));
+    if !inside {
+        return Err("That file is not one of Cerebro's images.".to_owned());
+    }
+    Ok(crate::dedup::reveal(p))
+}
+
 /// The Models screen's image test: the loaded vision model describes one image (a data: URL).
 #[tauri::command]
 pub async fn model_describe_image(engine: State<'_, Engine>, id: String, data: String) -> Result<String, String> {

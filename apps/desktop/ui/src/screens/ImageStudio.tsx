@@ -1,5 +1,7 @@
 import "../styles/images.css";
-import { createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
+import { createMemo, createResource, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
+import { useService } from "../service/context";
+import type { GeneratedImage, LibraryModel } from "../service/types";
 import { Icon } from "../components/icons";
 import { IllustrativeFlag, ScreenHeader } from "../components/Screen";
 import { Preview } from "../components/Preview";
@@ -31,25 +33,154 @@ import { useAppState } from "../state";
  * and export. In this build images are illustrative artwork drawn from the seed.
  */
 export function ImageStudio(): JSX.Element {
-  // The desktop engine runs language models only; it says so instead of drawing stand-in artwork.
-  if (__DESKTOP__) return <ImagesPlanned />;
+  if (__DESKTOP__) return <ImagesDesktop />;
   return <ImageStudioPreview />;
 }
 
-function ImagesPlanned(): JSX.Element {
+const SIZES = [512, 768] as const;
+
+/**
+ * The desktop screen: real images from an image model in the library (Stable Diffusion 2.x-family
+ * folders such as SD-Turbo), made on this machine; each one saved as a PNG with its seed.
+ */
+function ImagesDesktop(): JSX.Element {
+  const service = useService();
+  const [library] = createResource(() => service.listLibrary().catch(() => [] as LibraryModel[]));
+  const models = createMemo(() => (library() ?? []).filter((m) => m.kind === "image"));
+  const [modelId, setModelId] = createSignal<string | null>(null);
+  const model = () => models().find((m) => m.id === modelId()) ?? models()[0] ?? null;
+  const [prompt, setPrompt] = createSignal("");
+  const [size, setSize] = createSignal<number>(512);
+  const [steps, setSteps] = createSignal(1);
+  const [seedText, setSeedText] = createSignal("");
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  const [results, setResults] = createSignal<Array<GeneratedImage & { prompt: string }>>([]);
+  const current = () => results()[0] ?? null;
+  const seedValue = (): number | null => {
+    const t = seedText().trim();
+    return /^\d{1,9}$/.test(t) ? Number(t) : null;
+  };
+  const generate = () => {
+    const m = model();
+    if (!m || busy() || !prompt().trim()) return;
+    setBusy(true);
+    setError(null);
+    const p = prompt().trim();
+    service
+      .generateImage({ modelId: m.id, prompt: p, size: size(), steps: steps(), seed: seedValue() })
+      .then((g) => setResults((r) => [{ ...g, prompt: p }, ...r].slice(0, 24)))
+      .catch((e: unknown) => setError(e instanceof Error && e.message ? e.message : "The image could not be made."))
+      .finally(() => setBusy(false));
+  };
   return (
-    <div class="screen">
-      <ScreenHeader route="images" />
-      <Preview
-        art="gallery"
-        title="Images made on this computer"
-        lede="Cerebro Engine runs language models today. Image models come next, on the same GPU and with the same speed tuning."
-        features={[
-          { icon: "images", title: "Text to image", text: "Describe a picture; it is drawn locally with the seed shown so you can make it again." },
-          { icon: "sliders", title: "Edit and upscale", text: "Paint a mask to change part of a picture, or upscale it, without uploading anything." },
-          { icon: "gpu", title: "Fits your card", text: "Picks the image model and resolution your VRAM can hold." },
-        ]}
-      />
+    <div class="screen images">
+      <ScreenHeader route="images" lede="Describe a picture; it is made on this computer, with its seed so you can make it again." />
+      <Show
+        when={models().length > 0}
+        fallback={
+          <Show when={library()}>
+            <Preview
+              art="gallery"
+              title="Add an image model"
+              lede="Image Studio runs Stable Diffusion 2.x-family models in the diffusers folder layout, such as SD-Turbo. Put the model's folder under C:\models or Cerebro's models folder and it appears here."
+              features={[
+                { icon: "images", title: "Text to image", text: "Describe a picture; it is drawn locally with the seed shown so you can make it again." },
+                { icon: "lock", title: "On this computer", text: "Prompts and images never leave it." },
+                { icon: "gpu", title: "One step", text: "SD-Turbo makes a 512 x 512 image in a single step." },
+              ]}
+            />
+          </Show>
+        }
+      >
+        <div class="img-layout">
+          <section class="img-controls card" aria-label="Settings">
+            <label class="img-field">
+              <span>Model</span>
+              <select value={model()?.id ?? ""} onChange={(e) => setModelId(e.currentTarget.value)}>
+                <For each={models()}>{(m) => <option value={m.id}>{m.name}</option>}</For>
+              </select>
+            </label>
+            <label class="img-field">
+              <span>Describe the picture</span>
+              <textarea
+                rows={4}
+                maxLength={2000}
+                value={prompt()}
+                onInput={(e) => setPrompt(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) generate();
+                }}
+                placeholder="A red apple on a wooden table, soft window light"
+              />
+            </label>
+            <fieldset class="img-aspects">
+              <legend>Size</legend>
+              <For each={SIZES}>
+                {(s) => (
+                  <label class="img-chip" data-on={size() === s}>
+                    <input type="radio" name="img-size" checked={size() === s} onChange={() => setSize(s)} />
+                    {s} × {s}
+                  </label>
+                )}
+              </For>
+            </fieldset>
+            <label class="img-field">
+              <span>Steps: {steps()}</span>
+              <input type="range" min="1" max="4" step="1" value={steps()} onInput={(e) => setSteps(Number(e.currentTarget.value))} />
+            </label>
+            <label class="img-field">
+              <span>Seed (empty for a new one)</span>
+              <input inputMode="numeric" maxLength={9} value={seedText()} onInput={(e) => setSeedText(e.currentTarget.value)} aria-invalid={seedText().trim() !== "" && seedValue() === null ? "true" : undefined} />
+            </label>
+            <Show when={error()}>
+              <p class="img-error" role="alert">
+                <Icon name="alert" size={14} /> {error()}
+              </p>
+            </Show>
+            <button type="button" class="btn btn--primary img-go" data-press disabled={!prompt().trim() || busy()} aria-busy={busy() ? "true" : undefined} onClick={generate}>
+              <Icon name="images" size={16} />
+              {busy() ? "Making the image…" : "Generate"}
+            </button>
+          </section>
+          <section class="img-stage card" aria-label="Result">
+            <Show when={current()} fallback={<p class="img-stage__empty">{busy() ? "Making the image on this computer…" : "Your image appears here."}</p>}>
+              {(g) => (
+                <figure class="img-result">
+                  <img class="img-art" src={g().dataUrl} alt={g().prompt} width={g().width} height={g().height} />
+                  <figcaption>
+                    <span>{g().prompt}</span>
+                    <span class="mono hint">
+                      {g().width}×{g().height} · seed {g().seed} · {g().seconds.toFixed(1)} s
+                    </span>
+                  </figcaption>
+                  <div>
+                    <button type="button" class="btn btn--secondary btn--sm" onClick={() => void service.revealImage(g().path).catch(() => notify("Could not open the folder", undefined, "error"))}>
+                      Show in folder
+                    </button>
+                  </div>
+                </figure>
+              )}
+            </Show>
+          </section>
+        </div>
+        <Show when={results().length > 1}>
+          <section class="img-gallery" aria-labelledby="gallery-title">
+            <div class="img-gallery__head">
+              <h2 id="gallery-title">This session</h2>
+            </div>
+            <ul class="img-grid">
+              <For each={results().slice(1)}>
+                {(g) => (
+                  <li>
+                    <img class="img-art" src={g.dataUrl} alt={g.prompt} width={g.width} height={g.height} />
+                  </li>
+                )}
+              </For>
+            </ul>
+          </section>
+        </Show>
+      </Show>
     </div>
   );
 }

@@ -25,6 +25,7 @@ import type { EngineSwitch, LocalApiView, McpServerView, RemoteOptions, RemotePa
   Settings,
   KvStoreUsage,
   TestOutput,
+  GeneratedImage,
   TuneEvent,
   TuneProfile,
   TuneRunInfo,
@@ -115,6 +116,10 @@ export interface CerebroService {
   recordingLevel(): Promise<number>;
   /** Resolves with the length of the spoken audio, in seconds, as it starts playing. */
   speakSample(id: string, text: string): Promise<number>;
+  /** Image Studio: makes an image with an image model (desktop). */
+  generateImage(req: { modelId: string; prompt: string; size: number; steps: number; seed: number | null }): Promise<GeneratedImage>;
+  /** Opens File Explorer at a generated image. */
+  revealImage(path: string): Promise<boolean>;
   /** Reads a reply aloud with the speech model in use; resolves when it has finished or stopped. */
   readAloud(text: string): Promise<void>;
   /** Stops speech that is playing or being read. */

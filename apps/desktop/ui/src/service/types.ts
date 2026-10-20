@@ -437,6 +437,19 @@ export interface DedupeResult {
 }
 
 /** Output of a "try it" test. The mock's is always illustrative. */
+/** An image Image Studio made on this machine (desktop). */
+export interface GeneratedImage {
+  /** The PNG as a data: URL. */
+  dataUrl: string;
+  /** Where it was saved. */
+  path: string;
+  seed: number;
+  /** Time to make it, measured. */
+  seconds: number;
+  width: number;
+  height: number;
+}
+
 export interface TestOutput {
   text: string;
   provenance: Provenance;

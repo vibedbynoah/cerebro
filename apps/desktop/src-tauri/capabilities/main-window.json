@@ -38,6 +38,8 @@
     "allow-tune-start",
     "allow-mic-start",
     "allow-tts-sample",
+    "allow-image-generate",
+    "allow-image-reveal",
     "allow-tts-read",
     "allow-tts-stop",
     "allow-mic-level",

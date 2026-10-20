@@ -26,6 +26,8 @@ const COMMANDS: &[&str] = &[
     "tune_start",
     "mic_start",
     "tts_sample",
+    "image_generate",
+    "image_reveal",
     "tts_read",
     "tts_stop",
     "mic_level",

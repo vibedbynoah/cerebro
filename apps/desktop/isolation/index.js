@@ -202,6 +202,17 @@ const WITH_ARGS = {
   disk_unlink: (p) => isPlain(p) && hasOnlyKeys(p, ["groupId"]) && isGroupId(p.groupId),
   model_reveal: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && isModelId(p.id),
   tune_start: (p) => isPlain(p) && hasOnlyKeys(p, ["modelId", "profile", "integrityCheck"]) && isModelId(p.modelId) && ["chat", "coding", "long-docs"].includes(/** @type {string} */ (p.profile)) && typeof p.integrityCheck === "boolean",
+  image_generate: (p) =>
+    isPlain(p) &&
+    hasOnlyKeys(p, ["modelId", "prompt", "size", "steps"], ["seed"]) &&
+    isModelId(p.modelId) &&
+    typeof p.prompt === "string" &&
+    p.prompt.length > 0 &&
+    p.prompt.length <= 2000 &&
+    Number.isInteger(p.size) &&
+    Number.isInteger(p.steps) &&
+    (p.seed === undefined || p.seed === null || (Number.isInteger(p.seed) && /** @type {number} */ (p.seed) >= 0)),
+  image_reveal: (p) => isPlain(p) && hasOnlyKeys(p, ["path"]) && typeof p.path === "string" && p.path.length > 0 && p.path.length <= 1024,
   tts_sample: (p) => isPlain(p) && hasOnlyKeys(p, ["modelId", "text"]) && isModelId(p.modelId) && typeof p.text === "string" && p.text.length > 0 && p.text.length <= 280,
   tts_read: (p) => isPlain(p) && hasOnlyKeys(p, ["text"]) && typeof p.text === "string" && p.text.length > 0 && p.text.length <= 100_000,
   stt_transcribe: (p) => isPlain(p) && hasOnlyKeys(p, [], ["modelId"]) && (p.modelId === undefined || p.modelId === null || isModelId(p.modelId)),
