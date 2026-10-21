@@ -1,5 +1,6 @@
 import { createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { Icon } from "../../components/icons";
+import { closest, parseCommand, suggest, unknownCommand, type CommandDef } from "../../lib/chat/commands";
 import { MODE_PRESETS, MODES, type Mode } from "../../lib/chat/modes";
 import { EFFORT_LABELS, EFFORTS, REASONING_LABELS, REASONING_NOTES, REASONING_SOURCES, VERBOSITIES, VERBOSITY_LABELS, type ChatPrefs, type Effort, type EffortLevel } from "../../lib/chat/prompt";
 import type { Attachment } from "../../lib/chat/store";
@@ -57,6 +58,8 @@ export function Composer(props: {
   streaming: boolean;
   notes: string[];
   onSend: (text: string, atts: Attachment[]) => void;
+  /** A / command typed in the composer (lib/chat/commands.ts); never sent to the model. */
+  onCommand?: (name: string, arg: string) => void;
   onStop: () => void;
   onTranscribe: (seconds: number) => Promise<string>;
   /** Starts the microphone when push-to-talk is pressed (desktop records natively). */
@@ -77,10 +80,7 @@ export function Composer(props: {
   let wave: ReturnType<typeof setInterval> | undefined;
   onCleanup(() => clearInterval(wave));
 
-  const send = () => {
-    const t = text().trim();
-    if ((!t && !atts().length) || props.streaming) return;
-    props.onSend(t, atts());
+  const clearInput = () => {
     setText("");
     area.value = "";
     setAtts([]);
@@ -88,7 +88,68 @@ export function Composer(props: {
     area.style.height = "";
   };
 
+  const send = () => {
+    const t = text().trim();
+    if (props.onCommand && t.startsWith("/") && !t.startsWith("//")) {
+      const cmd = parseCommand(t);
+      if (cmd) {
+        props.onCommand(cmd.def.name, cmd.arg);
+        clearInput();
+        return;
+      }
+      const unknown = unknownCommand(t);
+      if (unknown) {
+        setError(`There is no /${unknown} command. Did you mean /${closest(unknown)}? Type /help for the list.`);
+        return;
+      }
+    }
+    if ((!t && !atts().length) || props.streaming) return;
+    // "//text" sends a message that starts with "/".
+    props.onSend(t.startsWith("//") ? t.slice(1) : t, atts());
+    clearInput();
+  };
+
+  // The / command menu: open while the message is a command name being typed.
+  const [menuIndex, setMenuIndex] = createSignal(0);
+  const [menuClosed, setMenuClosed] = createSignal(false);
+  const menuItems = (): CommandDef[] => {
+    const t = text();
+    if (!props.onCommand || menuClosed() || !/^\/[a-z-]*$/i.test(t)) return [];
+    return suggest(t);
+  };
+  const pick = (c: CommandDef) => {
+    setMenuIndex(0);
+    if (!c.args) {
+      setText(`/${c.name}`);
+      area.value = `/${c.name}`;
+      send();
+      return;
+    }
+    const v = `/${c.name} `;
+    setText(v);
+    area.value = v;
+    area.focus();
+  };
+
   const onKey = (e: KeyboardEvent) => {
+    const items = menuItems();
+    if (items.length) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        setMenuIndex((i) => (i + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length);
+        return;
+      }
+      if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
+        e.preventDefault();
+        pick(items[Math.min(menuIndex(), items.length - 1)]!);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setMenuClosed(true);
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       send();
@@ -207,6 +268,31 @@ export function Composer(props: {
           </For>
         </ul>
       </Show>
+      <Show when={menuItems().length}>
+        <ul class="command-menu card" id="command-menu" role="listbox" aria-label="Commands">
+          <For each={menuItems()}>
+            {(c, i) => (
+              <li
+                id={`cmd-${c.name}`}
+                role="option"
+                class="command-menu__item"
+                aria-selected={i() === Math.min(menuIndex(), menuItems().length - 1)}
+                onMouseEnter={() => setMenuIndex(i())}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  pick(c);
+                }}
+              >
+                <span class="mono command-menu__name">/{c.name}</span>
+                <Show when={c.args}>
+                  <span class="mono command-menu__args">{c.args}</span>
+                </Show>
+                <span class="command-menu__desc">{c.description}</span>
+              </li>
+            )}
+          </For>
+        </ul>
+      </Show>
       <div class="composer__row">
         <textarea
           ref={area}
@@ -214,8 +300,14 @@ export function Composer(props: {
           rows="1"
           placeholder={recording() ? "Listening…" : "Message the model. / for commands: /imagine a red fox in snow"}
           aria-label="Message"
+          aria-autocomplete="list"
+          aria-controls={menuItems().length ? "command-menu" : undefined}
+          aria-activedescendant={menuItems().length ? `cmd-${menuItems()[Math.min(menuIndex(), menuItems().length - 1)]!.name}` : undefined}
           onInput={(e) => {
             setText(e.currentTarget.value);
+            setMenuClosed(false);
+            setMenuIndex(0);
+            setError("");
             grow();
           }}
           onKeyDown={onKey}

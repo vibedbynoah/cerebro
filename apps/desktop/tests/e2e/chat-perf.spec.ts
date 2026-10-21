@@ -14,7 +14,7 @@ test("streaming a long reply never blocks the main thread for more than 50 ms", 
     const box = page.getByRole("textbox", { name: "Message" });
     // Pasting 8 KB into a textarea is one browser layout no app code controls; the budget is for
     // sending and streaming, so watching starts once the paste has settled.
-    await box.fill(`/echo ${long}`);
+    await box.fill(`//echo ${long}`);
     await page.waitForTimeout(500);
     await page.evaluate(() => {
       const w = window as unknown as { __long: number[] };

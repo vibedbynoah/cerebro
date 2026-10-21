@@ -19,3 +19,8 @@ export function notify(title: string, description?: string, kind: ToastKind = "i
     duration: kind === "error" ? 8000 : 4000,
   });
 }
+
+/** A toast with one action button, e.g. "Undo". */
+export function notifyAction(title: string, description: string, label: string, onClick: () => void, kind: ToastKind = "info"): void {
+  toaster.create({ title, description, type: kind, duration: 7000, action: { label, onClick } });
+}

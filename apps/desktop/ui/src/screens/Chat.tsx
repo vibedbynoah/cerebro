@@ -21,7 +21,13 @@ import {
   type LedgerState,
 } from "../lib/chat/store";
 import { chatToolRules, loadPolicy, mcpToolKey, savePolicy } from "../lib/permissions";
-import { notify } from "../lib/toast";
+import { notify, notifyAction } from "../lib/toast";
+import { COMMANDS, numberArg, orchestrateArg, speedArg, switchArg } from "../lib/chat/commands";
+import { parseMarkdown, plainText } from "../lib/chat/markdown";
+import { saveText } from "../lib/download";
+import { Dialog } from "@ark-ui/solid/dialog";
+import { Portal } from "solid-js/web";
+import "../styles/guide.css";
 import { useAppState } from "../state";
 import { DEFAULT_SAMPLER, LEDGER_FILES, type ChatTools, type ChatTurn, type LedgerFileName, type Sampler, type ToolActivity } from "../service/chat-types";
 import { useService } from "../service/context";
@@ -323,6 +329,154 @@ export function Chat(): JSX.Element {
 
   const more = () => send("Tell me more.", []);
 
+  /** A / command from the composer (lib/chat/commands.ts). Runs here; nothing reaches the model. */
+  const command = (name: string, arg: string) => {
+    const lastReply = () => [...(current()?.messages ?? [])].reverse().find((m) => m.role === "assistant" && m.text.trim());
+    const need = (what: string) => notify(`/${name} needs ${what}`, `Type /help to see how each command is used.`, "warning");
+    switch (name) {
+      case "new":
+        return newChat();
+      case "clear": {
+        const c = current();
+        if (!c || !c.messages.length) return notify("Nothing to clear");
+        if (streaming()) abort?.abort();
+        const kept = c.messages;
+        setState("list", (x) => x.id === c.id, "messages", []);
+        persist();
+        return notifyAction("Chat cleared", `${kept.length} message${kept.length === 1 ? "" : "s"} removed.`, "Undo", () => {
+          setState("list", (x) => x.id === c.id, "messages", kept);
+          persist();
+        });
+      }
+      case "retry":
+        if (!lastReply()) return notify("No reply to write again");
+        return regenerate();
+      case "model": {
+        if (!arg) return need("a model name");
+        const q = arg.toLowerCase();
+        const m = models().find((x) => x.name.toLowerCase() === q) ?? models().find((x) => x.name.toLowerCase().includes(q) || x.id.toLowerCase().includes(q));
+        if (!m) return notify(`No model matches "${arg}"`, "Add it from the Model Hub, or check its name on Models.", "warning");
+        setModelId(m.id);
+        return notify(`Model: ${m.name}`);
+      }
+      case "speed": {
+        const lvl = speedArg(arg);
+        if (!lvl) return need("a level: 1 to 5, or fastest, fast, balanced, accurate or maximum");
+        return pickMode(lvl);
+      }
+      case "think": {
+        const on = switchArg(arg);
+        if (on === null) return need("on or off");
+        setPrefs(on ? { effort: prefs().effort === "low" ? "medium" : prefs().effort, source: prefs().source === "none" ? "native" : prefs().source } : { effort: "low" });
+        return notify(on ? "Thinking on" : "Thinking off", on ? "The model thinks before it answers." : "The model answers straight away.");
+      }
+      case "system":
+        setPrefs({ base: arg || DEFAULT_BASE_PROMPT });
+        return notify(arg ? "System prompt set" : "System prompt reset", arg ? arg.slice(0, 120) : undefined);
+      case "temp": {
+        const v = numberArg(arg, 0, 2);
+        if (v === null) return need("a number from 0 to 2");
+        setSampler((s) => ({ ...s, temperature: v }));
+        return notify(`Temperature ${v}`);
+      }
+      case "max": {
+        const v = numberArg(arg, 16, 131072, true);
+        if (v === null) return need("a whole number of tokens from 16 to 131,072");
+        setSampler((s) => ({ ...s, maxTokens: v }));
+        return notify(`Longest reply: ${v.toLocaleString()} tokens`);
+      }
+      case "image":
+        if (!arg) return need("a description of the picture");
+        return void makeImage(arg);
+      case "say": {
+        const r = lastReply();
+        if (!r) return notify("No reply to read aloud");
+        return void service.readAloud(plainText(parseMarkdown(r.text))).catch((e: unknown) => notify("Could not read aloud", e instanceof Error ? e.message : undefined, "error"));
+      }
+      case "export": {
+        const c = current();
+        if (!c || !c.messages.length) return notify("Nothing to export yet");
+        const kind = arg.toLowerCase() === "json" ? "json" : arg.toLowerCase() === "md" || !arg ? "md" : null;
+        if (!kind) return need("md or json");
+        const base = (c.title || "chat").replace(/[^\w -]+/g, "").trim().slice(0, 60) || "chat";
+        const ok =
+          kind === "json"
+            ? saveText(`${base}.json`, "application/json", JSON.stringify({ title: c.title, messages: c.messages.map((m) => ({ role: m.role, text: m.text })) }, null, 2))
+            : saveText(`${base}.md`, "text/markdown", `# ${c.title}\n\n` + c.messages.map((m) => `**${m.role === "user" ? "You" : "Model"}:**\n\n${m.text}`).join("\n\n---\n\n"));
+        return notify(ok ? "Chat exported" : "Could not export", ok ? `${base}.${kind}` : undefined, ok ? "success" : "error");
+      }
+      case "copy": {
+        const r = lastReply();
+        if (!r) return notify("No reply to copy");
+        return void navigator.clipboard.writeText(r.text).then(
+          () => notify("Copied the last reply"),
+          () => notify("Could not copy", undefined, "error"),
+        );
+      }
+      case "plan":
+        setPrefs({ planMode: !prefs().planMode });
+        return notify(prefs().planMode ? "Plan first is on" : "Plan first is off");
+      case "orchestrate": {
+        const o = orchestrateArg(arg);
+        if (!o) return need("off, or workers (1-6) and rounds (1-8)");
+        if (!o.on) {
+          setPrefs({ orchestrate: false });
+          return notify("Orchestrate off");
+        }
+        setPrefs({ orchestrate: true, ...(o.workers ? { workers: o.workers } : {}), ...(o.rounds ? { rounds: o.rounds } : {}) });
+        return notify("Orchestrate on", `${prefs().workers} workers, up to ${prefs().rounds} rounds.`);
+      }
+      case "remember":
+        if (!arg) return need("a fact to remember");
+        setMemories((m) => [...m, { id: newId(), text: arg.slice(0, 500), scope: "you" }]);
+        return notify("Remembered", arg.slice(0, 120));
+      case "memories":
+        return setPanel("memory");
+      case "stats": {
+        const s = (current()?.messages ?? []).map((m) => m.stats).filter((x): x is NonNullable<typeof x> => x !== null);
+        if (!s.length) return notify("No replies in this chat yet");
+        const out = s.reduce((n, x) => n + x.outputTokens, 0);
+        const secs = s.reduce((n, x) => n + x.totalMs, 0) / 1000;
+        const tps = s.reduce((n, x) => n + x.tokPerSec, 0) / s.length;
+        return notify("This chat", `${s.length} replies, ${out.toLocaleString()} tokens in ${secs.toFixed(1)} s, ${tps.toFixed(1)} tokens per second on average.`);
+      }
+      case "help":
+        return setHelpOpen(true);
+    }
+  };
+  const [helpOpen, setHelpOpen] = createSignal(false);
+
+  /** /image: on the desktop, the first image model in the library makes it; the browser preview
+   *  draws its illustrative image through the mock chat as before. */
+  const makeImage = async (prompt: string) => {
+    if (!__DESKTOP__) return send(`/imagine ${prompt}`, []);
+    const lib = library() ?? [];
+    const im = lib.find((m) => m.kind === "image");
+    if (!im) return notify("No image model yet", "Add an image model (such as SD-Turbo) from the Model Hub to make images.", "warning");
+    const cid = ensureConversation();
+    const mid = newId();
+    setState("list", (c) => c.id === cid, "messages", (l) => [
+      ...l,
+      { id: newId(), role: "user", text: `/image ${prompt}`, thinking: "", checks: [], image: null, tools: [], ledger: null, attachments: [], stats: null, effort: prefs().effort, verbosity: prefs().verbosity, source: prefs().source, streaming: false, error: null } satisfies ChatMessage,
+      { id: mid, role: "assistant", text: "Making the image…", thinking: "", checks: [], image: null, tools: [], ledger: null, attachments: [], stats: null, effort: prefs().effort, verbosity: prefs().verbosity, source: prefs().source, streaming: true, error: null } satisfies ChatMessage,
+    ]);
+    try {
+      const g = await service.generateImage({ modelId: im.id, prompt, size: 512, steps: 1, seed: null });
+      updateMsg(cid, mid, (m) => {
+        m.text = `Made with ${im.name} in ${g.seconds.toFixed(1)} s, seed ${g.seed}.`;
+        m.attachments = [{ name: "image.png", type: "image/png", bytes: Math.round((g.dataUrl.length * 3) / 4), preview: g.dataUrl }];
+        m.streaming = false;
+      });
+    } catch (e) {
+      updateMsg(cid, mid, (m) => {
+        m.text = "";
+        m.error = e instanceof Error ? e.message : "The image could not be made.";
+        m.streaming = false;
+      });
+    }
+    persist();
+  };
+
   const newChat = () => {
     abort?.abort();
     const c = emptyConversation();
@@ -411,6 +565,41 @@ export function Chat(): JSX.Element {
           </Show>
         </div>
 
+        <Dialog.Root open={helpOpen()} onOpenChange={(d) => setHelpOpen(d.open)} lazyMount unmountOnExit>
+          <Portal>
+            <Dialog.Backdrop class="guide-backdrop" />
+            <Dialog.Positioner class="guide-positioner">
+              <Dialog.Content class="guide card" data-testid="command-help">
+                <header class="guide__head">
+                  <div>
+                    <Dialog.Title class="guide__title">Chat commands</Dialog.Title>
+                    <Dialog.Description class="guide__desc">Type / at the start of a message. Commands run here and are never sent to the model. Start a message with // to send a slash as text.</Dialog.Description>
+                  </div>
+                  <Dialog.CloseTrigger class="icon-btn" aria-label="Close">
+                    <Icon name="close" size={18} />
+                  </Dialog.CloseTrigger>
+                </header>
+                <div class="guide__body">
+                  <dl class="command-help">
+                    <For each={COMMANDS}>
+                      {(c) => (
+                        <>
+                          <dt class="mono">
+                            /{c.name}
+                            <Show when={c.args}>
+                              <span class="command-menu__args"> {c.args}</span>
+                            </Show>
+                          </dt>
+                          <dd>{c.description}</dd>
+                        </>
+                      )}
+                    </For>
+                  </dl>
+                </div>
+              </Dialog.Content>
+            </Dialog.Positioner>
+          </Portal>
+        </Dialog.Root>
         <Composer
           levels={levels}
           mode={modeOf(prefs(), sampler())}
@@ -420,6 +609,7 @@ export function Chat(): JSX.Element {
           streaming={streaming()}
           notes={built().notes}
           onSend={send}
+          onCommand={command}
           onStop={() => abort?.abort()}
           onTranscribe={(s) => service.transcribe(s)}
           onRecordStart={() => service.startRecording()}

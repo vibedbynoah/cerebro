@@ -2,7 +2,8 @@ import os from "node:os";
 import { defineConfig, devices } from "@playwright/test";
 
 // Fixed port so every worker agrees on the base URL; startup fails loudly if something holds it.
-const PORT = 4391;
+// CEREBRO_E2E_PORT lets two checkouts run their suites side by side.
+const PORT = Number(process.env["CEREBRO_E2E_PORT"] ?? 4391);
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 
 export default defineConfig({

@@ -62,9 +62,9 @@ export const test = base.extend<{ guard: Guard; onboarded: boolean; guideFirst: 
           },
           [ONBOARDING_KEY, DONE_RECORD] as const,
         );
-        // The feature guide too (its own spec opens it on purpose).
-        if (!guideFirst) await page.addInitScript((v) => window.localStorage.setItem("cerebro-guide-seen", v), GUIDE_VERSION);
       }
+      // The feature guide opens on entering the app; every spec but its own starts with it seen.
+      if (!guideFirst) await page.addInitScript((v) => window.localStorage.setItem("cerebro-guide-seen", v), GUIDE_VERSION);
       await page.addInitScript(() => {
         document.addEventListener("securitypolicyviolation", (e) => {
           console.error(`CSP violation: ${e.violatedDirective} ${e.blockedURI}`);

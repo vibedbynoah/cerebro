@@ -23,6 +23,9 @@ export function Toasts(): JSX.Element {
               <Toast.Description class="toast__desc">{toast().description}</Toast.Description>
             </Show>
           </div>
+          <Show when={toast().action}>
+            {(a) => <Toast.ActionTrigger class="btn btn--tertiary btn--sm toast__action">{a().label}</Toast.ActionTrigger>}
+          </Show>
           <Toast.CloseTrigger class="toast__close" aria-label="Dismiss notification" data-press>
             <Icon name="close" size={14} />
           </Toast.CloseTrigger>

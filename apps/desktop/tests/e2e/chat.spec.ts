@@ -80,7 +80,7 @@ test.describe("chat", () => {
     });
     await openChat(page);
     const evil = "<script>alert(1)</script> <img src=x onerror=alert(1)> [a](javascript:alert(1)) [b](https://example.com) <svg onload=alert(1)> **<b onclick=alert(1)>x</b>**";
-    await send(page, `/echo ${evil}`);
+    await send(page, `//echo ${evil}`);
     await waitDone(page);
     const reply = lastReply(page);
     await expect(reply.locator(".md script, .md img, .md svg, .md iframe, .md b[onclick], .md [onerror], .md [onload]")).toHaveCount(0);
