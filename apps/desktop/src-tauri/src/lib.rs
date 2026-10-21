@@ -31,6 +31,7 @@ mod tune_screen;
 mod stt;
 mod tts;
 mod images;
+mod cloud;
 mod vision_input;
 mod hub;
 mod kv_store;
@@ -70,6 +71,11 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::mic_start,
             commands::tts_sample,
             commands::image_generate,
+            commands::cloud_presets,
+            commands::cloud_providers,
+            commands::cloud_provider_save,
+            commands::cloud_provider_remove,
+            commands::cloud_models_list,
             commands::image_reveal,
             commands::tts_read,
             commands::tts_stop,
@@ -166,6 +172,7 @@ pub fn run() -> Result<(), tauri::Error> {
                 app.state::<engine::Engine>().set_tool_host(std::sync::Arc::new(tools));
                 if let Ok(dir) = app.path().app_config_dir() {
                     app.state::<std::sync::Arc<tune_screen::TuneHub>>().set_results_path(dir.join("tune-results.json"));
+                    cloud::set_file(dir.join("cloud.json"));
                 }
                 if let Ok(dir) = app.path().app_data_dir() {
                     app.state::<std::sync::Arc<images::Images>>().set_out_dir(dir.join("images"));

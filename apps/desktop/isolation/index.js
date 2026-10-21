@@ -11,6 +11,8 @@
 
 /** Commands that take no arguments. @type {ReadonlySet<string>} */
 const ALLOWED = new Set([
+  "cloud_presets",
+  "cloud_providers",
   "window_minimize",
   "window_toggle_maximize",
   "window_is_maximized",
@@ -77,6 +79,28 @@ function hasOnlyKeys(o, required, optional = []) {
 
 /** @param {unknown} v */
 const isModelId = (v) => typeof v === "string" && /^[A-Za-z0-9]{1,64}$/.test(v);
+
+/** A cloud model: "cloud:<provider id>/<the provider's model id>" (cloud.rs). @param {unknown} v */
+const isCloudModelId = (v) => typeof v === "string" && /^cloud:[A-Za-z0-9_-]{1,40}\/[^\s]{1,200}$/.test(v);
+
+/** A cloud provider as Settings > Cloud models saves it (cloud.rs checks the address again). @param {unknown} v */
+function isCloudProvider(v) {
+  if (!isPlain(v) || !hasOnlyKeys(v, ["id", "name", "kind", "baseUrl", "models"], ["hasKey"])) return false;
+  return (
+    typeof v.id === "string" &&
+    /^[A-Za-z0-9_-]{1,40}$/.test(v.id) &&
+    typeof v.name === "string" &&
+    v.name.length > 0 &&
+    v.name.length <= 60 &&
+    ["openAi", "anthropic", "gemini"].includes(/** @type {string} */ (v.kind)) &&
+    typeof v.baseUrl === "string" &&
+    v.baseUrl.length <= 300 &&
+    Array.isArray(v.models) &&
+    v.models.length <= 200 &&
+    v.models.every((m) => typeof m === "string" && m.length > 0 && m.length <= 200) &&
+    (v.hasKey === undefined || typeof v.hasKey === "boolean")
+  );
+}
 
 /** A duplicate group: the file's SHA-256 as lowercase hex (disk_scan's group id). @param {unknown} v */
 const isGroupId = (v) => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
@@ -158,7 +182,7 @@ function isAttachment(a) {
 
 /** @param {unknown} r */
 function isChatRequest(r) {
-  if (!isPlain(r) || !isModelId(r.modelId) || typeof r.systemPrompt !== "string" || !Array.isArray(r.turns) || !isPlain(r.sampler)) return false;
+  if (!isPlain(r) || !(isModelId(r.modelId) || isCloudModelId(r.modelId)) || typeof r.systemPrompt !== "string" || !Array.isArray(r.turns) || !isPlain(r.sampler)) return false;
   return (
     r.turns.every(
       (t) =>
@@ -202,6 +226,14 @@ const WITH_ARGS = {
   disk_unlink: (p) => isPlain(p) && hasOnlyKeys(p, ["groupId"]) && isGroupId(p.groupId),
   model_reveal: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && isModelId(p.id),
   tune_start: (p) => isPlain(p) && hasOnlyKeys(p, ["modelId", "profile", "integrityCheck"]) && isModelId(p.modelId) && ["chat", "coding", "long-docs"].includes(/** @type {string} */ (p.profile)) && typeof p.integrityCheck === "boolean",
+  cloud_provider_save: (p) =>
+    isPlain(p) &&
+    hasOnlyKeys(p, ["provider"], ["apiKey"]) &&
+    isCloudProvider(p.provider) &&
+    (p.apiKey === undefined || p.apiKey === null || (typeof p.apiKey === "string" && p.apiKey.length <= 400)),
+  cloud_provider_remove: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && typeof p.id === "string" && p.id.length > 0 && p.id.length <= 40,
+  cloud_models_list: (p) =>
+    isPlain(p) && hasOnlyKeys(p, ["provider"], ["apiKey"]) && isCloudProvider(p.provider) && (p.apiKey === undefined || p.apiKey === null || (typeof p.apiKey === "string" && p.apiKey.length <= 400)),
   image_generate: (p) =>
     isPlain(p) &&
     hasOnlyKeys(p, ["modelId", "prompt", "size", "steps"], ["seed"]) &&

@@ -26,6 +26,8 @@ import type { EngineSwitch, LocalApiView, McpServerView, RemoteOptions, RemotePa
   KvStoreUsage,
   TestOutput,
   GeneratedImage,
+  CloudPreset,
+  CloudProvider,
   TuneEvent,
   TuneProfile,
   TuneRunInfo,
@@ -116,6 +118,14 @@ export interface CerebroService {
   recordingLevel(): Promise<number>;
   /** Resolves with the length of the spoken audio, in seconds, as it starts playing. */
   speakSample(id: string, text: string): Promise<number>;
+  // ---- Cloud models: the user's own API keys and plans (Settings > Cloud models). ----
+  cloudPresets(): Promise<CloudPreset[]>;
+  cloudProviders(): Promise<CloudProvider[]>;
+  /** Adds or updates a provider; a non-empty key replaces the stored one. */
+  saveCloudProvider(p: CloudProvider, apiKey: string | null): Promise<CloudProvider[]>;
+  removeCloudProvider(id: string): Promise<CloudProvider[]>;
+  /** The models a provider offers with this key (or the stored one). */
+  listCloudModels(p: CloudProvider, apiKey: string | null): Promise<string[]>;
   /** Image Studio: makes an image with an image model (desktop). */
   generateImage(req: { modelId: string; prompt: string; size: number; steps: number; seed: number | null }): Promise<GeneratedImage>;
   /** Opens File Explorer at a generated image. */

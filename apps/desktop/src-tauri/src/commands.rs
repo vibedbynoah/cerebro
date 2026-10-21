@@ -465,17 +465,96 @@ pub async fn chat_send(engine: State<'_, Engine>, hub: TuneHubState<'_>, request
     if hub.running() {
         return Err("A tune is measuring the model on the Tune screen. Wait for it to finish, or cancel it there.".to_owned());
     }
-    find_model(&engine, &request.model_id)?;
-    let eng = engine.inner().handle();
     let sink: crate::engine::ChatSink = std::sync::Arc::new(move |e| {
         let _ = on_event.send(e);
     });
+    if let Some(rest) = request.model_id.strip_prefix(crate::cloud::PREFIX) {
+        let (provider, model) = rest.split_once('/').map(|(a, b)| (a.to_owned(), b.to_owned())).ok_or_else(|| "That cloud model id is not valid.".to_owned())?;
+        return tauri::async_runtime::spawn_blocking(move || cloud_reply(&provider, &model, &request, &sink)).await.map_err(|_| "The reply failed.".to_owned());
+    }
+    find_model(&engine, &request.model_id)?;
+    let eng = engine.inner().handle();
     tauri::async_runtime::spawn_blocking(move || eng.chat(request, sink)).await.map_err(|_| "The reply failed.".to_owned())?
+}
+
+/// A reply from a cloud model (cloud.rs), streamed as the same events a local reply sends.
+fn cloud_reply(provider: &str, model: &str, req: &ChatRequest, events: &crate::engine::ChatSink) {
+    let t0 = std::time::Instant::now();
+    let turns: Vec<crate::cloud::Turn<'_>> = req
+        .turns
+        .iter()
+        .map(|t| crate::cloud::Turn { role: if t.role == "assistant" { "assistant" } else { "user" }, text: t.text.as_str(), images: t.images().collect() })
+        .collect();
+    let settings = crate::cloud::Settings { temperature: req.sampler.temperature, max_tokens: req.sampler.max_tokens.max(1) };
+    let mut started: Option<f64> = None;
+    let r = crate::cloud::chat(provider, model, req.system_prompt.trim(), &turns, &settings, |piece| {
+        if started.is_none() {
+            let ms = t0.elapsed().as_secs_f64() * 1000.0;
+            started = Some(ms);
+            events(ChatEvent::Start { ttft_ms: ms });
+        }
+        match piece {
+            crate::cloud::Piece::Thinking(t) => events(ChatEvent::Thinking { text: t.to_owned() }),
+            crate::cloud::Piece::Text(t) => events(ChatEvent::Token { text: t.to_owned() }),
+        }
+        true
+    });
+    match r {
+        Ok(o) => {
+            let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            let ttft_ms = started.unwrap_or(total_ms);
+            let gen_s = ((total_ms - ttft_ms) / 1000.0).max(1e-3);
+            events(ChatEvent::Done {
+                stats: crate::engine::ChatStats {
+                    prompt_tokens: 0,
+                    length: false,
+                    output_tokens: o.output_tokens,
+                    thinking_tokens: o.thinking_pieces,
+                    tok_per_sec: o.output_tokens as f64 / gen_s,
+                    ttft_ms,
+                    total_ms,
+                    extra_ms: 0.0,
+                    stopped: o.stopped,
+                },
+            });
+        }
+        Err(message) => events(ChatEvent::Error { message }),
+    }
+}
+
+/// The cloud providers Cerebro knows (official API addresses and where to get a key).
+#[tauri::command]
+pub fn cloud_presets() -> Vec<crate::cloud::Preset> {
+    crate::cloud::PRESETS.to_vec()
+}
+
+/// The providers the user added (never their keys).
+#[tauri::command]
+pub fn cloud_providers() -> Vec<crate::cloud::Provider> {
+    crate::cloud::providers()
+}
+
+/// Adds or updates a provider; `api_key`, when given, goes to the Windows Credential Manager.
+#[tauri::command]
+pub fn cloud_provider_save(provider: crate::cloud::Provider, api_key: Option<String>) -> Result<Vec<crate::cloud::Provider>, String> {
+    crate::cloud::save(provider, api_key)
+}
+
+#[tauri::command]
+pub fn cloud_provider_remove(id: String) -> Result<Vec<crate::cloud::Provider>, String> {
+    crate::cloud::remove(&id)
+}
+
+/// The models a provider offers with this key (or the stored one): the "Test" button.
+#[tauri::command]
+pub async fn cloud_models_list(provider: crate::cloud::Provider, api_key: Option<String>) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::cloud::list_models(&provider, api_key.as_deref())).await.map_err(|_| "The check failed.".to_owned())?
 }
 
 /// Stops the reply being written.
 #[tauri::command]
 pub fn chat_stop(engine: State<'_, Engine>) {
+    crate::cloud::cancel();
     engine.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 

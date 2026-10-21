@@ -38,6 +38,9 @@ export const FEATURE_GROUPS: readonly FeatureGroup[] = [
     title: "Chat",
     features: [
       { title: "Speed or accuracy, one slider", text: "From a one-line prompt with greedy decoding on the graphics card, to long thinking with review passes, to Orchestrate. Moving it tells you what changed.", icon: "bolt", route: "chat", isNew: true },
+      { title: "/ commands", text: "Type / in a message for 19 commands: switch model, change speed, make an image, read aloud, export, and more. They run here and never reach the model.", icon: "code", route: "chat", isNew: true },
+      { title: "Live panel", text: "Speed, context, graphics memory, temperature and power beside the chat, with the settings you change most. Ctrl . opens it.", icon: "activity", route: "chat", isNew: true },
+      { title: "Cloud models with your own keys", text: "Add models you already pay for elsewhere. Keys stay in the Windows Credential Manager, and the chat says clearly when it goes to the cloud.", icon: "online", route: "settings", isNew: true },
       { title: "Thinking and review passes", text: "Reasoning models think within a budget you set, and answers can be checked and corrected before you see them.", icon: "check", route: "chat", isNew: true },
       { title: "Orchestrate", text: "The model plans, splits the work across fresh instances and checks it through a shared ledger, for hard problems.", icon: "plugins", route: "chat" },
       { title: "Images in chat", text: "Attach an image and a vision model describes or answers about it.", icon: "images", route: "chat" },

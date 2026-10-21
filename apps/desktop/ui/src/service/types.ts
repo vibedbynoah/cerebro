@@ -437,6 +437,26 @@ export interface DedupeResult {
 }
 
 /** Output of a "try it" test. The mock's is always illustrative. */
+/** A cloud provider Cerebro knows: its official API address and where to get a key. */
+export interface CloudPreset {
+  id: string;
+  name: string;
+  kind: "openAi" | "anthropic" | "gemini";
+  baseUrl: string;
+  keysUrl: string;
+}
+
+/** A cloud provider the user added (Settings > Cloud models). The key is never sent back. */
+export interface CloudProvider {
+  id: string;
+  name: string;
+  kind: "openAi" | "anthropic" | "gemini";
+  baseUrl: string;
+  /** The provider's model ids shown in Chat. */
+  models: string[];
+  hasKey: boolean;
+}
+
 /** An image Image Studio made on this machine (desktop). */
 export interface GeneratedImage {
   /** The PNG as a data: URL. */

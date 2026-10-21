@@ -6,6 +6,7 @@ import { createMockChat } from "./chat";
 import { createMockTrainer } from "./mock-train";
 import { cloneMachineTuneOutcome, createMachineTunePlayer } from "./machine-tune";
 import type {
+  CloudProvider,
   EngineSwitch,
   LocalApiView,
   McpServerView,
@@ -252,6 +253,7 @@ const IMAGE_TYPE = /^image\/(png|jpeg|webp|gif)$/;
  * The HUD ticker only runs while someone is subscribed, so an idle page schedules no timers.
  */
 export function createMockService(options: MockServiceOptions = {}): CerebroService {
+  let cloudList: CloudProvider[] = [];
   const switches: EngineSwitch[] = MOCK_SWITCHES.map((x) => ({ ...x }));
   let remote: Omit<RemoteView, "running" | "url" | "address" | "port"> = {
     enabled: false, addressChoice: null, addresses: ["192.168.1.20"], passwordSet: false, allowChat: false, allowTailscale: false,
@@ -701,6 +703,32 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
       }),
 
     startRecording: () => later(0, () => undefined),
+    // Cloud models: an in-memory list; "Test" offers example model names (nothing is contacted).
+    cloudPresets: () =>
+      later(0, () => [
+        { id: "openai", name: "OpenAI", kind: "openAi" as const, baseUrl: "https://api.openai.com/v1", keysUrl: "https://platform.openai.com/api-keys" },
+        { id: "anthropic", name: "Anthropic", kind: "anthropic" as const, baseUrl: "https://api.anthropic.com/v1", keysUrl: "https://console.anthropic.com/settings/keys" },
+        { id: "gemini", name: "Google Gemini", kind: "gemini" as const, baseUrl: "https://generativelanguage.googleapis.com/v1beta", keysUrl: "https://aistudio.google.com/apikey" },
+        { id: "openrouter", name: "OpenRouter", kind: "openAi" as const, baseUrl: "https://openrouter.ai/api/v1", keysUrl: "https://openrouter.ai/keys" },
+      ]),
+    cloudProviders: () => later(0, () => cloudList.map((p) => ({ ...p }))),
+    saveCloudProvider: (p, apiKey) =>
+      later(120, () => {
+        if (!p.hasKey && !apiKey) throw new Error("Paste the API key first.");
+        cloudList = [...cloudList.filter((x) => x.id !== p.id), { ...p, hasKey: true }];
+        return cloudList.map((x) => ({ ...x }));
+      }),
+    removeCloudProvider: (id) =>
+      later(80, () => {
+        cloudList = cloudList.filter((x) => x.id !== id);
+        return cloudList.map((x) => ({ ...x }));
+      }),
+    listCloudModels: (p, apiKey) =>
+      later(300, () => {
+        if (!apiKey && !p.hasKey) throw new Error("Paste the API key first.");
+        if (apiKey === "bad") throw new Error("The provider refused the key: check it, or create a new one on its site.");
+        return ["example-large", "example-medium", "example-small", "example-vision"];
+      }),
     // The preview draws its own illustrative artwork (screens/ImageStudio.tsx); it never calls these.
     generateImage: () => Promise.reject(new Error("The browser preview does not make images.")),
     revealImage: () => later(0, () => false),

@@ -3,6 +3,7 @@ import { createEffect, createResource, createSignal, For, Show, type JSX } from 
 import { ChatSettings } from "./settings/ChatSettings";
 import { LocalApiAccess } from "./settings/LocalApiAccess";
 import { McpServerAccess } from "./settings/McpServerAccess";
+import { CloudModels } from "./settings/CloudModels";
 import { PhoneAccess } from "./settings/PhoneAccess";
 import { SavedChats } from "./settings/SavedChats";
 import { WorkspaceFolders } from "./settings/WorkspaceFolders";
@@ -216,6 +217,8 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
       <Section id="network" title="Network" description="Every network feature is optional. Cerebro works fully offline.">
         {group("network")}
       </Section>
+
+      <CloudModels />
 
       <PhoneAccess />
 

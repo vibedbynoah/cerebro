@@ -448,7 +448,7 @@ pub struct TurnAttachment {
 
 impl ChatTurn {
     /// The images attached to this turn, as data: URLs.
-    fn images(&self) -> impl Iterator<Item = &str> {
+    pub(crate) fn images(&self) -> impl Iterator<Item = &str> {
         self.attachments.iter().filter_map(|a| a.data.as_deref()).filter(|d| d.starts_with("data:image/"))
     }
 }

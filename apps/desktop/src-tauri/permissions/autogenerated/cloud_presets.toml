@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cloud-presets"
+description = "Enables the cloud_presets command without any pre-configured scope."
+commands.allow = ["cloud_presets"]
+
+[[permission]]
+identifier = "deny-cloud-presets"
+description = "Denies the cloud_presets command without any pre-configured scope."
+commands.deny = ["cloud_presets"]

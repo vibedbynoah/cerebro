@@ -31,7 +31,7 @@ import "../styles/guide.css";
 import { useAppState } from "../state";
 import { DEFAULT_SAMPLER, LEDGER_FILES, type ChatTools, type ChatTurn, type LedgerFileName, type Sampler, type ToolActivity } from "../service/chat-types";
 import { useService } from "../service/context";
-import type { LibraryModel } from "../service/types";
+import type { CloudProvider, LibraryModel } from "../service/types";
 import { Composer } from "./chat/Composer";
 import { LiveDock } from "./chat/LiveDock";
 import { readPref, writePref } from "../lib/storage";
@@ -57,6 +57,10 @@ export function Chat(): JSX.Element {
     if (!modelId() && models().length) setModelId(models()[0]!.id);
   });
   const model = () => models().find((m) => m.id === modelId());
+  // Cloud models the user added in Settings > Cloud models: "cloud:<provider>/<model>".
+  const [cloud] = createResource(() => service.cloudProviders().catch(() => [] as CloudProvider[]));
+  const cloudModels = createMemo(() => (cloud() ?? []).flatMap((p) => p.models.map((m) => ({ id: `cloud:${p.id}/${m}`, name: m, provider: p.name }))));
+  const cloudOf = () => cloudModels().find((m) => m.id === modelId()) ?? null;
 
   const [prefs, setPrefsSignal] = createSignal<ChatPrefs>(loadPrefs());
   const levels = effectiveLevels(loadLevelEdits());
@@ -211,7 +215,12 @@ export function Chat(): JSX.Element {
   const run = async (cid: string) => {
     const conv = state.list.find((c) => c.id === cid);
     if (!conv || !modelId()) return;
-    const tools = await toolsForRequest();
+    const cm = cloudOf();
+    if (cm && app.settings()?.offlineMode) {
+      notify("Offline mode is on", `${cm.provider} is a cloud model, so it is blocked. Turn offline mode off in Settings, or pick a model on this computer.`, "warning");
+      return;
+    }
+    const tools = cm ? null : await toolsForRequest();
     const req = built();
     const p = prefs();
     const turns: ChatTurn[] = conv.messages
@@ -565,9 +574,24 @@ export function Chat(): JSX.Element {
           <label class="chat-head__model">
             <span class="sr-only">Model</span>
             <select value={modelId()} onChange={(e) => setModelId(e.currentTarget.value)} aria-label="Model">
-              <For each={models()}>{(m) => <option value={m.id}>{m.name}</option>}</For>
+              <Show when={cloudModels().length} fallback={<For each={models()}>{(m) => <option value={m.id}>{m.name}</option>}</For>}>
+                <optgroup label="On this computer">
+                  <For each={models()}>{(m) => <option value={m.id}>{m.name}</option>}</For>
+                </optgroup>
+                <optgroup label="Cloud (your API keys)">
+                  <For each={cloudModels()}>{(m) => <option value={m.id}>{`${m.name} · ${m.provider}`}</option>}</For>
+                </optgroup>
+              </Show>
             </select>
           </label>
+          <Show when={cloudOf()}>
+            {(c) => (
+              <span class="chat-head__cloud" title={`This chat is sent to ${c().provider} over the internet with your API key.`} data-testid="cloud-badge">
+                <Icon name="online" size={14} /> Sent to {c().provider}
+              </span>
+            )}
+          </Show>
+
           <span class="chat-head__live mono" aria-live="off" data-testid="live-readout">
             <Show when={live()}>
               {(l) => (

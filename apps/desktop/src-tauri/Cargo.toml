@@ -39,6 +39,8 @@ cerebro-job = { path = "../../../crates/cerebro-job" }
 cerebro-winfs = { path = "../../../crates/cerebro-winfs" }
 # Model Hub only: HTTPS to huggingface.co (rustls, no OpenSSL).
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
+# Cloud models (src/cloud.rs): API keys live in the Windows Credential Manager, never in files.
+keyring = { version = "3", features = ["windows-native"] }
 # 256-bit secrets from the OS CSPRNG and constant-time comparison (src/secret.rs). Vetted crates only;
 # nothing here is hand-rolled.
 getrandom = "=0.3.4"
