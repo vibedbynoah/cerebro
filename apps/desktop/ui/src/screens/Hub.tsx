@@ -2,11 +2,13 @@ import "../styles/hub.css";
 import { createMemo, createResource, createSignal, createUniqueId, For, Show, type JSX } from "solid-js";
 import { CodeBlock } from "../components/CodeBlock";
 import { Icon } from "../components/icons";
+import { LicenceNote } from "../components/LicenceNote";
 import { memoryNeeds, QuantTable } from "../components/QuantTable";
 import { IllustrativeFlag, ScreenHeader, Section } from "../components/Screen";
 import { Term } from "../components/Term";
 import { CHANNEL_LABELS, type Channel, type ExperienceLevel } from "../lib/experience";
 import { estimateFor, recommend, type MemoryModel } from "../lib/memory-estimate";
+import { licenceForModel } from "../lib/model-licences";
 import { availability, FORMAT_LABELS, FORMAT_NOTES, qualityKept } from "../lib/quants";
 import { hrefFor } from "../lib/routes";
 import { contextLabel, pickQuant } from "../onboarding/autoconfig";
@@ -215,6 +217,10 @@ function HubCard(props: { rec: Recommendation; hw: HardwareProfile | undefined; 
         <span class="chip hub-card__fit" data-tone={props.rec.fit === "gpu" ? "on" : props.rec.fit === "too-large" ? "off" : "neutral"}>
           {props.rec.fitLabel}
         </span>
+      </div>
+
+      <div class="hub-card__licence">
+        <LicenceNote licence={licenceForModel(m().name, null)} />
       </div>
 
       <Show when={props.level === "beginner"}>

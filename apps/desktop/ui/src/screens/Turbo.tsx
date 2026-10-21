@@ -202,7 +202,7 @@ function customMeasurement(watts: number) {
 // ---- Engines ------------------------------------------------------------------------------------
 
 function Engines(props: { channel: Channel }): JSX.Element {
-  const [active, setActive] = createSignal("llama-native");
+  const [active, setActive] = createSignal("cerebro-tuned");
   const choose = (b: EngineBuild) => {
     const v = canPromote(b, props.channel);
     if (!v.ok) {
@@ -218,7 +218,7 @@ function Engines(props: { channel: Channel }): JSX.Element {
       title="Engines and builds"
       description={
         <>
-          Builds compiled for this processor and graphics card, forks and other engines. The official <Term k="llamacpp" /> release always stays installed as the control; another build
+          Builds compiled for this processor and graphics card, forks and other engines. The reference build always stays installed as the control; another build
           becomes the default only when it is faster here and passes the quality check.
         </>
       }

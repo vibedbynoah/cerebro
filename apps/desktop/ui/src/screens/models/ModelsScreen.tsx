@@ -21,7 +21,7 @@ export function ModelsScreen(): JSX.Element {
           route="models"
           lede={
             <>
-              Every model file on this machine, from Cerebro's, LM Studio's and Ollama's folders. Load one with its tuned settings in one click, or open it to change any{" "}
+              Every model file on this machine, from Cerebro's folder and from folders other apps use. Load one with its tuned settings in one click, or open it to change any{" "}
               <Term k="backend">engine</Term> setting.
             </>
           }

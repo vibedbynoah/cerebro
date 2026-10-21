@@ -89,13 +89,13 @@ export const SETTINGS_META: readonly SettingMeta[] = [
     key: "offlineMode",
     group: "network",
     label: "Offline mode",
-    note: "Turns off every network feature. Everything else keeps working.",
+    note: "Stops Model Hub, web fetches and plugin installs. Trainer, MCP servers, the API and phone access keep working.",
   },
   {
     key: "allowModelDownloads",
     group: "network",
     label: "Model downloads",
-    note: "Lets Model Hub download models when a network is available.",
+    note: "Lets Model Hub search for and download models when a network is available.",
   },
   {
     key: "allowPluginInstalls",

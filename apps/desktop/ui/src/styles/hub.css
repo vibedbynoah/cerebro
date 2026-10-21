@@ -213,3 +213,11 @@
 .livehub__best { flex-basis: 100%; display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; font-size: 0.9rem; color: var(--color-text-secondary); }
 .livehub__best li { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; min-width: 0; }
 .livehub__mem { font-size: 0.85rem; color: var(--color-text-secondary); white-space: nowrap; }
+
+.hub-card__licence {
+  margin-top: var(--space-3);
+}
+
+.livehub__licence {
+  margin: var(--space-3) 0 var(--space-2);
+}

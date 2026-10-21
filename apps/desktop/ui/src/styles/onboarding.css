@@ -1057,6 +1057,10 @@
   color: var(--color-text-muted);
 }
 
+.rec__licence {
+  margin-top: 0.1rem;
+}
+
 .rec__fit {
   margin-top: 1px;
   white-space: nowrap;

@@ -171,7 +171,7 @@ describe("bundled legal documents", () => {
     expect(DOCS.privacy.summary).toMatch(/no telemetry/i);
     expect(all("privacy")).toMatch(/does not send them anywhere/);
     const licenses = all("licenses");
-    for (const name of ["Cerebro Engine", "JavaScript packages", "Rust crates", "Inter", "Fraunces", "JetBrains Mono", "llama.cpp"]) expect(licenses).toContain(name);
+    for (const name of ["Cerebro Engine", "JavaScript packages", "Rust crates", "Inter", "Fraunces", "JetBrains Mono", "GVS5H", "diffusers", "llama.cpp and ggml"]) expect(licenses).toContain(name);
     // The full Apache text is bundled, not linked to a website.
     const apache = DOCS.licenses.sections[0]?.blocks[0];
     expect(apache?.kind === "license" && (apache.text ?? "").includes("TERMS AND CONDITIONS FOR USE")).toBe(true);
@@ -197,6 +197,12 @@ describe("generated third-party notices", () => {
     }
     // A crate that ships no licence file gets the standard text and says so.
     for (const p of rust.notices.packages.filter((q) => q.note)) expect(p.note).toMatch(/no licence file/);
+    // Cerebro Engine is a path dependency with no crate-local licence file; the standard Apache
+    // text stands in for it and the page says where the copyright belongs.
+    const engine = rust.notices.packages.find((p) => p.name === "cerebro-engine");
+    expect(engine?.license).toBe("Apache-2.0");
+    expect(engine?.note).toMatch(/no licence file/);
+    expect(engine?.texts.some((t) => noticeText(rust.notices, t).includes("TERMS AND CONDITIONS FOR USE"))).toBe(true);
   });
 
   it("marks the JavaScript list as build-generated where nothing is bundled (Vitest, dev server)", () => {

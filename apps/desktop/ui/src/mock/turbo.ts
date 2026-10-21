@@ -6,12 +6,12 @@ import type { EngineBuild, GpuRange, MachineProfile, Measurement, TokenProfile }
  */
 
 export const ENGINE_BUILDS: readonly EngineBuild[] = [
-  { id: "llama-official", name: "llama.cpp official release", kind: "control", target: "Generic CUDA 12 build", version: "b11026", channel: "stable", installed: true, speedVsControl: 1, qualityOk: true, note: "Always installed. Every other build has to beat it on this machine." },
-  { id: "llama-native", name: "llama.cpp, tuned for this machine", kind: "tuned-build", target: "AVX2 + CUDA sm_86, flash attention, LTO", version: "b11026", channel: "stable", installed: true, speedVsControl: 1.11, qualityOk: true, note: "Compiled for this CPU's instruction set and this GPU's architecture." },
-  { id: "ik-llama", name: "ik_llama.cpp", kind: "fork", target: "CUDA sm_86, fused MoE kernels", version: "2026.10", channel: "beta", installed: true, speedVsControl: 1.24, qualityOk: true, note: "A fork with faster MoE and i-quant kernels." },
+  { id: "cerebro-reference", name: "Cerebro reference build", kind: "control", target: "Generic CUDA 12 build", version: "0.1.0", channel: "stable", installed: true, speedVsControl: 1, qualityOk: true, note: "Always installed. Every other build has to beat it on this machine." },
+  { id: "cerebro-tuned", name: "Cerebro, tuned for this machine", kind: "tuned-build", target: "AVX2 + CUDA sm_86, flash attention, LTO", version: "0.1.0", channel: "stable", installed: true, speedVsControl: 1.11, qualityOk: true, note: "Compiled for this CPU's instruction set and this GPU's architecture." },
+  { id: "cerebro-fused", name: "Cerebro fused-MoE build", kind: "fork", target: "CUDA sm_86, fused MoE kernels", version: "2026.10", channel: "beta", installed: true, speedVsControl: 1.24, qualityOk: true, note: "A build with faster MoE and i-quant kernels." },
   { id: "strata", name: "Strata", kind: "engine", target: "Qwen3.8-Flash-Next family only", version: "0.1.40", channel: "beta", installed: true, speedVsControl: 1.9, qualityOk: true, note: "Expert cache in VRAM, CPU experts in parallel, model-native speculation. One model family." },
-  { id: "llama-pgo", name: "llama.cpp, profile-guided build", kind: "tuned-build", target: "PGO from this machine's own runs", version: "b11026", channel: "experimental", installed: false, speedVsControl: null, qualityOk: null, note: "Built from a profile of your own workloads. Takes about 20 minutes to build locally." },
-  { id: "llama-self-fork", name: "llama.cpp, expert-cache fork", kind: "fork", target: "CUDA sm_86", version: "dev", channel: "experimental", installed: true, speedVsControl: 0.31, qualityOk: true, note: "Measured slower than the control here, so it is never promoted." },
+  { id: "cerebro-profile", name: "Cerebro profile-guided build", kind: "tuned-build", target: "PGO from this machine's own runs", version: "0.1.0", channel: "experimental", installed: false, speedVsControl: null, qualityOk: null, note: "Built from a profile of your own workloads. Takes about 20 minutes to build locally." },
+  { id: "cerebro-expert-cache", name: "Cerebro expert-cache build", kind: "fork", target: "CUDA sm_86", version: "dev", channel: "experimental", installed: true, speedVsControl: 0.31, qualityOk: true, note: "Measured slower than the control here, so it is never promoted." },
 ];
 
 export const GPU_RANGE: GpuRange = { minPowerW: 60, maxPowerW: 115, defaultPowerW: 80 };

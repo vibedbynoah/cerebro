@@ -142,7 +142,7 @@ export function isTuneProfile(value: unknown): value is TuneProfile {
   return typeof value === "string" && (PROFILE_IDS as readonly string[]).includes(value);
 }
 
-/** A candidate must beat llama.cpp's automatic settings by more than this share to replace them:
+/** A candidate must beat Cerebro Engine's automatic settings by more than this share to replace them:
  *  repeated runs of one configuration differ by about this much. */
 export const NOISE_MARGIN = 0.03;
 

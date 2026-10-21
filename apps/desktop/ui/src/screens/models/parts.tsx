@@ -66,9 +66,9 @@ export function FitChip(props: { fit: FitClass }): JSX.Element {
 
 export const SOURCE_LABELS: Readonly<Record<ModelSource, string>> = {
   cerebro: "Cerebro",
-  lmstudio: "LM Studio",
-  ollama: "Ollama",
-  other: "Other folder",
+  lmstudio: "Another app's folder",
+  ollama: "Another app's folder",
+  other: "Your folder",
 };
 
 /** "17.3 GiB" with the unit as its own span (DESIGN.md: a number and its unit are one unit of type). */

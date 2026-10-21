@@ -3,6 +3,7 @@ import { createMemo, createResource, createSignal, For, onCleanup, Show, type JS
 import { useService } from "../service/context";
 import type { GeneratedImage, LibraryModel } from "../service/types";
 import { Icon } from "../components/icons";
+import { LicenceNote } from "../components/LicenceNote";
 import { IllustrativeFlag, ScreenHeader } from "../components/Screen";
 import { Preview } from "../components/Preview";
 import {
@@ -23,6 +24,7 @@ import {
   type GenParams,
 } from "../lib/images";
 import { newId } from "../lib/chat/store";
+import { licenceForModel } from "../lib/model-licences";
 import { notify } from "../lib/toast";
 import { useAppState } from "../state";
 
@@ -137,6 +139,14 @@ function ImagesDesktop(): JSX.Element {
               <p class="img-error" role="alert">
                 <Icon name="alert" size={14} /> {error()}
               </p>
+            </Show>
+            <Show when={model()}>
+              {(m) => (
+                <div class="img-licence">
+                  <LicenceNote licence={licenceForModel(m().name)} />
+                  <p class="hint">The licence also covers the images you make with this model. Check it before you publish or sell them.</p>
+                </div>
+              )}
             </Show>
             <button type="button" class="btn btn--primary img-go" data-press disabled={!prompt().trim() || busy()} aria-busy={busy() ? "true" : undefined} onClick={generate}>
               <Icon name="images" size={16} />
@@ -281,7 +291,7 @@ function ImageStudioPreview(): JSX.Element {
 
   return (
     <div class="screen images">
-      <ScreenHeader route="images" lede="Make and edit images with local models. Built in: no plugin, no upload, nothing leaves this computer." actions={<IllustrativeFlag />} />
+      <ScreenHeader route="images" lede="Make and edit images with local models. Built in: no plugin, no upload." actions={<IllustrativeFlag />} />
       <div class="img-layout">
         <form
           class="img-controls card"
@@ -411,6 +421,10 @@ function ImageStudioPreview(): JSX.Element {
           <Show when={tried() && errors().mode}>
             <span class="img-error">{errors().mode}</span>
           </Show>
+          <div class="img-licence">
+            <LicenceNote licence={licenceForModel(model().name)} />
+            <p class="hint">The licence also covers the images you make with this model. Check it before you publish or sell them.</p>
+          </div>
           <div class="img-go">
             <Show
               when={progress() === null}

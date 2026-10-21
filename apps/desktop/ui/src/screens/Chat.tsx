@@ -460,7 +460,7 @@ function Empty(props: { onPick: (t: string) => void }): JSX.Element {
   const ideas = ["Why is my 30B model slower than the 8B?", "Write a Python function that counts lines in a huge file", "/imagine a lighthouse at dusk, oil painting"];
   return (
     <div class="chat-empty">
-      <h2>Ask anything. It stays on this computer.</h2>
+      <h2>Ask anything. The model runs here.</h2>
       <ul role="list">
         <For each={ideas}>
           {(t) => (

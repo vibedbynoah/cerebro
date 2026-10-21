@@ -8,10 +8,11 @@ import type { DuplicateCopy, DuplicateGroup } from "../../service/types";
 import { SOURCE_LABELS, Spinner } from "./parts";
 
 /**
- * Disk space: the same model file stored more than once across Cerebro's, LM Studio's, Ollama's and
- * other folders (matched by SHA-256, not by name), and a safe deduplicate: the user picks the copy
- * to keep, every copy's hash is checked, then the extra copies on the same drive become hard links
- * to it. Every app still finds its file where it expects it, and Undo copies the bytes back.
+ * Disk space: the same model file stored more than once across Cerebro's folder, other apps'
+ * folders and folders you added (matched by SHA-256, not by name), and a safe deduplicate: the user
+ * picks the copy to keep, every copy's hash is checked, then the extra copies on the same drive
+ * become hard links to it. Every app still finds its file where it expects it, and Undo copies the
+ * bytes back.
  */
 export function DiskPanel(): JSX.Element {
   const service = useService();
@@ -80,7 +81,7 @@ export function DiskPanel(): JSX.Element {
       </div>
       <p class="disk__how">
         Files are matched by their <Term k="sha256" /> fingerprint, not their names. Deduplicating keeps the copy you choose and turns the others on the same drive into{" "}
-        <Term k="hardLink">hard links</Term>, so LM Studio and Ollama keep working. Undo turns them back into separate files.
+        <Term k="hardLink">hard links</Term>, so every app keeps working. Undo turns them back into separate files.
       </p>
       <Show when={report.state === "errored"}>
         <p class="field__error" role="alert">
@@ -142,6 +143,13 @@ function CountGiB(props: { gib: number }): JSX.Element {
       <span class="unit">{tib() ? "TiB" : "GiB"}</span>
     </span>
   );
+}
+
+/** The copy in a sentence, e.g. "the copy in another app's folder". */
+function copyName(source: DuplicateCopy["source"]): string {
+  if (source === "cerebro") return "Cerebro's copy";
+  if (source === "other") return "the copy in your folder";
+  return "the copy in another app's folder";
 }
 
 function DuplicateRow(props: {
@@ -229,7 +237,7 @@ function DuplicateRow(props: {
             <span class="dup__confirm" role="group" aria-label={mode() === "link" ? "Confirm deduplicate" : "Confirm undo"}>
               <span class="dup__confirm-text">
                 {mode() === "link"
-                  ? `Link ${n()} ${n() === 1 ? "copy" : "copies"} to the ${SOURCE_LABELS[keptCopy()?.source ?? "other"]} one?`
+                  ? `Link ${n()} ${n() === 1 ? "copy" : "copies"} to ${copyName(keptCopy()?.source ?? "other")}?`
                   : `Copy the file back? Needs ${(g().sizeGiB * n()).toFixed(1)} GiB free on ${keptCopy()?.volume ?? "the drive"}.`}
               </span>
               <button
@@ -262,7 +270,7 @@ function DuplicateRow(props: {
             };
             return (
               <label class="dup-copy" data-source={c.source} classList={{ "is-kept": isKept() }}>
-                <input type="radio" class="dup-copy__radio" name={name} value={c.path} checked={isKept()} onChange={() => props.onKeep(c.path)} aria-label={`Keep the ${SOURCE_LABELS[c.source]} copy`} />
+                <input type="radio" class="dup-copy__radio" name={name} value={c.path} checked={isKept()} onChange={() => props.onKeep(c.path)} aria-label={`Keep this copy: ${SOURCE_LABELS[c.source]} — ${c.path}`} />
                 <span class="dup-copy__source">{SOURCE_LABELS[c.source]}</span>
                 <span class="dup-copy__path mono" title={c.path}>
                   {c.path}

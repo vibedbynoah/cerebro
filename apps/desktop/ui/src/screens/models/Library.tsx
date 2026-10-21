@@ -428,7 +428,7 @@ function EmptyLibrary(): JSX.Element {
       </span>
       <h3 class="lib-empty__title">No models on this machine yet</h3>
       <p class="lib-empty__text">
-        Download one from Model Hub, or keep using the <Term k="gguf" /> files you already downloaded with LM Studio or Ollama: Cerebro reads their folders and
+        Download one from Model Hub, or keep using the <Term k="gguf" /> files you already downloaded with another app: Cerebro reads their folders and
         lists every file here on its own.
       </p>
       <div class="lib-empty__actions">

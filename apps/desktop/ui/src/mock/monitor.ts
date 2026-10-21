@@ -616,7 +616,7 @@ export function createMonitorSim(o: MonitorSimOptions): MonitorSim {
     const expertSize = m && m.expertsTotal ? (m.sizeGiB * 0.92 * 0.85) / (m.layers * m.expertsTotal) : 0;
     return {
       version: "0.1.0",
-      backend: "llama.cpp",
+      backend: "cerebro",
       build: o.build,
       address: o.address,
       model: m

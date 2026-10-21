@@ -2262,3 +2262,55 @@ body {
     transition: none;
   }
 }
+
+/* Model licence line: the licence's name, whether commercial use is allowed, and a plain
+   sentence. Used in Hub cards, the model drawer, setup and Image Studio. */
+.licence-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 0.6rem;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+
+.licence-note__name {
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+
+.licence-note__use {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 0.45rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  font-size: 0.6875rem;
+  line-height: 1.7;
+  white-space: nowrap;
+}
+
+.licence-note[data-commercial="no"] .licence-note__use {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.licence-note[data-commercial="conditions"] .licence-note__use {
+  border-color: var(--color-warning);
+  color: var(--color-warning);
+}
+
+.licence-note__summary {
+  flex-basis: 100%;
+  color: var(--color-text-secondary);
+}
+
+.licence-note--compact {
+  gap: 0.2rem 0.45rem;
+  font-size: 0.75rem;
+}
+
+.licence-note--compact .licence-note__summary {
+  display: none;
+}

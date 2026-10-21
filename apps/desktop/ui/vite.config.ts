@@ -89,8 +89,12 @@ function cerebroLicenses(): Plugin {
       if (id !== `\0${LICENSES_ID}`) return null;
       rust ??= rustNotices(path.resolve(appDir, "../.."), path.join(appDir, "licenses"), path.resolve(appDir, "../../LICENSE"));
       const apache = readFileSync(path.resolve(appDir, "../../LICENSE"), "utf8");
+      const gvs5h = readFileSync(path.join(appDir, "licenses", "GVS5H-MIT.txt"), "utf8");
+      const ggml = readFileSync(path.join(appDir, "licenses", "ggml-MIT.txt"), "utf8");
       return [
         `export const apache = ${JSON.stringify(apache)};`,
+        `export const gvs5h = ${JSON.stringify(gvs5h)};`,
+        `export const ggml = ${JSON.stringify(ggml)};`,
         `export const rust = JSON.parse(${JSON.stringify(JSON.stringify(rust))});`,
         isBuild
           ? `export const bundled = JSON.parse("${BUNDLED_TOKEN}");\nexport const bundledComplete = true;`

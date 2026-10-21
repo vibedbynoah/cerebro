@@ -6,7 +6,7 @@
  * the app, network use is limited to the optional features named, and the protections are
  * described exactly as settings-meta.ts and the glossary describe them, including what they do not do.
  */
-import { apache as apacheText, bundled, bundledComplete, rust } from "virtual:cerebro-licenses";
+import { apache as apacheText, bundled, bundledComplete, ggml as ggmlText, gvs5h as gvs5hText, rust } from "virtual:cerebro-licenses";
 import interOfl from "@design/fonts/inter/OFL.txt?raw";
 import frauncesOfl from "@design/fonts/fraunces/OFL.txt?raw";
 import jetbrainsOfl from "@design/fonts/jetbrains-mono/OFL.txt?raw";
@@ -41,7 +41,16 @@ const TERMS: LegalDoc = {
       blocks: [
         {
           kind: "p",
-          text: "Cerebro does not include a model. Every model you download or add is made by a third party and comes with its own licence, and often an acceptable-use policy. Those terms apply to your use of that model, alongside these. You are responsible for reading and following them.",
+          text: "Cerebro does not include a model. Every model you download or add is made by a third party and comes with its own licence, and often an acceptable-use policy. Those terms apply to your use of that model, alongside these. Some limit commercial use or require attribution. The app shows the licence before you download a model and in its details, but the terms are between you and the publisher. You are responsible for reading and following them.",
+        },
+      ],
+    },
+    {
+      heading: "Runs on this computer",
+      blocks: [
+        {
+          kind: "p",
+          text: "The engine runs on this computer, and your prompts, files and generated output stay here unless you use a feature that sends them elsewhere. The Privacy page lists every network feature and what it sends.",
         },
       ],
     },
@@ -77,7 +86,7 @@ const TERMS: LegalDoc = {
       blocks: [
         {
           kind: "p",
-          text: "Model downloads and plugin installs are optional and connect only to the source you pick. That source has its own terms. Offline mode, or switching either feature off in Settings, stops them.",
+          text: "Network features are optional. They are Model Hub, Trainer downloads, MCP servers you connect, web tools you enable, the local API, phone access and plugin installs. Each one sends data only to the source or app you choose, and that source has its own terms. Offline mode stops Model Hub search and downloads and plugin installs; it does not stop Trainer downloads, MCP servers, web tools, the local API or phone access. The Privacy page says what each one sends.",
         },
       ],
     },
@@ -96,14 +105,14 @@ const TERMS: LegalDoc = {
 const PRIVACY: LegalDoc = {
   id: "privacy",
   title: "Privacy",
-  summary: "Cerebro has no accounts, no analytics and no telemetry. What you do stays on this computer.",
+  summary: "Cerebro has no accounts, no analytics and no telemetry. It uses a network only for the features you use.",
   sections: [
     {
       heading: "What stays on this computer",
       blocks: [
         {
           kind: "p",
-          text: "Your prompts, chats, documents, generated output, models, settings and tuning measurements are stored on this computer only. Cerebro does not send them anywhere.",
+          text: "Your prompts, chats, documents, generated output, models, settings and tuning measurements are stored on this computer only. Cerebro does not send them anywhere on its own. The network features below run only when you use them, and send only what they need.",
         },
       ],
     },
@@ -113,9 +122,13 @@ const PRIVACY: LegalDoc = {
         {
           kind: "list",
           items: [
-            "Only when you use a network feature: downloading a model or installing a plugin.",
-            "Only to the source you pick. Like any download, the request shows that source your IP address.",
-            "Offline mode switches both features off. Everything else keeps working without a network.",
+            "Model Hub: a search sends your search text to huggingface.co, and opening a repository or reading a file's header asks huggingface.co for that file's details. A download comes from Hugging Face, which sees your IP address, like any download.",
+            "Trainer: setting up a training run downloads tools from PyPI and GitHub and the base model you choose. Your training data stays on this computer.",
+            "MCP servers: a server you add can be on this computer, another computer or the internet. What you send it, and what a tool asks it for, leaves this computer. Its own privacy terms apply.",
+            "Web tools: if you let a model fetch a page, the request goes to that site, which sees your IP address. The block local network switch stops a fetch from reaching this computer or your local network.",
+            "The local API and phone access: these listen for connections instead of calling out. The API listens on 127.0.0.1 by default; phone access works on your own network. Data goes only to the apps or devices you allow.",
+            "Plugins: installing a plugin downloads it from its source. An installed plugin can make its own network requests; check its notice before installing it.",
+            "Offline mode stops Model Hub search and downloads and plugin installs. It does not stop Trainer downloads, MCP servers you connect, web tools, the local API or phone access.",
           ],
         },
       ],
@@ -143,7 +156,7 @@ const PRIVACY: LegalDoc = {
       blocks: [
         {
           kind: "p",
-          text: "Because everything Cerebro stores is on this computer, you stay in control of it: delete a model, a chat or the app's data folders at any time and it is gone. There is no copy anywhere else to request.",
+          text: "Because everything Cerebro stores is on this computer, you stay in control of it: delete a model, a chat or the app's data folders at any time and it is gone. Cerebro keeps no other copy to request.",
         },
       ],
     },
@@ -198,15 +211,41 @@ const LICENSES: LegalDoc = {
       ],
     },
     {
-      heading: "Run by Cerebro",
-      blocks: [{ kind: "license", name: "llama.cpp", detail: "The program that runs models. Cerebro configures it; it does not fork or change it.", license: "MIT" }],
+      heading: "Ported work",
+      blocks: [
+        {
+          kind: "p",
+          text: "Parts of Cerebro follow other open-source projects. Their licences are below in full.",
+        },
+        {
+          kind: "license",
+          name: "GVS5H",
+          detail: "Orchestrate mode is ported from GVS5H, a method for coordinating one local model as several roles.",
+          license: "MIT",
+          text: gvs5hText,
+        },
+        {
+          kind: "license",
+          name: "diffusers",
+          detail: "Cerebro Engine's image generation follows algorithms and layouts from Hugging Face diffusers.",
+          license: "Apache-2.0",
+          text: apacheText,
+        },
+        {
+          kind: "license",
+          name: "llama.cpp and ggml",
+          detail: "Cerebro Engine follows tensor layouts, GGUF file formats and kernel arrangements from these projects. Cerebro does not include or run the llama.cpp program.",
+          license: "MIT",
+          text: ggmlText,
+        },
+      ],
     },
     {
       heading: "Models",
       blocks: [
         {
           kind: "p",
-          text: "Models are not part of Cerebro. Each one has its own licence from its publisher, shown where you download it. Read it before you use the model: some limit commercial use or require attribution.",
+          text: "Models are not part of Cerebro. Each one has its own licence from its publisher, shown before you download it and in its details. Read it before you use the model: some limit commercial use or require attribution. The model card is the authoritative version.",
         },
       ],
     },

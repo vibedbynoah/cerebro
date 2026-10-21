@@ -14,6 +14,10 @@ interface CerebroNotices {
 /** Everything the bundled Licenses page shows (vite.config.ts, cerebroLicenses). */
 declare module "virtual:cerebro-licenses" {
   export const apache: string;
+  /** MIT text for GVS5H, the source of Orchestrate mode. */
+  export const gvs5h: string;
+  /** MIT text for llama.cpp and ggml, whose layouts and formats Cerebro Engine follows. */
+  export const ggml: string;
   /** Crates compiled into the desktop binary. */
   export const rust: CerebroNotices;
   /** node_modules packages in the built JavaScript. */

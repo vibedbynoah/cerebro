@@ -6,7 +6,7 @@ import { notify } from "../../lib/toast";
 import { useService } from "../../service/context";
 import type { LocalApiView } from "../../service/types";
 
-const CLIENTS = ["OpenAI SDK", "Anthropic SDK", "Claude Code", "curl", "Other"] as const;
+const CLIENTS = ["OpenAI SDK", "Anthropic SDK", "curl", "Other"] as const;
 type Client = (typeof CLIENTS)[number];
 
 const ROTATE_CONFIRM_MS = 4000;
@@ -29,8 +29,6 @@ export function apiSnippet(client: Client, base: string, key: string): string {
         'm = client.messages.create(model="local", max_tokens=1024, messages=[{"role": "user", "content": "Hello"}])',
         "print(m.content[0].text)",
       ].join("\n");
-    case "Claude Code":
-      return [`set ANTHROPIC_BASE_URL=${root}`, `set ANTHROPIC_AUTH_TOKEN=${key}`, "claude"].join("\n");
     case "curl":
       return `curl ${base}/chat/completions -H "Authorization: Bearer ${key}" -H "Content-Type: application/json" -d "{\\"model\\":\\"local\\",\\"messages\\":[{\\"role\\":\\"user\\",\\"content\\":\\"Hello\\"}]}"`;
     case "Other":

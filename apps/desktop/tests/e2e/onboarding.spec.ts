@@ -199,8 +199,9 @@ test("the full Terms, Privacy and Licenses open in place from the bundle, by key
   await expect(dialog).toContainText("no telemetry");
   await page.keyboard.press("End");
   await expect(dialog.getByRole("tab", { name: "Licenses" })).toBeFocused();
-  // Cerebro, the generated JavaScript list, three typefaces, the generated Rust list, llama.cpp.
-  await expect(dialog.locator(".legal__license")).toHaveCount(7);
+  // Cerebro, the generated JavaScript list, three typefaces, the generated Rust list, and three
+  // ported works (GVS5H, diffusers, llama.cpp and ggml).
+  await expect(dialog.locator(".legal__license")).toHaveCount(9);
   await dialog.getByText("Full licence text").first().click();
   await expect(dialog.locator(".legal__pre").first()).toContainText("Apache License");
 

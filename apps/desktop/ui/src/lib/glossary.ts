@@ -3,10 +3,6 @@
  * are written from the implementing code and docs/CLAIMS.md, including what a mechanism does NOT do.
  */
 export const GLOSSARY = {
-  llamacpp: {
-    term: "llama.cpp",
-    text: "An open-source inference engine for GGUF files. Cerebro runs models on its own engine, which reads the same files; the official llama.cpp release is the speed reference Cerebro measures itself against.",
-  },
   tokps: {
     term: "tok/s",
     text: "Tokens per second: how fast a model writes. A token is a word or a piece of a word.",

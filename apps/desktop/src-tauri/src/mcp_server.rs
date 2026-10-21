@@ -1,5 +1,5 @@
-//! Cerebro as an MCP server: other programs on this computer (Claude Code, VS Code, Cursor, the
-//! DeepSeek harness...) use the local models through MCP's Streamable HTTP transport (2025-06-18).
+//! Cerebro as an MCP server: other programs on this computer (VS Code, other editors, scripts)
+//! use the local models through MCP's Streamable HTTP transport (2025-06-18).
 //!
 //! Off by default. Binds 127.0.0.1 only; every request needs the access token as a bearer token;
 //! a browser Origin or a Host other than this loopback address is refused (DNS rebinding). Replies
