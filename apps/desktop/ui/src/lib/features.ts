@@ -29,7 +29,7 @@ export const FEATURE_GROUPS: readonly FeatureGroup[] = [
     title: "Run models on this computer",
     features: [
       { title: "Its own inference engine", text: "Cerebro runs models with its own engine on NVIDIA cards, other graphics cards and the processor, and splits a model between them when it does not fit.", icon: "chip", route: "models" },
-      { title: "Model Hub", text: "Search and download models, see which ones fit this machine before you download, and read each model's licence first.", icon: "hub", route: "hub" },
+      { title: "Model Hub", text: "Recommended models ranked by how well they fit this computer, browse by task, search everything on Hugging Face, and download with progress, stop and resume. Each model's licence is shown first.", icon: "hub", route: "hub", isNew: true },
       { title: "Tune for this machine", text: "Measure the fastest settings for a model on your hardware and keep them.", icon: "tune", route: "tune" },
       { title: "Monitor", text: "Speed, memory, temperature and every request, live.", icon: "activity", route: "monitor" },
     ],

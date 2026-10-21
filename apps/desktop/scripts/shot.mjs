@@ -26,7 +26,7 @@ await page.addInitScript(([k, v, g, t]) => {
   localStorage.setItem("cerebro-guide-seen", g);
   localStorage.setItem("cerebro-theme", t);
 }, [constant(progress, "ONBOARDING_KEY"), record, guide, theme]);
-await page.goto(`${url}/#/${route}`);
+await page.goto(route.includes("?") ? `${url}/${route}` : `${url}/#/${route}`);
 await page.waitForTimeout(1200);
 if (setup) await page.evaluate(setup);
 await page.waitForTimeout(1500);

@@ -1,4 +1,6 @@
 import { createEffect, createMemo, createResource, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
+import { FamilyTile } from "../../components/FamilyTile";
+import { ABILITY_LABELS, abilitiesOf, fitBadge, HUB_CATEGORIES, HUB_PICKS, type HubPick } from "../../lib/hub-picks";
 import { Icon } from "../../components/icons";
 import { LicenceNote } from "../../components/LicenceNote";
 import { memoryNeeds } from "../../components/QuantTable";
@@ -38,14 +40,27 @@ function fitOf(bytes: number, vram: number, ram: number): { label: string; tone:
 export function LiveHub(): JSX.Element {
   const service = useService();
   const app = useAppState();
-  const [query, setQuery] = createSignal("Qwen3 GGUF");
-  const [submitted, setSubmitted] = createSignal("Qwen3 GGUF");
+  // Nothing is searched until the user asks: the front page is the recommendations below.
+  const [query, setQuery] = createSignal("");
+  const [submitted, setSubmitted] = createSignal("");
   const [repo, setRepo] = createSignal<string | null>(null);
   const [hw] = createResource(() => service.detectHardware().catch(() => undefined));
   const offline = () => app.settings()?.offlineMode === true || app.network() !== "online";
   const downloadsOff = () => app.settings()?.allowModelDownloads === false;
   const blocked = () => offline() || downloadsOff();
-  const search = () => (blocked() ? undefined : submitted());
+  const search = () => (blocked() || !submitted() ? undefined : submitted());
+  const runSearch = (q: string) => {
+    if (blocked()) return;
+    setQuery(q);
+    setRepo(null);
+    setSubmitted(q.trim());
+  };
+  const vramGiB = () => hw()?.gpu?.vramTotalGiB ?? 0;
+  const ramGiB = () => hw()?.ramTotalGiB ?? 0;
+  const order = { good: 0, ok: 1, slow: 2, no: 3 } as const;
+  const picks = createMemo(() =>
+    HUB_PICKS.map((p) => ({ p, fit: fitBadge(p.sizeGiB, vramGiB(), ramGiB()) })).sort((a, b) => order[a.fit.tone] - order[b.fit.tone]),
+  );
   const filesFor = () => (blocked() ? undefined : repo());
   const [results] = createResource(search, (q) => service.hubSearch!(q));
   const [files, { refetch }] = createResource(filesFor, (r) => service.hubFiles!(r));
@@ -147,9 +162,34 @@ export function LiveHub(): JSX.Element {
           Search
         </button>
       </form>
+      <div class="livehub__chips" role="group" aria-label="Browse by task">
+        <For each={HUB_CATEGORIES}>
+          {(c) => (
+            <button type="button" class="chip livehub__chip" aria-pressed={submitted() === c.query} disabled={blocked()} onClick={() => runSearch(c.query)}>
+              {c.label}
+            </button>
+          )}
+        </For>
+        <Show when={submitted()}>
+          <button type="button" class="btn btn--tertiary btn--sm" onClick={() => runSearch("")}>
+            Back to recommendations
+          </button>
+        </Show>
+      </div>
+      <Show when={!submitted()}>
+        <section class="livehub__picks" aria-labelledby="picks-title">
+          <h2 id="picks-title">Recommended for this computer</h2>
+          <ul class="livehub__pick-grid">
+            <For each={picks()}>
+              {(x) => <PickCard pick={x.p} fit={x.fit} disabled={blocked()} onOpen={() => runSearch(x.p.query)} />}
+            </For>
+          </ul>
+        </section>
+      </Show>
       <p class="livehub__note">
         Live from huggingface.co. Sizes are the files' real sizes; fit is judged against this machine: {hw() ? `${hw()!.gpu ? `${hw()!.gpu!.name}, ${hw()!.gpu!.vramTotalGiB.toFixed(0)} GiB graphics memory · ` : ""}${hw()!.ramTotalGiB.toFixed(0)} GiB system memory` : "reading…"}
       </p>
+      <Show when={submitted()}>
       <div class="livehub__panes">
         <section class="livehub__results" aria-label="Repositories">
           <Show when={!results.loading} fallback={<p class="livehub__muted">Searching…</p>}>
@@ -160,11 +200,17 @@ export function LiveHub(): JSX.Element {
                     {(r: HubRepo) => (
                       <li>
                         <button type="button" class="livehub__repo" aria-pressed={repo() === r.id} onClick={() => setRepo(r.id)}>
+                          <FamilyTile name={r.id} size={34} />
+                          <span class="livehub__repo-body">
                           <span class="livehub__repo-name">{r.id}</span>
                           <span class="livehub__muted">
-                            {r.downloads.toLocaleString()} downloads · {r.likes.toLocaleString()} likes{r.updated ? ` · ${r.updated.slice(0, 10)}` : ""}
+                            {compactCount(r.downloads)} downloads · {compactCount(r.likes)} likes{r.updated ? ` · ${r.updated.slice(0, 10)}` : ""}
+                          </span>
+                          <span class="livehub__badges">
+                            <For each={abilitiesOf(r.id, r.tags)}>{(a) => <span class="livehub__badge">{ABILITY_LABELS[a]}</span>}</For>
                           </span>
                           <LicenceNote licence={licenceForModel(r.id, null, r.license)} compact />
+                          </span>
                         </button>
                       </li>
                     )}
@@ -283,6 +329,40 @@ export function LiveHub(): JSX.Element {
           </Show>
         </section>
       </div>
+      </Show>
     </div>
+  );
+}
+
+/** 12,345 as "12K", 1,234,567 as "1.2M". */
+function compactCount(n: number): string {
+  if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(n >= 1e4 ? 0 : 1)}K`;
+  return String(n);
+}
+
+function PickCard(props: { pick: HubPick; fit: { label: string; tone: string }; disabled: boolean; onOpen: () => void }): JSX.Element {
+  return (
+    <li class="livehub__pick card" data-fit={props.fit.tone}>
+      <div class="livehub__pick-head">
+        <FamilyTile name={props.pick.family} size={44} />
+        <div>
+          <h3>{props.pick.title}</h3>
+          <span class="livehub__muted mono">
+            {props.pick.params} · about {props.pick.sizeGiB.toFixed(1)} GiB
+          </span>
+        </div>
+      </div>
+      <p>{props.pick.blurb}</p>
+      <div class="livehub__badges">
+        <For each={props.pick.abilities}>{(a) => <span class="livehub__badge">{ABILITY_LABELS[a]}</span>}</For>
+      </div>
+      <div class="livehub__pick-foot">
+        <span class={`livehub__fit livehub__fit--${props.fit.tone}`}>{props.fit.label}</span>
+        <button type="button" class="btn btn--secondary btn--sm" disabled={props.disabled} onClick={() => props.onOpen()} aria-label={`See files for ${props.pick.title}`}>
+          See files
+        </button>
+      </div>
+    </li>
   );
 }

@@ -254,6 +254,8 @@ const IMAGE_TYPE = /^image\/(png|jpeg|webp|gif)$/;
  */
 export function createMockService(options: MockServiceOptions = {}): CerebroService {
   let cloudList: CloudProvider[] = [];
+  const hubDone = new Set<string>();
+  const hubCancelled = new Set<string>();
   const switches: EngineSwitch[] = MOCK_SWITCHES.map((x) => ({ ...x }));
   let remote: Omit<RemoteView, "running" | "url" | "address" | "port"> = {
     enabled: false, addressChoice: null, addresses: ["192.168.1.20"], passwordSet: false, allowChat: false, allowTailscale: false,
@@ -703,6 +705,50 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
       }),
 
     startRecording: () => later(0, () => undefined),
+    // Model Hub (the live Hub, shown in the browser build with ?hub=live): example repositories and
+    // files, a GGUF header per file, and a download that progresses over about two seconds.
+    hubSearch: (q) =>
+      later(250, () => {
+        const all = [
+          { id: "example-org/Qwen3.5-4B-GGUF", author: "example-org", downloads: 412000, likes: 930, updated: "2026-09-30T10:00:00Z", license: "apache-2.0", tags: ["gguf", "text-generation", "image-text-to-text"] },
+          { id: "example-org/Qwen3-Coder-30B-A3B-Instruct-GGUF", author: "example-org", downloads: 268000, likes: 610, updated: "2026-09-12T10:00:00Z", license: "apache-2.0", tags: ["gguf", "text-generation"] },
+          { id: "example-org/gemma-4-E4B-it-GGUF", author: "example-org", downloads: 190000, likes: 455, updated: "2026-08-20T10:00:00Z", license: "gemma", tags: ["gguf", "image-text-to-text"] },
+          { id: "example-org/Llama-3.1-8B-Instruct-GGUF", author: "example-org", downloads: 1200000, likes: 2100, updated: "2025-11-02T10:00:00Z", license: "llama3.1", tags: ["gguf", "text-generation"] },
+          { id: "example-org/Qwen3-0.6B-GGUF", author: "example-org", downloads: 98000, likes: 220, updated: "2026-05-01T10:00:00Z", license: "apache-2.0", tags: ["gguf"] },
+        ];
+        const words = q.toLowerCase().replace(/gguf/g, "").split(/\s+/).filter(Boolean);
+        const hits = all.filter((r) => words.every((w) => r.id.toLowerCase().includes(w.replace(/\s/g, ""))));
+        return hits.length ? hits : all.slice(0, 3);
+      }),
+    hubFiles: (repo) =>
+      later(200, () => {
+        const base = repo.split("/").pop()!.replace(/-GGUF$/, "");
+        const gib = /30B/.test(base) ? 17.3 : /4B|E4B/.test(base) ? 2.6 : /8B/.test(base) ? 4.6 : 0.5;
+        return [
+          { path: `${base}-Q4_K_M.gguf`, size: Math.round(gib * 2 ** 30), parts: [`${base}-Q4_K_M.gguf`], quant: "Q4_K_M", downloaded: hubDone.has(`${repo}/${base}-Q4_K_M.gguf`) },
+          { path: `${base}-Q8_0.gguf`, size: Math.round(gib * 1.9 * 2 ** 30), parts: [`${base}-Q8_0.gguf`], quant: "Q8_0", downloaded: hubDone.has(`${repo}/${base}-Q8_0.gguf`) },
+        ];
+      }),
+    hubFileMeta: (_repo, file) =>
+      later(60, () => ({ size: /Q8/.test(file) ? 4.9 * 2 ** 30 : 2.6 * 2 ** 30, architecture: "qwen3", layers: 36, kvHeads: 8, headDim: 128, embedding: 2560, experts: null, activeExperts: null, contextMax: 40960, attentionLayers: 36, quant: /Q8/.test(file) ? "Q8_0" : "Q4_K_M" })),
+    hubDownload: (repo, file, onEvent) =>
+      new Promise((resolve) => {
+        let done = 0;
+        const step = Math.max(1, Math.floor(file.size / 10));
+        const t = setInterval(() => {
+          done = Math.min(file.size, done + step);
+          onEvent({ type: "progress", done, total: file.size, bytesPerSec: step * 5 });
+          if (done >= file.size || hubCancelled.delete(`${repo}/${file.path}`)) {
+            clearInterval(t);
+            if (done >= file.size) {
+              hubDone.add(`${repo}/${file.path}`);
+              onEvent({ type: "done", path: `C:\\models\\${file.path}` });
+            } else onEvent({ type: "error", message: "Stopped. Resume picks up where it left off." });
+            resolve(`C:\\models\\${file.path}`);
+          }
+        }, 200);
+      }),
+    hubCancel: (repo, path) => later(0, () => void hubCancelled.add(`${repo}/${path}`)),
     // Cloud models: an in-memory list; "Test" offers example model names (nothing is contacted).
     cloudPresets: () =>
       later(0, () => [

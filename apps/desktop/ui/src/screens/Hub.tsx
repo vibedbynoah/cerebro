@@ -36,7 +36,8 @@ const memoryModel = (m: CatalogModel): MemoryModel => ({ architecture: m.archite
  */
 export function ModelHub(): JSX.Element {
   // The desktop app searches Hugging Face live; the web preview shows the bundled catalogue.
-  if (__DESKTOP__) return <LiveHub />;
+  // The browser build shows the live Hub on its mock with ?hub=live (for testing and review).
+  if (__DESKTOP__ || new URLSearchParams(location.search).get("hub") === "live") return <LiveHub />;
   const service = useService();
   const app = useAppState();
   const [catalog] = createResource(() => service.listCatalog());

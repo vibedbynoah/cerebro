@@ -221,3 +221,110 @@
 .livehub__licence {
   margin: var(--space-3) 0 var(--space-2);
 }
+
+/* ---- Live Hub front page: categories, recommended picks, family tiles ---- */
+
+.family-tile {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  border-radius: var(--radius-md);
+  background: oklch(from var(--color-accent) l c var(--tile-hue, h) / 0.16);
+  color: oklch(from var(--color-text-primary) l 0.09 var(--tile-hue, 265));
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.family-tile[data-family="other"] {
+  background: var(--color-surface-2);
+  color: var(--color-text-secondary);
+}
+
+.livehub__chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.livehub__chip {
+  cursor: pointer;
+}
+
+.livehub__chip[aria-pressed="true"] {
+  border-color: var(--color-accent);
+  color: var(--color-accent-text);
+}
+
+.livehub__picks h2 {
+  margin: var(--space-5) 0 var(--space-3);
+  font-size: var(--text-title);
+}
+
+.livehub__pick-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.livehub__pick {
+  display: grid;
+  grid-template-rows: auto 1fr auto auto;
+  gap: var(--space-2);
+  padding: var(--space-4);
+}
+
+.livehub__pick-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.livehub__pick h3 {
+  margin: 0;
+  font-size: 1.02rem;
+}
+
+.livehub__pick p {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-small);
+}
+
+.livehub__pick-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.livehub__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.livehub__badge {
+  padding: 1px 7px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  color: var(--color-text-secondary);
+  font-size: 0.75rem;
+}
+
+.livehub__repo {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  text-align: left;
+}
+
+.livehub__repo-body {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
