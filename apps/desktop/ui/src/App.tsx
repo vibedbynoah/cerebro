@@ -122,6 +122,11 @@ function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Eleme
 
   // The feature guide opens once on entering the app (and again when the list of features changes).
   const [guideOpen, setGuideOpen] = createSignal(guideDue());
+  onMount(() => {
+    const open = () => setGuideOpen(true);
+    window.addEventListener("cerebro:open-guide", open);
+    onCleanup(() => window.removeEventListener("cerebro:open-guide", open));
+  });
 
   const commands = createMemo<PaletteCommand[]>(() => [
     ...ROUTES.map((r) => ({

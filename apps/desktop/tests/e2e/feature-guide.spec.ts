@@ -33,6 +33,13 @@ test.describe("the feature guide", () => {
     await expect(page.getByTestId("feature-guide")).toHaveCount(0);
   });
 
+  test("Home's What's new opens the guide", async ({ page }) => {
+    await page.goto("/#/home");
+    await page.getByTestId("feature-guide").getByRole("button", { name: "Close" }).click();
+    await page.getByRole("button", { name: "See everything Cerebro does" }).click();
+    await expect(page.getByTestId("feature-guide")).toBeVisible();
+  });
+
   test("is accessible", async ({ page }) => {
     await page.goto("/#/home");
     await expect(page.getByTestId("feature-guide")).toBeVisible();

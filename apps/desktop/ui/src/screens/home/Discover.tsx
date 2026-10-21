@@ -47,8 +47,13 @@ const NEWS = [
   { date: "Oct 5", text: "Chat: reasoning source per message, including the raw model with no added prompt." },
 ];
 
-/** The desktop build has no Turbo profiles or image editing yet, so its news omits those two items. */
-const DESKTOP_NEWS = NEWS.filter((n) => !n.text.startsWith("Turbo:") && !n.text.startsWith("Image Studio:"));
+/** What this desktop release added (the feature guide lists everything). */
+const DESKTOP_NEWS = [
+  { date: "Oct 21", text: "Cluster: run one model across your computers over Wi-Fi, Ethernet or a USB network cable." },
+  { date: "Oct 21", text: "Cloud models with your own API keys, voice mode, / commands and a live panel in Chat." },
+  { date: "Oct 20", text: "Image Studio: a 512 x 512 image in about a fifth of a second on a recent NVIDIA card." },
+  { date: "Oct 20", text: "Model Hub: recommended models ranked by fit, and the official MCP registry in Tools." },
+];
 
 const DONE_KEY = "cerebro-checklist-dismissed";
 
@@ -163,6 +168,9 @@ export function Discover(props: { tuned: boolean; models: number }): JSX.Element
         </Show>
 
         <Section id="news" title="What's new">
+          <button type="button" class="btn btn--tertiary btn--sm news__all" onClick={() => window.dispatchEvent(new CustomEvent("cerebro:open-guide"))}>
+            See everything Cerebro does
+          </button>
           <ul class="news" role="list">
             <For each={news}>
               {(n) => (
