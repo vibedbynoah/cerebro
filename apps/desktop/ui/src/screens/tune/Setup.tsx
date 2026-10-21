@@ -143,7 +143,7 @@ export function TuneSetup(props: {
         </Show>
         <p class="pick__terms">
           On the cards: the <Term k="quant" /> (Q4_K_M, Q5_K_M), whether it is an <Term k="moe" /> model or dense (every part works on every token), its size on disk, and
-          whether it fits in <Term k="vram">video memory</Term> with its <Term k="kvCache" /> at the chosen workload's depth (an estimate; the tune measures the real thing).
+          whether it fits in <Term k="vram">graphics memory</Term> with its <Term k="kvCache" /> at the chosen workload's depth (an estimate; the tune measures the real thing).
         </p>
         <p class="hint">
           <Icon name="info" size={16} />

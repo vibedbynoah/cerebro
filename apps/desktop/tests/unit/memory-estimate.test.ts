@@ -36,7 +36,7 @@ describe("Qwen3-0.6B Q8_0 at 4K", () => {
     // layers cost 0.44 GiB. Compute buffers are 512 x 1024 x 4 x 6 bytes = 0.011 GiB, plus 0.3 GiB
     // of driver overhead. Weights + KV + scratch = 0.61 + 0.44 + 0.31 = 1.36 GiB.
     const e = estimate(QWEN3_06B, quant, 4096, "f16", { gpuLayers: 28, vramGiB: 12, ramGiB: 32 });
-    expect(e).toEqual({ weightsGiB: 0.61, kvGiB: 0.44, scratchGiB: 0.31, vramGiB: 1.36, ramGiB: 0, fits: "gpu", note: "The whole file and its context fit in video memory." });
+    expect(e).toEqual({ weightsGiB: 0.61, kvGiB: 0.44, scratchGiB: 0.31, vramGiB: 1.36, ramGiB: 0, fits: "gpu", note: "The whole file and its context fit in graphics memory." });
   });
 
   it("runs from system memory when there is no card to offload to", () => {
@@ -144,7 +144,7 @@ describe("quantisation tier and the best files for this machine", () => {
     expect(picks.map((p) => p.tag)).toEqual(["ud", "q5", "q8", "split-ud", "too-big"]);
     expect(picks.map((p) => p.rank)).toEqual([1, 2, 3, 4, 5]);
     expect(picks.map((p) => p.estimate.fits)).toEqual(["gpu", "gpu", "gpu", "split", "no"]);
-    expect(picks[0]!.why).toBe("UD-Q4_K_XL is the closest fit entirely in video memory (2.0 GiB).");
+    expect(picks[0]!.why).toBe("UD-Q4_K_XL is the closest fit entirely in graphics memory (2.0 GiB).");
     expect(picks[4]!.why).toBe("Q4_K_M needs more memory than this machine can spare (40.0 GiB).");
     expect(recommend(candidates, LAPTOP, 4096, "f16", 3)).toHaveLength(3);
   });

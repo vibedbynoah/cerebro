@@ -20,12 +20,13 @@ const KV_TYPE = "f16" as const;
 /** A hub file's architecture, for the memory estimate. */
 const memoryModel = (meta: HubFileMeta): MemoryModel => ({ architecture: meta.experts ? "moe" : "dense", layers: meta.layers, kvHeads: meta.kvHeads, headDim: meta.headDim, embedding: meta.embedding, contextMax: meta.contextMax, attentionLayers: meta.attentionLayers });
 
-/** How a file of `bytes` fits this machine: all in VRAM, VRAM + RAM (experts or layers on the CPU), RAM only, or not at all. */
+/** How a file of `bytes` fits this machine: all in graphics memory, graphics memory + system
+ *  memory (experts or layers on the processor), system memory only, or not at all. */
 function fitOf(bytes: number, vram: number, ram: number): { label: string; tone: "good" | "ok" | "slow" | "no" } {
   const need = bytes * 1.1;
-  if (vram > 0 && need <= vram * 0.92) return { label: "Fits in VRAM", tone: "good" };
-  if (need <= vram * 0.92 + ram * 0.7) return { label: vram > 0 ? "VRAM + RAM" : "Fits in RAM", tone: vram > 0 ? "ok" : "slow" };
-  if (need <= ram * 0.9 + vram) return { label: "Tight: needs most of RAM", tone: "slow" };
+  if (vram > 0 && need <= vram * 0.92) return { label: "Fits in graphics memory", tone: "good" };
+  if (need <= vram * 0.92 + ram * 0.7) return { label: vram > 0 ? "Graphics memory + system memory" : "Fits in system memory", tone: vram > 0 ? "ok" : "slow" };
+  if (need <= ram * 0.9 + vram) return { label: "Tight: needs most of system memory", tone: "slow" };
   return { label: "Too large for this machine", tone: "no" };
 }
 
@@ -147,7 +148,7 @@ export function LiveHub(): JSX.Element {
         </button>
       </form>
       <p class="livehub__note">
-        Live from huggingface.co. Sizes are the files' real sizes; fit is judged against this machine: {hw() ? `${hw()!.gpu ? `${hw()!.gpu!.name}, ${hw()!.gpu!.vramTotalGiB.toFixed(0)} GiB VRAM · ` : ""}${hw()!.ramTotalGiB.toFixed(0)} GiB RAM` : "reading…"}
+        Live from huggingface.co. Sizes are the files' real sizes; fit is judged against this machine: {hw() ? `${hw()!.gpu ? `${hw()!.gpu!.name}, ${hw()!.gpu!.vramTotalGiB.toFixed(0)} GiB graphics memory · ` : ""}${hw()!.ramTotalGiB.toFixed(0)} GiB system memory` : "reading…"}
       </p>
       <div class="livehub__panes">
         <section class="livehub__results" aria-label="Repositories">

@@ -1,6 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
-import { expect, scrollThrough, settle, test } from "./fixtures";
+import { expect, openFineTune, scrollThrough, settle, test } from "./fixtures";
 
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"];
 // 1x1 transparent PNG.
@@ -56,6 +56,7 @@ test.describe("chat", () => {
 
   test("Max effort with Both shows thinking and two self-check passes, and the prompt shows exactly what is sent", async ({ page }) => {
     await openChat(page);
+    await openFineTune(page);
     await page.locator("label.segmented__option", { hasText: "Max" }).click();
     await page.getByRole("combobox", { name: "Reasoning" }).selectOption("both");
     await send(page, "Check my math");
@@ -128,6 +129,7 @@ test.describe("chat", () => {
     await page.getByRole("button", { name: "Add", exact: true }).click();
     await expect(page.locator(".memory__text").last()).toHaveValue("Likes dark mode.");
     await page.locator('[data-setting="memory-chat"]').click();
+    await openFineTune(page);
     await page.getByRole("button", { name: "System prompt" }).click();
     await expect(page.getByTestId("prompt-preview")).not.toContainText("Likes dark mode.");
   });
@@ -148,6 +150,7 @@ test.describe("chat", () => {
     test(`no axe violations with a finished reply (${scheme})`, async ({ page }) => {
       await page.emulateMedia({ colorScheme: scheme });
       await openChat(page);
+      await openFineTune(page);
       await send(page, "Write a Python function to count lines");
       await waitDone(page);
       await scrollThrough(page);

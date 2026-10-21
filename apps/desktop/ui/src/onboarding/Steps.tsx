@@ -100,7 +100,7 @@ export function HardwareStep(props: { hw: HardwareProfile | undefined; state: Sc
         value: h.gpu?.name ?? "None found",
         meta: h.gpu ? "Runs the model's heavy maths" : "Models will run on the processor",
       },
-      { id: "vram", icon: "bolt", label: <>Video memory <Term k="vram" /></>, value: gib(h.gpu?.vramTotalGiB ?? 0), unit: "GiB", meta: "The fastest place for a model" },
+      { id: "vram", icon: "bolt", label: <>Graphics memory <Term k="vram" /></>, value: gib(h.gpu?.vramTotalGiB ?? 0), unit: "GiB", meta: "The fastest place for a model" },
       { id: "ram", icon: "memory", label: <>System memory <Term k="ram" /></>, value: gib(h.ramTotalGiB), unit: "GiB", meta: "Holds what does not fit" },
     ];
   });
@@ -221,7 +221,7 @@ export function HardwareStep(props: { hw: HardwareProfile | undefined; state: Sc
           <div class="memmap__legend">
             <span class="memmap__key">
               <span class="memmap__swatch memmap__swatch--vram" aria-hidden="true" />
-              Video memory, <span class="mono">{gib(props.hw?.gpu?.vramTotalGiB ?? 0)}</span>
+              Graphics memory, <span class="mono">{gib(props.hw?.gpu?.vramTotalGiB ?? 0)}</span>
               <span class="unit">GiB</span>: fastest
             </span>
             <span class="memmap__key">
@@ -230,7 +230,7 @@ export function HardwareStep(props: { hw: HardwareProfile | undefined; state: Sc
               <span class="unit">GiB</span>: larger, slower
             </span>
           </div>
-          <p class="memmap__note">A model that fits in video memory runs fastest. A larger one can spill into system memory, and Cerebro measures what that costs.</p>
+          <p class="memmap__note">A model that fits in graphics memory runs fastest. A larger one can spill into system memory, and Cerebro measures what that costs.</p>
         </figure>
       </Show>
     </div>
@@ -291,7 +291,7 @@ export function ModelStep(props: {
                 <span class="rec-legend__swatch" aria-hidden="true">
                   <span class="rec-legend__tick" />
                 </span>
-                Ranked by fit, not speed. Bar: file size against spare memory; the tick marks where video memory ends.
+                Ranked by fit, not speed. Bar: file size against spare memory; the tick marks where graphics memory ends.
               </span>
             </Show>
             <Show when={props.recs.some((r) => r.model.provenance === "illustrative") || props.hw?.provenance === "illustrative"}>
@@ -636,7 +636,7 @@ export function FinishStep(props: {
                   <span class="summary__value">{h().gpu?.name ?? "No graphics card found"}</span>
                   <span class="summary__meta">
                     <span class="mono">{gib(h().gpu?.vramTotalGiB ?? 0)}</span>
-                    <span class="unit">GiB</span> video memory, <span class="mono">{gib(h().ramTotalGiB)}</span>
+                    <span class="unit">GiB</span> graphics memory, <span class="mono">{gib(h().ramTotalGiB)}</span>
                     <span class="unit">GiB</span> system memory
                   </span>
                   <Show when={h().provenance === "illustrative"}>

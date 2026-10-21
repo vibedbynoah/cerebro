@@ -225,6 +225,26 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
 
       <WorkspaceFolders />
 
+      <Section id="config-file" title="Configuration file" description="Every setting above as one JSON file you can edit, back up or copy to another computer. Conversations, memories and keys are not included.">
+        <div class="settings-row">
+          <button type="button" class="btn btn--secondary" data-press onClick={doExport}>
+            <Icon name="download" size={16} />
+            Export
+          </button>
+          <label class="btn btn--secondary" data-press>
+            <Icon name="upload" size={16} />
+            Import
+            <input class="sr-only" type="file" accept="application/json,.json" onChange={(e) => e.currentTarget.files?.[0] && void doImport(e.currentTarget.files[0])} />
+          </label>
+        </div>
+      </Section>
+
+      <Section id="setup" title="First-run setup" description="Walk through the experience level, the hardware check, a first model and its load settings, the protections and the terms again. Nothing changes until you choose.">
+        <button type="button" class="btn btn--secondary" data-press onClick={() => props.onRunSetup()}>
+          Run setup again
+        </button>
+      </Section>
+
       <Section id="about" title="About">
         <dl class="about">
           <dt>Version</dt>
@@ -252,26 +272,6 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
           More about Cerebro
           <Icon name="arrowRight" size={14} />
         </a>
-      </Section>
-
-      <Section id="config-file" title="Configuration file" description="Every setting above as one JSON file you can edit, back up or copy to another computer. Conversations, memories and keys are not included.">
-        <div class="settings-row">
-          <button type="button" class="btn btn--secondary" data-press onClick={doExport}>
-            <Icon name="download" size={16} />
-            Export
-          </button>
-          <label class="btn btn--secondary" data-press>
-            <Icon name="upload" size={16} />
-            Import
-            <input class="sr-only" type="file" accept="application/json,.json" onChange={(e) => e.currentTarget.files?.[0] && void doImport(e.currentTarget.files[0])} />
-          </label>
-        </div>
-      </Section>
-
-      <Section id="setup" title="First-run setup" description="Walk through the experience level, the hardware check, a first model and its load settings, the protections and the terms again. Nothing changes until you choose.">
-        <button type="button" class="btn btn--secondary" data-press onClick={() => props.onRunSetup()}>
-          Run setup again
-        </button>
       </Section>
       <LegalDialog doc={legal()} onSelect={setLegal} onClose={() => setLegal(null)} />
     </div>

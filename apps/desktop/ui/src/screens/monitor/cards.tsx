@@ -416,7 +416,7 @@ export function MetricGrid(props: { snap: MetricsSnapshot; series: MetricsSeries
         }
       >
         <Show when={vram()}>
-          <svg class="mon-split" viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label={`VRAM split: ${vramParts().map((p) => `${p.label} ${num(p.value, 2)} GiB`).join(", ")}, of ${num(hw().vramTotalGiB, 1)} GiB`}>
+          <svg class="mon-split" viewBox="0 0 100 8" preserveAspectRatio="none" role="img" aria-label={`Graphics memory split: ${vramParts().map((p) => `${p.label} ${num(p.value, 2)} GiB`).join(", ")}, of ${num(hw().vramTotalGiB, 1)} GiB`}>
             <Index each={vramOffsets()}>{(p) => <rect class="mon-split__part" data-part={p().key} x={p().x} y="0" width={Math.max(0, p().w)} height="8" />}</Index>
           </svg>
           <ul class="mon-legend">
@@ -431,7 +431,7 @@ export function MetricGrid(props: { snap: MetricsSnapshot; series: MetricsSeries
             </Index>
           </ul>
         </Show>
-        {spark("vram", "VRAM in use", "vramUsedGiB", (v) => `${num(v, 2)} GiB`, hw().vramTotalGiB, { value: hw().vramTotalGiB * 0.95, label: "Pressure at 95%" })}
+        {spark("vram", "Graphics memory in use", "vramUsedGiB", (v) => `${num(v, 2)} GiB`, hw().vramTotalGiB, { value: hw().vramTotalGiB * 0.95, label: "Pressure at 95%" })}
       </MetricCard>
 
       <MetricCard
@@ -703,7 +703,7 @@ export function AlertsCard(props: { alerts: AlertTracker }): JSX.Element {
         Alerts
       </h2>
       <p class="mon-cache__lede">
-        Cerebro watches for <Term k="throttling" />, VRAM above 95% and writing more than 20% below the tuned baseline, and shows one quiet notice when one starts.
+        Cerebro watches for <Term k="throttling" />, graphics memory above 95% and writing more than 20% below the tuned baseline, and shows one quiet notice when one starts.
       </p>
       <Show when={recent().length > 0} fallback={<p class="mon-empty">Nothing has gone wrong since the Monitor started watching.</p>}>
         <ul class="mon-recent">

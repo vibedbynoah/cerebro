@@ -198,7 +198,6 @@ function ImagesDesktop(): JSX.Element {
 /** The browser preview's design study of the screen, with illustrative artwork drawn from the seed. */
 function ImageStudioPreview(): JSX.Element {
   const app = useAppState();
-  const [advanced, setAdvanced] = createSignal(app.level() === "advanced");
   const [p, setP] = createSignal<GenParams>({
     mode: "txt2img",
     modelId: IMAGE_MODELS[0]!.id,
@@ -382,11 +381,8 @@ function ImageStudioPreview(): JSX.Element {
             </fieldset>
           </Show>
 
-          <label class="img-toggle">
-            <input type="checkbox" checked={advanced()} onChange={(e) => setAdvanced(e.currentTarget.checked)} />
-            <span>Advanced settings</span>
-          </label>
-          <Show when={advanced()}>
+          <details class="img-advanced-details" open={app.level() === "advanced"}>
+            <summary class="img-advanced-summary">Advanced settings</summary>
             <div class="img-advanced">
               <label class="img-field">
                 <span>Seed</span>
@@ -416,7 +412,7 @@ function ImageStudioPreview(): JSX.Element {
                 {(k) => <span class="img-error">{errors()[k]}</span>}
               </For>
             </div>
-          </Show>
+          </details>
 
           <Show when={tried() && errors().mode}>
             <span class="img-error">{errors().mode}</span>

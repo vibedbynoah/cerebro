@@ -1,6 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
-import { expect, settle, test } from "./fixtures";
+import { expect, openFineTune, settle, test } from "./fixtures";
 
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"];
 
@@ -23,6 +23,7 @@ async function send(page: Page, text: string): Promise<void> {
 test.describe("orchestrate in chat", () => {
   test("the toggle explains itself and sends the run: steps advance, Notes open, the answer arrives, the panel folds away", async ({ page }) => {
     await openChat(page);
+    await openFineTune(page);
     await expect(page.getByText("Several instances of this model plan, split the work and check each other through a shared ledger.")).toHaveCount(0);
     await toggle(page).check();
     await expect(page.getByText("Several instances of this model plan, split the work and check each other through a shared ledger. Slower, often better on hard problems.")).toBeVisible();
@@ -59,6 +60,7 @@ test.describe("orchestrate in chat", () => {
 
   test("Stop mid-run keeps the partial ledger and the folder path", async ({ page }) => {
     await openChat(page);
+    await openFineTune(page);
     await toggle(page).check();
     await send(page, "A goal that takes a while");
     await expect(step(page)).toHaveText("Plan, round 0", { timeout: 10_000 });
@@ -77,6 +79,7 @@ test.describe("orchestrate in chat", () => {
     test(`no axe violations with a finished Orchestrate reply (${scheme})`, async ({ page }) => {
       await page.emulateMedia({ colorScheme: scheme });
       await openChat(page);
+      await openFineTune(page);
       await toggle(page).check();
       await send(page, "What is 14 times 7?");
       await expect(bot(page).getByTestId("reply-meta")).toBeVisible({ timeout: 40_000 });

@@ -196,7 +196,7 @@ export function VramChart(props: { soaks: readonly SoakView[]; soakSeconds: numb
       const state = s.result ? (s.result.passed ? "passed" : "failed") : s.interrupted ? "interrupted" : "running";
       return `${props.label(s.candidateId)}: ${state}${last ? `, ${fmt(last.vramFreeGiB, 2)} GiB free` : ""}.`;
     });
-    return `Free video memory during each soak, in GiB. The shaded band is the final third, where the trend must not fall. ${parts.join(" ")}`;
+    return `Free graphics memory during each soak, in GiB. The shaded band is the final third, where the trend must not fall. ${parts.join(" ")}`;
   });
 
   return (

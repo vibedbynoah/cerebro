@@ -180,7 +180,7 @@ function BeginnerPlan(props: { model: CatalogModel; hw: HardwareProfile | undefi
   const why = (): string => {
     switch (place()) {
       case "gpu":
-        return "The closest to the original weights that fits in your video memory with room for context.";
+        return "The closest to the original weights that fits in your graphics memory with room for context.";
       case "moe-offload":
         return "The closest to the original that fits across video and system memory with room to spare.";
       case "split":

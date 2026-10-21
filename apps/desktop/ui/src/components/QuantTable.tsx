@@ -10,9 +10,9 @@ import { Term } from "./Term";
 
 const f1 = (n: number): string => (Math.round(n * 10) / 10).toFixed(1);
 
-/** "Needs 6.2 GiB VRAM + 1.4 GiB RAM at 8K context": the Hub's per-file memory line. */
+/** "Needs 6.2 GiB graphics memory + 1.4 GiB system memory at 8K context": the Hub's memory line. */
 export function memoryNeeds(e: MemoryEstimate, ctxLabel: string): string {
-  return `Needs ${f1(e.vramGiB)} GiB VRAM + ${f1(e.ramGiB)} GiB RAM at ${ctxLabel} context`;
+  return `Needs ${f1(e.vramGiB)} GiB graphics memory + ${f1(e.ramGiB)} GiB system memory at ${ctxLabel} context`;
 }
 
 /**
@@ -57,7 +57,7 @@ export function QuantTable(props: {
               </th>
               <Show when={props.memory}>
                 <th scope="col" class="num" title={`Memory this file needs at ${props.memory!.ctxLabel} context`}>
-                  VRAM + RAM
+                  Memory
                 </th>
               </Show>
               <th scope="col" class="num">

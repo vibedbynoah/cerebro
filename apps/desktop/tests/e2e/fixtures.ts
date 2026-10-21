@@ -98,6 +98,15 @@ export async function scrollThrough(page: Page): Promise<void> {
   });
 }
 
+/** Opens Chat's "Fine-tune" disclosure, which holds the finer composer controls. */
+export async function openFineTune(page: Page): Promise<void> {
+  const more = page.locator("details.composer__more");
+  if (!(await more.evaluate((d) => (d as HTMLDetailsElement).open))) {
+    await page.locator(".composer__more > summary").click();
+  }
+  await expect(more).toHaveJSProperty("open", true);
+}
+
 /** Waits until no CSS animation or transition is running anywhere in the document. */
 export async function settle(page: Page): Promise<void> {
   await page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== "running"), undefined, { timeout: 5000 });

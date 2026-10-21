@@ -1,6 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import { readFile } from "node:fs/promises";
-import { expect, openScreen, scrollThrough, settle, test } from "./fixtures";
+import { expect, openFineTune, openScreen, scrollThrough, settle, test } from "./fixtures";
 
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"];
 
@@ -36,6 +36,7 @@ test.describe("settings: replies, search, configuration file", () => {
     await high.getByRole("textbox", { name: "Instruction" }).blur();
     await expect(high.locator("summary")).toContainText("edited");
     await openScreen(page, "chat");
+    await openFineTune(page);
     await page.getByRole("button", { name: "System prompt" }).click();
     await expect(page.getByTestId("prompt-preview")).toContainText("Double-check every number twice.");
     await expect(page.getByTestId("prompt-preview")).toContainText("Give a thorough answer");
@@ -45,6 +46,7 @@ test.describe("settings: replies, search, configuration file", () => {
     await openScreen(page, "settings");
     await page.locator('[data-setting="add-instructions"]').click();
     await openScreen(page, "chat");
+    await openFineTune(page);
     await page.getByRole("button", { name: "System prompt" }).click();
     await expect(page.getByTestId("prompt-preview")).toHaveText("You are a helpful assistant running locally on this computer.");
   });

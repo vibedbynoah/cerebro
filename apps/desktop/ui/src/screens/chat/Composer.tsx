@@ -3,6 +3,10 @@ import { Icon } from "../../components/icons";
 import { MODE_PRESETS, MODES, type Mode } from "../../lib/chat/modes";
 import { EFFORT_LABELS, EFFORTS, REASONING_LABELS, REASONING_NOTES, REASONING_SOURCES, VERBOSITIES, VERBOSITY_LABELS, type ChatPrefs, type Effort, type EffortLevel } from "../../lib/chat/prompt";
 import type { Attachment } from "../../lib/chat/store";
+import { readPref, writePref } from "../../lib/storage";
+
+/** Whether the composer's fine controls were left open; they start folded away. */
+const FINE_TUNE_KEY = "cerebro-chat-fine-tune";
 
 const IMAGE = /^image\/(png|jpeg|gif|webp)$/;
 const MAX_IMAGE = 10 * 1024 * 1024;
@@ -284,88 +288,103 @@ export function Composer(props: {
         </span>
       </div>
       <p class="composer__hint composer__hint--mode" id="mode-note">
-        {props.mode ? MODE_PRESETS[props.mode].summary : "Custom: you changed one of the settings below by hand. Move the slider to pick a level again."}
+        {props.mode ? MODE_PRESETS[props.mode].summary : "Custom: you changed one of the settings in Fine-tune by hand. Move the slider to pick a level again."}
       </p>
-      <div class="composer__controls">
-        <fieldset class="segmented segmented--sm effort" aria-describedby="effort-note">
-          <legend>Effort</legend>
-          <For each={EFFORTS}>
-            {(e) => (
-              <label class="segmented__option" data-press>
-                <input type="radio" name="effort" value={e} checked={props.prefs.effort === e} onChange={() => props.setPrefs({ effort: e })} />
-                <span>{EFFORT_LABELS[e]}</span>
-              </label>
-            )}
-          </For>
-        </fieldset>
-        <fieldset class="segmented segmented--sm">
-          <legend>Verbosity</legend>
-          <For each={VERBOSITIES}>
-            {(v) => (
-              <label class="segmented__option" data-press>
-                <input type="radio" name="verbosity" value={v} checked={props.prefs.verbosity === v} onChange={() => props.setPrefs({ verbosity: v })} />
-                <span>{VERBOSITY_LABELS[v]}</span>
-              </label>
-            )}
-          </For>
-        </fieldset>
-        <label class="composer__select">
-          <span>Reasoning</span>
-          <select value={props.prefs.source} onChange={(e) => props.setPrefs({ source: e.currentTarget.value as ChatPrefs["source"] })} aria-describedby="source-note">
-            <For each={REASONING_SOURCES}>{(s) => <option value={s}>{REASONING_LABELS[s]}</option>}</For>
-          </select>
-        </label>
-        <label class="composer__check">
-          <input type="checkbox" checked={!props.prefs.addInstructions} onChange={(e) => props.setPrefs({ addInstructions: !e.currentTarget.checked })} />
-          <span>No added prompt</span>
-        </label>
-        <label class="composer__check" title="The model looks around without changing anything, then shows you a plan to approve.">
-          <input type="checkbox" checked={props.prefs.planMode} onChange={(e) => props.setPrefs({ planMode: e.currentTarget.checked })} />
-          <span>Plan first</span>
-        </label>
-        <label class="composer__check">
-          <input type="checkbox" checked={props.prefs.orchestrate} onChange={(e) => props.setPrefs({ orchestrate: e.currentTarget.checked })} />
-          <span>Orchestrate</span>
-        </label>
-        <Show when={props.prefs.orchestrate}>
-          <span class="stepper">
-            Workers
-            <button class="icon-btn icon-btn--sm" type="button" aria-label="Fewer workers" disabled={props.prefs.workers <= ORCHESTRATE_WORKERS[0]} onClick={() => props.setPrefs({ workers: props.prefs.workers - 1 })}>
-              <Icon name="chevron" size={14} />
-            </button>
-            <span class="mono stepper__value" data-testid="orchestrate-workers">
-              {props.prefs.workers}
-            </span>
-            <button class="icon-btn icon-btn--sm stepper__up" type="button" aria-label="More workers" disabled={props.prefs.workers >= ORCHESTRATE_WORKERS[1]} onClick={() => props.setPrefs({ workers: props.prefs.workers + 1 })}>
-              <Icon name="chevron" size={14} />
-            </button>
+      <details class="composer__more" open={readPref(FINE_TUNE_KEY) === "open"} on:toggle={(e) => writePref(FINE_TUNE_KEY, e.currentTarget.open ? "open" : "closed")}>
+        <summary class="composer__more-summary">
+          <Icon name="sliders" size={15} />
+          <span class="composer__more-title">Fine-tune</span>
+          <span class="composer__more-meta" aria-hidden="true">Effort, reasoning and prompt</span>
+          <span class="composer__more-chevron" aria-hidden="true">
+            <Icon name="chevron" size={14} />
           </span>
-          <span class="stepper">
-            Rounds
-            <button class="icon-btn icon-btn--sm" type="button" aria-label="Fewer rounds" disabled={props.prefs.rounds <= ORCHESTRATE_ROUNDS[0]} onClick={() => props.setPrefs({ rounds: props.prefs.rounds - 1 })}>
-              <Icon name="chevron" size={14} />
+        </summary>
+        <div class="composer__more-body">
+          <div class="composer__controls">
+            <fieldset class="segmented segmented--sm effort" aria-describedby="effort-note">
+              <legend>Effort</legend>
+              <For each={EFFORTS}>
+                {(e) => (
+                  <label class="segmented__option" data-press>
+                    <input type="radio" name="effort" value={e} checked={props.prefs.effort === e} onChange={() => props.setPrefs({ effort: e })} />
+                    <span>{EFFORT_LABELS[e]}</span>
+                  </label>
+                )}
+              </For>
+            </fieldset>
+            <fieldset class="segmented segmented--sm">
+              <legend>Verbosity</legend>
+              <For each={VERBOSITIES}>
+                {(v) => (
+                  <label class="segmented__option" data-press>
+                    <input type="radio" name="verbosity" value={v} checked={props.prefs.verbosity === v} onChange={() => props.setPrefs({ verbosity: v })} />
+                    <span>{VERBOSITY_LABELS[v]}</span>
+                  </label>
+                )}
+              </For>
+            </fieldset>
+            <label class="composer__select">
+              <span>Reasoning</span>
+              <select value={props.prefs.source} onChange={(e) => props.setPrefs({ source: e.currentTarget.value as ChatPrefs["source"] })} aria-describedby="source-note">
+                <For each={REASONING_SOURCES}>{(s) => <option value={s}>{REASONING_LABELS[s]}</option>}</For>
+              </select>
+            </label>
+            <label class="composer__check">
+              <input type="checkbox" checked={!props.prefs.addInstructions} onChange={(e) => props.setPrefs({ addInstructions: !e.currentTarget.checked })} />
+              <span>No added prompt</span>
+            </label>
+            <label class="composer__check" title="The model looks around without changing anything, then shows you a plan to approve.">
+              <input type="checkbox" checked={props.prefs.planMode} onChange={(e) => props.setPrefs({ planMode: e.currentTarget.checked })} />
+              <span>Plan first</span>
+            </label>
+            <label class="composer__check">
+              <input type="checkbox" checked={props.prefs.orchestrate} onChange={(e) => props.setPrefs({ orchestrate: e.currentTarget.checked })} />
+              <span>Orchestrate</span>
+            </label>
+            <Show when={props.prefs.orchestrate}>
+              <span class="stepper">
+                Workers
+                <button class="icon-btn icon-btn--sm" type="button" aria-label="Fewer workers" disabled={props.prefs.workers <= ORCHESTRATE_WORKERS[0]} onClick={() => props.setPrefs({ workers: props.prefs.workers - 1 })}>
+                  <Icon name="chevron" size={14} />
+                </button>
+                <span class="mono stepper__value" data-testid="orchestrate-workers">
+                  {props.prefs.workers}
+                </span>
+                <button class="icon-btn icon-btn--sm stepper__up" type="button" aria-label="More workers" disabled={props.prefs.workers >= ORCHESTRATE_WORKERS[1]} onClick={() => props.setPrefs({ workers: props.prefs.workers + 1 })}>
+                  <Icon name="chevron" size={14} />
+                </button>
+              </span>
+              <span class="stepper">
+                Rounds
+                <button class="icon-btn icon-btn--sm" type="button" aria-label="Fewer rounds" disabled={props.prefs.rounds <= ORCHESTRATE_ROUNDS[0]} onClick={() => props.setPrefs({ rounds: props.prefs.rounds - 1 })}>
+                  <Icon name="chevron" size={14} />
+                </button>
+                <span class="mono stepper__value" data-testid="orchestrate-rounds">
+                  {props.prefs.rounds}
+                </span>
+                <button class="icon-btn icon-btn--sm stepper__up" type="button" aria-label="More rounds" disabled={props.prefs.rounds >= ORCHESTRATE_ROUNDS[1]} onClick={() => props.setPrefs({ rounds: props.prefs.rounds + 1 })}>
+                  <Icon name="chevron" size={14} />
+                </button>
+              </span>
+            </Show>
+            <button class="btn btn--tertiary btn--sm" type="button" onClick={() => props.onOpenPrompt()} data-press>
+              <Icon name="code" size={14} />
+              <span class="btn__label">System prompt</span>
             </button>
-            <span class="mono stepper__value" data-testid="orchestrate-rounds">
-              {props.prefs.rounds}
-            </span>
-            <button class="icon-btn icon-btn--sm stepper__up" type="button" aria-label="More rounds" disabled={props.prefs.rounds >= ORCHESTRATE_ROUNDS[1]} onClick={() => props.setPrefs({ rounds: props.prefs.rounds + 1 })}>
-              <Icon name="chevron" size={14} />
-            </button>
-          </span>
-        </Show>
-        <button class="btn btn--tertiary btn--sm" type="button" onClick={() => props.onOpenPrompt()} data-press>
-          <Icon name="code" size={14} />
-          <span class="btn__label">System prompt</span>
-        </button>
-      </div>
-      <p class="composer__hint" id="effort-note">
-        <span id="source-note">{REASONING_NOTES[props.prefs.source]}</span> {EFFORT_LABELS[props.prefs.effort]}: {props.levels[props.prefs.effort].slowdown}
-        {props.levels[props.prefs.effort].passes ? `, ${props.levels[props.prefs.effort].passes} review pass${props.levels[props.prefs.effort].passes > 1 ? "es" : ""}` : ""}.
-        <For each={props.notes}>{(n) => <> {n}</>}</For> <kbd>Enter</kbd> sends, <kbd>Shift</kbd>+<kbd>Enter</kbd> new line, <kbd>Esc</kbd> stops.
+          </div>
+          <p class="composer__hint" id="effort-note">
+            <span id="source-note">{REASONING_NOTES[props.prefs.source]}</span> {EFFORT_LABELS[props.prefs.effort]}: {props.levels[props.prefs.effort].slowdown}
+            {props.levels[props.prefs.effort].passes ? `, ${props.levels[props.prefs.effort].passes} review pass${props.levels[props.prefs.effort].passes > 1 ? "es" : ""}` : ""}.
+            <For each={props.notes}>{(n) => <> {n}</>}</For>
+          </p>
+          <Show when={props.prefs.orchestrate}>
+            <p class="composer__hint composer__hint--orchestrate">Several instances of this model plan, split the work and check each other through a shared ledger. Slower, often better on hard problems.</p>
+          </Show>
+        </div>
+      </details>
+      <p class="composer__hint composer__hint--keys">
+        <kbd>Enter</kbd> sends, <kbd>Shift</kbd>+<kbd>Enter</kbd> new line, <kbd>Esc</kbd> stops.
       </p>
-      <Show when={props.prefs.orchestrate}>
-        <p class="composer__hint composer__hint--orchestrate">Several instances of this model plan, split the work and check each other through a shared ledger. Slower, often better on hard problems.</p>
-      </Show>
     </div>
   );
 }
