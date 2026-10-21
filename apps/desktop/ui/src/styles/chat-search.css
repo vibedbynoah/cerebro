@@ -1,0 +1,92 @@
+/* Global chat search (components/ChatSearch.tsx). The dialog reuses the command palette's shape. */
+
+.chat-search {
+  width: min(44rem, 100%);
+}
+
+.chat-search__summary {
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.chat-search__list {
+  display: grid;
+  align-content: start;
+  gap: 2px;
+}
+
+.chat-search__hint {
+  margin: 0;
+  padding: var(--space-6) var(--space-4);
+  text-align: center;
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+}
+
+.chat-search__result {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--color-text-secondary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-search__result[aria-selected="true"],
+.chat-search__result:hover {
+  background: var(--color-surface-3);
+  color: var(--color-text-primary);
+}
+
+.chat-search__result:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.chat-search__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.chat-search__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: var(--weight-medium);
+  color: var(--color-text-primary);
+}
+
+.chat-search__where {
+  flex: none;
+  font-size: 0.6875rem;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.chat-search__snippet {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.chat-search__hit {
+  background: none;
+  color: var(--color-accent-text);
+  font-weight: var(--weight-semibold);
+}

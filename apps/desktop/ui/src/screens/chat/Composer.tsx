@@ -1,4 +1,4 @@
-import { createSignal, For, onCleanup, Show, type JSX } from "solid-js";
+import { createEffect, createSignal, For, on, onCleanup, Show, type JSX } from "solid-js";
 import { Icon } from "../../components/icons";
 import { MODE_PRESETS, MODES, type Mode } from "../../lib/chat/modes";
 import { EFFORT_LABELS, EFFORTS, REASONING_LABELS, REASONING_NOTES, REASONING_SOURCES, VERBOSITIES, VERBOSITY_LABELS, type ChatPrefs, type Effort, type EffortLevel } from "../../lib/chat/prompt";
@@ -60,6 +60,9 @@ export function Composer(props: {
   /** The microphone's level, 0..1, polled for the waveform while recording. */
   onLevel?: () => Promise<number>;
   onOpenPrompt: () => void;
+  onOpenPrompts: () => void;
+  /** A prompt chosen in the library: replaces the composer text whenever `at` changes. */
+  draft?: { text: string; at: number } | null;
 }): JSX.Element {
   const [text, setText] = createSignal("");
   const [atts, setAtts] = createSignal<Attachment[]>([]);
@@ -75,7 +78,17 @@ export function Composer(props: {
 
   const send = () => {
     const t = text().trim();
-    if ((!t && !atts().length) || props.streaming) return;
+    if (props.streaming) return;
+    if (t === "/prompt" || t === "/prompts") {
+      props.onOpenPrompts();
+      setText("");
+      area.value = "";
+      setAtts([]);
+      setError("");
+      area.style.height = "";
+      return;
+    }
+    if (!t && !atts().length) return;
     props.onSend(t, atts());
     setText("");
     area.value = "";
@@ -105,6 +118,22 @@ export function Composer(props: {
     });
   };
   onCleanup(() => cancelAnimationFrame(growFrame));
+
+  // A prompt from the library fills the box and puts the cursor at the end, ready to edit or send.
+  createEffect(
+    on(
+      () => props.draft,
+      (draft) => {
+        if (!draft) return;
+        setText(draft.text);
+        area.value = draft.text;
+        grow();
+        area.focus();
+        area.setSelectionRange(draft.text.length, draft.text.length);
+      },
+      { defer: true },
+    ),
+  );
 
   const addFiles = async (files: FileList | File[]) => {
     const list = Array.from(files).slice(0, MAX_FILES - atts().length);
@@ -208,7 +237,7 @@ export function Composer(props: {
           ref={area}
           class="composer__input"
           rows="1"
-          placeholder={recording() ? "Listening…" : "Message the model. / for commands: /imagine a red fox in snow"}
+          placeholder={recording() ? "Listening…" : "Message the model. /imagine for an image, /prompt for saved prompts"}
           aria-label="Message"
           onInput={(e) => {
             setText(e.currentTarget.value);
@@ -353,6 +382,10 @@ export function Composer(props: {
             </button>
           </span>
         </Show>
+        <button class="btn btn--tertiary btn--sm" type="button" onClick={() => props.onOpenPrompts()} data-press>
+          <Icon name="book" size={14} />
+          <span class="btn__label">Prompts</span>
+        </button>
         <button class="btn btn--tertiary btn--sm" type="button" onClick={() => props.onOpenPrompt()} data-press>
           <Icon name="code" size={14} />
           <span class="btn__label">System prompt</span>
@@ -361,7 +394,7 @@ export function Composer(props: {
       <p class="composer__hint" id="effort-note">
         <span id="source-note">{REASONING_NOTES[props.prefs.source]}</span> {EFFORT_LABELS[props.prefs.effort]}: {props.levels[props.prefs.effort].slowdown}
         {props.levels[props.prefs.effort].passes ? `, ${props.levels[props.prefs.effort].passes} review pass${props.levels[props.prefs.effort].passes > 1 ? "es" : ""}` : ""}.
-        <For each={props.notes}>{(n) => <> {n}</>}</For> <kbd>Enter</kbd> sends, <kbd>Shift</kbd>+<kbd>Enter</kbd> new line, <kbd>Esc</kbd> stops.
+        <For each={props.notes}>{(n) => <> {n}</>}</For> <kbd>Enter</kbd> sends, <kbd>Shift</kbd>+<kbd>Enter</kbd> new line, <kbd>Esc</kbd> stops. <kbd>/prompt</kbd> opens saved prompts.
       </p>
       <Show when={props.prefs.orchestrate}>
         <p class="composer__hint composer__hint--orchestrate">Several instances of this model plan, split the work and check each other through a shared ledger. Slower, often better on hard problems.</p>

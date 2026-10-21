@@ -14,21 +14,63 @@ const ms = (n: number) => (n < 1000 ? `${Math.round(n)} ms` : `${(n / 1000).toFi
 export function MessageView(props: {
   m: ChatMessage;
   last: boolean;
-  onRegenerate: () => void;
+  branch?: { index: number; total: number };
+  busy?: boolean;
+  found?: boolean;
+  onRegenerate: (id: string) => void;
   onMore: () => void;
+  onEdit?: (id: string, text: string) => void;
+  onBranch?: (id: string, delta: number) => void;
   onToolDecide?: (id: string, decision: ToolDecision) => void;
   onToolAnswer?: (id: string, answer: ToolAnswer) => void;
 }): JSX.Element {
   return (
-    <Show when={props.m.role === "assistant"} fallback={<UserMessage m={props.m} />}>
+    <Show when={props.m.role === "assistant"} fallback={<UserMessage {...props} />}>
       <AssistantMessage {...props} />
     </Show>
   );
 }
 
-function UserMessage(props: { m: ChatMessage }): JSX.Element {
+function BranchControl(props: { index: number; total: number; busy?: boolean | undefined; onBranch?: ((delta: number) => void) | undefined }): JSX.Element {
   return (
-    <article class="msg msg--user" aria-label="You said">
+    <span class="msg__branches">
+      <button class="msg__branch-btn" type="button" aria-label="Previous branch" disabled={props.busy} onClick={() => props.onBranch?.(-1)}>
+        &lt;
+      </button>
+      <span class="mono msg__branch-count" aria-label={`Branch ${props.index} of ${props.total}`}>
+        {props.index}/{props.total}
+      </span>
+      <button class="msg__branch-btn" type="button" aria-label="Next branch" disabled={props.busy} onClick={() => props.onBranch?.(1)}>
+        &gt;
+      </button>
+    </span>
+  );
+}
+
+function UserMessage(props: {
+  m: ChatMessage;
+  branch?: { index: number; total: number };
+  busy?: boolean;
+  found?: boolean;
+  onEdit?: (id: string, text: string) => void;
+  onBranch?: (id: string, delta: number) => void;
+}): JSX.Element {
+  const [editing, setEditing] = createSignal(false);
+  const [draft, setDraft] = createSignal("");
+  let area: HTMLTextAreaElement | undefined;
+  const start = () => {
+    setDraft(props.m.text);
+    setEditing(true);
+    requestAnimationFrame(() => area?.focus());
+  };
+  const save = () => {
+    const text = draft().trim();
+    if (!text || !props.onEdit) return;
+    setEditing(false);
+    props.onEdit(props.m.id, text);
+  };
+  return (
+    <article class="msg msg--user" classList={{ "msg--found": props.found }} aria-label="You said" data-message-id={props.m.id} tabindex="-1">
       <Show when={props.m.attachments.length}>
         <ul class="msg__atts" role="list">
           <For each={props.m.attachments}>
@@ -43,12 +85,78 @@ function UserMessage(props: { m: ChatMessage }): JSX.Element {
           </For>
         </ul>
       </Show>
-      <p class="msg__text">{props.m.text}</p>
+      <Show
+        when={editing()}
+        fallback={
+          <p class="msg__text" onDblClick={() => !props.busy && start()}>
+            {props.m.text}
+          </p>
+        }
+      >
+        <form
+          class="msg__edit"
+          onSubmit={(e) => {
+            e.preventDefault();
+            save();
+          }}
+        >
+          <label class="sr-only" for={`edit-${props.m.id}`}>
+            Edit message
+          </label>
+          <textarea
+            id={`edit-${props.m.id}`}
+            ref={area}
+            class="input msg__edit-input"
+            rows="3"
+            value={draft()}
+            maxlength="100000"
+            onInput={(e) => setDraft(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setEditing(false);
+              } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                save();
+              }
+            }}
+          />
+          <span class="msg__edit-actions">
+            <button class="btn btn--primary btn--sm" type="submit" disabled={!draft().trim()} data-press>
+              Save and branch
+            </button>
+            <button class="btn btn--tertiary btn--sm" type="button" onClick={() => setEditing(false)}>
+              Cancel
+            </button>
+          </span>
+        </form>
+      </Show>
+      <span class="msg__meta-row">
+        <Show when={props.onEdit && !editing()}>
+          <button class="icon-btn icon-btn--sm" type="button" aria-label="Edit message" onClick={start} disabled={props.busy}>
+            <Icon name="edit" size={14} />
+          </button>
+        </Show>
+        <Show when={(props.branch?.total ?? 1) > 1}>
+          <BranchControl index={props.branch!.index} total={props.branch!.total} busy={props.busy} onBranch={(d) => props.onBranch?.(props.m.id, d)} />
+        </Show>
+      </span>
     </article>
   );
 }
 
-function AssistantMessage(props: { m: ChatMessage; last: boolean; onRegenerate: () => void; onMore: () => void; onToolDecide?: (id: string, decision: ToolDecision) => void; onToolAnswer?: (id: string, answer: ToolAnswer) => void }): JSX.Element {
+function AssistantMessage(props: {
+  m: ChatMessage;
+  last: boolean;
+  branch?: { index: number; total: number };
+  busy?: boolean;
+  found?: boolean;
+  onRegenerate: (id: string) => void;
+  onMore: () => void;
+  onBranch?: (id: string, delta: number) => void;
+  onToolDecide?: (id: string, decision: ToolDecision) => void;
+  onToolAnswer?: (id: string, answer: ToolAnswer) => void;
+}): JSX.Element {
   const m = () => props.m;
   const [speaking, setSpeaking] = createSignal(false);
   const service = useService();
@@ -90,7 +198,7 @@ function AssistantMessage(props: { m: ChatMessage; last: boolean; onRegenerate: 
   };
 
   return (
-    <article class="msg msg--bot" aria-label="Reply" aria-busy={m().streaming} data-streaming={m().streaming}>
+    <article class="msg msg--bot" classList={{ "msg--found": props.found }} aria-label="Reply" aria-busy={m().streaming} data-streaming={m().streaming} data-message-id={m().id} tabindex="-1">
       <Show when={m().ledger}>
         {(ledger) => <LedgerPanel id={m().id} ledger={ledger()} streaming={m().streaming} ref={(el) => void (ledgerEl = el)} />}
       </Show>
@@ -121,6 +229,11 @@ function AssistantMessage(props: { m: ChatMessage; last: boolean; onRegenerate: 
           </ol>
         </details>
       </Show>
+      <Show when={(props.branch?.total ?? 1) > 1}>
+        <span class="msg__meta-row msg__meta-row--bot">
+          <BranchControl index={props.branch!.index} total={props.branch!.total} busy={props.busy} onBranch={(d) => props.onBranch?.(m().id, d)} />
+        </span>
+      </Show>
       <Show when={m().error}>
         <p class="notice" role="alert">
           <Icon name="alert" size={16} /> <span>{m().error}</span>
@@ -145,11 +258,9 @@ function AssistantMessage(props: { m: ChatMessage; last: boolean; onRegenerate: 
               <button class="icon-btn" type="button" onClick={readAloud} aria-label={speaking() ? "Stop reading aloud" : "Read aloud"} aria-pressed={speaking()}>
                 <Icon name={speaking() ? "stop" : "speaker"} size={16} />
               </button>
-              <Show when={props.last}>
-                <button class="icon-btn" type="button" onClick={() => props.onRegenerate()} aria-label="Regenerate">
-                  <Icon name="refresh" size={16} />
-                </button>
-              </Show>
+              <button class="icon-btn" type="button" onClick={() => props.onRegenerate(m().id)} aria-label="Regenerate">
+                <Icon name="refresh" size={16} />
+              </button>
             </span>
             <Show when={props.last && m().verbosity === "brief" && !s().stopped}>
               <button class="btn btn--tertiary btn--sm msg__more" type="button" onClick={() => props.onMore()} data-press>
