@@ -24,7 +24,7 @@ test.describe("turbo", () => {
 
   test("a slower build is never promoted and says why", async ({ page }) => {
     await openScreen(page, "turbo");
-    const slow = page.locator(".turbo-engine[data-engine='llama-self-fork']");
+    const slow = page.locator(".turbo-engine[data-engine='cerebro-expert-cache']");
     await expect(slow).toContainText("-69% vs control");
     await expect(slow.locator(".hint")).toContainText(/channel|control stays/);
   });

@@ -157,7 +157,7 @@ export function fileName(model: CatalogModel, quant: CatalogQuant): string {
  */
 export function configFlags(model: CatalogModel, cfg: SetupConfig): string[] {
   const quant = model.quants.find((q) => q.id === cfg.quantId);
-  const bin = quant?.backend === "strata" ? "strata-server" : "llama-server";
+  const bin = quant?.backend === "strata" ? "strata-server" : "cerebro serve";
   const lines = [
     `${bin} -m ${quant ? fileName(model, quant) : "<file>"}`,
     `  -c ${cfg.contextLength}`,

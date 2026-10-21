@@ -3,10 +3,12 @@ import { createEffect, createMemo, createResource, createSignal, createUniqueId,
 import { Portal } from "solid-js/web";
 import { CodeBlock } from "../../components/CodeBlock";
 import { Icon } from "../../components/icons";
+import { LicenceNote } from "../../components/LicenceNote";
 import { IllustrativeFlag } from "../../components/Screen";
 import { Term } from "../../components/Term";
 import { fitClass } from "../../lib/fit";
 import { baselineParams, changedFields, draftCandidates, validateLoadParams } from "../../lib/load-params";
+import { licenceForModel } from "../../lib/model-licences";
 import { hrefFor, hrefWithModel } from "../../lib/routes";
 import { notify } from "../../lib/toast";
 import { activeTweakCount, applyTweaks, contextCeiling, EMPTY_TWEAKS } from "../../lib/tweaks";
@@ -403,6 +405,10 @@ function Overview(props: { model: LibraryModel; onReveal: () => void }): JSX.Ele
           <dd>
             {SOURCE_LABELS[m().source]}
             {pub() ? ` · ${pub()}` : ""}
+          </dd>
+          <dt>Licence</dt>
+          <dd class="facts__licence">
+            <LicenceNote licence={licenceForModel(m().name, m().family)} />
           </dd>
           <dt>Size</dt>
           <dd class="mono">

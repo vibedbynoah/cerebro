@@ -39,6 +39,9 @@ pub struct HubRepo {
     pub downloads: u64,
     pub likes: u64,
     pub updated: String,
+    /// The repository's `license:` tag, when it publishes one (e.g. "apache-2.0"). Shown before a
+    /// file is downloaded so the user can read what the model allows.
+    pub license: Option<String>,
     pub tags: Vec<String>,
 }
 
@@ -71,13 +74,17 @@ pub fn search(query: &str) -> Result<Vec<HubRepo>, String> {
     let list: Vec<ApiModel> = resp.json().map_err(|_| "Hugging Face sent an unexpected answer.".to_owned())?;
     Ok(list
         .into_iter()
-        .map(|m| HubRepo {
-            author: m.id.split('/').next().unwrap_or_default().to_owned(),
-            id: m.id,
-            downloads: m.downloads,
-            likes: m.likes,
-            updated: m.last_modified,
-            tags: m.tags.into_iter().filter(|t| !t.contains(':')).take(12).collect(),
+        .map(|m| {
+            let license = m.tags.iter().find_map(|t| t.strip_prefix("license:").map(str::to_owned));
+            HubRepo {
+                author: m.id.split('/').next().unwrap_or_default().to_owned(),
+                id: m.id,
+                downloads: m.downloads,
+                likes: m.likes,
+                updated: m.last_modified,
+                license,
+                tags: m.tags.into_iter().filter(|t| !t.contains(':')).take(12).collect(),
+            }
         })
         .collect())
 }

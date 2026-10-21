@@ -6,7 +6,7 @@ import { notify } from "../../lib/toast";
 import { useService } from "../../service/context";
 import type { McpServerView } from "../../service/types";
 
-const APPS = ["Claude Code", "VS Code", "Cursor", "DeepSeek harness", "Other"] as const;
+const APPS = ["VS Code", "Cursor", "Other"] as const;
 type App = (typeof APPS)[number];
 
 const TOOLS: Array<{ name: string; desc: string }> = [
@@ -21,7 +21,7 @@ const ROTATE_CONFIRM_MS = 4000;
 
 /**
  * MCP server access (Settings screen, id="mcp-server"): lets other apps on this computer use local
- * models through MCP. Loopback only — nothing outside this machine can connect.
+ * models through MCP. Loopback only — other devices cannot connect.
  */
 export function McpServerAccess(): JSX.Element {
   const service = useService();
@@ -33,7 +33,7 @@ export function McpServerAccess(): JSX.Element {
   const [revealed, setRevealed] = createSignal(false);
   const [confirming, setConfirming] = createSignal(false);
   const [rotating, setRotating] = createSignal(false);
-  const [app, setApp] = createSignal<App>("Claude Code");
+  const [app, setApp] = createSignal<App>("VS Code");
 
   // Polled 3 times a second (never overlapping, skipped while hidden): connected clients and their
   // last-seen times change under the reader's eyes. A failure is reported once.
@@ -88,8 +88,6 @@ export function McpServerAccess(): JSX.Element {
     if (!v?.url || !v.token) return "";
     const auth = `Authorization: Bearer ${v.token}`;
     switch (app()) {
-      case "Claude Code":
-        return `claude mcp add --transport http cerebro ${v.url} --header "${auth}"`;
       case "VS Code":
         return JSON.stringify(
           { servers: { cerebro: { type: "http", url: v.url, headers: { Authorization: `Bearer ${v.token}` } } } },
@@ -102,17 +100,6 @@ export function McpServerAccess(): JSX.Element {
           null,
           2,
         );
-      case "DeepSeek harness":
-        return [
-          `- id: mcp-cerebro`,
-          `  name: '@deepseek-ai/dsh-mcp-client'`,
-          `  config:`,
-          `    serverName: cerebro`,
-          `    transport: streamable-http`,
-          `    url: ${v.url}`,
-          `    headers:`,
-          `      Authorization: 'Bearer ${v.token}'`,
-        ].join("\n");
       case "Other":
         return `URL: ${v.url}\nHeader: ${auth}\nTransport: Streamable HTTP (MCP 2025-06-18)`;
     }
@@ -176,7 +163,7 @@ export function McpServerAccess(): JSX.Element {
     <Section
       id="mcp-server"
       title="Use Cerebro from other apps"
-      description="Other programs on this computer can use your local models through MCP: Claude Code, VS Code, Cursor, the DeepSeek harness and more. Nothing outside this computer can connect."
+      description="Other programs on this computer can use your local models through MCP, including VS Code and Cursor. The server listens on 127.0.0.1 only, so other devices cannot connect."
     >
       <div class="mcpsrv" data-testid="mcp-server-access">
         <div class="mcpsrv__status-row">

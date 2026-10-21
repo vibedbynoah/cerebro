@@ -13,7 +13,7 @@ export interface BackendStatus {
   state: BackendState;
   /** Loopback address the OpenAI-compatible API listens on while running, e.g. "127.0.0.1:8181". */
   address: string | null;
-  /** llama.cpp build the backend was verified against, e.g. "b6500". */
+  /** Cerebro Engine build the backend was verified against, e.g. "b6500". */
   build: string;
 }
 
@@ -105,7 +105,7 @@ export interface AppInfo {
 export interface HardwareProfile {
   provenance: Provenance;
   cpu: { name: string; cores: number; threads: number };
-  /** The graphics card llama.cpp can offload to, or null when there is none it can use. */
+  /** The graphics card Cerebro Engine can offload to, or null when there is none it can use. */
   gpu: GpuInfo | null;
   ramTotalGiB: number;
 }
@@ -151,8 +151,8 @@ export interface CatalogSampler {
 /** Quantisation families the catalogue lists. Each is a different way to store fewer bits per weight. */
 export type QuantFormat = "gsq-rco" | "unsloth-ud" | "imatrix-iq" | "k-quant" | "exl3" | "awq" | "mlx";
 
-/** The engine a file needs. Only `llama.cpp` and `strata` files run in this build. */
-export type QuantBackend = "llama.cpp" | "strata" | "exllamav3" | "vllm" | "mlx";
+/** The engine a file needs. Only `Cerebro Engine` and `strata` files run in this build. */
+export type QuantBackend = "cerebro" | "strata" | "exllamav3" | "vllm" | "mlx";
 
 /**
  * One downloadable file of a model. Quality is measured against the unquantised (BF16) weights:
@@ -201,7 +201,7 @@ export type SpeculativeMode = "off" | "ngram" | "draft";
 /** The draft-free speculative strategies (docs/CLAIMS.md). */
 export type NgramStrategy = "ngram-simple" | "ngram-map-k" | "ngram-map-k4v" | "ngram-mod" | "ngram-cache";
 
-/** Every llama.cpp load parameter the load panel exposes. Validated by lib/load-params.ts on both
+/** Every Cerebro Engine load parameter the load panel exposes. Validated by lib/load-params.ts on both
  *  sides of the service boundary. */
 export interface LoadParams {
   /** Tokens the model can keep in view at once. */
@@ -252,7 +252,7 @@ export interface TuneResult {
   decodeTpsDepth: number;
   /** The working context depth `decodeTpsDepth` was measured at, tokens. */
   depth: number;
-  /** llama.cpp build that produced the numbers, e.g. "b6500". */
+  /** Cerebro Engine build that produced the numbers, e.g. "b6500". */
   build: string;
   /** The graphics card (or "CPU only") it ran on. */
   gpu: string;
@@ -466,7 +466,7 @@ export type TuneProfile = "chat" | "coding" | "long-docs";
  *  quality gate runs before the soak, so no long soak is spent on a setting that fails it. */
 export type TunePhase = "probe" | "screen" | "measure" | "quality" | "soak" | "decide";
 
-/** One setting a candidate configuration changes: plain words, plus the llama.cpp flag when it has
+/** One setting a candidate configuration changes: plain words, plus a Cerebro Engine flag when it has
  *  a well-known one (null otherwise, never an invented flag). */
 export interface TuneSetting {
   name: string;
@@ -478,7 +478,7 @@ export interface TuneCandidate {
   id: string;
   /** Plain-words name, e.g. "Experts of 30 layers on the CPU". */
   label: string;
-  /** llama.cpp's own automatic settings (its built-in fit): the baseline every candidate must beat. */
+  /** Cerebro Engine's own automatic settings (its built-in fit): the baseline every candidate must beat. */
   baseline: boolean;
   settings: TuneSetting[];
 }
@@ -500,7 +500,7 @@ export interface TuneRunInfo {
   depth: number;
   /** Sampler during measurement, as values. */
   sampler: string;
-  /** llama.cpp build the backend runs, e.g. "b6500". */
+  /** Cerebro Engine build the backend runs, e.g. "b6500". */
   build: string;
   /** Commit (or binary hash) of that exact backend build: measurements are keyed to the binary. */
   backendCommit: string;
@@ -561,6 +561,8 @@ export interface HubRepo {
   likes: number;
   /** ISO date of the last change. */
   updated: string;
+  /** The repository's `license:` tag, e.g. "apache-2.0", or null when it publishes none. */
+  license: string | null;
   tags: string[];
 }
 

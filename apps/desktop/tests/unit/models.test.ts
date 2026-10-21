@@ -56,7 +56,7 @@ describe("load settings validation", () => {
     expect(validateLoadParams({ ...ok, mmap: "yes" }, MOE, MOCK_HARDWARE).mmap).toBeDefined();
   });
 
-  it("explains combinations llama.cpp cannot run", () => {
+  it("explains combinations Cerebro Engine cannot run", () => {
     const ok = baselineParams(MOE, MOCK_HARDWARE);
     expect(validateLoadParams({ ...ok, kvCacheV: "q4_0", flashAttention: "off" }, MOE, MOCK_HARDWARE).kvCacheV).toMatch(/flash attention/);
     expect(validateLoadParams({ ...ok, batchSize: 256, ubatchSize: 512 }, MOE, MOCK_HARDWARE).ubatchSize).toBeDefined();

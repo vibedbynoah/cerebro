@@ -1,0 +1,34 @@
+Cerebro
+Copyright 2026 Cerebro contributors
+
+Cerebro is licensed under the Apache License, Version 2.0 (see LICENSE).
+This file records the separate work that Cerebro's desktop app and engine are
+built on or port from, with the licence that work is offered under.
+
+Ported work
+-----------
+
+Orchestrate mode in apps/desktop/src-tauri/src/orchestrate.rs is a port of
+GVS5H (https://github.com/slee-persis/GVS5H), Copyright (c) 2026 Persis
+Capital Inc., licensed under the MIT License. The full text is in
+apps/desktop/licenses/GVS5H-MIT.txt and on the app's Licenses page.
+
+The image generation path in Cerebro Engine (crates/cerebro-engine/src/
+diffusion.rs) follows algorithms and layouts from Hugging Face diffusers
+(https://github.com/huggingface/diffusers), Copyright the diffusers authors,
+licensed under the Apache License, Version 2.0. The full Apache text is in
+LICENSE and on the app's Licenses page.
+
+Cerebro Engine (crates/cerebro-engine/src/vision.rs, gguf.rs and the model
+loading kernels) follows tensor layouts, GGUF file formats and kernel
+arrangements from llama.cpp and ggml (https://github.com/ggml-org/llama.cpp),
+Copyright (c) 2023-2026 The ggml authors, licensed under the MIT License. The
+full text is in apps/desktop/licenses/ggml-MIT.txt and on the app's Licenses
+page. Cerebro does not include or run the llama.cpp program.
+
+Third-party packages
+--------------------
+
+The app's Licenses page lists every JavaScript package in the built interface
+and every Rust crate compiled into the desktop program, with the licence texts
+each publishes. That list is generated from the build, not kept by hand.

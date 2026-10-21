@@ -14,9 +14,10 @@ test.describe("Cerebro as an MCP server", () => {
     await expect(page.getByTestId("mcp-server-token")).toContainText("•");
     await expect(page.getByTestId("mcp-server-snippet")).toHaveCount(0);
     await section.getByRole("button", { name: "Show" }).click();
-    await expect(page.getByTestId("mcp-server-snippet")).toContainText("claude mcp add --transport http cerebro http://127.0.0.1:47811/mcp");
-    await section.getByRole("radio", { name: "DeepSeek harness" }).click();
-    await expect(page.getByTestId("mcp-server-snippet")).toContainText("transport: streamable-http");
+    await expect(page.getByTestId("mcp-server-snippet")).toContainText('"type": "http"');
+    await expect(page.getByTestId("mcp-server-snippet")).toContainText('"Authorization": "Bearer ');
+    await section.getByRole("radio", { name: "Other" }).click();
+    await expect(page.getByTestId("mcp-server-snippet")).toContainText("Transport: Streamable HTTP (MCP 2025-06-18)");
     const before = await page.getByTestId("mcp-server-token").textContent();
     await section.getByRole("button", { name: "New token" }).click();
     await section.getByRole("button", { name: "Click again to replace" }).click();

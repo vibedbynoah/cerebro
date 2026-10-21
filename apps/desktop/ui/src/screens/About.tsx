@@ -20,10 +20,10 @@ export function About(props: { platform: Platform }): JSX.Element {
     { icon: "security", title: "Protected by default", text: "Integrity check before every start, process-tree cleanup, a clean environment. Each protection is yours to switch off." },
     {
       icon: "offline",
-      title: "Offline and local",
+      title: "Local by default",
       text: (
         <>
-          Models run on this computer and the <Term k="api" /> answers on <Term k="loopback" /> only. Network features are optional.
+          Models run on this computer and the <Term k="api" /> answers on <Term k="loopback" /> only by default. Network features are optional.
         </>
       ),
     },

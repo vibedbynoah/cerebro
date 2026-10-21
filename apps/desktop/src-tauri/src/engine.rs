@@ -2,7 +2,7 @@
 //!
 //! One worker thread owns the loaded model, its session (KV cache, GPU state) and tokenizer; IPC
 //! commands send it jobs and read a shared status that the Monitor and status bar poll. Model
-//! files are found by scanning Cerebro's, LM Studio's and the user's model folders; nothing is
+//! files are found by scanning Cerebro's, another app's and the user's model folders; nothing is
 //! moved or modified.
 
 use std::collections::VecDeque;

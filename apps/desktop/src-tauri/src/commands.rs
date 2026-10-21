@@ -88,7 +88,7 @@ pub async fn hw_detect() -> HardwareProfile {
     tauri::async_runtime::spawn_blocking(engine::hardware).await.unwrap_or_else(|_| engine::hardware())
 }
 
-/// Scans the model folders (Cerebro's, LM Studio's, C:\models) and remembers the result.
+/// Scans the model folders (Cerebro's, another app's, C:\models) and remembers the result.
 #[tauri::command]
 pub async fn library_list(engine: State<'_, Engine>) -> Result<Vec<LibraryModel>, String> {
     let list = tauri::async_runtime::spawn_blocking(engine::scan_library).await.map_err(|_| "The model scan failed.".to_owned())?;

@@ -35,7 +35,7 @@ interface Base {
   kind: ModelKind;
   arch: ModelArch;
   contextMax: number;
-  /** Ollama-style tag stem, for blob paths and slugs. */
+  /** Tag stem for blob paths and slugs. */
   slug: string;
   extraPublisher?: boolean;
 }

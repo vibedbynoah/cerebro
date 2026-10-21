@@ -121,7 +121,7 @@ export interface EngineModel {
 
 export interface MetricsEngine {
   version: string;
-  backend: "llama.cpp" | "strata";
+  backend: "cerebro" | "strata";
   build: string;
   /** Loopback address the API listens on. */
   address: string;

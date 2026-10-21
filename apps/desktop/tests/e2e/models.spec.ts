@@ -602,7 +602,7 @@ test.describe("disk space", () => {
     const coder = page.locator(".dup", { hasText: "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf" });
     await expect(coder).toContainText("Drive D: stays a copy");
     await coder.getByRole("button", { name: "Deduplicate" }).click();
-    await expect(coder.locator(".dup__confirm")).toContainText("Link 2 copies to the Cerebro one?");
+    await expect(coder.locator(".dup__confirm")).toContainText("Link 2 copies to Cerebro's copy?");
     await coder.getByRole("button", { name: "Link" }).click();
     await expect(coder.locator(".dup__done")).toContainText("34.6 GiB freed");
     await expect(page.locator(".toast", { hasText: "Freed 34.6 GiB" })).toContainText("1 copy on another drive stays separate");
@@ -611,13 +611,13 @@ test.describe("disk space", () => {
   test("the copy to keep can be chosen, and Undo turns the links back into copies", async ({ page }) => {
     await openScreen(page, "models");
     const qwen = page.locator(".dup", { hasText: "Qwen3-8B-Q5_K_M.gguf" });
-    await expect(qwen.getByRole("radio", { name: "Keep the Cerebro copy" })).toBeChecked();
-    await qwen.getByRole("radio", { name: "Keep the LM Studio copy" }).check();
+    await expect(qwen.getByRole("radio", { name: /Keep this copy: Cerebro — / })).toBeChecked();
+    await qwen.getByRole("radio", { name: /Keep this copy: Another app's folder — .*\.lmstudio/ }).check();
     await qwen.getByRole("button", { name: "Deduplicate" }).click();
-    await expect(qwen.locator(".dup__confirm")).toContainText("to the LM Studio one?");
+    await expect(qwen.locator(".dup__confirm")).toContainText("to the copy in another app's folder?");
     await qwen.getByRole("button", { name: "Link" }).click();
     await expect(qwen.locator(".dup__done")).toBeVisible();
-    await expect(qwen.locator(".dup-copy.is-kept")).toContainText("LM Studio");
+    await expect(qwen.locator(".dup-copy.is-kept")).toContainText("Another app's folder");
     await qwen.getByRole("button", { name: "Undo" }).click();
     await expect(qwen.locator(".dup__confirm")).toContainText("GiB free on C:");
     await qwen.getByRole("button", { name: "Restore copies" }).click();

@@ -138,7 +138,7 @@ type StartModel = Pick<LibraryModel, "contextMax" | "arch" | "sizeGiB" | "archit
 
 /**
  * Cerebro's starting settings for a model that has never been tuned: every value set explicitly
- * (Cerebro never inherits a llama-server default, docs/CLAIMS.md), a modest context, one thread per
+ * (Cerebro never inherits a Cerebro Engine default, docs/CLAIMS.md), a modest context, one thread per
  * physical core, and as much of the model on the GPU as the memory estimate says fits: for a MoE
  * model the expert weights of the first layers move to the CPU first, for a dense one whole layers
  * do. A tune replaces all of this with measured values. When this machine was not detected (`hw`

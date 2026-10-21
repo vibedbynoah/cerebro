@@ -25,10 +25,10 @@ interface Headline {
 }
 
 /**
- * The result: one large figure (the profile's objective with the kept settings, against llama.cpp's
- * automatic settings, every condition right below it: docs/CLAIMS.md rule zero), then the three
- * numbers side by side, why it won, and how to use it. When llama.cpp's own settings won, the
- * comparison is against the best candidate instead, and says so plainly.
+ * The result: one large figure (the profile's objective with the kept settings, against Cerebro
+ * Engine's automatic settings, every condition right below it: docs/CLAIMS.md rule zero), then the
+ * three numbers side by side, why it won, and how to use it. When Cerebro Engine's own settings won,
+ * the comparison is against the best candidate instead, and says so plainly.
  *
  * `animate` is false when the result was already there as the screen opened (a replay): it then
  * appears at once, with no entrance and no count-up.

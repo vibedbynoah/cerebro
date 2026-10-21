@@ -1,6 +1,7 @@
 import { createMemo, For, Index, Show, type JSX } from "solid-js";
 import { CodeBlock } from "../components/CodeBlock";
 import { Icon, type IconName } from "../components/icons";
+import { LicenceNote } from "../components/LicenceNote";
 import { IllustrativeFlag } from "../components/Screen";
 import { Term } from "../components/Term";
 import type { LegalDocId } from "../legal/types";
@@ -11,6 +12,7 @@ import { TERMS_VERSION } from "./progress";
 import { eyebrowFor, StepHeader } from "./StepHeader";
 import { contextLabel, type SetupConfig } from "./autoconfig";
 import { LEVEL_LABELS, type ExperienceLevel } from "../lib/experience";
+import { licenceForModel } from "../lib/model-licences";
 import { pct, type Recommendation } from "./recommend";
 
 /**
@@ -261,8 +263,8 @@ export function ModelStep(props: {
         title={ranked() ? "Models that suit this machine." : "Pick a first model."}
         lede={
           ranked()
-            ? "Ranked by how each fits this computer's memory. Nothing downloads now. Models you already have in LM Studio or Ollama appear in Models as they are."
-            : "Choose any model below, or decide later. Nothing downloads now. Models you already have in LM Studio or Ollama appear in Models as they are."
+            ? "Ranked by how each fits this computer's memory. Nothing downloads now. Models in another app's folder appear in Models as they are."
+            : "Choose any model below, or decide later. Nothing downloads now. Models in another app's folder appear in Models as they are."
         }
       />
       <Show when={!props.loading} fallback={<p class="hint">Reading the catalog…</p>}>
@@ -339,6 +341,7 @@ export function ModelStep(props: {
                       <span class="rec__spec mono" id={`${inputId}-spec`}>
                         {`${r.model.params} · ${r.model.quant} · ${gib(r.model.sizeGiB)} GiB`}
                       </span>
+                      <LicenceNote licence={licenceForModel(r.model.name)} compact class="rec__licence" />
                     </span>
                     <span class="chip rec__fit" id={`${inputId}-fit`} data-tone={r.fit === "gpu" ? "on" : "neutral"}>
                       {r.fitLabel}
@@ -409,7 +412,7 @@ export function PrivacyStep(): JSX.Element {
     {
       icon: "offline",
       title: "Works without a network",
-      body: () => <>Chat, tuning, document search and the API run on this computer. Only model downloads and plugin installs use a network, and both are optional.</>,
+      body: () => <>Chat, tuning, document search and the API run on this computer. Only the network features you use make a network request.</>,
       keys: null,
     },
     {
@@ -450,13 +453,13 @@ export function PrivacyStep(): JSX.Element {
     {
       icon: "offline",
       title: "Works without a network",
-      body: () => <>Chat, the Monitor, document search and every engine switch run on this computer. Only Model Hub downloads use a network, and you can turn them off.</>,
+      body: () => <>Chat, the Monitor, document search and every engine switch run on this computer. Downloads and the network features you use need a connection.</>,
       keys: null,
     },
     {
       icon: "lock",
-      title: "Nothing leaves this computer",
-      body: () => <>The engine runs inside Cerebro. No account, no telemetry, no cloud model behind it.</>,
+      title: "No account, no telemetry",
+      body: () => <>The engine runs inside Cerebro. No cloud model is behind it, and no usage data is sent anywhere.</>,
       keys: null,
     },
     {
@@ -517,8 +520,8 @@ export function TermsStep(props: { accepted: boolean; changed: boolean; onOpen: 
   const points: Array<{ icon: IconName; title: string; text: string }> = [
     { icon: "info", title: "Provided as is.", text: "Cerebro is free, open-source software under the Apache-2.0 licence, with no warranty of any kind." },
     { icon: "tools", title: "You answer for what you run.", text: "You are responsible for the models you use, the plugins you install and everything they generate." },
-    { icon: "documents", title: "Model licences apply.", text: "Each model has its own licence from its publisher, and its terms apply whenever you use it." },
-    { icon: "lock", title: "Your data stays here.", text: "No accounts, no telemetry. Nothing leaves this computer unless you use a network feature." },
+    { icon: "documents", title: "Model licences apply.", text: "Each model has its own licence from its publisher, and its terms apply whenever you use it. Some limit commercial use." },
+    { icon: "lock", title: "Your data stays here.", text: "No accounts, no telemetry. Data leaves this computer only when you use a network feature." },
   ];
   const docs: Array<{ id: LegalDocId; label: string }> = [
     { id: "terms", label: "Full terms" },

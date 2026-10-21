@@ -206,7 +206,7 @@ describe("one config, two views", () => {
 
   it("produces loopback-only backend flags that follow every value", () => {
     const flags = configFlags(m, auto).join("\n");
-    expect(flags).toMatch(/^llama-server -m gpt-oss-20b-UD-Q4_K_XL\.gguf/);
+    expect(flags).toMatch(/^cerebro serve -m gpt-oss-20b-UD-Q4_K_XL\.gguf/);
     expect(flags).toContain("--n-cpu-moe 12");
     expect(flags).toContain("-ctk q8_0 -ctv q8_0");
     expect(flags).toContain("--host 127.0.0.1");

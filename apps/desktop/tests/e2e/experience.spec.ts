@@ -117,7 +117,7 @@ test.describe("during setup", () => {
     // Back to Stable: the GSQ-RCO file cannot run any more, so the automatic file comes back.
     await page.locator('input[name="setup-channel"][value="stable"]').check();
     await expect(page.locator('input[name="setup-quant"]:checked')).toHaveValue("gemma-4-12b-it--ud-q4-k-xl");
-    await expect(flags).toContainText("llama-server -m Gemma-4-12B-it-UD-Q4_K_XL.gguf");
+    await expect(flags).toContainText("cerebro serve -m Gemma-4-12B-it-UD-Q4_K_XL.gguf");
     // Every edit flows into the flags; values outside the model's range are clamped.
     await page.locator("#cfg-ngl").fill("999");
     await page.locator("#cfg-ngl").blur();

@@ -1,11 +1,15 @@
 import { createEffect, createMemo, createResource, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { Icon } from "../../components/icons";
+import { LicenceNote } from "../../components/LicenceNote";
 import { memoryNeeds } from "../../components/QuantTable";
 import { ScreenHeader } from "../../components/Screen";
+import { licenceForModel } from "../../lib/model-licences";
 import { estimateFor, recommend, type MemoryModel } from "../../lib/memory-estimate";
 import { contextLabel } from "../../onboarding/autoconfig";
 import { useService } from "../../service/context";
 import type { HubDownloadEvent, HubFile, HubFileMeta, HubRepo } from "../../service/types";
+import { hrefFor } from "../../lib/routes";
+import { useAppState } from "../../state";
 
 const GIB = 1024 ** 3;
 const gib = (b: number) => (b / GIB).toFixed(b >= 10 * GIB ? 1 : 2);
@@ -32,12 +36,19 @@ function fitOf(bytes: number, vram: number, ram: number): { label: string; tone:
  */
 export function LiveHub(): JSX.Element {
   const service = useService();
+  const app = useAppState();
   const [query, setQuery] = createSignal("Qwen3 GGUF");
   const [submitted, setSubmitted] = createSignal("Qwen3 GGUF");
   const [repo, setRepo] = createSignal<string | null>(null);
   const [hw] = createResource(() => service.detectHardware().catch(() => undefined));
-  const [results] = createResource(submitted, (q) => service.hubSearch!(q));
-  const [files, { refetch }] = createResource(repo, (r) => service.hubFiles!(r));
+  const offline = () => app.settings()?.offlineMode === true || app.network() !== "online";
+  const downloadsOff = () => app.settings()?.allowModelDownloads === false;
+  const blocked = () => offline() || downloadsOff();
+  const search = () => (blocked() ? undefined : submitted());
+  const filesFor = () => (blocked() ? undefined : repo());
+  const [results] = createResource(search, (q) => service.hubSearch!(q));
+  const [files, { refetch }] = createResource(filesFor, (r) => service.hubFiles!(r));
+  const selected = () => (results() ?? []).find((r) => r.id === repo()) ?? null;
   const [progress, setProgress] = createSignal<Record<string, { done: number; total: number; bps: number; error?: string; path?: string }>>({});
   const vram = createMemo(() => (hw()?.gpu?.vramTotalGiB ?? 0) * GIB);
   const ram = createMemo(() => (hw()?.ramTotalGiB ?? 0) * GIB);
@@ -91,6 +102,7 @@ export function LiveHub(): JSX.Element {
   });
 
   const start = (r: string, f: HubFile) => {
+    if (blocked()) return;
     const key = `${r}/${f.path}`;
     setProgress((p) => ({ ...p, [key]: { done: 0, total: f.size, bps: 0 } }));
     service
@@ -109,17 +121,28 @@ export function LiveHub(): JSX.Element {
   return (
     <div class="screen livehub">
       <ScreenHeader route="hub" />
+      <Show when={blocked()}>
+        <div class="notice reveal" role="status">
+          <Icon name="offline" size={18} />
+          <p>
+            <Show when={downloadsOff()} fallback={<>No network right now. Model Hub search and downloads need a connection.</>}>
+              Model downloads are switched off. <a class="text-link" href={hrefFor("settings")}>Change this in Settings</a>.
+            </Show>
+          </p>
+        </div>
+      </Show>
       <form
         class="livehub__search"
         onSubmit={(e) => {
           e.preventDefault();
+          if (blocked()) return;
           setRepo(null);
           setSubmitted(query().trim());
         }}
       >
         <Icon name="search" size={18} />
-        <input class="input" type="search" value={query()} onInput={(e) => setQuery(e.currentTarget.value)} placeholder="Search Hugging Face: a model, a publisher, a quant…" aria-label="Search Hugging Face" maxLength={120} />
-        <button class="btn btn--primary" type="submit">
+        <input class="input" type="search" value={query()} onInput={(e) => setQuery(e.currentTarget.value)} placeholder="Search Hugging Face: a model, a publisher, a quant…" aria-label="Search Hugging Face" maxLength={120} disabled={blocked()} />
+        <button class="btn btn--primary" type="submit" disabled={blocked()}>
           Search
         </button>
       </form>
@@ -140,6 +163,7 @@ export function LiveHub(): JSX.Element {
                           <span class="livehub__muted">
                             {r.downloads.toLocaleString()} downloads · {r.likes.toLocaleString()} likes{r.updated ? ` · ${r.updated.slice(0, 10)}` : ""}
                           </span>
+                          <LicenceNote licence={licenceForModel(r.id, null, r.license)} compact />
                         </button>
                       </li>
                     )}
@@ -152,6 +176,9 @@ export function LiveHub(): JSX.Element {
         <section class="livehub__files" aria-label="Files">
           <Show when={repo()} fallback={<p class="livehub__muted">Pick a repository to see its files.</p>}>
             <h2 class="livehub__title">{repo()}</h2>
+            <Show when={selected()}>
+              {(r) => <LicenceNote licence={licenceForModel(r().id, null, r().license)} class="livehub__licence" />}
+            </Show>
             <div class="livehub__controls">
               <label class="livehub__ctx" for="livehub-context">
                 <span>Context</span>
@@ -226,7 +253,7 @@ export function LiveHub(): JSX.Element {
                                       <Show when={p()?.error}>
                                         <span class="livehub__err">{p()!.error}</span>
                                       </Show>
-                                      <button class="btn btn--secondary" type="button" disabled={fit().tone === "no"} onClick={() => start(repo()!, f)}>
+                                      <button class="btn btn--secondary" type="button" disabled={blocked() || fit().tone === "no"} onClick={() => start(repo()!, f)}>
                                         {p()?.error ? "Resume" : "Download"}
                                       </button>
                                     </>

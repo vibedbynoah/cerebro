@@ -181,7 +181,7 @@ function snap(over: { at: number; temp?: number; throttle?: Array<"thermal" | "p
     hardwareStatic: { gpuName: "G", gpuCount: 1, driver: null, cpuName: "C", cores: 8, threads: 16, ramTotalGiB: 32, gpuThrottleTempC: 87 },
     engine: {
       version: "0",
-      backend: "llama.cpp",
+      backend: "cerebro",
       build: "b1",
       address: "127.0.0.1:1",
       model: null,

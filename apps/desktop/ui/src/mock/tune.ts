@@ -10,7 +10,7 @@ import { MOCK_BACKEND_COMMIT, MOCK_GPU, MOCK_HARDWARE, MOCK_LIVE_BASE, MOCK_MODE
  * deliberately simple memory-and-bandwidth model of the example 8 GiB laptop GPU, so the story is
  * coherent for any model: what fits, what runs out of memory, what wins and why. Every number is
  * invented and every run carries `provenance: "illustrative"`. Nothing here describes real
- * llama.cpp performance; the real engine sends the same event shapes with measured values.
+ * Cerebro Engine performance; the real engine sends the same event shapes with measured values.
  */
 
 /** Where a test can freeze playback (mid-screen, mid-soak), for deterministic screenshots. */
@@ -55,13 +55,13 @@ const SAMPLER = "temperature 0 (greedy), set explicitly";
 type Kv = "f16" | "q8_0" | "q4_0";
 
 interface Config {
-  /** Layers on the GPU; "fit" lets llama.cpp's automatic fit decide. */
+  /** Layers on the GPU; "fit" lets Cerebro Engine's automatic fit decide. */
   gpuLayers: number | "fit";
   /** MoE: layers whose expert weights stay in system memory. */
   moeCpu: number;
   kv: Kv;
   fa: boolean;
-  /** Pinned to performance cores, or null for llama.cpp's own choice. */
+  /** Pinned to performance cores, or null for Cerebro Engine's own choice. */
   threads: number | null;
   ubatch: number;
   ngram: boolean;
@@ -264,7 +264,7 @@ function loadParamsFor(m: LibraryModel, c: Config, depth: number): LoadParams {
     moeCpuLayers: isMoe(m) ? c.moeCpu : 0,
     kvCacheK: c.kv,
     kvCacheV: c.kv,
-    // llama.cpp's own choice is "auto"; a candidate that names it turns it on.
+    // Cerebro Engine's own choice is "auto"; a candidate that names it turns it on.
     flashAttention: c.fa ? "on" : "auto",
     threads: c.threads ?? start.threads,
     cpuAffinity: c.threads !== null ? "performance" : "all",
@@ -472,7 +472,7 @@ export function buildTuneScript(m: LibraryModel, profile: TuneProfile, opts: Scr
   const ranked = [...advanced].sort((a, b) => score(b) - score(a));
   const baseline = planned[0]!;
   const baseScore = score(baseline);
-  // Only a candidate that beats llama.cpp's own settings by more than the noise margin is worth
+  // Only a candidate that beats Cerebro Engine's own settings by more than the noise margin is worth
   // checking further; the rest would change settings for no measurable gain.
   const contenders = ranked.filter((p) => !p.candidate.baseline && score(p) > baseScore * (1 + NOISE_MARGIN));
   const rejected: string[] = [];
@@ -500,7 +500,7 @@ export function buildTuneScript(m: LibraryModel, profile: TuneProfile, opts: Scr
   }
 
   // Soak: the fastest remaining candidate under sustained load; if its free video memory falls,
-  // the next one (at most three). When none is left, llama.cpp's own settings are confirmed the
+  // the next one (at most three). When none is left, Cerebro Engine's own settings are confirmed the
   // same way before they are kept.
   push(500, 2, { kind: "phase", phase: "soak" });
   nextStep();

@@ -23,14 +23,14 @@ export interface ActivityEntry {
 }
 
 export const MANIFEST = {
-  backend: "llama.cpp b11026 (CUDA 12)",
+  backend: "Cerebro Engine 0.1.0 (CUDA 12)",
   signedBy: "Cerebro release key 7F3A…C21E",
   verifiedAt: "2026-10-09 09:14",
   files: [
-    { path: "llama-server.exe", sha256: "9b1e4c0f6a2d7e8b3c5a1f0e9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d0c", ok: true },
-    { path: "ggml-cuda.dll", sha256: "3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d", ok: true },
-    { path: "ggml-base.dll", sha256: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90", ok: true },
-    { path: "llama.dll", sha256: "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0", ok: true },
+    { path: "cerebro.exe", sha256: "9b1e4c0f6a2d7e8b3c5a1f0e9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d0c", ok: true },
+    { path: "cerebro-engine.dll", sha256: "3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d", ok: true },
+    { path: "cerebro-kernels.dll", sha256: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90", ok: true },
+    { path: "cerebro-core.dll", sha256: "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0", ok: true },
     { path: "cudart64_12.dll", sha256: "5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f", ok: true },
   ] satisfies FileHash[],
 };

@@ -70,7 +70,7 @@ export interface CerebroService {
   // ---- Models screen. Every id argument must name a library model; every other argument is
   // validated with the same rules as the UI (lib/load-params.ts, lib/tweaks.ts, lib/gguf.ts). ----
 
-  /** Every model file found in Cerebro's, LM Studio's, Ollama's and the user's added folders. */
+  /** Every model file found in Cerebro's folder, another app's folder and the user's added folders. */
   listLibrary(): Promise<LibraryModel[]>;
   /** Heavy per-model data the list does not need: GGUF metadata, template, quirks. */
   getModelDetail(id: string): Promise<ModelDetail>;

@@ -1,5 +1,5 @@
 //! Disk space on the Models screen: find model files stored more than once across Cerebro's,
-//! LM Studio's, Ollama's and other folders, then replace the extra copies on one drive with NTFS
+//! another app's and other folders, then replace the extra copies on one drive with NTFS
 //! hard links to the copy the user keeps — and undo that.
 //!
 //! The rules that make it safe:

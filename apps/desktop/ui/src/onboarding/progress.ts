@@ -11,7 +11,7 @@ import { readPref, writePref } from "../lib/storage";
 export const ONBOARDING_KEY = "cerebro-onboarding";
 
 /** Bump when the plain-language terms change: setup then reopens at the terms step only. */
-export const TERMS_VERSION = "2026-09-30";
+export const TERMS_VERSION = "2026-10-19";
 
 export const STEPS = [
   { id: "welcome", label: "Welcome" },
