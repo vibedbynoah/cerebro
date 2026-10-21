@@ -1031,6 +1031,8 @@ pub struct Session {
     /// Image spans in the cache, in slot order: `nx * ny` slots each, whose tokens have 2D rotary
     /// positions; text after an image continues `max(nx, ny)` positions on, not `nx * ny`.
     pub images: Vec<ImageSpan>,
+    /// Layer ranges run by workers on other computers (cluster.rs); processor sessions only.
+    pub remote: Option<crate::cluster::Remote>,
     // Scratch buffers, reused every step.
     x: Vec<f32>,
     h: Vec<f32>,
@@ -1166,6 +1168,7 @@ impl Session {
             #[cfg(feature = "portable")]
             portable: None,
             images: Vec::new(),
+            remote: None,
         }
     }
 
@@ -1269,7 +1272,7 @@ impl Session {
             return Ok(common);
         }
         let dense = m.layers.iter().all(|l| matches!(l.ffn, Ffn::Dense { .. })) && m.cfg.ssm.is_none() && !m.cfg.attn_gate;
-        if dense && crate::switches::enabled(crate::switches::CPU_BATCH_PREFILL) {
+        if dense && self.remote.is_none() && crate::switches::enabled(crate::switches::CPU_BATCH_PREFILL) {
             for c in prompt[common..].chunks(CPU_CHUNK) {
                 self.step_batch(m, c);
                 self.progress.set(self.tokens.len());
@@ -1717,9 +1720,43 @@ impl Session {
         rope_pos_in(&self.images, slot)
     }
 
-    /// Layers `from`.. for the token at `pos`, on the activation in `self.x`.
+    /// Layers `from`.. for the token at `pos`, on the activation in `self.x`. Ranges a worker on
+    /// another computer runs (cluster.rs) go over the link.
     fn layers_from(&mut self, m: &Model, from: usize, pos: usize) {
-        self.layers_range(m, from, m.cfg.n_layer, pos);
+        let Some(mut remote) = self.remote.take() else {
+            return self.layers_range(m, from, m.cfg.n_layer, pos);
+        };
+        let mut li = from;
+        let n = m.cfg.n_layer;
+        while li < n {
+            let next = remote.ranges.iter().map(|r| r.lo).filter(|&lo| lo >= li).min().unwrap_or(n);
+            if next > li {
+                self.layers_range(m, li, next, pos);
+                li = next;
+                continue;
+            }
+            let r = remote.starting_at(li).expect("a range starts here");
+            if let Err(e) = r.forward(pos, &mut self.x) {
+                self.remote = Some(remote);
+                panic!("cluster step failed: {e}");
+            }
+            li = r.hi;
+        }
+        self.remote = Some(remote);
+    }
+
+    /// A worker's part (cluster.rs): layers lo..hi for consecutive positions from pos0, on `rows`
+    /// (one activation per position), in place.
+    pub fn forward_range(&mut self, m: &Model, lo: usize, hi: usize, pos0: usize, rows: &mut [f32]) {
+        let dim = m.cfg.dim;
+        for (i, row) in rows.chunks_exact_mut(dim).enumerate() {
+            self.x.copy_from_slice(row);
+            self.layers_range(m, lo, hi, pos0 + i);
+            row.copy_from_slice(&self.x);
+            if self.tokens.len() <= pos0 + i {
+                self.tokens.push(0x8000_0000 | ((pos0 + i) as u32 & 0x7fff_ffff));
+            }
+        }
     }
 
     /// Checking aid: the residual stream after the first `upto` layers for every prompt token, on

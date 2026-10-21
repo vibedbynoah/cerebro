@@ -13,6 +13,8 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 memmap2 = "0.9"
+# Cluster pairing (cluster.rs): HMAC-SHA256 proofs and model fingerprints.
+sha2 = "0.10"
 rayon = "1.10"
 fancy-regex = "0.14"
 cudarc = { version = "0.19", default-features = false, features = ["std", "driver", "nvrtc", "dynamic-loading", "cuda-12080"], optional = true }
