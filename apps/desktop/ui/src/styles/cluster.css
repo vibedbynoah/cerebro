@@ -1,0 +1,168 @@
+/* Cluster screen (screens/Cluster.tsx). Built only from design-system tokens. */
+
+.cluster__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+
+.cluster__field {
+  display: grid;
+  gap: 4px;
+  min-width: 180px;
+  color: var(--color-text-secondary);
+  font-size: var(--text-small);
+}
+
+.cluster__field select,
+.cluster__field input:not([type="range"]),
+.cluster__manual input {
+  min-height: 34px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+  color: var(--color-text-primary);
+  font: inherit;
+}
+
+.cluster__field input[type="range"] {
+  accent-color: var(--color-accent);
+}
+
+.cluster__field--code {
+  min-width: 120px;
+}
+
+.cluster__manual {
+  display: flex;
+  flex: 1 1 320px;
+  gap: var(--space-2);
+}
+
+.cluster__manual input {
+  flex: 1;
+}
+
+.cluster__sharing {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-5);
+  padding: var(--space-4) var(--space-5);
+}
+
+.cluster__label {
+  display: block;
+  color: var(--color-text-muted);
+  font-size: var(--text-small);
+}
+
+.cluster__code {
+  font-size: 2.2rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--color-text-primary);
+}
+
+.cluster__facts {
+  display: grid;
+  gap: 4px;
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.cluster__found,
+.cluster__chosen {
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cluster__found li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.cluster__plan {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  padding: var(--space-4);
+}
+
+.cluster__chosen li {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) auto minmax(160px, 1fr) auto;
+  align-items: end;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.cluster__who {
+  display: grid;
+  gap: 2px;
+}
+
+.cluster__error {
+  margin: 0;
+  color: var(--color-danger);
+  font-size: var(--text-small);
+}
+
+.cluster__links {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  padding: var(--space-4);
+}
+
+.cluster__links h3 {
+  margin: 0;
+}
+
+.cluster__links table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-small);
+}
+
+.cluster__links th,
+.cluster__links td {
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+}
+
+.cluster__links a {
+  justify-self: start;
+}
+
+.cluster .icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+@media (max-width: 900px) {
+  .cluster__sharing,
+  .cluster__chosen li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

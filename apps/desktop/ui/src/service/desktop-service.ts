@@ -11,7 +11,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import type { CerebroService, Unsubscribe } from "./service";
 import type { ChatEvent, ChatRequest } from "./chat-types";
 import type { HistoryRange, MetricsSeries, MetricsSnapshot, RequestDetail } from "./monitor-types";
-import type { CatalogModel, DedupeResult, DiskReport, DuplicateGroup, GpuInfo, HardwareProfile, KvStoreUsage, LibraryModel, LiveStats, LoadedModel, LoadParams, ModelDetail, ModelSummary, NetworkState, GgufCopy, GeneratedImage, CloudPreset, CloudProvider } from "./types";
+import type { CatalogModel, DedupeResult, DiskReport, DuplicateGroup, GpuInfo, HardwareProfile, KvStoreUsage, LibraryModel, LiveStats, LoadedModel, LoadParams, ModelDetail, ModelSummary, NetworkState, GgufCopy, GeneratedImage, CloudPreset, CloudProvider, ClusterShare, ClusterWorker, ClusterLink } from "./types";
 import { CURRENT_CATALOG } from "./catalog";
 import type { TrainerStatus, TrainEvent, TrainInstalled } from "./train-types";
 import type { Placement } from "./types";
@@ -201,6 +201,11 @@ export function createDesktopService(local: CerebroService): CerebroService {
     startRecording: () => invoke<void>("mic_start"),
     recordingLevel: () => invoke<number>("mic_level"),
     speakSample: (id, text) => invoke<number>("tts_sample", { modelId: id, text }),
+    clusterShareGet: () => invoke<ClusterShare>("cluster_share_get"),
+    clusterShareStart: (id) => invoke<ClusterShare>("cluster_share_start", { id }),
+    clusterShareStop: () => invoke<ClusterShare>("cluster_share_stop"),
+    clusterDiscover: () => invoke<ClusterWorker[]>("cluster_discover"),
+    clusterLoad: (id, localShare, workers) => invoke<{ links: ClusterLink[] }>("cluster_load", { id, localShare, workers }),
     cloudPresets: () => invoke<CloudPreset[]>("cloud_presets"),
     cloudProviders: () => invoke<CloudProvider[]>("cloud_providers"),
     saveCloudProvider: (provider, apiKey) => invoke<CloudProvider[]>("cloud_provider_save", { provider, apiKey }),

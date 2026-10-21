@@ -39,6 +39,7 @@ const Settings = named(() => import("./screens/Settings"), "Settings");
 const Train = named(() => import("./screens/Train"), "Train");
 const Tune = named(() => import("./screens/Tune"), "Tune");
 const Turbo = named(() => import("./screens/Turbo"), "Turbo");
+const Cluster = named(() => import("./screens/Cluster"), "Cluster");
 
 const SIDEBAR_KEY = "cerebro-sidebar";
 
@@ -228,6 +229,9 @@ function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Eleme
             </Match>
             <Match when={router.route() === "models"}>
               <Models />
+            </Match>
+            <Match when={router.route() === "cluster"}>
+              <Cluster />
             </Match>
             <Match when={router.route() === "tune"}>
               <Tune />

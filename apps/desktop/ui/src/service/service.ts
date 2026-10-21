@@ -27,6 +27,9 @@ import type { EngineSwitch, LocalApiView, McpServerView, RemoteOptions, RemotePa
   TestOutput,
   GeneratedImage,
   CloudPreset,
+  ClusterShare,
+  ClusterWorker,
+  ClusterLink,
   CloudProvider,
   TuneEvent,
   TuneProfile,
@@ -118,6 +121,13 @@ export interface CerebroService {
   recordingLevel(): Promise<number>;
   /** Resolves with the length of the spoken audio, in seconds, as it starts playing. */
   speakSample(id: string, text: string): Promise<number>;
+  // ---- Cluster: one model across several computers (screens/Cluster.tsx). ----
+  clusterShareGet(): Promise<ClusterShare>;
+  clusterShareStart(modelId: string): Promise<ClusterShare>;
+  clusterShareStop(): Promise<ClusterShare>;
+  clusterDiscover(): Promise<ClusterWorker[]>;
+  /** Loads a model here with layer ranges on the given workers; resolves with each link's figures. */
+  clusterLoad(modelId: string, localShare: number, workers: Array<{ addr: string; code: string; share: number }>): Promise<{ links: ClusterLink[] }>;
   // ---- Cloud models: the user's own API keys and plans (Settings > Cloud models). ----
   cloudPresets(): Promise<CloudPreset[]>;
   cloudProviders(): Promise<CloudProvider[]>;

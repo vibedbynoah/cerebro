@@ -4,6 +4,7 @@ export type RouteId =
   | "home"
   | "hub"
   | "models"
+  | "cluster"
   | "tune"
   | "monitor"
   | "turbo"
@@ -34,6 +35,7 @@ export const ROUTES: readonly RouteDef[] = [
   { id: "hub", label: "Model Hub", icon: "hub", group: "Run", summary: "Find models that fit this machine and download them. Searching the catalogue uses the network; everything else works offline.", keywords: "download browse catalog gguf" },
   { id: "chat", label: "Chat", icon: "chat", group: "Run", summary: "Talk to a local model. It runs on this computer.", keywords: "conversation prompt assistant agent coding" },
   { id: "models", label: "Models", icon: "models", group: "Run", summary: "The models on this machine and how each one was tuned.", keywords: "library local gguf list" },
+  { id: "cluster", label: "Cluster", icon: "link", group: "Run", summary: "Run one model across your computers over any network link, each running part of it.", keywords: "multiple computers network lan wifi ethernet usb distributed split homelab worker pair" },
   { id: "tune", label: "Tune", icon: "tune", group: "Run", summary: "Measure the fastest safe settings for a model on this machine.", keywords: "benchmark measure speed optimize flags" },
   { id: "monitor", label: "Monitor", icon: "activity", group: "Run", summary: "The model and the machine, live: speed, memory, heat, and every request.", keywords: "metrics telemetry live gpu vram temperature requests inspector dashboard stats" },
   {

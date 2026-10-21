@@ -12,6 +12,9 @@
 /** Commands that take no arguments. @type {ReadonlySet<string>} */
 const ALLOWED = new Set([
   "cloud_presets",
+  "cluster_share_get",
+  "cluster_share_stop",
+  "cluster_discover",
   "cloud_providers",
   "window_minimize",
   "window_toggle_maximize",
@@ -226,6 +229,30 @@ const WITH_ARGS = {
   disk_unlink: (p) => isPlain(p) && hasOnlyKeys(p, ["groupId"]) && isGroupId(p.groupId),
   model_reveal: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && isModelId(p.id),
   tune_start: (p) => isPlain(p) && hasOnlyKeys(p, ["modelId", "profile", "integrityCheck"]) && isModelId(p.modelId) && ["chat", "coding", "long-docs"].includes(/** @type {string} */ (p.profile)) && typeof p.integrityCheck === "boolean",
+  cluster_share_start: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && isModelId(p.id),
+  cluster_load: (p) =>
+    isPlain(p) &&
+    hasOnlyKeys(p, ["id", "localShare", "workers"], ["context"]) &&
+    isModelId(p.id) &&
+    typeof p.localShare === "number" &&
+    p.localShare > 0 &&
+    p.localShare <= 1 &&
+    (p.context === undefined || p.context === null || (Number.isInteger(p.context) && /** @type {number} */ (p.context) >= 512 && /** @type {number} */ (p.context) <= 1 << 20)) &&
+    Array.isArray(p.workers) &&
+    p.workers.length >= 1 &&
+    p.workers.length <= 8 &&
+    p.workers.every(
+      (w) =>
+        isPlain(w) &&
+        hasOnlyKeys(w, ["addr", "code", "share"]) &&
+        typeof w.addr === "string" &&
+        /^[0-9A-Za-z.:\[\]-]{3,80}$/.test(w.addr) &&
+        typeof w.code === "string" &&
+        /^[0-9 -]{6,9}$/.test(w.code) &&
+        typeof w.share === "number" &&
+        w.share > 0 &&
+        w.share <= 1,
+    ),
   cloud_provider_save: (p) =>
     isPlain(p) &&
     hasOnlyKeys(p, ["provider"], ["apiKey"]) &&

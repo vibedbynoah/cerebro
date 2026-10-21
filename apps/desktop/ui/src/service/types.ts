@@ -437,6 +437,32 @@ export interface DedupeResult {
 }
 
 /** Output of a "try it" test. The mock's is always illustrative. */
+/** Cluster: whether this computer is shared as a worker (screens/Cluster.tsx). */
+export interface ClusterShare {
+  sharing: boolean;
+  model: string | null;
+  code: string | null;
+  port: number | null;
+  addresses: string[];
+  computer: string;
+}
+
+/** A sharing computer heard on the local network. */
+export interface ClusterWorker {
+  name: string;
+  addr: string;
+  fingerprint: string;
+}
+
+/** How one link measured when a model loaded across computers. */
+export interface ClusterLink {
+  addr: string;
+  lo: number;
+  hi: number;
+  rttMs: number;
+  mbPerS: number;
+}
+
 /** A cloud provider Cerebro knows: its official API address and where to get a key. */
 export interface CloudPreset {
   id: string;

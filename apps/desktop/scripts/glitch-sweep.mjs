@@ -14,7 +14,7 @@ import { startServer } from "./serve.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const OUT = path.resolve(HERE, "../review/sweep");
-const ROUTES = ["home", "hub", "models", "tune", "monitor", "turbo", "chat", "images", "documents", "plugins", "tools", "settings", "about"];
+const ROUTES = ["home", "hub", "models", "cluster", "tune", "monitor", "turbo", "chat", "images", "documents", "plugins", "tools", "settings", "about"];
 const SRC = await readFile(path.resolve(HERE, "../ui/src/onboarding/progress.ts"), "utf8");
 const c = (n) => new RegExp(`export const ${n} = "([^"]+)"`).exec(SRC)?.[1];
 // The feature guide's version, so the sweep sees the screens rather than the guide over them.

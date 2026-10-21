@@ -617,6 +617,8 @@ pub struct LoadedInfo {
 
 enum Job {
     Load { model: LibraryModel, ctx: usize, gpu_layers: Option<usize>, reply: Sender<Result<(), String>> },
+    /// Load with some layers on other computers (cluster.rs); the rest on this processor.
+    LoadCluster { model: LibraryModel, ctx: usize, local_share: f64, workers: Vec<crate::cluster::WorkerChoice>, reply: Sender<Result<Vec<crate::cluster::LinkReport>, String>> },
     Unload { reply: Sender<()> },
     Chat { req: ChatRequest, events: ChatSink, reply: Sender<()> },
     Tune { events: TuneSink, reply: Sender<Result<tune::Outcome, String>> },
@@ -783,6 +785,31 @@ impl Engine {
                                         s.progress = Some(progress);
                                     });
                                     Ok(())
+                                }
+                                Err(e) => Err(e),
+                            };
+                            set(&st, |s| s.activity = "idle");
+                            let _ = reply.send(msg);
+                        }
+                        Job::LoadCluster { model, ctx, local_share, workers, reply } => {
+                            if let Some(l) = loaded.take() {
+                                save_profile(&l);
+                            }
+                            set(&st, |s| {
+                                s.loaded = None;
+                                s.activity = "loading";
+                            });
+                            let r = load_cluster(&model, ctx, local_share, &workers);
+                            let msg = match r {
+                                Ok((l, links)) => {
+                                    let info = loaded_info(&l, ctx);
+                                    let progress = l.session.progress.clone();
+                                    loaded = Some(l);
+                                    set(&st, |s| {
+                                        s.loaded = Some(info);
+                                        s.progress = Some(progress);
+                                    });
+                                    Ok(links)
                                 }
                                 Err(e) => Err(e),
                             };
@@ -974,6 +1001,13 @@ impl Engine {
         rx.recv().map_err(|_| "The engine stopped while loading.".to_owned())?
     }
 
+    /// Loads `model` with layers on the paired workers; returns how each link measured.
+    pub fn load_cluster(&self, model: LibraryModel, ctx: usize, local_share: f64, workers: Vec<crate::cluster::WorkerChoice>) -> Result<Vec<crate::cluster::LinkReport>, String> {
+        let (reply, rx) = channel();
+        self.send(Job::LoadCluster { model, ctx, local_share, workers, reply })?;
+        rx.recv().map_err(|_| "The engine stopped while loading.".to_owned())?
+    }
+
     pub fn unload(&self) -> Result<(), String> {
         let (reply, rx) = channel();
         self.send(Job::Unload { reply })?;
@@ -1019,6 +1053,25 @@ fn load(m: &LibraryModel, ctx: usize, gpu_layers: Option<usize>) -> Result<Loade
     let model = Model::load(Path::new(&m.path)).map_err(|e| format!("Could not load the model: {e}"))?;
     let tok = Tokenizer::from_gguf(model.gguf()).map_err(|e| format!("Could not read the tokenizer: {e}"))?;
     Ok(assemble(model, tok, m, ctx, gpu_layers))
+}
+
+/// A model across computers: a processor session here for the first layers, each worker's range
+/// over its link (cerebro_engine::cluster). Every computer needs the same model file.
+fn load_cluster(m: &LibraryModel, ctx: usize, local_share: f64, workers: &[crate::cluster::WorkerChoice]) -> Result<(Loaded, Vec<crate::cluster::LinkReport>), String> {
+    if !m.supported {
+        return Err(format!("Cerebro Engine does not run the {} architecture yet.", m.arch_name));
+    }
+    let model = Model::load(Path::new(&m.path)).map_err(|e| format!("Could not load the model: {e}"))?;
+    if model.cfg.ssm.is_some() {
+        return Err("Models with recurrent layers cannot be shared across computers yet.".to_owned());
+    }
+    let tok = Tokenizer::from_gguf(model.gguf()).map_err(|e| format!("Could not read the tokenizer: {e}"))?;
+    let ctx = ctx.clamp(512, model.cfg.ctx_train.max(512));
+    let (remote, links) = crate::cluster::connect(Path::new(&m.path), model.cfg.n_layer, ctx, local_share, workers)?;
+    let mut session = Session::new(&model, ctx);
+    session.remote = Some(remote);
+    let dialect = crate::toolcall::dialect_from_template(model.gguf().str("tokenizer.chat_template").unwrap_or(""));
+    Ok((Loaded { model, session, tok, info: m.clone(), dialect, placement: None, vision: None, images: Default::default() }, links))
 }
 
 /// A loaded model from its weights and tokenizer: the session placed as `place` decides.
@@ -2265,6 +2318,57 @@ mod tool_loop_tests {
             line.push_str(&format!(" {right}/{} right, {secs:6.1} s, {toks:5} tokens out, {think:5} thinking", questions.len()));
             println!("{line}");
         }
+    }
+
+    /// Cluster through the app: this computer shares a model (cluster.rs), the engine loads the same
+    /// model with its second half on that worker over localhost, and a greedy reply is word for word
+    /// the reply of the model loaded normally on the processor.
+    /// `cargo test --release -p cerebro-desktop cluster_through_the_app -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn cluster_through_the_app_matches_a_local_load() {
+        let path = std::env::var("CEREBRO_TEST_MODEL").unwrap_or_else(|_| r"C:\models\dev\Qwen3-0.6B-Q8_0.gguf".into());
+        let model = describe(Path::new(&path), "test").expect("model");
+        cerebro_engine::switches::set(cerebro_engine::switches::GPU_ENABLED, 0).unwrap();
+        let ask = |engine: &Engine| -> String {
+            let events: Arc<Mutex<Vec<ChatEvent>>> = Arc::default();
+            let ev = events.clone();
+            let sink: ChatSink = Arc::new(move |e: ChatEvent| ev.lock().unwrap().push(e));
+            let req = ChatRequest {
+                model_id: model.id.clone(),
+                system_prompt: String::new(),
+                turns: vec![ChatTurn { role: "user".into(), text: "Name three planets and one fact about each.".into(), attachments: Vec::new() }],
+                sampler: ChatSampler { temperature: 0.0, top_p: 1.0, min_p: 0.0, top_k: 1, repeat_penalty: 1.0, max_tokens: 80 },
+                native: None,
+                tools: None,
+                orchestrate: None,
+                passes: 0,
+                keep_cache: false,
+                client_tools: None,
+            };
+            engine.chat(req, sink).unwrap();
+            let events = events.lock().unwrap();
+            events.iter().filter_map(|e| if let ChatEvent::Token { text } = e { Some(text.as_str()) } else { None }).collect()
+        };
+        let local = Engine::start();
+        local.load(model.clone(), 2048, Some(0)).unwrap();
+        let want = ask(&local);
+        local.unload().unwrap();
+
+        let view = crate::cluster::share_start(Path::new(&path), &model.name).expect("share");
+        let code = view.code.clone().unwrap();
+        let addr = format!("127.0.0.1:{}", view.port.unwrap());
+        let engine = Engine::start();
+        let links = engine.load_cluster(model.clone(), 2048, 0.5, vec![crate::cluster::WorkerChoice { addr: addr.clone(), code: code.clone(), share: 0.5 }]).expect("cluster load");
+        println!("links: {:?}", links.iter().map(|l| (l.lo, l.hi, l.rtt_ms, l.mb_per_s)).collect::<Vec<_>>());
+        let got = ask(&engine);
+        println!("local:   {want}\ncluster: {got}");
+        assert_eq!(got, want, "the reply across computers must be the reply on one");
+        // A wrong code is refused before anything runs.
+        let wrong = engine.load_cluster(model.clone(), 2048, 0.5, vec![crate::cluster::WorkerChoice { addr, code: "000000".into(), share: 0.5 }]);
+        assert!(wrong.unwrap_err().contains("not paired"));
+        crate::cluster::share_stop();
+        cerebro_engine::switches::reset();
     }
 
     /// Orchestrate mode on the real engine: plan, ideate, manage, workers and finalize all run on

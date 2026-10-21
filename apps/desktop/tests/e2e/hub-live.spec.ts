@@ -12,7 +12,7 @@ test.describe("the live Model Hub", () => {
     await expect(grid.locator(".livehub__pick").first().locator(".family-tile")).toBeVisible();
     const tones = await grid.locator(".livehub__pick").evaluateAll((els) => els.map((e) => e.getAttribute("data-fit")));
     const rank = { good: 0, ok: 1, slow: 2, no: 3 } as Record<string, number>;
-    expect(tones.map((t) => rank[t!])).toEqual([...tones.map((t) => rank[t!])].sort((a, b) => a - b));
+    expect(tones.map((t) => rank[t!])).toEqual([...tones.map((t) => rank[t!])].sort((a, b) => (a ?? 0) - (b ?? 0)));
   });
 
   test("a category searches, a repository lists its files, and a download lands in the library", async ({ page }) => {

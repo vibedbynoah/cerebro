@@ -32,6 +32,7 @@ mod stt;
 mod tts;
 mod images;
 mod cloud;
+mod cluster;
 mod vision_input;
 mod hub;
 mod kv_store;
@@ -72,6 +73,11 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::tts_sample,
             commands::image_generate,
             commands::cloud_presets,
+            commands::cluster_share_get,
+            commands::cluster_share_start,
+            commands::cluster_share_stop,
+            commands::cluster_discover,
+            commands::cluster_load,
             commands::cloud_providers,
             commands::cloud_provider_save,
             commands::cloud_provider_remove,

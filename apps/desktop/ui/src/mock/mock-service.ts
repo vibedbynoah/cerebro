@@ -7,6 +7,7 @@ import { createMockTrainer } from "./mock-train";
 import { cloneMachineTuneOutcome, createMachineTunePlayer } from "./machine-tune";
 import type {
   CloudProvider,
+  ClusterShare,
   EngineSwitch,
   LocalApiView,
   McpServerView,
@@ -254,6 +255,7 @@ const IMAGE_TYPE = /^image\/(png|jpeg|webp|gif)$/;
  */
 export function createMockService(options: MockServiceOptions = {}): CerebroService {
   let cloudList: CloudProvider[] = [];
+  let clusterShare: ClusterShare = { sharing: false, model: null, code: null, port: null, addresses: ["192.168.1.10"], computer: "THIS-PC" };
   const hubDone = new Set<string>();
   const hubCancelled = new Set<string>();
   const switches: EngineSwitch[] = MOCK_SWITCHES.map((x) => ({ ...x }));
@@ -749,6 +751,38 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
         }, 200);
       }),
     hubCancel: (repo, path) => later(0, () => void hubCancelled.add(`${repo}/${path}`)),
+    // Cluster: sharing is an in-memory flag; two example computers answer the search, and a load
+    // returns example link figures (the preview connects to nothing).
+    clusterShareGet: () => later(0, () => ({ ...clusterShare })),
+    clusterShareStart: (id) =>
+      later(150, () => {
+        clusterShare = { ...clusterShare, sharing: true, model: MOCK_LIBRARY.find((m) => m.id === id)?.name ?? id, code: "482913", port: 50080 };
+        return { ...clusterShare };
+      }),
+    clusterShareStop: () =>
+      later(50, () => {
+        clusterShare = { ...clusterShare, sharing: false, model: null, code: null, port: null };
+        return { ...clusterShare };
+      }),
+    clusterDiscover: () =>
+      later(600, () => [
+        { name: "OFFICE-PC", addr: "192.168.1.20:50080", fingerprint: "ab".repeat(32) },
+        { name: "MINI-PC", addr: "192.168.1.34:50080", fingerprint: "ab".repeat(32) },
+      ]),
+    clusterLoad: (_id, local, workers) =>
+      later(500, () => {
+        if (workers.some((w) => w.code.replace(/\D/g, "") !== "482913")) throw new Error("the worker at 192.168.1.20:50080 refused: this computer is not paired with the worker (wrong pairing code)");
+        const n = 36;
+        let lo = Math.max(1, Math.round(n * local / (local + workers.reduce((s, w) => s + w.share, 0))));
+        return {
+          links: workers.map((w, i) => {
+            const hi = i === workers.length - 1 ? n : Math.min(n - 1, lo + Math.round((n - lo) / (workers.length - i)));
+            const out = { addr: w.addr, lo, hi, rttMs: 0.9 + i * 0.4, mbPerS: 110 - i * 20 };
+            lo = hi;
+            return out;
+          }),
+        };
+      }),
     // Cloud models: an in-memory list; "Test" offers example model names (nothing is contacted).
     cloudPresets: () =>
       later(0, () => [

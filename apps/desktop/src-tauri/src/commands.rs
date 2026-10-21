@@ -122,6 +122,44 @@ pub async fn model_load(engine: State<'_, Engine>, stt: SttState<'_>, id: String
     Ok(loaded_json(&engine, &stt))
 }
 
+/// Cluster: whether this computer is shared as a worker, its pairing code and addresses.
+#[tauri::command]
+pub fn cluster_share_get() -> crate::cluster::ShareView {
+    crate::cluster::share_view()
+}
+
+/// Shares this computer: other Cerebro apps holding the pairing code may run layers of this model here.
+#[tauri::command]
+pub async fn cluster_share_start(engine: State<'_, Engine>, id: String) -> Result<crate::cluster::ShareView, String> {
+    let model = find_model(&engine, &id)?;
+    if model.kind != "text" && model.kind != "vision" {
+        return Err("Only language models can be shared across computers.".to_owned());
+    }
+    tauri::async_runtime::spawn_blocking(move || crate::cluster::share_start(std::path::Path::new(&model.path), &model.name)).await.map_err(|_| "Sharing failed.".to_owned())?
+}
+
+#[tauri::command]
+pub fn cluster_share_stop() -> crate::cluster::ShareView {
+    crate::cluster::share_stop();
+    crate::cluster::share_view()
+}
+
+/// Cerebro workers announcing themselves on the local network.
+#[tauri::command]
+pub async fn cluster_discover() -> Result<Vec<cerebro_engine::cluster::Announced>, String> {
+    tauri::async_runtime::spawn_blocking(crate::cluster::discover).await.map_err(|_| "Looking for computers failed.".to_owned())
+}
+
+/// Loads a model across this computer and the chosen workers; returns each link's measurements.
+#[tauri::command]
+pub async fn cluster_load(engine: State<'_, Engine>, stt: SttState<'_>, id: String, context: Option<u32>, local_share: f64, workers: Vec<crate::cluster::WorkerChoice>) -> Result<serde_json::Value, String> {
+    let model = find_model(&engine, &id)?;
+    let ctx = context.unwrap_or(8192).clamp(512, 1 << 20) as usize;
+    let eng = engine.inner().handle();
+    let links = tauri::async_runtime::spawn_blocking(move || eng.load_cluster(model, ctx, local_share, workers)).await.map_err(|_| "The load failed.".to_owned())??;
+    Ok(serde_json::json!({ "loaded": loaded_json(&engine, &stt), "links": links }))
+}
+
 /// Where a model would go if loaded now: GPU layers, RAM, the drive, and an estimated speed. The
 /// model loaded now counts as freed (loading replaces it).
 #[tauri::command]

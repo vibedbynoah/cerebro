@@ -4,6 +4,7 @@ const TITLES: Record<(typeof ROUTE_IDS)[number], string> = {
   home: "This machine, measured.",
   hub: "Model Hub",
   models: "Models",
+  cluster: "Cluster",
   tune: "Tune",
   monitor: "Monitor",
   turbo: "Turbo",
