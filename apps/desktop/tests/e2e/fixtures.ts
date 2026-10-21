@@ -1,5 +1,6 @@
 import { test as base, expect, type Page } from "@playwright/test";
 import { ONBOARDING_KEY, TERMS_VERSION } from "../../ui/src/onboarding/progress";
+import { GUIDE_VERSION } from "../../ui/src/lib/features";
 
 export const ROUTE_IDS = ["home", "hub", "models", "tune", "monitor", "turbo", "chat", "images", "documents", "train", "plugins", "tools", "settings", "about"] as const;
 export type RouteIdE2E = (typeof ROUTE_IDS)[number];
@@ -23,12 +24,14 @@ export interface Guard {
  * request to another origin fails the test after it finishes. Off-origin requests are also aborted
  * at the network layer, so nothing can leave the machine even if a check is missed.
  */
-export const test = base.extend<{ guard: Guard; onboarded: boolean }>({
+export const test = base.extend<{ guard: Guard; onboarded: boolean; guideFirst: boolean }>({
   /** Every test starts past first-run setup unless it opts out with `test.use({ onboarded: false })`,
    *  which gives it a fresh profile that has never finished setup. */
   onboarded: [true, { option: true }],
+  /** The feature guide opens on entering the app; tests skip it unless they set this. */
+  guideFirst: [false, { option: true }],
   guard: [
-    async ({ page, baseURL, onboarded }, use) => {
+    async ({ page, baseURL, onboarded, guideFirst }, use) => {
       const origin = new URL(baseURL ?? "http://127.0.0.1").origin;
       const allowed: RegExp[] = [];
       const guard: Guard = {
@@ -59,6 +62,8 @@ export const test = base.extend<{ guard: Guard; onboarded: boolean }>({
           },
           [ONBOARDING_KEY, DONE_RECORD] as const,
         );
+        // The feature guide too (its own spec opens it on purpose).
+        if (!guideFirst) await page.addInitScript((v) => window.localStorage.setItem("cerebro-guide-seen", v), GUIDE_VERSION);
       }
       await page.addInitScript(() => {
         document.addEventListener("securitypolicyviolation", (e) => {

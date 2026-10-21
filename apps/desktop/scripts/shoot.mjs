@@ -13,6 +13,7 @@
  * fails the run, same as the Playwright suite.
  */
 import { chromium } from "@playwright/test";
+import { readFileSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,6 +33,7 @@ const constant = (/** @type {string} */ name) => {
   return m[1];
 };
 const ONBOARDING_KEY = constant("ONBOARDING_KEY");
+const GUIDE_VERSION = /GUIDE_VERSION = "([^"]+)"/.exec(readFileSync(new URL("../ui/src/lib/features.ts", import.meta.url), "utf8"))?.[1] ?? "";
 const DONE_RECORD = JSON.stringify({ v: 1, completed: true, termsVersion: constant("TERMS_VERSION"), model: "gemma-4-12b-it" });
 
 /** @param {import("@playwright/test").Page} page */
@@ -405,6 +407,7 @@ async function main() {
         return route.abort("blockedbyclient");
       });
       await context.addInitScript(([key, record]) => window.localStorage.setItem(key, record), /** @type {[string, string]} */ ([ONBOARDING_KEY, DONE_RECORD]));
+      await context.addInitScript((v) => window.localStorage.setItem("cerebro-guide-seen", v), GUIDE_VERSION);
       const page = await context.newPage();
       page.on("console", (m) => (m.type() === "error" || m.type() === "warning") && problems.push(`${theme}: ${m.text()}`));
       page.on("pageerror", (e) => problems.push(`${theme}: ${e.message}`));

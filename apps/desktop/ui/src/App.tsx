@@ -5,6 +5,7 @@ import { StatusPill } from "./components/StatusPill";
 import { StatusBar } from "./components/StatusBar";
 import { TitleBar } from "./components/TitleBar";
 import { Toasts } from "./components/Toasts";
+import { FeatureGuide, guideDue } from "./components/FeatureGuide";
 import { prefersReducedMotion } from "@design/motion";
 import { createRouter } from "./lib/router";
 import { routeById, ROUTES, type RouteId } from "./lib/routes";
@@ -116,6 +117,9 @@ function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Eleme
     notify(`Theme: ${THEME_LABELS[choice]}`);
   };
 
+  // The feature guide opens once on entering the app (and again when the list of features changes).
+  const [guideOpen, setGuideOpen] = createSignal(guideDue());
+
   const commands = createMemo<PaletteCommand[]>(() => [
     ...ROUTES.map((r) => ({
       id: `go-${r.id}`,
@@ -146,6 +150,15 @@ function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Eleme
       hint: "Ctrl B",
       keywords: "navigation menu panel",
       run: toggleSidebar,
+    },
+    {
+      id: "guide",
+      label: "What Cerebro does",
+      group: "Help",
+      icon: "info",
+      hint: "Every feature in this version",
+      keywords: "features guide tour help whats new",
+      run: () => setGuideOpen(true),
     },
     {
       id: "setup",
@@ -256,6 +269,14 @@ function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Eleme
         <p class="sr-only" role="status" aria-live="polite">
           {announce()}
         </p>
+        <FeatureGuide
+          open={guideOpen()}
+          onClose={() => setGuideOpen(false)}
+          onOpen={(r) => {
+            focusMainNext = true;
+            router.navigate(r);
+          }}
+        />
         <CommandPalette
           open={paletteOpen()}
           onOpenChange={setPaletteOpen}

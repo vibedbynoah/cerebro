@@ -1,0 +1,65 @@
+import type { IconName } from "../components/icons";
+import type { RouteId } from "./routes";
+
+/**
+ * What Cerebro does, for the feature guide that opens on first entry (components/FeatureGuide.tsx)
+ * and from the command palette. Only what this build really does: each entry names the screen it
+ * lives on so "Open" can take the user there. Bump GUIDE_VERSION when the list changes so the
+ * guide shows once more.
+ */
+
+export const GUIDE_VERSION = "2026-10-21";
+
+export interface Feature {
+  title: string;
+  text: string;
+  icon: IconName;
+  route: RouteId;
+  /** Shown with a "New" badge. */
+  isNew?: boolean;
+}
+
+export interface FeatureGroup {
+  title: string;
+  features: readonly Feature[];
+}
+
+export const FEATURE_GROUPS: readonly FeatureGroup[] = [
+  {
+    title: "Run models on this computer",
+    features: [
+      { title: "Its own inference engine", text: "Cerebro runs models with its own engine on NVIDIA cards, other graphics cards and the processor, and splits a model between them when it does not fit.", icon: "chip", route: "models" },
+      { title: "Model Hub", text: "Search and download models, see which ones fit this machine before you download, and read each model's licence first.", icon: "hub", route: "hub" },
+      { title: "Tune for this machine", text: "Measure the fastest settings for a model on your hardware and keep them.", icon: "tune", route: "tune" },
+      { title: "Monitor", text: "Speed, memory, temperature and every request, live.", icon: "activity", route: "monitor" },
+    ],
+  },
+  {
+    title: "Chat",
+    features: [
+      { title: "Speed or accuracy, one slider", text: "From a one-line prompt with greedy decoding on the graphics card, to long thinking with review passes, to Orchestrate. Moving it tells you what changed.", icon: "bolt", route: "chat", isNew: true },
+      { title: "Thinking and review passes", text: "Reasoning models think within a budget you set, and answers can be checked and corrected before you see them.", icon: "check", route: "chat", isNew: true },
+      { title: "Orchestrate", text: "The model plans, splits the work across fresh instances and checks it through a shared ledger, for hard problems.", icon: "plugins", route: "chat" },
+      { title: "Images in chat", text: "Attach an image and a vision model describes or answers about it.", icon: "images", route: "chat" },
+      { title: "Talk and listen", text: "Push to talk with speech recognition on this computer, and replies read aloud.", icon: "chat", route: "chat", isNew: true },
+      { title: "Tools", text: "Models call tools and MCP servers, each behind your permission.", icon: "tools", route: "tools" },
+    ],
+  },
+  {
+    title: "Create",
+    features: [
+      { title: "Image Studio", text: "Make a 512 x 512 image in about a fifth of a second on a recent NVIDIA card, with the seed kept so you can make it again.", icon: "images", route: "images", isNew: true },
+      { title: "Documents", text: "Search your own files on this machine.", icon: "documents", route: "documents" },
+      { title: "Train", text: "Fine-tune a model on your own examples.", icon: "chip", route: "train" },
+    ],
+  },
+  {
+    title: "Your machine, your rules",
+    features: [
+      { title: "Private by default", text: "Models run here. Only what you start uses the network: downloads, tools you allow, and the features you turn on.", icon: "lock", route: "settings" },
+      { title: "Every protection is a switch", text: "Settings explains each protection and lets you turn it off.", icon: "settings", route: "settings" },
+    ],
+  },
+];
+
+export const GUIDE_SEEN_KEY = "cerebro-guide-seen";

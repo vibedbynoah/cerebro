@@ -17,6 +17,8 @@ const OUT = path.resolve(HERE, "../review/sweep");
 const ROUTES = ["home", "hub", "models", "tune", "monitor", "turbo", "chat", "images", "documents", "plugins", "tools", "settings", "about"];
 const SRC = await readFile(path.resolve(HERE, "../ui/src/onboarding/progress.ts"), "utf8");
 const c = (n) => new RegExp(`export const ${n} = "([^"]+)"`).exec(SRC)?.[1];
+// The feature guide's version, so the sweep sees the screens rather than the guide over them.
+const GUIDE = /GUIDE_VERSION = "([^"]+)"/.exec(await readFile(path.resolve(HERE, "../ui/src/lib/features.ts"), "utf8"))?.[1];
 const done = JSON.stringify({ v: 1, completed: true, termsVersion: c("TERMS_VERSION"), model: "gemma-4-12b-it" });
 
 await mkdir(OUT, { recursive: true });
@@ -30,10 +32,11 @@ for (const theme of ["dark", "light"]) {
       const errs = [];
       page.on("console", (m) => m.type() === "error" && errs.push(m.text()));
       page.on("pageerror", (e) => errs.push(String(e)));
-      await page.addInitScript(([k, v, lvl]) => {
+      await page.addInitScript(([k, v, lvl, g]) => {
         localStorage.setItem(k, v);
         localStorage.setItem("cerebro-experience", lvl);
-      }, [c("ONBOARDING_KEY"), done, level]);
+        localStorage.setItem("cerebro-guide-seen", g);
+      }, [c("ONBOARDING_KEY"), done, level, GUIDE]);
       for (const route of ROUTES) {
         errs.length = 0;
         await page.goto(`${origin}/#/${route}`);
