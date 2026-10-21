@@ -1,5 +1,5 @@
 import "../styles/chat.css";
-import { batch, createEffect, createMemo, createResource, createSignal, For, on, onCleanup, Show, type JSX } from "solid-js";
+import { batch, createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import { Icon } from "../components/icons";
 import { IllustrativeFlag } from "../components/Screen";
@@ -33,6 +33,8 @@ import { DEFAULT_SAMPLER, LEDGER_FILES, type ChatTools, type ChatTurn, type Ledg
 import { useService } from "../service/context";
 import type { LibraryModel } from "../service/types";
 import { Composer } from "./chat/Composer";
+import { LiveDock } from "./chat/LiveDock";
+import { readPref, writePref } from "../lib/storage";
 import { MessageView } from "./chat/Message";
 import type { ToolAnswer, ToolDecision } from "./chat/ToolCard";
 import { recordToolActivity, summarizeArgs } from "../lib/tool-activity";
@@ -70,7 +72,37 @@ export function Chat(): JSX.Element {
   const [currentId, setCurrentId] = createSignal<string>(state.list[0]?.id ?? "");
   const current = () => state.list.find((c) => c.id === currentId());
   const [memories, setMemories] = createSignal<Memory[]>(loadMemories());
-  const [panel, setPanel] = createSignal<"none" | "memory" | "prompt">("none");
+  // The side panel: memory, the system prompt, or the live dock (remembered while it is the dock).
+  const DOCK_KEY = "cerebro-chat-dock";
+  const [panel, setPanelSignal] = createSignal<"none" | "memory" | "prompt" | "dock">(readPref(DOCK_KEY) === "open" ? "dock" : "none");
+  const setPanel = (p: "none" | "memory" | "prompt" | "dock") => {
+    setPanelSignal(p);
+    writePref(DOCK_KEY, p === "dock" ? "open" : null);
+  };
+  const [dockWidth, setDockWidth] = createSignal(Math.min(520, Math.max(280, Number(readPref("cerebro-chat-dock-width")) || 340)));
+  const startResize = (e: PointerEvent) => {
+    e.preventDefault();
+    const x0 = e.clientX;
+    const w0 = dockWidth();
+    const move = (ev: PointerEvent) => setDockWidth(Math.min(520, Math.max(280, w0 + (x0 - ev.clientX))));
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      writePref("cerebro-chat-dock-width", String(dockWidth()));
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+  onMount(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === ".") {
+        e.preventDefault();
+        setPanel(panel() === "dock" ? "none" : "dock");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => window.removeEventListener("keydown", onKey));
+  });
   const [live, setLive] = createSignal<{ tps: number; ttft: number } | null>(null);
 
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -553,6 +585,9 @@ export function Chat(): JSX.Element {
           <button class="icon-btn" type="button" aria-label="Memory" aria-pressed={panel() === "memory"} onClick={() => setPanel(panel() === "memory" ? "none" : "memory")}>
             <Icon name="memory" size={18} />
           </button>
+          <button class="icon-btn" type="button" aria-label="Live panel (Ctrl .)" title="Live panel (Ctrl .)" aria-pressed={panel() === "dock"} onClick={() => setPanel(panel() === "dock" ? "none" : "dock")}>
+            <Icon name="activity" size={18} />
+          </button>
         </header>
 
         <div class="chat-thread" ref={thread} role="log" aria-live="polite" aria-relevant="additions">
@@ -619,13 +654,46 @@ export function Chat(): JSX.Element {
       </section>
 
       <Show when={panel() !== "none"}>
-        <aside class="chat-side card" aria-label={panel() === "memory" ? "Memory" : "System prompt"}>
+        <aside
+          class="chat-side card"
+          classList={{ "chat-side--dock": panel() === "dock" }}
+          style={panel() === "dock" ? { width: `${dockWidth()}px` } : undefined}
+          aria-label={panel() === "memory" ? "Memory" : panel() === "dock" ? "Live panel" : "System prompt"}
+        >
+          <Show when={panel() === "dock"}>
+            <div class="chat-side__resize" role="separator" aria-orientation="vertical" aria-label="Resize the live panel" aria-valuemin={280} aria-valuemax={520} aria-valuenow={dockWidth()} tabindex="0" onPointerDown={startResize} onKeyDown={(e) => {
+              if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+                e.preventDefault();
+                setDockWidth((w) => Math.min(520, Math.max(280, w + (e.key === "ArrowLeft" ? 20 : -20))));
+                writePref("cerebro-chat-dock-width", String(dockWidth()));
+              }
+            }} />
+          </Show>
           <div class="chat-side__head">
-            <h2>{panel() === "memory" ? "Memory" : "System prompt"}</h2>
+            <h2>{panel() === "memory" ? "Memory" : panel() === "dock" ? "Live panel" : "System prompt"}</h2>
             <button class="icon-btn" type="button" aria-label="Close panel" onClick={() => setPanel("none")}>
               <Icon name="close" size={16} />
             </button>
           </div>
+          <Show when={panel() === "dock"}>
+            <LiveDock
+              mode={modeOf(prefs(), sampler())}
+              onMode={pickMode}
+              sampler={sampler()}
+              setSampler={setSampler}
+              thinking={prefs().effort !== "low" && prefs().source !== "none"}
+              setThinking={(on) => setPrefs(on ? { effort: prefs().effort === "low" ? "medium" : prefs().effort, source: prefs().source === "none" ? "native" : prefs().source } : { effort: "low" })}
+              onOpenPrompt={() => setPanel("prompt")}
+              onUnload={() => {
+                const id = modelId();
+                void service.unloadModel(id).then(
+                  () => notify("Model unloaded", "Its memory is free. It loads again with your next message."),
+                  (e: unknown) => notify("Could not unload", e instanceof Error ? e.message : undefined, "error"),
+                );
+              }}
+            />
+          </Show>
+          <Show when={panel() !== "dock"}>
           <Show when={panel() === "memory"} fallback={<PromptPanel prefs={prefs()} setPrefs={setPrefs} preview={built().systemPrompt} native={built().native} />}>
             <MemoryPanel
               memories={memories()}
@@ -640,6 +708,7 @@ export function Chat(): JSX.Element {
               }}
             />
           </Show>
+        </Show>
         </aside>
       </Show>
     </div>

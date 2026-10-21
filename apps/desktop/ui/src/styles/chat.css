@@ -1101,3 +1101,151 @@
   margin: 0;
   color: var(--color-text-secondary);
 }
+
+/* ---- Live dock (screens/chat/LiveDock.tsx) ---- */
+
+.chat-side--dock {
+  position: relative;
+  overflow-y: auto;
+}
+
+.chat-side__resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 2;
+}
+
+.chat-side__resize:hover,
+.chat-side__resize:focus-visible {
+  background: var(--color-accent-muted);
+  outline: none;
+}
+
+.dock {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.dock__section {
+  display: grid;
+  gap: var(--space-2);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.dock__section:last-child {
+  border-bottom: 0;
+}
+
+.dock__section h3 {
+  margin: 0;
+  font-size: var(--text-small);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.dock__big {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.dock__value {
+  font-size: 1.9rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.dock__unit {
+  color: var(--color-text-secondary);
+  font-size: var(--text-small);
+}
+
+.dock__stats {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  font-size: var(--text-small);
+}
+
+.dock__stats dt {
+  color: var(--color-text-secondary);
+}
+
+.dock__stats dd {
+  margin: 0;
+  text-align: right;
+}
+
+.dock__meter {
+  display: grid;
+  gap: 4px;
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.dock__bar {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--color-surface-2);
+}
+
+.dock__bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-accent);
+  transition: width var(--duration-fast) var(--ease-standard);
+}
+
+.dock__field {
+  display: grid;
+  gap: 4px;
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.dock__field input[type="range"] {
+  width: 100%;
+  accent-color: var(--color-accent);
+}
+
+.dock__field strong {
+  color: var(--color-text-primary);
+}
+
+.dock__check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.dock__check input {
+  accent-color: var(--color-accent);
+}
+
+.dock__model {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.dock__model strong {
+  color: var(--color-text-primary);
+}
+
+.dock .spark {
+  width: 100%;
+}
