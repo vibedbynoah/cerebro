@@ -92,15 +92,14 @@ const TAGS: Readonly<Record<string, ModelLicence>> = {
 /** The licence a model name, repository id, family or Hub tag points at. */
 export function licenceForModel(name: string, family?: string | null, tag?: string | null): ModelLicence {
   const text = `${name} ${family ?? ""}`.toLowerCase();
-  // The publisher's own licence tag is the most reliable source when it names a known licence.
   const key = (tag ?? "").toLowerCase().replace(/^license:/, "").trim();
-  if (key && key !== "other" && TAGS[key]) return TAGS[key];
 
   // Most specific first: FLUX dev and schnell, and the Stability image families, differ sharply.
   if (/flux[.\s_-]*1[.\s_-]*dev|flux1-dev/.test(text)) return FLUX_DEV;
   if (/flux[.\s_-]*1[.\s_-]*schnell|flux1-schnell/.test(text)) return APACHE;
   if (/sd[.\s_-]*turbo|sdxl[.\s_-]*turbo/.test(text)) return SD_TURBO;
-  if (/stable[.\s_-]*diffusion[.\s_-]*2|sd[.\s_-]*2[.\s_-]*1?/.test(text)) return OPENRAIL;
+  // Stable Diffusion 2.x itself (not its Turbo distillation) is CreativeML OpenRAIL++-M.
+  if (/stable[.\s_-]*diffusion[.\s_-]*2|\bsd[.\s_-]?2(\.[01])?\b/.test(text)) return OPENRAIL;
   if (/sd[.\s_-]*3[.\s_-]*5|stable[.\s_-]*diffusion[.\s_-]*3[.\s_-]*5|sd3\.5/.test(text)) return SD_COMMUNITY;
   if (/sdxl|stable[.\s_-]*diffusion[.\s_-]*xl/.test(text)) return OPENRAIL;
   if (/qwen[.\s_-]*image/.test(text)) return APACHE;
