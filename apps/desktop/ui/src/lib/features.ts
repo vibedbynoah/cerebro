@@ -43,6 +43,7 @@ export const FEATURE_GROUPS: readonly FeatureGroup[] = [
       { title: "Live panel", text: "Speed, context, graphics memory, temperature and power beside the chat, with the settings you change most. Ctrl . opens it.", icon: "activity", route: "chat", isNew: true },
       { title: "Cloud models with your own keys", text: "Add models you already pay for elsewhere. Keys stay in the Windows Credential Manager, and the chat says clearly when it goes to the cloud.", icon: "online", route: "settings", isNew: true },
       { title: "Thinking and review passes", text: "Reasoning models think within a budget you set, and answers can be checked and corrected before you see them.", icon: "check", route: "chat", isNew: true },
+      { title: "Branches, search and saved prompts", text: "Edit an earlier message or write a reply again to branch the chat and switch between versions; search every chat at once; keep prompts with fill-in fields.", icon: "search", route: "chat", isNew: true },
       { title: "Orchestrate", text: "The model plans, splits the work across fresh instances and checks it through a shared ledger, for hard problems.", icon: "plugins", route: "chat" },
       { title: "Images in chat", text: "Attach an image and a vision model describes or answers about it.", icon: "images", route: "chat" },
       { title: "Voice mode", text: "Talk hands-free: it listens until you pause, answers aloud, and listens again. Speech is recognised and spoken on this computer.", icon: "mic", route: "chat", isNew: true },

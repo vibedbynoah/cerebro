@@ -1,4 +1,4 @@
-import { createSignal, For, onCleanup, Show, type JSX } from "solid-js";
+import { createEffect, createSignal, For, on, onCleanup, Show, type JSX } from "solid-js";
 import { Icon } from "../../components/icons";
 import { closest, parseCommand, suggest, unknownCommand, type CommandDef } from "../../lib/chat/commands";
 import { MODE_PRESETS, MODES, type Mode } from "../../lib/chat/modes";
@@ -67,6 +67,9 @@ export function Composer(props: {
   /** The microphone's level, 0..1, polled for the waveform while recording. */
   onLevel?: () => Promise<number>;
   onOpenPrompt: () => void;
+  onOpenPrompts: () => void;
+  /** A prompt chosen in the library: replaces the composer text whenever `at` changes. */
+  draft?: { text: string; at: number } | null;
 }): JSX.Element {
   const [text, setText] = createSignal("");
   const [atts, setAtts] = createSignal<Attachment[]>([]);
@@ -170,6 +173,22 @@ export function Composer(props: {
     });
   };
   onCleanup(() => cancelAnimationFrame(growFrame));
+
+  // A prompt from the library fills the box and puts the cursor at the end, ready to edit or send.
+  createEffect(
+    on(
+      () => props.draft,
+      (draft) => {
+        if (!draft) return;
+        setText(draft.text);
+        area.value = draft.text;
+        grow();
+        area.focus();
+        area.setSelectionRange(draft.text.length, draft.text.length);
+      },
+      { defer: true },
+    ),
+  );
 
   const addFiles = async (files: FileList | File[]) => {
     const list = Array.from(files).slice(0, MAX_FILES - atts().length);
@@ -277,7 +296,7 @@ export function Composer(props: {
                 role="option"
                 class="command-menu__item"
                 aria-selected={i() === Math.min(menuIndex(), menuItems().length - 1)}
-                onMouseEnter={() => setMenuIndex(i())}
+                onMouseMove={() => i() !== menuIndex() && setMenuIndex(i())}
                 onMouseDown={(e) => {
                   e.preventDefault();
                   pick(c);
@@ -298,7 +317,7 @@ export function Composer(props: {
           ref={area}
           class="composer__input"
           rows="1"
-          placeholder={recording() ? "Listening…" : "Message the model. / for commands: /imagine a red fox in snow"}
+          placeholder={recording() ? "Listening…" : "Message the model. /imagine for an image, /prompt for saved prompts"}
           aria-label="Message"
           aria-autocomplete="list"
           aria-controls={menuItems().length ? "command-menu" : undefined}
@@ -462,6 +481,10 @@ export function Composer(props: {
             <button class="btn btn--tertiary btn--sm" type="button" onClick={() => props.onOpenPrompt()} data-press>
               <Icon name="code" size={14} />
               <span class="btn__label">System prompt</span>
+            </button>
+            <button class="btn btn--tertiary btn--sm" type="button" onClick={() => props.onOpenPrompts()} data-press>
+              <Icon name="book" size={14} />
+              <span class="btn__label">Prompts</span>
             </button>
           </div>
           <p class="composer__hint" id="effort-note">

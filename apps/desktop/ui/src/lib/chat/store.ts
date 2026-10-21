@@ -6,6 +6,11 @@ import type { Effort, Memory, ReasoningSource, Verbosity } from "./prompt";
  * Conversations and memories, kept on this machine in local storage. Everything read back is
  * validated field by field; a tampered or oversized entry is dropped, never rendered as markup
  * (replies are always parsed by lib/chat/markdown.ts).
+ *
+ * A conversation is a tree of messages: each node names its parent and the tree remembers which
+ * child was chosen at every step. `messages` is the active path, kept in the stored record so an
+ * older build can still read the chat; the tree is what makes branches possible. Chats saved before
+ * branching have no tree and are migrated into a single path when they load.
  */
 
 export interface Attachment {
@@ -46,13 +51,33 @@ export interface ChatMessage {
   error: string | null;
 }
 
+/** One message in a conversation's tree. The message id is also the node id. */
+export interface BranchNode {
+  id: string;
+  parentId: string | null;
+  message: ChatMessage;
+}
+
+/** Every message ever sent in a chat, plus the child chosen at each step. The root's parent is "". */
+export interface BranchTree {
+  nodes: BranchNode[];
+  selected: Record<string, string>;
+}
+
 export interface Conversation {
   id: string;
   title: string;
+  /** The active path through the tree: what the screen shows and what is sent to the model. */
   messages: ChatMessage[];
+  tree: BranchTree;
   /** Per-chat "don't remember this". */
   noMemory: boolean;
   updatedAt: number;
+  pinned: boolean;
+  /** One optional folder, null for none. */
+  folder: string | null;
+  tags: string[];
+  archived: boolean;
 }
 
 export const CONVERSATIONS_KEY = "cerebro-chats";
@@ -60,6 +85,10 @@ export const MEMORIES_KEY = "cerebro-memories";
 const MAX_CONVERSATIONS = 50;
 const MAX_TEXT = 200_000;
 const MAX_PREVIEW = 2_000_000;
+const MAX_BRANCH_NODES = 500;
+const MAX_FOLDER = 60;
+const MAX_TAG = 30;
+const MAX_TAGS = 8;
 
 export const newId = (): string => {
   const b = new Uint8Array(8);
@@ -74,7 +103,18 @@ export function titleFrom(text: string): string {
 }
 
 export function emptyConversation(): Conversation {
-  return { id: newId(), title: "New chat", messages: [], noMemory: false, updatedAt: Date.now() };
+  return {
+    id: newId(),
+    title: "New chat",
+    messages: [],
+    tree: { nodes: [], selected: {} },
+    noMemory: false,
+    updatedAt: Date.now(),
+    pinned: false,
+    folder: null,
+    tags: [],
+    archived: false,
+  };
 }
 
 const str = (v: unknown, max = MAX_TEXT): string | null => (typeof v === "string" && v.length <= max ? v : null);
@@ -155,6 +195,144 @@ function parseMessage(v: unknown): ChatMessage | null {
   };
 }
 
+/** A plain chain for a chat saved before branching existed. */
+export function treeFromMessages(messages: readonly ChatMessage[]): BranchTree {
+  const nodes: BranchNode[] = [];
+  const selected: Record<string, string> = {};
+  let parentId: string | null = null;
+  for (const message of messages) {
+    nodes.push({ id: message.id, parentId, message });
+    selected[parentId ?? ""] = message.id;
+    parentId = message.id;
+  }
+  return { nodes, selected };
+}
+
+function parseTree(v: unknown): BranchTree | null {
+  if (!v || typeof v !== "object") return null;
+  const x = v as Record<string, unknown>;
+  if (!Array.isArray(x.nodes)) return null;
+  const nodes: BranchNode[] = [];
+  const ids = new Set<string>();
+  // Keep the newest nodes: a very long chat should reopen near where the person left it.
+  for (const raw of x.nodes.slice(-MAX_BRANCH_NODES)) {
+    if (!raw || typeof raw !== "object") continue;
+    const n = raw as Record<string, unknown>;
+    const id = str(n.id, 64);
+    const message = parseMessage(n.message);
+    if (!id || !message || ids.has(id)) continue;
+    let parentId: string | null;
+    if (n.parentId === null || n.parentId === undefined) parentId = null;
+    else {
+      const parent = str(n.parentId, 64);
+      if (parent === null) continue;
+      parentId = parent;
+    }
+    message.id = id;
+    ids.add(id);
+    nodes.push({ id, parentId, message });
+  }
+  if (!nodes.length) return null;
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  // A node whose parent vanished (or a parent cycle) cannot be reached; drop it rather than hang.
+  const valid: BranchNode[] = [];
+  for (const node of nodes) {
+    if (node.parentId !== null && !byId.has(node.parentId)) continue;
+    const seen = new Set<string>([node.id]);
+    let parent = node.parentId;
+    while (parent !== null) {
+      if (seen.has(parent)) break;
+      seen.add(parent);
+      parent = byId.get(parent)?.parentId ?? null;
+    }
+    if (parent === null) valid.push(node);
+  }
+  if (!valid.length) return null;
+  const validById = new Map(valid.map((n) => [n.id, n]));
+  const selected: Record<string, string> = {};
+  if (x.selected && typeof x.selected === "object") {
+    for (const [key, value] of Object.entries(x.selected as Record<string, unknown>)) {
+      if (typeof value !== "string" || !validById.has(value)) continue;
+      const parent = validById.get(value)!.parentId;
+      if ((key === "" && parent === null) || (key !== "" && validById.has(key) && parent === key)) selected[key] = value;
+    }
+  }
+  return { nodes: valid, selected };
+}
+
+function parseTags(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const raw of v) {
+    const tag = str(raw, MAX_TAG)?.trim();
+    if (tag && !out.includes(tag)) out.push(tag);
+    if (out.length >= MAX_TAGS) break;
+  }
+  return out;
+}
+
+/** The path from a root to a leaf, following the child chosen at each step. */
+export function branchPath(tree: BranchTree): BranchNode[] {
+  const byParent = new Map<string, BranchNode[]>();
+  for (const node of tree.nodes) {
+    const key = node.parentId ?? "";
+    const list = byParent.get(key);
+    if (list) list.push(node);
+    else byParent.set(key, [node]);
+  }
+  const out: BranchNode[] = [];
+  const seen = new Set<string>();
+  let parent = "";
+  for (;;) {
+    const children = byParent.get(parent);
+    if (!children?.length) break;
+    const wanted = tree.selected[parent];
+    const node = children.find((n) => n.id === wanted) ?? children[children.length - 1]!;
+    if (seen.has(node.id)) break;
+    seen.add(node.id);
+    out.push(node);
+    parent = node.id;
+  }
+  return out;
+}
+
+export function activeMessages(tree: BranchTree): ChatMessage[] {
+  return branchPath(tree).map((n) => n.message);
+}
+
+/** Which of its siblings a message is: 1-based index and the total. */
+export function branchPosition(tree: BranchTree, id: string): { index: number; total: number } {
+  const node = tree.nodes.find((n) => n.id === id);
+  if (!node) return { index: 1, total: 1 };
+  const siblings = tree.nodes.filter((n) => (n.parentId ?? "") === (node.parentId ?? ""));
+  return { index: Math.max(0, siblings.findIndex((n) => n.id === id)) + 1, total: siblings.length };
+}
+
+/** Switches one message to its previous (-1) or next (+1) sibling, wrapping at the ends. */
+export function switchBranch(tree: BranchTree, id: string, delta: number): BranchTree {
+  const node = tree.nodes.find((n) => n.id === id);
+  if (!node) return tree;
+  const siblings = tree.nodes.filter((n) => (n.parentId ?? "") === (node.parentId ?? ""));
+  if (siblings.length < 2) return tree;
+  const at = siblings.findIndex((n) => n.id === id);
+  const next = siblings[(at + delta + siblings.length) % siblings.length];
+  if (!next) return tree;
+  return { nodes: tree.nodes, selected: { ...tree.selected, [node.parentId ?? ""]: next.id } };
+}
+
+/** Makes the path to a message (and through it, the last child chosen below it) active. */
+export function focusBranch(tree: BranchTree, id: string): BranchTree {
+  const byId = new Map(tree.nodes.map((n) => [n.id, n]));
+  let node = byId.get(id);
+  if (!node) return tree;
+  const selected = { ...tree.selected };
+  while (node) {
+    selected[node.parentId ?? ""] = node.id;
+    node = node.parentId === null ? undefined : byId.get(node.parentId);
+  }
+  return { nodes: tree.nodes, selected };
+}
+
 export function parseConversations(raw: string | null): Conversation[] {
   if (!raw) return [];
   let v: unknown;
@@ -171,7 +349,31 @@ export function parseConversations(raw: string | null): Conversation[] {
       const id = str(x.id, 64);
       const title = str(x.title, 200);
       if (!id || title === null || !Array.isArray(x.messages)) return [];
-      return [{ id, title, messages: x.messages.map(parseMessage).filter((m): m is ChatMessage => m !== null), noMemory: x.noMemory === true, updatedAt: num(x.updatedAt) }];
+      const seen = new Set<string>();
+      const messages = x.messages
+        .map(parseMessage)
+        .filter((m): m is ChatMessage => m !== null)
+        .filter((m) => (seen.has(m.id) ? false : (seen.add(m.id), true)))
+        .slice(-MAX_BRANCH_NODES);
+      const parsedTree = parseTree(x.tree);
+      let tree = parsedTree ?? treeFromMessages(messages);
+      if (!branchPath(tree).length) tree = treeFromMessages(messages);
+      const active = activeMessages(tree);
+      const folder = str(x.folder, MAX_FOLDER)?.trim() ?? "";
+      return [
+        {
+          id,
+          title,
+          messages: active.length ? active : messages,
+          tree,
+          noMemory: x.noMemory === true,
+          updatedAt: num(x.updatedAt),
+          pinned: x.pinned === true,
+          folder: folder || null,
+          tags: parseTags(x.tags),
+          archived: x.archived === true,
+        },
+      ];
     })
     .slice(0, MAX_CONVERSATIONS);
 }

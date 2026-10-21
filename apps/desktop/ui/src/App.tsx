@@ -1,4 +1,5 @@
 import { createEffect, createMemo, createSignal, lazy, Match, on, onCleanup, onMount, Show, Switch, type Accessor, type JSX } from "solid-js";
+import { ChatSearch } from "./components/ChatSearch";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import { Sidebar } from "./components/Sidebar";
 import { StatusPill } from "./components/StatusPill";
@@ -8,6 +9,7 @@ import { Toasts } from "./components/Toasts";
 import { FeatureGuide, guideDue } from "./components/FeatureGuide";
 import { prefersReducedMotion } from "@design/motion";
 import { createRouter } from "./lib/router";
+import { chatSearchOpen, setChatJump, setChatSearchOpen } from "./lib/chat/navigation";
 import { routeById, ROUTES, type RouteId } from "./lib/routes";
 import { readPref, writePref } from "./lib/storage";
 import { createTheme, THEME_LABELS, type ThemeChoice } from "./lib/theme";
@@ -182,6 +184,15 @@ function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Eleme
         void state.setSetting("offlineMode", on, `Offline mode ${on ? "on" : "off"}`);
       },
     },
+    {
+      id: "search-chats",
+      label: "Search chats",
+      group: "Chat",
+      icon: "search",
+      hint: "Ctrl+Shift+F",
+      keywords: "find messages conversations text full text",
+      run: () => setChatSearchOpen(true),
+    },
   ]);
 
   // Global shortcuts. Ctrl+K works everywhere, including inside text fields, like every palette.
@@ -191,6 +202,10 @@ function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Eleme
         e.preventDefault();
         if (paletteOpen()) setPaletteOpen(false);
         else openPalette();
+      } else if ((e.ctrlKey || e.metaKey) && !e.altKey && e.shiftKey && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        setPaletteOpen(false);
+        setChatSearchOpen(true);
       } else if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "b" && !paletteOpen()) {
         e.preventDefault();
         toggleSidebar();
@@ -286,6 +301,15 @@ function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Eleme
           onOpenChange={setPaletteOpen}
           commands={commands()}
           returnFocus={() => (focusMainNext ? (main ?? null) : opener)}
+        />
+        <ChatSearch
+          open={chatSearchOpen()}
+          onOpenChange={setChatSearchOpen}
+          onJump={(conversationId, messageId, query) => {
+            setChatJump({ conversationId, messageId, query });
+            focusMainNext = false;
+            router.navigate("chat");
+          }}
         />
       </div>
     </MetricsProvider>

@@ -33,6 +33,7 @@ export const COMMANDS: readonly CommandDef[] = [
   { name: "remember", args: "<fact>", description: "Remember a fact about you for later chats.", aliases: ["memory"] },
   { name: "memories", args: "", description: "Open what Cerebro remembers about you.", aliases: ["forget"] },
   { name: "stats", args: "", description: "This chat's speed and token totals." },
+  { name: "prompts", args: "", description: "Open your saved prompts.", aliases: ["prompt"] },
   { name: "help", args: "", description: "List every command." },
 ];
 

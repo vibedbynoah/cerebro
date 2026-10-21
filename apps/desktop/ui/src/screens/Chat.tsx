@@ -7,19 +7,28 @@ import { SettingSwitch } from "../components/SettingSwitch";
 import { applyMode, loadSampler, MODE_PRESETS, modeOf, saveSampler, type Mode } from "../lib/chat/modes";
 import { buildRequest, DEFAULT_BASE_PROMPT, effectiveLevels, loadLevelEdits, loadPrefs, savePrefs, supportsNativeReasoning, type ChatPrefs, type Memory } from "../lib/chat/prompt";
 import {
+  activeMessages,
+  branchPath,
+  branchPosition,
   emptyConversation,
+  focusBranch,
   loadConversations,
   loadMemories,
   memoryCandidate,
   newId,
   saveConversations,
   saveMemories,
+  switchBranch,
   titleFrom,
+  treeFromMessages,
   type Attachment,
   type ChatMessage,
   type Conversation,
   type LedgerState,
 } from "../lib/chat/store";
+import { chatJump, publishChats, setChatJump } from "../lib/chat/navigation";
+import { loadPrompts, savePrompts, type SavedPrompt } from "../lib/chat/prompts";
+import { searchConversations } from "../lib/chat/search";
 import { chatToolRules, loadPolicy, mcpToolKey, savePolicy } from "../lib/permissions";
 import { notify, notifyAction } from "../lib/toast";
 import { COMMANDS, numberArg, orchestrateArg, speedArg, switchArg } from "../lib/chat/commands";
@@ -32,11 +41,13 @@ import { useAppState } from "../state";
 import { DEFAULT_SAMPLER, LEDGER_FILES, type ChatTools, type ChatTurn, type LedgerFileName, type Sampler, type ToolActivity } from "../service/chat-types";
 import { useService } from "../service/context";
 import type { CloudProvider, LibraryModel } from "../service/types";
+import { HighlightQuery } from "../components/ChatSearch";
 import { Composer } from "./chat/Composer";
 import { LiveDock } from "./chat/LiveDock";
 import { VoiceMode } from "./chat/VoiceMode";
 import { readPref, writePref } from "../lib/storage";
 import { MessageView } from "./chat/Message";
+import { PromptLibrary } from "./chat/PromptLibrary";
 import type { ToolAnswer, ToolDecision } from "./chat/ToolCard";
 import { recordToolActivity, summarizeArgs } from "../lib/tool-activity";
 
@@ -77,10 +88,11 @@ export function Chat(): JSX.Element {
   const [currentId, setCurrentId] = createSignal<string>(state.list[0]?.id ?? "");
   const current = () => state.list.find((c) => c.id === currentId());
   const [memories, setMemories] = createSignal<Memory[]>(loadMemories());
+  const [prompts, setPromptsSignal] = createSignal<SavedPrompt[]>(loadPrompts());
   // The side panel: memory, the system prompt, or the live dock (remembered while it is the dock).
   const DOCK_KEY = "cerebro-chat-dock";
-  const [panel, setPanelSignal] = createSignal<"none" | "memory" | "prompt" | "dock">(readPref(DOCK_KEY) === "open" ? "dock" : "none");
-  const setPanel = (p: "none" | "memory" | "prompt" | "dock") => {
+  const [panel, setPanelSignal] = createSignal<"none" | "memory" | "prompt" | "prompts" | "dock">(readPref(DOCK_KEY) === "open" ? "dock" : "none");
+  const setPanel = (p: "none" | "memory" | "prompt" | "prompts" | "dock") => {
     setPanelSignal(p);
     writePref(DOCK_KEY, p === "dock" ? "open" : null);
   };
@@ -109,6 +121,15 @@ export function Chat(): JSX.Element {
     onCleanup(() => window.removeEventListener("keydown", onKey));
   });
   const [live, setLive] = createSignal<{ tps: number; ttft: number } | null>(null);
+  const [draft, setDraft] = createSignal<{ text: string; at: number } | null>(null);
+  const [listQuery, setListQuery] = createSignal("");
+  const [folderFilter, setFolderFilter] = createSignal("all");
+  const [tagFilter, setTagFilter] = createSignal("all");
+  const [showArchived, setShowArchived] = createSignal(false);
+  const [foundId, setFoundId] = createSignal("");
+  let foundTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const setPrompts = (fn: (list: SavedPrompt[]) => SavedPrompt[]) => setPromptsSignal(fn);
 
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
   const persist = () => {
@@ -117,10 +138,19 @@ export function Chat(): JSX.Element {
   };
   onCleanup(() => {
     clearTimeout(saveTimer);
+    clearTimeout(foundTimer);
     saveConversations(state.list);
     abort?.abort();
   });
   createEffect(on(memories, (m) => saveMemories(m), { defer: true }));
+  createEffect(on(prompts, (p) => savePrompts(p), { defer: true }));
+  // Search in the shell sees a just-sent message before the debounced save reaches local storage.
+  createEffect(
+    on(
+      () => state.list.map((c) => `${c.id}:${c.updatedAt}:${c.messages.length}:${c.title}`).join("|"),
+      () => publishChats(state.list),
+    ),
+  );
 
   const built = createMemo(() =>
     buildRequest({
@@ -163,13 +193,39 @@ export function Chat(): JSX.Element {
     return c.id;
   };
 
+  /** Old records and hand-built state always get a tree before a branch operation needs one. */
+  const treeOf = (c: Conversation) => {
+    if (!c.tree || !Array.isArray(c.tree.nodes)) c.tree = treeFromMessages(c.messages);
+    return c.tree;
+  };
+
+  /** Adds a message node under `parentId` (null for the first message) and makes it the active child. */
+  const addMessage = (cid: string, message: ChatMessage, parentId: string | null) => {
+    setState(
+      "list",
+      (c) => c.id === cid,
+      produce((c) => {
+        const tree = treeOf(c);
+        tree.nodes.push({ id: message.id, parentId, message });
+        tree.selected[parentId ?? ""] = message.id;
+        c.messages = activeMessages(tree);
+        c.updatedAt = Date.now();
+      }),
+    );
+  };
+
   const updateMsg = (cid: string, mid: string, fn: (m: ChatMessage) => void) =>
     setState(
       "list",
       (c) => c.id === cid,
-      "messages",
-      (m) => m.id === mid,
-      produce(fn),
+      produce((c) => {
+        const node = c.tree?.nodes.find((n) => n.id === mid);
+        const message = c.messages.find((m) => m.id === mid);
+        if (node) fn(node.message);
+        // A parsed chat shares the node's message object with the active path; only touch it twice
+        // when they really are different objects.
+        if (message && message !== node?.message) fn(message);
+      }),
     );
 
   /** The tools the model may call this turn: the built-ins plus every MCP tool, each resolved
@@ -213,7 +269,7 @@ export function Chat(): JSX.Element {
     });
   };
 
-  const run = async (cid: string) => {
+  const run = async (cid: string, parentId: string | null) => {
     const conv = state.list.find((c) => c.id === cid);
     if (!conv || !modelId()) return;
     const cm = cloudOf();
@@ -224,12 +280,15 @@ export function Chat(): JSX.Element {
     const tools = cm ? null : await toolsForRequest();
     const req = built();
     const p = prefs();
-    const turns: ChatTurn[] = conv.messages
+    const path = branchPath(treeOf(conv));
+    const at = parentId === null ? -1 : path.findIndex((n) => n.id === parentId);
+    const context = (at >= 0 ? path.slice(0, at + 1) : path).map((n) => n.message);
+    const turns: ChatTurn[] = context
       .filter((m) => !m.streaming && !m.error)
       .map((m) => ({ role: m.role, text: m.text, ...(m.attachments.length ? { attachments: m.attachments.map(({ name, type, bytes, preview }) => ({ name, type, bytes, ...(preview ? { data: preview } : {}) })) } : {}) }));
     const mid = newId();
     const reply: ChatMessage = { id: mid, role: "assistant", text: "", thinking: "", checks: [], image: null, tools: [], ledger: null, attachments: [], stats: null, effort: p.effort, verbosity: p.verbosity, source: p.source, streaming: true, error: null };
-    setState("list", (c) => c.id === cid, "messages", (l) => [...l, reply]);
+    addMessage(cid, reply, parentId);
     abort = new AbortController();
     let tokens = 0;
     let firstAt = 0;
@@ -351,22 +410,85 @@ export function Chat(): JSX.Element {
       setMemories((m) => [...m, { id: newId(), text: fact, scope: "you" }]);
       notify("Remembered", fact);
     }
+    const parentId = conv.messages[conv.messages.length - 1]?.id ?? null;
+    const user: ChatMessage = {
+      id: newId(),
+      role: "user",
+      text,
+      thinking: "",
+      checks: [],
+      image: null,
+      tools: [],
+      ledger: null,
+      attachments: atts,
+      stats: null,
+      effort: prefs().effort,
+      verbosity: prefs().verbosity,
+      source: prefs().source,
+      streaming: false,
+      error: null,
+    };
     batch(() => {
       if (!conv.messages.length) setState("list", (c) => c.id === cid, "title", titleFrom(text || atts[0]?.name || ""));
-      setState("list", (c) => c.id === cid, "messages", (l) => [
-        ...l,
-        { id: newId(), role: "user", text, thinking: "", checks: [], image: null, tools: [], ledger: null, attachments: atts, stats: null, effort: prefs().effort, verbosity: prefs().verbosity, source: prefs().source, streaming: false, error: null } satisfies ChatMessage,
-      ]);
+      addMessage(cid, user, parentId);
     });
-    void run(cid);
+    void run(cid, user.id);
   };
 
-  const regenerate = () => {
+  /** Edits a user message into a new sibling branch; the old wording stays reachable. */
+  const editMessage = (mid: string, text: string) => {
+    const c = current();
+    if (!c || streaming() || !text.trim()) return;
+    const node = treeOf(c).nodes.find((n) => n.id === mid);
+    if (!node || node.message.role !== "user") return;
+    const original = node.message;
+    const edited: ChatMessage = { ...original, id: newId(), text: text.trim(), thinking: "", checks: [], image: null, tools: [], ledger: null, stats: null, streaming: false, error: null };
+    setState(
+      "list",
+      (x) => x.id === c.id,
+      produce((x) => {
+        const tree = treeOf(x);
+        tree.nodes.push({ id: edited.id, parentId: node.parentId, message: edited });
+        tree.selected[node.parentId ?? ""] = edited.id;
+        x.messages = activeMessages(tree);
+        x.updatedAt = Date.now();
+      }),
+    );
+    persist();
+    void run(c.id, edited.id);
+  };
+
+  /** A new reply to the same prompt, as a sibling of the reply being regenerated. */
+  const regenerate = (mid: string) => {
     const c = current();
     if (!c || streaming()) return;
-    const lastBot = [...c.messages].reverse().find((m) => m.role === "assistant");
-    if (lastBot) setState("list", (x) => x.id === c.id, "messages", (l) => l.filter((m) => m.id !== lastBot.id));
-    void run(c.id);
+    const node = treeOf(c).nodes.find((n) => n.id === mid);
+    if (!node || node.message.role !== "assistant" || node.parentId === null) return;
+    void run(c.id, node.parentId);
+  };
+
+  const switchMessageBranch = (mid: string, delta: number) => {
+    if (streaming()) return;
+    const c = current();
+    if (!c) return;
+    const parentKey = treeOf(c).nodes.find((n) => n.id === mid)?.parentId ?? "";
+    let nextId = "";
+    setState(
+      "list",
+      (x) => x.id === c.id,
+      produce((x) => {
+        x.tree = switchBranch(treeOf(x), mid, delta);
+        x.messages = activeMessages(x.tree);
+        nextId = x.tree.selected[parentKey] ?? "";
+      }),
+    );
+    persist();
+    // Keep the keyboard where the switch happened: the message that is now shown.
+    if (nextId)
+      requestAnimationFrame(() => {
+        const target = Array.from(thread.querySelectorAll<HTMLElement>("[data-message-id]")).find((el) => el.dataset.messageId === nextId);
+        target?.focus({ preventScroll: true });
+      });
   };
 
   const more = () => send("Tell me more.", []);
@@ -392,7 +514,7 @@ export function Chat(): JSX.Element {
       }
       case "retry":
         if (!lastReply()) return notify("No reply to write again");
-        return regenerate();
+        return regenerate(lastReply()!.id);
       case "model": {
         if (!arg) return need("a model name");
         const q = arg.toLowerCase();
@@ -486,6 +608,8 @@ export function Chat(): JSX.Element {
         return setHelpOpen(true);
       case "voice":
         return setVoice(true);
+      case "prompts":
+        return setPanel("prompts");
     }
   };
   const [helpOpen, setHelpOpen] = createSignal(false);
@@ -542,6 +666,7 @@ export function Chat(): JSX.Element {
     const c = emptyConversation();
     setState("list", (l) => [c, ...l]);
     setCurrentId(c.id);
+    setListQuery("");
     persist();
   };
 
@@ -551,6 +676,92 @@ export function Chat(): JSX.Element {
     if (id === currentId()) setCurrentId(state.list[0]?.id ?? "");
     persist();
   };
+
+  const setPinned = (id: string, pinned: boolean) => {
+    setState("list", (c) => c.id === id, "pinned", pinned);
+    persist();
+  };
+
+  const setArchived = (id: string, archived: boolean) => {
+    setState("list", (c) => c.id === id, "archived", archived);
+    if (id === currentId() && archived && !showArchived()) {
+      const next = state.list.find((c) => c.id !== id && !c.archived);
+      setCurrentId(next?.id ?? "");
+    }
+    persist();
+  };
+
+  const setFolder = (id: string, value: string) => {
+    const folder = value.trim().slice(0, 60);
+    setState("list", (c) => c.id === id, "folder", folder || null);
+    persist();
+  };
+
+  const setTags = (id: string, value: string) => {
+    const tags = [...new Set(value.split(",").map((t) => t.trim().slice(0, 30)).filter(Boolean))].slice(0, 8);
+    setState("list", (c) => c.id === id, "tags", tags);
+    persist();
+  };
+
+  const folderNames = createMemo(() => [...new Set(state.list.flatMap((c) => (c.folder ? [c.folder] : [])))].sort((a, b) => a.localeCompare(b)));
+  const tagNames = createMemo(() => [...new Set(state.list.flatMap((c) => c.tags))].sort((a, b) => a.localeCompare(b)));
+  const searchResults = createMemo(() => (listQuery().trim() ? searchConversations(state.list, listQuery()) : []));
+  const visibleConversations = createMemo(() =>
+    [...state.list]
+      .filter((c) => {
+        if (c.archived !== showArchived()) return false;
+        if (folderFilter() === "__none__" ? c.folder !== null : folderFilter() !== "all" && c.folder !== folderFilter()) return false;
+        if (tagFilter() !== "all" && !c.tags.includes(tagFilter())) return false;
+        return true;
+      })
+      .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt),
+  );
+
+  /** Opens a chat (and a message in it), switching to that message's branch when needed. */
+  const jumpTo = (conversationId: string, messageId: string | null) => {
+    if (!state.list.some((c) => c.id === conversationId)) {
+      const loaded = loadConversations();
+      if (loaded.length) setState("list", loaded);
+    }
+    setCurrentId(conversationId);
+    if (messageId) {
+      setState(
+        "list",
+        (c) => c.id === conversationId,
+        produce((c) => {
+          if (!c.messages.some((m) => m.id === messageId)) {
+            c.tree = focusBranch(treeOf(c), messageId);
+            c.messages = activeMessages(c.tree);
+          }
+        }),
+      );
+      setFoundId(messageId);
+      clearTimeout(foundTimer);
+      foundTimer = setTimeout(() => setFoundId(""), 2600);
+    }
+    setListQuery("");
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        if (!thread) return;
+        if (!messageId) {
+          thread.scrollTop = 0;
+          return;
+        }
+        const target = Array.from(thread.querySelectorAll<HTMLElement>("[data-message-id]")).find((el) => el.dataset.messageId === messageId);
+        if (!target) return;
+        target.scrollIntoView({ block: "center" });
+        target.focus({ preventScroll: true });
+      }),
+    );
+  };
+
+  createEffect(
+    on(chatJump, (jump) => {
+      if (!jump) return;
+      jumpTo(jump.conversationId, jump.messageId);
+      setChatJump(null);
+    }),
+  );
 
   let thread!: HTMLDivElement;
   createEffect(
@@ -564,6 +775,8 @@ export function Chat(): JSX.Element {
     ),
   );
 
+  const panelLabel = () => (panel() === "memory" ? "Memory" : panel() === "prompt" ? "System prompt" : "Prompt library");
+
   return (
     <div class="screen chat" data-panel={panel() === "none" ? "closed" : "open"}>
       <aside class="chat-list" aria-label="Conversations">
@@ -571,20 +784,128 @@ export function Chat(): JSX.Element {
           <Icon name="plus" size={16} />
           <span class="btn__label">New chat</span>
         </button>
-        <ul role="list">
-          <For each={state.list} fallback={<li class="hint">No conversations yet.</li>}>
-            {(c) => (
-              <li class="chat-list__item" data-current={c.id === currentId()}>
-                <button type="button" class="chat-list__open" onClick={() => setCurrentId(c.id)} aria-current={c.id === currentId() ? "true" : undefined}>
-                  {c.title}
-                </button>
-                <button type="button" class="icon-btn icon-btn--sm" aria-label={`Delete ${c.title}`} onClick={() => remove(c.id)}>
-                  <Icon name="trash" size={14} />
-                </button>
-              </li>
-            )}
-          </For>
-        </ul>
+        <div class="chat-list__search">
+          <Icon name="search" size={14} />
+          <input
+            class="input"
+            type="search"
+            value={listQuery()}
+            placeholder="Search chats"
+            aria-label="Search chats and messages"
+            maxlength="200"
+            onInput={(e) => setListQuery(e.currentTarget.value)}
+          />
+          <Show when={listQuery()}>
+            <button class="icon-btn icon-btn--sm" type="button" aria-label="Clear search" onClick={() => setListQuery("")}>
+              <Icon name="close" size={12} />
+            </button>
+          </Show>
+        </div>
+
+        <Show
+          when={listQuery().trim()}
+          fallback={
+            <>
+              <div class="chat-list__filters">
+                <label class="chat-list__filter">
+                  <span class="sr-only">Folder</span>
+                  <select class="input" value={folderFilter()} aria-label="Filter by folder" onChange={(e) => setFolderFilter(e.currentTarget.value)}>
+                    <option value="all">All folders</option>
+                    <option value="__none__">No folder</option>
+                    <For each={folderNames()}>{(f) => <option value={f}>{f}</option>}</For>
+                  </select>
+                </label>
+                <label class="chat-list__filter">
+                  <span class="sr-only">Tag</span>
+                  <select class="input" value={tagFilter()} aria-label="Filter by tag" onChange={(e) => setTagFilter(e.currentTarget.value)}>
+                    <option value="all">All tags</option>
+                    <For each={tagNames()}>{(t) => <option value={t}>{t}</option>}</For>
+                  </select>
+                </label>
+                <label class="chat-list__archived">
+                  <input type="checkbox" checked={showArchived()} onChange={(e) => setShowArchived(e.currentTarget.checked)} />
+                  <span>Archived</span>
+                </label>
+              </div>
+              <datalist id="chat-folder-options">
+                <For each={folderNames()}>{(f) => <option value={f} />}</For>
+              </datalist>
+              <ul role="list">
+                <For each={visibleConversations()} fallback={<li class="hint">{state.list.length ? "No chats in this view." : "No conversations yet."}</li>}>
+                  {(c) => (
+                    <li class="chat-list__item" data-current={c.id === currentId()} data-pinned={c.pinned}>
+                      <button type="button" class="chat-list__open" onClick={() => setCurrentId(c.id)} aria-current={c.id === currentId() ? "true" : undefined}>
+                        <Show when={c.pinned}>
+                          <Icon name="pin" size={12} class="chat-list__pin" />
+                        </Show>
+                        <span>{c.title}</span>
+                      </button>
+                      <button
+                        type="button"
+                        class="icon-btn icon-btn--sm"
+                        aria-label={c.pinned ? `Unpin ${c.title}` : `Pin ${c.title}`}
+                        aria-pressed={c.pinned}
+                        onClick={() => setPinned(c.id, !c.pinned)}
+                      >
+                        <Icon name="pin" size={14} />
+                      </button>
+                      <details class="chat-list__options">
+                        <summary class="icon-btn icon-btn--sm" aria-label={`Chat options for ${c.title}`} title="Chat options">
+                          <Icon name="sliders" size={14} />
+                        </summary>
+                        <div class="chat-list__options-body">
+                          <label class="chat-list__field">
+                            <span>Folder</span>
+                            <input class="input" list="chat-folder-options" value={c.folder ?? ""} maxlength="60" placeholder="No folder" onChange={(e) => setFolder(c.id, e.currentTarget.value)} />
+                          </label>
+                          <label class="chat-list__field">
+                            <span>Tags, separated by commas</span>
+                            <input class="input" value={c.tags.join(", ")} maxlength="260" placeholder="No tags" onChange={(e) => setTags(c.id, e.currentTarget.value)} />
+                          </label>
+                          <label class="composer__check">
+                            <input type="checkbox" checked={c.archived} onChange={(e) => setArchived(c.id, e.currentTarget.checked)} />
+                            <span>Archived</span>
+                          </label>
+                        </div>
+                      </details>
+                      <button type="button" class="icon-btn icon-btn--sm" aria-label={`Delete ${c.title}`} onClick={() => remove(c.id)}>
+                        <Icon name="trash" size={14} />
+                      </button>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </>
+          }
+        >
+          <div class="chat-list__results-head">
+            <span role="status">
+              {searchResults().length} {searchResults().length === 1 ? "result" : "results"}
+            </span>
+            <button class="btn btn--tertiary btn--sm" type="button" onClick={() => setListQuery("")}>
+              Clear
+            </button>
+          </div>
+          <ul class="chat-list__results" role="list">
+            <For each={searchResults()} fallback={<li class="hint">No chats match “{listQuery().trim()}”.</li>}>
+              {(result) => (
+                <li>
+                  <button class="chat-list__result" type="button" onClick={() => jumpTo(result.conversationId, result.messageId)}>
+                    <span class="chat-list__result-title">
+                      <HighlightQuery text={result.conversationTitle} query={listQuery()} />
+                    </span>
+                    <span class="chat-list__result-where">{result.messageId === null ? "Chat title" : result.role === "user" ? "You" : "Reply"}</span>
+                    <Show when={result.messageId !== null}>
+                      <span class="chat-list__result-snippet">
+                        <HighlightQuery text={result.snippet} query={listQuery()} />
+                      </span>
+                    </Show>
+                  </button>
+                </li>
+              )}
+            </For>
+          </ul>
+        </Show>
       </aside>
 
       <section class="chat-main" aria-label="Chat">
@@ -625,6 +946,9 @@ export function Chat(): JSX.Element {
             <IllustrativeFlag />
           </Show>
           <SamplerMenu sampler={sampler()} onChange={setSampler} />
+          <button class="icon-btn" type="button" aria-label="Prompt library" aria-pressed={panel() === "prompts"} onClick={() => setPanel(panel() === "prompts" ? "none" : "prompts")}>
+            <Icon name="book" size={18} />
+          </button>
           <button class="icon-btn" type="button" aria-label="Memory" aria-pressed={panel() === "memory"} onClick={() => setPanel(panel() === "memory" ? "none" : "memory")}>
             <Icon name="memory" size={18} />
           </button>
@@ -641,7 +965,21 @@ export function Chat(): JSX.Element {
             {/* The transcript's own heading: replies' Markdown headings (h3, h4) nest under it. */}
             <h2 class="sr-only">Conversation</h2>
             <For each={current()!.messages}>
-              {(m, i) => <MessageView m={m} last={i() === current()!.messages.length - 1} onRegenerate={regenerate} onMore={more} onToolDecide={(id, d) => decideTool(currentId(), m.id, id, d)} onToolAnswer={answerTool} />}
+              {(m, i) => (
+                <MessageView
+                  m={m}
+                  last={i() === current()!.messages.length - 1}
+                  branch={branchPosition(current()!.tree, m.id)}
+                  found={foundId() === m.id}
+                  busy={streaming()}
+                  onRegenerate={regenerate}
+                  onMore={more}
+                  onEdit={editMessage}
+                  onBranch={switchMessageBranch}
+                  onToolDecide={(id, d) => decideTool(currentId(), m.id, id, d)}
+                  onToolAnswer={answerTool}
+                />
+              )}
             </For>
           </Show>
         </div>
@@ -699,6 +1037,8 @@ export function Chat(): JSX.Element {
           onRecordStart={() => service.startRecording()}
           onLevel={() => service.recordingLevel()}
           onOpenPrompt={() => setPanel("prompt")}
+          onOpenPrompts={() => setPanel("prompts")}
+          draft={draft()}
         />
       </section>
 
@@ -707,7 +1047,7 @@ export function Chat(): JSX.Element {
           class="chat-side card"
           classList={{ "chat-side--dock": panel() === "dock" }}
           style={panel() === "dock" ? { width: `${dockWidth()}px` } : undefined}
-          aria-label={panel() === "memory" ? "Memory" : panel() === "dock" ? "Live panel" : "System prompt"}
+          aria-label={panel() === "dock" ? "Live panel" : panelLabel()}
         >
           <Show when={panel() === "dock"}>
             <div class="chat-side__resize" role="separator" aria-orientation="vertical" aria-label="Resize the live panel" aria-valuemin={280} aria-valuemax={520} aria-valuenow={dockWidth()} tabindex="0" onPointerDown={startResize} onKeyDown={(e) => {
@@ -719,7 +1059,7 @@ export function Chat(): JSX.Element {
             }} />
           </Show>
           <div class="chat-side__head">
-            <h2>{panel() === "memory" ? "Memory" : panel() === "dock" ? "Live panel" : "System prompt"}</h2>
+            <h2>{panel() === "dock" ? "Live panel" : panelLabel()}</h2>
             <button class="icon-btn" type="button" aria-label="Close panel" onClick={() => setPanel("none")}>
               <Icon name="close" size={16} />
             </button>
@@ -742,8 +1082,27 @@ export function Chat(): JSX.Element {
               }}
             />
           </Show>
-          <Show when={panel() !== "dock"}>
-          <Show when={panel() === "memory"} fallback={<PromptPanel prefs={prefs()} setPrefs={setPrefs} preview={built().systemPrompt} native={built().native} />}>
+          <Show when={panel() !== "dock"}>          <Show
+            when={panel() === "memory"}
+            fallback={
+              <Show
+                when={panel() === "prompt"}
+                fallback={
+                  <PromptLibrary
+                    prompts={prompts()}
+                    setPrompts={setPrompts}
+                    onUse={(text) => {
+                      setDraft({ text, at: Date.now() });
+                      setPanel("none");
+                      notify("Prompt ready", "Fill in any details, then send it.", "info");
+                    }}
+                  />
+                }
+              >
+                <PromptPanel prefs={prefs()} setPrefs={setPrefs} preview={built().systemPrompt} native={built().native} />
+              </Show>
+            }
+          >
             <MemoryPanel
               memories={memories()}
               setMemories={setMemories}
