@@ -361,7 +361,7 @@ function Profiler(): JSX.Element {
             <dd class="mono">{p.draftAcceptance === null ? "off" : `${Math.round(p.draftAcceptance * 100)}%`}</dd>
           </div>
           <div>
-            <dt>Free VRAM</dt>
+            <dt>Free graphics memory</dt>
             <dd class="mono">{p.vramFreeGiB.toFixed(1)} GiB</dd>
           </div>
         </dl>

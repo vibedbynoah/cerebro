@@ -223,7 +223,7 @@ test("the HUD shows mock live data and updates it", async ({ page }) => {
   const speed = page.locator(".statusbar [data-hud='speed'] .hud-item__value");
   await expect(speed).toContainText("tok/s");
   await expect(page.locator(".statusbar [data-hud='backend']")).toContainText("127.0.0.1:8181");
-  await expect(page.getByRole("meter", { name: "VRAM in use" })).toHaveAttribute("aria-valuemax", "8");
+  await expect(page.getByRole("meter", { name: "Graphics memory in use" })).toHaveAttribute("aria-valuemax", "8");
 });
 
 test("the Home tiles and the HUD always show the same live sample", async ({ page }) => {

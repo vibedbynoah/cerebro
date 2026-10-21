@@ -583,6 +583,61 @@
   margin-top: var(--space-1);
 }
 
+/* The fine controls live behind one disclosure, so the everyday composer is the message row
+   and the Speed <-> Accuracy slider. */
+.composer__more {
+  margin-top: var(--space-1);
+}
+
+.composer__more-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  margin-left: calc(-1 * var(--space-2));
+  border-radius: var(--radius-md);
+  color: var(--color-text-secondary);
+  font-size: var(--text-small);
+  cursor: pointer;
+  list-style: none;
+}
+
+.composer__more-summary::-webkit-details-marker {
+  display: none;
+}
+
+.composer__more-summary:hover {
+  background: var(--color-surface-2);
+  color: var(--color-text-primary);
+}
+
+.composer__more-summary:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.composer__more-title {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.composer__more-meta {
+  color: var(--color-text-muted);
+}
+
+.composer__more-chevron {
+  display: inline-flex;
+  transition: transform 120ms ease;
+}
+
+.composer__more[open] .composer__more-chevron {
+  transform: rotate(180deg);
+}
+
+.composer__more-body {
+  padding-top: var(--space-2);
+}
+
 .composer__controls {
   display: flex;
   flex-wrap: wrap;
@@ -967,7 +1022,8 @@
 
 @media (prefers-reduced-motion: reduce) {
   .msg__typing,
-  .wave__bar {
+  .wave__bar,
+  .composer__more-chevron {
     animation: none;
     transition: none;
   }

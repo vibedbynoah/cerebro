@@ -63,7 +63,11 @@ test.describe("image studio", () => {
 
   test("advanced settings validate their values", async ({ page }) => {
     await open(page);
-    await page.getByRole("checkbox", { name: "Advanced settings" }).check();
+    const details = page.locator(".img-advanced-details");
+    if (!(await details.evaluate((el) => (el as HTMLDetailsElement).open))) {
+      await page.locator(".img-advanced-details > summary").click();
+    }
+    await expect(details).toHaveAttribute("open", "");
     await page.getByRole("spinbutton", { name: "Steps" }).fill("500");
     await page.getByRole("spinbutton", { name: "Steps" }).blur();
     await expect(page.locator(".img-advanced .img-error")).toHaveText("Steps must be 1 to 150.");

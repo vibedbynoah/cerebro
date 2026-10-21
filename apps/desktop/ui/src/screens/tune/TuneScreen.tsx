@@ -147,9 +147,11 @@ export function TuneScreen(): JSX.Element {
             <PhaseStepper view={null} />
           </Section>
         </Show>
-        <Section id="cli" title="From the command line" description="The same tune from a terminal. It uses the GPU fully while it measures.">
-          <CodeBlock lines={[command()]} label="Copy command" />
-        </Section>
+        <Show when={!__DESKTOP__}>
+          <Section id="cli" title="From the command line" description="The same tune from a terminal. It uses the graphics card fully while it measures.">
+            <CodeBlock lines={[command()]} label="Copy command" />
+          </Section>
+        </Show>
       </Show>
       <p class="sr-only" role="status" aria-live="polite">
         {announcement(session.view)}

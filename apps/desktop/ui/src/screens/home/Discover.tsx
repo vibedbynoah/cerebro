@@ -32,12 +32,23 @@ const SPOTLIGHTS: readonly Spotlight[] = [
   { title: "Soak-tested speed", text: "Tune runs the fastest settings for minutes, not seconds, and rejects any that slowly run out of graphics memory.", route: "tune", icon: "tune", cta: "Run a tune" },
 ];
 
+/** The desktop build has no machine builds and runs only text-to-image models, so two spotlights
+ *  would advertise screens it does not have; it gets a truthful image variant instead. */
+const DESKTOP_SPOTLIGHTS = SPOTLIGHTS.filter((s) => s.route !== "turbo").map((s) =>
+  s.route === "images"
+    ? { ...s, text: "Image Studio makes images on this computer with an SD-Turbo-style model from your library, and keeps the seed so you can make one again." }
+    : s,
+);
+
 const NEWS = [
   { date: "Oct 9", text: "Image Studio: inpainting with a brush mask and 4× upscaling." },
   { date: "Oct 8", text: "Turbo: machine profiles with measured before and after, and one-click revert." },
   { date: "Oct 7", text: "Monitor: MoE expert share, cache hits and draft acceptance, live." },
   { date: "Oct 5", text: "Chat: reasoning source per message, including the raw model with no added prompt." },
 ];
+
+/** The desktop build has no Turbo profiles or image editing yet, so its news omits those two items. */
+const DESKTOP_NEWS = NEWS.filter((n) => !n.text.startsWith("Turbo:") && !n.text.startsWith("Image Studio:"));
 
 const DONE_KEY = "cerebro-checklist-dismissed";
 
@@ -48,7 +59,9 @@ export function dayIndex(now: Date, n: number): number {
 
 export function Discover(props: { tuned: boolean; models: number }): JSX.Element {
   const [offset, setOffset] = createSignal(0);
-  const spot = () => SPOTLIGHTS[(dayIndex(new Date(), SPOTLIGHTS.length) + offset()) % SPOTLIGHTS.length]!;
+  const spotlights = __DESKTOP__ ? DESKTOP_SPOTLIGHTS : SPOTLIGHTS;
+  const spot = () => spotlights[(dayIndex(new Date(), spotlights.length) + offset()) % spotlights.length]!;
+  const news = __DESKTOP__ ? DESKTOP_NEWS : NEWS;
   const chats = loadConversations();
   const gallery = loadGallery();
   const plugins = loadInstalled();
@@ -59,7 +72,8 @@ export function Discover(props: { tuned: boolean; models: number }): JSX.Element
     { id: "tune", label: "Run your first tune", done: props.tuned, route: "tune" as RouteId },
     { id: "chat", label: "Start a chat", done: chats.some((c) => c.messages.length > 0), route: "chat" as RouteId },
     { id: "image", label: "Make an image", done: gallery.length > 0, route: "images" as RouteId },
-    { id: "plugin", label: "Install a plugin", done: Object.keys(plugins.installed).length + plugins.local.length > 2, route: "plugins" as RouteId },
+    // Plugins are a browser-preview design study in the desktop build, so there is no install step there.
+    ...(__DESKTOP__ ? [] : [{ id: "plugin", label: "Install a plugin", done: Object.keys(plugins.installed).length + plugins.local.length > 2, route: "plugins" as RouteId }]),
   ];
   const doneCount = steps.filter((s) => s.done).length;
 
@@ -150,7 +164,7 @@ export function Discover(props: { tuned: boolean; models: number }): JSX.Element
 
         <Section id="news" title="What's new">
           <ul class="news" role="list">
-            <For each={NEWS}>
+            <For each={news}>
               {(n) => (
                 <li>
                   <span class="mono news__date">{n.date}</span>

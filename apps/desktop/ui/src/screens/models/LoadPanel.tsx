@@ -428,12 +428,12 @@ export function FitBar(props: { fit: FitEstimate; summary: string }): JSX.Elemen
         <span class="fit-status" data-status={props.fit.status} role="status" aria-live="polite">
           <Icon name={props.fit.status === "over" ? "alert" : "check"} size={14} />
           {STATUS_TEXT[props.fit.status]}
-          <span class="fit-status__amount mono">{`${tightest().total.toFixed(1)} of ${tightest().capacity.toFixed(1)} GiB ${props.fit.vram.capacity > 0 ? "VRAM" : "RAM"}`}</span>
+          <span class="fit-status__amount mono">{`${tightest().total.toFixed(1)} of ${tightest().capacity.toFixed(1)} GiB ${props.fit.vram.capacity > 0 ? "graphics memory" : "system memory"}`}</span>
         </span>
         <span class="fit__note">Memory estimate: arithmetic from the file and these settings; a tune measures the real thing.</span>
       </div>
-      <Meter label="VRAM" use={props.fit.vram} />
-      <Meter label="RAM" use={props.fit.ram} />
+      <Meter label="Graphics memory" use={props.fit.vram} />
+      <Meter label="System memory" use={props.fit.ram} />
       <ul class="fit-legend" aria-label="Legend">
         <li data-seg="weights">Weights</li>
         <li data-seg="kv">KV cache</li>
@@ -460,7 +460,7 @@ function Meter(props: { label: string; use: MemoryUse }): JSX.Element {
   return (
     <div class="meter-row" data-status={u().status}>
       <span class="meter-row__label">{props.label}</span>
-      <div class="meter" role="meter" aria-label={`Estimated ${props.label} use`} aria-valuemin={0} aria-valuemax={u().capacity} aria-valuenow={Math.min(u().total, u().capacity)} aria-valuetext={text()}>
+      <div class="meter" role="meter" aria-label={`Estimated ${props.label.toLowerCase()} use`} aria-valuemin={0} aria-valuemax={u().capacity} aria-valuenow={Math.min(u().total, u().capacity)} aria-valuetext={text()}>
         <For each={["extra", "compute", "kv", "weights"] as const}>
           {(seg, i) => <span class="meter__seg" data-seg={seg} style={{ transform: `translateX(${cumulative()[i()]! - 100}%)` }} />}
         </For>

@@ -63,16 +63,16 @@ describe("routing", () => {
     expect(ROUTES.map((r) => r.label)).toEqual([
       "Home",
       "Model Hub",
+      "Chat",
       "Models",
       "Tune",
       "Monitor",
       "Turbo",
-      "Chat",
       "Image Studio",
       "Documents",
       "Train",
-      "Plugins",
       "Tools",
+      "Plugins",
       "Settings",
       "About",
     ]);

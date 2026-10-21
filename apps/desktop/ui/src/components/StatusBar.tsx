@@ -14,7 +14,7 @@ const BACKEND_LABEL: Record<LiveStats["backend"]["state"], string> = {
 };
 
 /**
- * The HUD along the bottom: backend state, loaded model, decode speed and VRAM. Values come from the
+ * The HUD along the bottom: backend state, loaded model, decode speed and graphics memory. Values come from the
  * service; while they are illustrative (web mode, mock) the bar says so in words. Not a live region:
  * a number changing every second would flood a screen reader.
  */
@@ -69,11 +69,11 @@ export function StatusBar(props: { network: NetworkState | null; offlineMode: bo
             <span class="hud-sep" aria-hidden="true" />
             <span class="hud-item" data-hud="vram">
               <Icon name="chip" size={14} />
-              <span class="hud-item__label">VRAM</span>
+              <span class="hud-item__label">Graphics memory</span>
               <span
                 class="hud-gauge"
                 role="meter"
-                aria-label="VRAM in use"
+                aria-label="Graphics memory in use"
                 aria-valuemin={0}
                 aria-valuemax={s().vramTotalGiB}
                 aria-valuenow={s().vramUsedGiB}

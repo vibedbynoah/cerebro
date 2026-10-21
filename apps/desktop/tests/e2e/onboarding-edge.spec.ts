@@ -164,7 +164,7 @@ test("each radio is named by model and fit only, and described by its reason and
   await primary(page).click();
   await expect(step(page, "model")).toBeVisible();
   const first = page.getByRole("radio").first();
-  await expect(first).toHaveAccessibleName("Gemma-4-12B-it Best fit Fits in video memory");
+  await expect(first).toHaveAccessibleName("Gemma-4-12B-it Best fit Fits in graphics memory");
   await expect(first).toHaveAccessibleDescription(/^Fits entirely in your .* 6\.9 GiB$/);
 });
 

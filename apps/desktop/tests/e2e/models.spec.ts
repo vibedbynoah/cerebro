@@ -78,7 +78,7 @@ test.describe("library", () => {
     await page.locator(".lib-toolbar label", { hasText: "Audio" }).click();
     await expect(rows.first().locator('.badge[data-modality="audio-in"], .badge[data-modality="audio-out"]')).toHaveCount(1);
     await page.getByRole("combobox", { name: "Memory fit" }).selectOption("vram");
-    for (const chip of await page.locator(".lib-body .fit-chip").allTextContents()) expect(chip).toBe("Fits in VRAM");
+    for (const chip of await page.locator(".lib-body .fit-chip").allTextContents()) expect(chip).toBe("Fits in graphics memory");
   });
 
   test("keyboard: arrows move, End reaches the last row, Enter opens details, Escape returns", async ({ page }) => {
@@ -208,7 +208,7 @@ test.describe("load panel", () => {
   test("every change is marked, moves the estimate, and resets to tuned", async ({ page }) => {
     await openModel(page, TUNED_MOE);
     await page.getByRole("tab", { name: "Load settings" }).click();
-    const vram = page.getByRole("meter", { name: "Estimated VRAM use" });
+    const vram = page.getByRole("meter", { name: "Estimated graphics memory use" });
     const before = Number(await vram.getAttribute("aria-valuenow"));
     await expect(page.locator(".drawer__caption")).toContainText("Tuned settings");
 
@@ -219,7 +219,7 @@ test.describe("load panel", () => {
     await expect.poll(async () => Number(await vram.getAttribute("aria-valuenow"))).not.toBe(before);
 
     // Fewer experts on the CPU puts more weight on the GPU.
-    const ram = page.getByRole("meter", { name: "Estimated RAM use" });
+    const ram = page.getByRole("meter", { name: "Estimated system memory use" });
     const ramBefore = Number(await ram.getAttribute("aria-valuenow"));
     await page.getByLabel("Experts on CPU", { exact: true }).fill("0");
     await expect.poll(async () => Number(await ram.getAttribute("aria-valuenow"))).toBeLessThan(ramBefore);
@@ -304,7 +304,7 @@ test.describe("hardware not detected", () => {
     await expect(page.locator("main h1")).toBeVisible();
     await expect(page.locator(".lib-body > .lib-row").first()).toBeVisible();
     for (const chip of await page.locator(".lib-body .fit-chip").allTextContents()) expect(chip.trim()).toBe("Unknown");
-    await expect(page.locator(".fit-chip", { hasText: "Fits in VRAM" })).toHaveCount(0);
+    await expect(page.locator(".fit-chip", { hasText: "Fits in graphics memory" })).toHaveCount(0);
 
     await page.getByRole("searchbox", { name: "Search models" }).fill(UNTUNED.file);
     await page.locator(`.lib-row[data-model="${UNTUNED.id}"] .lib-name__text`).click();
@@ -324,7 +324,7 @@ test.describe("hardware not detected", () => {
     await page.locator(`.lib-row[data-model="${UNTUNED.id}"] .lib-name__text`).click();
     await page.getByRole("tab", { name: "Load settings" }).click();
     await page.getByRole("button", { name: "Detect again" }).click();
-    await expect(page.getByRole("meter", { name: "Estimated VRAM use" })).toBeVisible();
+    await expect(page.getByRole("meter", { name: "Estimated graphics memory use" })).toBeVisible();
     await expect(page.locator(".fit-unknown")).toHaveCount(0);
   });
 });
@@ -333,7 +333,7 @@ test.describe("tweaks and load settings agree", () => {
   test("a KV tweak shows in the caption, shrinks the estimate, and is what Load sends", async ({ page }) => {
     await openModel(page, UNTUNED);
     await page.getByRole("tab", { name: "Load settings" }).click();
-    const vram = page.getByRole("meter", { name: "Estimated VRAM use" });
+    const vram = page.getByRole("meter", { name: "Estimated graphics memory use" });
     const kvOf = async () => Number(/KV cache ([\d.]+)/.exec((await vram.getAttribute("aria-valuetext")) ?? "")?.[1] ?? Number.NaN);
     const kvBefore = await kvOf();
     expect(kvBefore).toBeGreaterThan(0);

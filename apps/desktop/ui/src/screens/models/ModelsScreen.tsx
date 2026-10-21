@@ -33,9 +33,11 @@ export function ModelsScreen(): JSX.Element {
         <Section id="disk" title="Disk space" description="The same file kept by more than one app, and how much a safe deduplicate would free.">
           <DiskPanel />
         </Section>
-        <Section id="cli" title="From the command line" description="The same library and the same tuned settings, from a terminal.">
-          <CodeBlock lines={["cerebro models", "cerebro tune qwen3-8b-q5km", "cerebro serve qwen3-8b-q5km", "cerebro chat"]} />
-        </Section>
+        <Show when={!__DESKTOP__}>
+          <Section id="cli" title="From the command line" description="The same library and the same tuned settings, from a terminal.">
+            <CodeBlock lines={["cerebro models", "cerebro tune qwen3-8b-q5km", "cerebro serve qwen3-8b-q5km", "cerebro chat"]} />
+          </Section>
+        </Show>
         <ModelDrawer />
       </div>
     </ModelsProvider>

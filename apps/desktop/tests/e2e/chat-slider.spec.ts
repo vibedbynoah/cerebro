@@ -1,6 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
-import { expect, settle, test } from "./fixtures";
+import { expect, openFineTune, settle, test } from "./fixtures";
 
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"];
 
@@ -23,6 +23,8 @@ test.describe("the Speed <-> Accuracy slider", () => {
     await expect(page.locator("#mode-note")).toContainText("The quickest reply");
     // The notice names what changed.
     await expect(page.getByText("Greedy decoding", { exact: false }).first()).toBeVisible();
+    // The fine controls are folded away by default, but the slider still set them.
+    await openFineTune(page);
     await expect(page.locator('input[name="effort"][value="low"]')).toBeChecked();
     await expect(page.locator('input[name="verbosity"][value="brief"]')).toBeChecked();
     // The system prompt follows: one line.
@@ -40,9 +42,10 @@ test.describe("the Speed <-> Accuracy slider", () => {
     await openChat(page);
     await slider(page).fill("2");
     await expect(level(page)).toHaveText("Fast");
+    await openFineTune(page);
     await page.locator('input[name="effort"][value="high"]').check({ force: true });
     await expect(level(page)).toHaveText("Custom");
-    await expect(page.locator("#mode-note")).toContainText("you changed one of the settings below by hand");
+    await expect(page.locator("#mode-note")).toContainText("you changed one of the settings in Fine-tune by hand");
     await slider(page).fill("4");
     await expect(level(page)).toHaveText("Accurate");
   });
@@ -55,9 +58,22 @@ test.describe("the Speed <-> Accuracy slider", () => {
     await expect(level(page)).toHaveText("Fastest");
   });
 
+  test("Fine-tune remembers whether it was open", async ({ page }) => {
+    await openChat(page);
+    const more = page.locator("details.composer__more");
+    await expect(more).toHaveJSProperty("open", false);
+    await openFineTune(page);
+    await page.reload();
+    await expect(page.locator("details.composer__more")).toHaveJSProperty("open", true);
+    await page.locator(".composer__more > summary").click();
+    await page.reload();
+    await expect(page.locator("details.composer__more")).toHaveJSProperty("open", false);
+  });
+
   test("is accessible", async ({ page }) => {
     await openChat(page);
     await slider(page).fill("4");
+    await openFineTune(page);
     await settle(page);
     const r = await new AxeBuilder({ page }).withTags(TAGS).include(".composer").analyze();
     expect(r.violations).toEqual([]);

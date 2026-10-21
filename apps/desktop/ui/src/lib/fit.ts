@@ -110,7 +110,7 @@ export function fitClass(model: Pick<LibraryModel, "sizeGiB">, hw: Pick<Hardware
 }
 
 export const FIT_LABELS: Readonly<Record<FitClass, string>> = {
-  vram: "Fits in VRAM",
+  vram: "Fits in graphics memory",
   partial: "Partial offload",
   "too-large": "Too large",
   unknown: "Unknown",

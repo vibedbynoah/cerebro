@@ -206,9 +206,9 @@ test.describe("alerts and machines", () => {
   test("thermal throttling, VRAM pressure and a speed regression each raise one quiet notice", async ({ page }) => {
     await openMonitor(page, "?mock=monitor-alerts");
     // One toast as the alert starts (it fades after a few seconds), even though the condition holds.
-    await expect(page.locator(".toast").filter({ hasText: "VRAM almost full" })).toBeVisible({ timeout: 10000 });
+    await expect(page.locator(".toast").filter({ hasText: "Graphics memory almost full" })).toBeVisible({ timeout: 10000 });
     await page.waitForTimeout(1500);
-    await expect(page.locator(".toast").filter({ hasText: "VRAM almost full" })).toHaveCount(1);
+    await expect(page.locator(".toast").filter({ hasText: "Graphics memory almost full" })).toHaveCount(1);
     for (const kind of ["thermal", "vram", "regression"]) await expect(page.locator(`.mon-alert[data-kind='${kind}']`)).toBeVisible({ timeout: 20000 });
     await expect(page.locator(".mon-alert[data-kind='regression']")).toContainText(/below the \d+\.\d tok\/s measured at 8,192 context/);
     await expect(page.locator("[data-metric='temp']")).toHaveClass(/is-alert/);

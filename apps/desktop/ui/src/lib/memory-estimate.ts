@@ -80,7 +80,7 @@ const int = (n: number, hi: number): number => (Number.isFinite(n) ? Math.min(hi
 function noteFor(fits: MemoryFit, moe: boolean): string {
   switch (fits) {
     case "gpu":
-      return "The whole file and its context fit in video memory.";
+      return "The whole file and its context fit in graphics memory.";
     case "split":
       return moe ? "Attention and shared weights on the card; experts stay in system memory." : "Weights split across video and system memory; the context follows the layers.";
     case "cpu":
@@ -199,7 +199,7 @@ function whyFor(c: MemoryCandidate & { estimate: MemoryEstimate }): string {
   const size = `${finite(c.quant.sizeGiB).toFixed(1)} GiB`;
   switch (c.estimate.fits) {
     case "gpu":
-      return `${c.quant.label} is the closest fit entirely in video memory (${size}).`;
+      return `${c.quant.label} is the closest fit entirely in graphics memory (${size}).`;
     case "split":
       return `${c.quant.label} runs across video and system memory (${size}); Cerebro measures the speed after download.`;
     case "cpu":

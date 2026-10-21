@@ -124,7 +124,7 @@ export function Library(): JSX.Element {
             <select class="input" aria-label="Memory fit" value={fit()} onChange={(e) => (setFit(e.currentTarget.value as FitClass | "all"), setActive(0))}>
               <option value="all">Any fit</option>
               <Show when={store.hw()} fallback={<option value="unknown">Fit unknown</option>}>
-                <option value="vram">Fits in VRAM</option>
+                <option value="vram">Fits in graphics memory</option>
                 <option value="partial">Partial offload</option>
                 <option value="too-large">Too large</option>
               </Show>

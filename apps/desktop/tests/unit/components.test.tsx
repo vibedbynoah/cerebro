@@ -89,7 +89,7 @@ describe("StatusBar", () => {
         <StatusBar network="offline" offlineMode={false} />
       </ServiceProvider>
     ));
-    const meter = await screen.findByRole("meter", { name: "VRAM in use" });
+    const meter = await screen.findByRole("meter", { name: "Graphics memory in use" });
     expect(meter.getAttribute("aria-valuemax")).toBe("8");
     expect(screen.getByText("Illustrative data")).toBeTruthy();
     expect(screen.getByText("Running")).toBeTruthy();

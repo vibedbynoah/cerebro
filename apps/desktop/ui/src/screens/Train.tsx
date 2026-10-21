@@ -129,7 +129,7 @@ export function Train(): JSX.Element {
               </span>
               <Show when={!i().cuda}>
                 <span class="chip" data-tone="off">
-                  No CUDA GPU: training will not start
+                  No compatible graphics card: training will not start
                 </span>
               </Show>
             </div>

@@ -339,13 +339,13 @@ function conditions(s: MetricsSnapshot): Record<AlertKind, Condition> {
     thermal: {
       hot: thermalNow,
       cool: thermalCool,
-      title: "GPU is thermal throttling",
+      title: "Graphics card is too hot, so it is slowing down",
       detail: `${num(temp)} °C${ok(limit) ? `, at or above the ${num(limit)} °C point where the driver slows the card` : ""}. Speed drops until it cools; check airflow or lower the power limit.`,
     },
     vram: {
       hot: share !== null && share >= ALERT_RULES.vram.raiseShare,
       cool: share === null || share < ALERT_RULES.vram.clearShare,
-      title: "VRAM almost full",
+      title: "Graphics memory almost full",
       detail: `${num(hw.vramUsedGiB, 1)} of ${num(hw.vramTotalGiB, 1)} GiB in use${ok(other) && other >= 0.5 ? `; other programs hold ${num(other, 1)} GiB` : ""}. If it fills, the driver moves memory to system RAM and speed falls sharply.`,
     },
     regression: {
@@ -354,7 +354,7 @@ function conditions(s: MetricsSnapshot): Record<AlertKind, Condition> {
       title: "Writing slower than the tuned baseline",
       detail:
         base && ratioNow !== null
-          ? `${num(live.decodeTps, 1)} tok/s is ${num((1 - ratioNow) * 100)}% below the ${num(base.decodeTps, 1)} tok/s measured at ${compact(base.depth)} context; this request is at ${compact(depth)}. Long contexts, heat or other GPU work slow writing.`
+          ? `${num(live.decodeTps, 1)} tok/s is ${num((1 - ratioNow) * 100)}% below the ${num(base.decodeTps, 1)} tok/s measured at ${compact(base.depth)} context; this request is at ${compact(depth)}. Long contexts, heat or other graphics card work slow writing.`
           : "Writing speed fell below the tuned baseline.",
     },
   };

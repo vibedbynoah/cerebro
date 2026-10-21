@@ -232,7 +232,7 @@ export function WinnerCard(props: { view: TuneView; animate: boolean }): JSX.Ele
                 {(r) => (
                   <li>
                     <Icon name="check" size={14} />
-                    {`Soak: free video memory trend ${r().slopeMiBPerMin >= 0 ? "+" : "−"}${fmt(Math.abs(r().slopeMiBPerMin), 1)} MiB/min over the final third of ${formatClock(run().soakSeconds)}`}
+                    {`Soak: free graphics memory trend ${r().slopeMiBPerMin >= 0 ? "+" : "−"}${fmt(Math.abs(r().slopeMiBPerMin), 1)} MiB/min over the final third of ${formatClock(run().soakSeconds)}`}
                   </li>
                 )}
               </Show>

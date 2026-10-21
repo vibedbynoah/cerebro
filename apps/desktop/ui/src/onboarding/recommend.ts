@@ -63,7 +63,7 @@ const TIER: Record<Fit, number> = { gpu: 0, "moe-offload": 1, split: 2, "too-lar
 // Labels and reasons describe the memory mechanism, never a speed ranking: nothing is measured at
 // this point, and which offloaded model ends up faster depends on the machine (docs/CLAIMS.md).
 const LABEL: Record<Fit, string> = {
-  gpu: "Fits in video memory",
+  gpu: "Fits in graphics memory",
   "moe-offload": "Tuning matters most",
   split: "Runs partly from system memory",
   "too-large": "Too large for this machine",

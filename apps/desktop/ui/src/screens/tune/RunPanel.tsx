@@ -580,7 +580,7 @@ function SoakCard(props: { view: TuneView }): JSX.Element {
       </div>
       <Show
         when={current()}
-        fallback={<p class="tune-card__empty">After the quality gate, the fastest remaining candidate runs under sustained load while free video memory is watched.</p>}
+        fallback={<p class="tune-card__empty">After the quality gate, the fastest remaining candidate runs under sustained load while free graphics memory is watched.</p>}
       >
         {(s) => {
           const last = () => s().samples.at(-1);
@@ -655,7 +655,7 @@ export function RunPanel(props: { session: TuneSession; onNewTune: () => void })
             <p class="probe-line">
               <Icon name="gpu" size={14} />
               <span>
-                <span class="mono">{fmt(p().vramFreeGiB, 2)} GiB</span> of {fmt(v().run?.vramTotalGiB ?? 0, 0)} GiB video memory free.
+                <span class="mono">{fmt(p().vramFreeGiB, 2)} GiB</span> of {fmt(v().run?.vramTotalGiB ?? 0, 0)} GiB graphics memory free.
               </span>
               <Show
                 when={p().integrity === "verified"}
