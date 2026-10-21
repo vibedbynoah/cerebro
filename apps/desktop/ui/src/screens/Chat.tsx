@@ -44,6 +44,7 @@ import type { CloudProvider, LibraryModel } from "../service/types";
 import { HighlightQuery } from "../components/ChatSearch";
 import { Composer } from "./chat/Composer";
 import { LiveDock } from "./chat/LiveDock";
+import { loadPresets, removePreset, savePreset } from "../lib/chat/presets";
 import { VoiceMode } from "./chat/VoiceMode";
 import { readPref, writePref } from "../lib/storage";
 import { MessageView } from "./chat/Message";
@@ -69,6 +70,21 @@ export function Chat(): JSX.Element {
     if (!modelId() && models().length) setModelId(models()[0]!.id);
   });
   const model = () => models().find((m) => m.id === modelId());
+  // A model's own saved settings come back when it is picked (lib/chat/presets.ts).
+  const [presetIds, setPresetIds] = createSignal(new Set(Object.keys(loadPresets())));
+  createEffect(
+    on(
+      modelId,
+      (id) => {
+        const p = id ? loadPresets()[id] : undefined;
+        if (!p) return;
+        setPrefs(p.prefs);
+        setSampler(p.sampler);
+        notify("This model's settings", "Its saved settings are back. Change them in the live panel.", "info");
+      },
+      { defer: true },
+    ),
+  );
   // Cloud models the user added in Settings > Cloud models: "cloud:<provider>/<model>".
   const [cloud] = createResource(() => service.cloudProviders().catch(() => [] as CloudProvider[]));
   const cloudModels = createMemo(() => (cloud() ?? []).flatMap((p) => p.models.map((m) => ({ id: `cloud:${p.id}/${m}`, name: m, provider: p.name }))));
@@ -1073,6 +1089,17 @@ export function Chat(): JSX.Element {
               thinking={prefs().effort !== "low" && prefs().source !== "none"}
               setThinking={(on) => setPrefs(on ? { effort: prefs().effort === "low" ? "medium" : prefs().effort, source: prefs().source === "none" ? "native" : prefs().source } : { effort: "low" })}
               onOpenPrompt={() => setPanel("prompt")}
+              hasPreset={presetIds().has(modelId())}
+              onSavePreset={() => {
+                savePreset(modelId(), prefs(), sampler());
+                setPresetIds(new Set(Object.keys(loadPresets())));
+                notify("Saved for this model", "These settings come back whenever you pick it.", "success");
+              }}
+              onClearPreset={() => {
+                removePreset(modelId());
+                setPresetIds(new Set(Object.keys(loadPresets())));
+                notify("Forgotten", "This model uses your general settings again.");
+              }}
               onUnload={() => {
                 const id = modelId();
                 void service.unloadModel(id).then(

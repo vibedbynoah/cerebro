@@ -1,33 +1,24 @@
-import { describe, expect, it } from "vitest";
-import { applyPreset, chatToolRules, DEFAULT_POLICY, parsePolicy, PRESETS, presetOf, type Policy } from "../../ui/src/lib/permissions";
+import { beforeEach, describe, expect, it } from "vitest";
+import { loadPresets, PRESETS_KEY, removePreset, savePreset } from "../../ui/src/lib/chat/presets";
+import { DEFAULT_PREFS } from "../../ui/src/lib/chat/prompt";
+import { DEFAULT_SAMPLER } from "../../ui/src/service/chat-types";
 
-describe("tool presets", () => {
-  it("the default policy is the 'Ask before changes' preset", () => {
-    expect(presetOf(DEFAULT_POLICY)).toBe("ask");
+describe("per-model presets", () => {
+  beforeEach(() => localStorage.clear());
+
+  it("saves, loads and forgets a model's settings", () => {
+    savePreset("m1", { ...DEFAULT_PREFS, effort: "high" }, { ...DEFAULT_SAMPLER, temperature: 0.2 });
+    const p = loadPresets()["m1"]!;
+    expect(p.prefs.effort).toBe("high");
+    expect(p.sampler.temperature).toBe(0.2);
+    removePreset("m1");
+    expect(loadPresets()["m1"]).toBeUndefined();
   });
 
-  it("each preset round-trips, keeps the user's MCP rules, and reaches the chat request", () => {
-    const start: Policy = { ...DEFAULT_POLICY, rules: { ...DEFAULT_POLICY.rules, "github/create_issue": "deny" } };
-    for (const x of PRESETS) {
-      const p = applyPreset(start, x.id);
-      expect(presetOf(p)).toBe(x.id);
-      expect(p.rules["github/create_issue"]).toBe("deny");
-      expect(p.access).toBe(x.access);
-      expect(chatToolRules(p, ["cerebro/write_file"], true).access).toBe(x.access);
-    }
-    expect(chatToolRules(applyPreset(start, "read-only"), ["cerebro/write_file"], true).rules["cerebro/write_file"]).toBe("deny");
-    expect(chatToolRules(applyPreset(start, "full-auto"), ["cerebro/run_command", "other/tool"], true).rules).toEqual({ "cerebro/run_command": "allow", "other/tool": "allow" });
-  });
-
-  it("changing one rule makes it custom", () => {
-    const p = applyPreset(DEFAULT_POLICY, "auto-edit");
-    expect(presetOf({ ...p, rules: { ...p.rules, "cerebro/run_command": "always" } })).toBeNull();
-    expect(presetOf({ ...p, access: "full" })).toBeNull();
-  });
-
-  it("access survives storage and bad values fall back to workspace", () => {
-    expect(parsePolicy(JSON.stringify({ defaultRule: "ask", rules: {}, access: "full" })).access).toBe("full");
-    expect(parsePolicy(JSON.stringify({ defaultRule: "ask", rules: {}, access: "root" })).access).toBe("workspace");
-    expect(parsePolicy(JSON.stringify({ defaultRule: "ask", rules: {} })).access).toBe("workspace");
+  it("drops anything unreadable or out of range", () => {
+    localStorage.setItem(PRESETS_KEY, JSON.stringify({ ok: { prefs: { ...DEFAULT_PREFS }, sampler: DEFAULT_SAMPLER }, bad: { prefs: { effort: "ultra" } }, worse: 3 }));
+    expect(Object.keys(loadPresets())).toEqual(["ok"]);
+    localStorage.setItem(PRESETS_KEY, "not json");
+    expect(loadPresets()).toEqual({});
   });
 });

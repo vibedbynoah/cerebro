@@ -20,6 +20,10 @@ export function LiveDock(props: {
   setThinking: (on: boolean) => void;
   onOpenPrompt: () => void;
   onUnload: () => void;
+  /** This model has its own saved settings. */
+  hasPreset: boolean;
+  onSavePreset: () => void;
+  onClearPreset: () => void;
 }): JSX.Element {
   const feed = useMetrics();
   const s = () => feed.snapshot();
@@ -140,6 +144,17 @@ export function LiveDock(props: {
           <Icon name="code" size={14} />
           <span class="btn__label">System prompt</span>
         </button>
+        <div class="dock__preset">
+          <button type="button" class="btn btn--secondary btn--sm" onClick={() => props.onSavePreset()}>
+            Save as this model's settings
+          </button>
+          <Show when={props.hasPreset}>
+            <button type="button" class="btn btn--tertiary btn--sm" onClick={() => props.onClearPreset()}>
+              Forget them
+            </button>
+          </Show>
+        </div>
+        <p class="dock__note">{props.hasPreset ? "This model has its own settings: they come back whenever you pick it." : "Saved settings come back whenever you pick this model."}</p>
       </section>
 
       <Show when={model()}>
