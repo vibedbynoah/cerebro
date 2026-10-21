@@ -41,6 +41,7 @@ import type { EngineSwitch, LocalApiView, McpServerView, RemoteOptions, RemotePa
 } from "./types";
 
 import type { ChatEvent, ChatRequest } from "./chat-types";
+import type { McpCatalogueEntry } from "../lib/mcp-catalogue";
 import type { HistoryRange, MetricsSeries, MetricsSnapshot, RequestDetail } from "./monitor-types";
 
 export type Unsubscribe = () => void;
@@ -121,6 +122,8 @@ export interface CerebroService {
   recordingLevel(): Promise<number>;
   /** Resolves with the length of the spoken audio, in seconds, as it starts playing. */
   speakSample(id: string, text: string): Promise<number>;
+  /** Tools > Browse servers: a live search of the official MCP registry (desktop). */
+  mcpRegistrySearch(query: string): Promise<McpCatalogueEntry[]>;
   // ---- Cluster: one model across several computers (screens/Cluster.tsx). ----
   clusterShareGet(): Promise<ClusterShare>;
   clusterShareStart(modelId: string): Promise<ClusterShare>;

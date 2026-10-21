@@ -122,6 +122,12 @@ pub async fn model_load(engine: State<'_, Engine>, stt: SttState<'_>, id: String
     Ok(loaded_json(&engine, &stt))
 }
 
+/// Tools > Browse servers, "Official registry": a live search of registry.modelcontextprotocol.io.
+#[tauri::command]
+pub async fn mcp_registry_search(query: String) -> Result<Vec<crate::mcp_registry::Entry>, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::mcp_registry::search(&query)).await.map_err(|_| "The search failed.".to_owned())?
+}
+
 /// Cluster: whether this computer is shared as a worker, its pairing code and addresses.
 #[tauri::command]
 pub fn cluster_share_get() -> crate::cluster::ShareView {

@@ -1,3 +1,4 @@
+import type { McpCatalogueEntry } from "../lib/mcp-catalogue";
 /**
  * The desktop app's CerebroService: every number and model comes from Cerebro Engine running in the
  * app process (src-tauri/src/engine.rs), through IPC commands. Nothing here is invented: a feature
@@ -201,6 +202,7 @@ export function createDesktopService(local: CerebroService): CerebroService {
     startRecording: () => invoke<void>("mic_start"),
     recordingLevel: () => invoke<number>("mic_level"),
     speakSample: (id, text) => invoke<number>("tts_sample", { modelId: id, text }),
+    mcpRegistrySearch: (query) => invoke<McpCatalogueEntry[]>("mcp_registry_search", { query }),
     clusterShareGet: () => invoke<ClusterShare>("cluster_share_get"),
     clusterShareStart: (id) => invoke<ClusterShare>("cluster_share_start", { id }),
     clusterShareStop: () => invoke<ClusterShare>("cluster_share_stop"),

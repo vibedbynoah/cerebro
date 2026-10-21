@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-mcp-registry-search"
+description = "Enables the mcp_registry_search command without any pre-configured scope."
+commands.allow = ["mcp_registry_search"]
+
+[[permission]]
+identifier = "deny-mcp-registry-search"
+description = "Denies the mcp_registry_search command without any pre-configured scope."
+commands.deny = ["mcp_registry_search"]

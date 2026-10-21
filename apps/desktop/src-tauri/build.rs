@@ -29,6 +29,7 @@ const COMMANDS: &[&str] = &[
     "image_generate",
     "cloud_presets",
     "cluster_share_get",
+    "mcp_registry_search",
     "cluster_share_start",
     "cluster_share_stop",
     "cluster_discover",

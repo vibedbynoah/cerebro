@@ -751,6 +751,14 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
         }, 200);
       }),
     hubCancel: (repo, path) => later(0, () => void hubCancelled.add(`${repo}/${path}`)),
+    // The official MCP registry: two example servers (the preview contacts nothing).
+    mcpRegistrySearch: (q) =>
+      later(300, () =>
+        [
+          { id: "weather-example", name: "Weather (example)", category: "Registry", description: "Forecasts for a place. An example of a registry server.", install: { command: "npx", args: ["-y", "@example/weather-mcp@1.2.0"] }, env: [{ name: "WEATHER_KEY", label: "Your API key", secret: true, url: "https://example.com" }], risk: "run" as const, offline: false, homepage: "https://example.com/weather-mcp" },
+          { id: "notes-example", name: "Notes (example)", category: "Registry", description: "Search and write notes. An example of a registry server.", install: { command: "uvx", args: ["notes-mcp==0.3.1"] }, env: [], risk: "run" as const, offline: false, homepage: "https://example.com/notes-mcp" },
+        ].filter((e) => !q || `${e.name} ${e.description}`.toLowerCase().includes(q.toLowerCase())),
+      ),
     // Cluster: sharing is an in-memory flag; two example computers answer the search, and a load
     // returns example link figures (the preview connects to nothing).
     clusterShareGet: () => later(0, () => ({ ...clusterShare })),

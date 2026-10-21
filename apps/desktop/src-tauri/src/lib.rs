@@ -33,6 +33,7 @@ mod tts;
 mod images;
 mod cloud;
 mod cluster;
+mod mcp_registry;
 mod vision_input;
 mod hub;
 mod kv_store;
@@ -74,6 +75,7 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::image_generate,
             commands::cloud_presets,
             commands::cluster_share_get,
+            commands::mcp_registry_search,
             commands::cluster_share_start,
             commands::cluster_share_stop,
             commands::cluster_discover,

@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
+import { createResource, createEffect, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { Section } from "../../components/Screen";
 import { MCP_CATALOGUE, type McpCatalogueEntry, type McpRisk } from "../../lib/mcp-catalogue";
 import { notify } from "../../lib/toast";
@@ -44,6 +44,10 @@ export function McpServers(): JSX.Element {
   // Browse servers: text and category filter the catalogue; choosing an entry pre-fills the form.
   const [browseQuery, setBrowseQuery] = createSignal("");
   const [browseCategory, setBrowseCategory] = createSignal("");
+  // The bundled catalogue, or a live search of the official MCP registry (on Enter).
+  const [source, setSource] = createSignal<"bundled" | "registry">("bundled");
+  const [registryQuery, setRegistryQuery] = createSignal<string | null>(null);
+  const [registry] = createResource(registryQuery, (q: string) => service.mcpRegistrySearch(q));
   const [chosen, setChosen] = createSignal<McpCatalogueEntry | null>(null);
   const [chosenEnv, setChosenEnv] = createSignal<Record<string, string>>({});
   let formCard: HTMLFormElement | undefined;
@@ -168,7 +172,8 @@ export function McpServers(): JSX.Element {
     }
   };
 
-  const browseResults = () => {
+  const browseResults = (): readonly McpCatalogueEntry[] => {
+    if (source() === "registry") return registry.error ? [] : (registry() ?? []);
     const category = browseCategory();
     const inCategory = category ? MCP_CATALOGUE.filter((e) => e.category === category) : MCP_CATALOGUE;
     const query = browseQuery().trim().toLowerCase();
@@ -342,15 +347,35 @@ export function McpServers(): JSX.Element {
             Real servers from the official MCP project and their vendors. "Add" fills the form below with the command and the keys that server
             needs.
           </p>
-          <div class="mcp__browse-controls">
+          <fieldset class="segmented segmented--sm mcp__source">
+            <legend class="sr-only">Where to look</legend>
+            <label class="segmented__option" data-press>
+              <input type="radio" name="mcp-source" checked={source() === "bundled"} onChange={() => setSource("bundled")} />
+              <span>Checked list ({MCP_CATALOGUE.length})</span>
+            </label>
+            <label class="segmented__option" data-press>
+              <input type="radio" name="mcp-source" checked={source() === "registry"} onChange={() => setSource("registry")} />
+              <span>Official MCP registry</span>
+            </label>
+          </fieldset>
+          <form class="mcp__browse-controls" onSubmit={(e) => {
+            e.preventDefault();
+            if (source() === "registry") setRegistryQuery(browseQuery().trim());
+          }}>
             <input
               class="tools-search mcp__search"
               type="search"
-              placeholder="Search servers"
+              placeholder={source() === "registry" ? "Search the registry, then press Enter" : "Search servers"}
               aria-label="Search servers"
               value={browseQuery()}
               onInput={(e) => setBrowseQuery(e.currentTarget.value)}
             />
+            <Show when={source() === "registry"}>
+              <button class="btn btn--secondary btn--sm" type="submit">
+                Search
+              </button>
+            </Show>
+            <Show when={source() === "bundled"}>
             <div class="mcp__chips" role="group" aria-label="Filter by category">
               <button class="mcp__chip" type="button" aria-pressed={browseCategory() === ""} onClick={() => setBrowseCategory("")}>
                 All
@@ -368,9 +393,25 @@ export function McpServers(): JSX.Element {
                 )}
               </For>
             </div>
-          </div>
+            </Show>
+          </form>
           <p class="hint" data-testid="mcp-catalogue-count">
-            {browseResults().length} of {MCP_CATALOGUE.length} servers
+            <Show
+              when={source() === "registry"}
+              fallback={
+                <>
+                  {browseResults().length} of {MCP_CATALOGUE.length} servers
+                </>
+              }
+            >
+              {registry.loading
+                ? "Searching the registry…"
+                : registry.error
+                  ? String((registry.error as Error)?.message ?? registry.error)
+                  : registryQuery() === null
+                    ? "Every server published to the official MCP registry. Registry servers are not checked by Cerebro: read each one's page before you add it."
+                    : `${browseResults().length} servers from the registry`}
+            </Show>
           </p>
           <ul class="mcp__grid">
             <For each={browseResults()} fallback={<li class="hint">Nothing matches. Clear the search or pick another category.</li>}>

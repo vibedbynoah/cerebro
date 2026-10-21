@@ -229,6 +229,7 @@ const WITH_ARGS = {
   disk_unlink: (p) => isPlain(p) && hasOnlyKeys(p, ["groupId"]) && isGroupId(p.groupId),
   model_reveal: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && isModelId(p.id),
   tune_start: (p) => isPlain(p) && hasOnlyKeys(p, ["modelId", "profile", "integrityCheck"]) && isModelId(p.modelId) && ["chat", "coding", "long-docs"].includes(/** @type {string} */ (p.profile)) && typeof p.integrityCheck === "boolean",
+  mcp_registry_search: (p) => isPlain(p) && hasOnlyKeys(p, ["query"]) && typeof p.query === "string" && p.query.length <= 100,
   cluster_share_start: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && isModelId(p.id),
   cluster_load: (p) =>
     isPlain(p) &&

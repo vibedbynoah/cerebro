@@ -41,6 +41,7 @@
     "allow-image-generate",
     "allow-cloud-presets",
     "allow-cluster-share-get",
+    "allow-mcp-registry-search",
     "allow-cluster-share-start",
     "allow-cluster-share-stop",
     "allow-cluster-discover",

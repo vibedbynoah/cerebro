@@ -46,7 +46,7 @@ export const FEATURE_GROUPS: readonly FeatureGroup[] = [
       { title: "Orchestrate", text: "The model plans, splits the work across fresh instances and checks it through a shared ledger, for hard problems.", icon: "plugins", route: "chat" },
       { title: "Images in chat", text: "Attach an image and a vision model describes or answers about it.", icon: "images", route: "chat" },
       { title: "Talk and listen", text: "Push to talk with speech recognition on this computer, and replies read aloud.", icon: "chat", route: "chat", isNew: true },
-      { title: "Tools", text: "Models call tools and MCP servers, each behind your permission.", icon: "tools", route: "tools" },
+      { title: "Tools and the MCP library", text: "Models call tools and MCP servers, each behind your permission. Browse a checked list of servers, or search everything in the official MCP registry and add one in a click.", icon: "tools", route: "tools", isNew: true },
     ],
   },
   {
