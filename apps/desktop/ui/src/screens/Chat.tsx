@@ -34,6 +34,7 @@ import { useService } from "../service/context";
 import type { CloudProvider, LibraryModel } from "../service/types";
 import { Composer } from "./chat/Composer";
 import { LiveDock } from "./chat/LiveDock";
+import { VoiceMode } from "./chat/VoiceMode";
 import { readPref, writePref } from "../lib/storage";
 import { MessageView } from "./chat/Message";
 import type { ToolAnswer, ToolDecision } from "./chat/ToolCard";
@@ -483,9 +484,27 @@ export function Chat(): JSX.Element {
       }
       case "help":
         return setHelpOpen(true);
+      case "voice":
+        return setVoice(true);
     }
   };
   const [helpOpen, setHelpOpen] = createSignal(false);
+  const [voice, setVoice] = createSignal(false);
+
+  /** Voice mode's turn: send what was said, and resolve with the reply once it has finished. */
+  const askAndWait = (text: string): Promise<string> =>
+    new Promise((resolve, reject) => {
+      send(text, []);
+      const t0 = Date.now();
+      const tick = setInterval(() => {
+        if (streaming() && Date.now() - t0 < 600_000) return;
+        if (Date.now() - t0 < 300) return;
+        clearInterval(tick);
+        const last = [...(current()?.messages ?? [])].reverse().find((m) => m.role === "assistant");
+        if (last?.error) reject(new Error(last.error));
+        else resolve(last?.text ?? "");
+      }, 150);
+    });
 
   /** /image: on the desktop, the first image model in the library makes it; the browser preview
    *  draws its illustrative image through the mock chat as before. */
@@ -609,6 +628,9 @@ export function Chat(): JSX.Element {
           <button class="icon-btn" type="button" aria-label="Memory" aria-pressed={panel() === "memory"} onClick={() => setPanel(panel() === "memory" ? "none" : "memory")}>
             <Icon name="memory" size={18} />
           </button>
+          <button class="icon-btn" type="button" aria-label="Voice mode" title="Voice mode: talk hands-free" onClick={() => setVoice(true)}>
+            <Icon name="mic" size={18} />
+          </button>
           <button class="icon-btn" type="button" aria-label="Live panel (Ctrl .)" title="Live panel (Ctrl .)" aria-pressed={panel() === "dock"} onClick={() => setPanel(panel() === "dock" ? "none" : "dock")}>
             <Icon name="activity" size={18} />
           </button>
@@ -624,6 +646,9 @@ export function Chat(): JSX.Element {
           </Show>
         </div>
 
+        <Show when={voice()}>
+          <VoiceMode onAsk={askAndWait} onClose={() => setVoice(false)} />
+        </Show>
         <Dialog.Root open={helpOpen()} onOpenChange={(d) => setHelpOpen(d.open)} lazyMount unmountOnExit>
           <Portal>
             <Dialog.Backdrop class="guide-backdrop" />

@@ -1261,3 +1261,100 @@
   font-size: var(--text-small);
   white-space: nowrap;
 }
+
+/* ---- Voice mode (screens/chat/VoiceMode.tsx) ---- */
+
+.voice {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: var(--space-4);
+  padding: var(--space-6);
+  background: color-mix(in oklch, var(--color-bg) 94%, transparent);
+  text-align: center;
+}
+
+.voice__orb {
+  --level: 0;
+  width: 160px;
+  height: 160px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, var(--color-accent-text), var(--color-accent) 60%, transparent 72%);
+  box-shadow: 0 0 calc(24px + 60px * var(--level)) color-mix(in oklch, var(--color-accent) 55%, transparent);
+  transform: scale(calc(0.9 + 0.25 * var(--level)));
+  transition: transform 90ms linear, box-shadow 90ms linear;
+}
+
+.voice[data-phase="thinking"] .voice__orb,
+.voice[data-phase="transcribing"] .voice__orb {
+  animation: voice-pulse 1.4s ease-in-out infinite;
+}
+
+.voice[data-phase="speaking"] .voice__orb {
+  animation: voice-pulse 0.9s ease-in-out infinite;
+}
+
+@keyframes voice-pulse {
+  50% {
+    transform: scale(1.08);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voice__orb {
+    animation: none !important;
+    transition: none;
+  }
+}
+
+.voice__phase {
+  margin: 0;
+  font-size: 1.4rem;
+  font-weight: 600;
+}
+
+.voice__heard,
+.voice__reply {
+  max-width: 640px;
+  margin: 0;
+  color: var(--color-text-secondary);
+}
+
+.voice__who {
+  margin-right: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--text-small);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.voice__error {
+  margin: 0;
+  color: var(--color-danger);
+}
+
+.voice__sens {
+  display: grid;
+  gap: 4px;
+  width: min(300px, 80vw);
+  color: var(--color-text-muted);
+  font-size: var(--text-small);
+}
+
+.voice__sens input {
+  accent-color: var(--color-accent);
+}
+
+.voice__actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.voice__hint {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-small);
+}

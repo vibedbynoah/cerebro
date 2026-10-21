@@ -255,6 +255,7 @@ const IMAGE_TYPE = /^image\/(png|jpeg|webp|gif)$/;
  */
 export function createMockService(options: MockServiceOptions = {}): CerebroService {
   let cloudList: CloudProvider[] = [];
+  let recordingSince = 0;
   let clusterShare: ClusterShare = { sharing: false, model: null, code: null, port: null, addresses: ["192.168.1.10"], computer: "THIS-PC" };
   const hubDone = new Set<string>();
   const hubCancelled = new Set<string>();
@@ -706,7 +707,10 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
         };
       }),
 
-    startRecording: () => later(0, () => undefined),
+    startRecording: () =>
+      later(0, () => {
+        recordingSince = Date.now();
+      }),
     // Model Hub (the live Hub, shown in the browser build with ?hub=live): example repositories and
     // files, a GGUF header per file, and a download that progresses over about two seconds.
     hubSearch: (q) =>
@@ -831,7 +835,13 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
         clearTimeout(speechTimer);
         speechDone?.();
       }),
-    recordingLevel: () => later(0, () => 0.15 + Math.random() * 0.85),
+    // A short phrase after the microphone starts (0.3 s to 1.5 s), then quiet: what voice mode's
+    // end-of-speech detection hears in the preview.
+    recordingLevel: () =>
+      later(0, () => {
+        const t = Date.now() - recordingSince;
+        return t > 300 && t < 1500 ? 0.3 + Math.random() * 0.6 : 0.01;
+      }),
 
     transcribeSample: (id, seconds) =>
       later(latency.test, () => {

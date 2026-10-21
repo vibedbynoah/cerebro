@@ -1,4 +1,5 @@
 import type { Page } from "@playwright/test";
+import { COMMANDS } from "../../ui/src/lib/chat/commands";
 import { expect, test } from "./fixtures";
 
 async function openChat(page: Page): Promise<void> {
@@ -34,7 +35,7 @@ test.describe("/ commands", () => {
     await box(page).fill("/help");
     await box(page).press("Enter");
     await expect(page.getByTestId("command-help")).toBeVisible();
-    await expect(page.getByTestId("command-help").locator("dt")).toHaveCount(19);
+    await expect(page.getByTestId("command-help").locator("dt")).toHaveCount(COMMANDS.length);
     await page.keyboard.press("Escape");
   });
 

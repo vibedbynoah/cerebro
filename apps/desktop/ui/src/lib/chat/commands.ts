@@ -25,6 +25,7 @@ export const COMMANDS: readonly CommandDef[] = [
   { name: "max", args: "<tokens>", description: "Set the longest reply, in tokens." },
   { name: "image", args: "<prompt>", description: "Make an image with your image model and put it in the chat.", aliases: ["imagine"] },
   { name: "say", args: "", description: "Read the last reply aloud." },
+  { name: "voice", args: "", description: "Talk hands-free: it listens, answers aloud, and listens again." },
   { name: "export", args: "md | json", description: "Save this chat as Markdown or JSON." },
   { name: "copy", args: "", description: "Copy the last reply." },
   { name: "plan", args: "", description: "Plan first: the model looks around, then shows a plan to approve." },

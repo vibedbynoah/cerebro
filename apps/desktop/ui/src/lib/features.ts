@@ -45,6 +45,7 @@ export const FEATURE_GROUPS: readonly FeatureGroup[] = [
       { title: "Thinking and review passes", text: "Reasoning models think within a budget you set, and answers can be checked and corrected before you see them.", icon: "check", route: "chat", isNew: true },
       { title: "Orchestrate", text: "The model plans, splits the work across fresh instances and checks it through a shared ledger, for hard problems.", icon: "plugins", route: "chat" },
       { title: "Images in chat", text: "Attach an image and a vision model describes or answers about it.", icon: "images", route: "chat" },
+      { title: "Voice mode", text: "Talk hands-free: it listens until you pause, answers aloud, and listens again. Speech is recognised and spoken on this computer.", icon: "mic", route: "chat", isNew: true },
       { title: "Talk and listen", text: "Push to talk with speech recognition on this computer, and replies read aloud.", icon: "chat", route: "chat", isNew: true },
       { title: "Tools and the MCP library", text: "Models call tools and MCP servers, each behind your permission. Browse a checked list of servers, or search everything in the official MCP registry and add one in a click.", icon: "tools", route: "tools", isNew: true },
     ],
