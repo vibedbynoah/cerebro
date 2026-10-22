@@ -1173,12 +1173,32 @@ fn with_llama(model: Model, tok: Tokenizer, m: &LibraryModel, ctx: usize, gpu_la
         return Err((model, tok));
     }
     let ctx = ctx.clamp(512, model.cfg.ctx_train.max(512));
-    let vram = cerebro_engine::hw::gpus().first().map_or(0, |g| g.vram_free);
-    let plan = match cerebro_engine::gpu::plan_for(&model, ctx, vram, gpu_layers) {
-        Ok(p) if p.layout == cerebro_engine::placement::Layout::Split && p.gpu_layers > 0 => p,
-        _ => return Err((model, tok)),
+    let nvidia = cerebro_engine::hw::gpus();
+    let (build, plan, layers) = if let Some(g) = nvidia.first() {
+        // NVIDIA: only a split goes to llama.cpp (a model that fits runs faster on Cerebro's engine).
+        match cerebro_engine::gpu::plan_for(&model, ctx, g.vram_free, gpu_layers) {
+            Ok(p) if p.layout == cerebro_engine::placement::Layout::Split && p.gpu_layers > 0 => {
+                let n = p.gpu_layers;
+                (crate::llama_backend::Build::Cuda, p, n)
+            }
+            _ => return Err((model, tok)),
+        }
+    } else {
+        // AMD / Intel graphics the portable backend would use: llama.cpp's Vulkan build.
+        let integrated_ok = cerebro_engine::switches::enabled(cerebro_engine::switches::PORTABLE_INTEGRATED);
+        let usable = cerebro_engine::switches::enabled(cerebro_engine::switches::PORTABLE_GPU)
+            && cerebro_engine::portable::adapters().iter().any(|a| a.kind.contains("Discrete") || (integrated_ok && a.kind.contains("Integrated")));
+        if !usable {
+            return Err((model, tok));
+        }
+        let mut p = match cerebro_engine::gpu::plan_for(&model, ctx, 0, None) {
+            Ok(p) => p,
+            Err(_) => return Err((model, tok)),
+        };
+        p.gpu_layers = p.total_layers;
+        (crate::llama_backend::Build::Vulkan, p, 999)
     };
-    let dir = match crate::llama_backend::install(crate::llama_backend::Build::Cuda, |done, total| {
+    let dir = match crate::llama_backend::install(build, |done, total| {
         if done % (64 << 20) < (1 << 20) {
             eprintln!("llama.cpp download: {} of {} MB", done >> 20, total >> 20);
         }
@@ -1189,10 +1209,13 @@ fn with_llama(model: Model, tok: Tokenizer, m: &LibraryModel, ctx: usize, gpu_la
             return Err((model, tok));
         }
     };
-    match crate::llama_backend::Server::start(&dir, Path::new(&m.path), plan.gpu_layers, ctx) {
+    match crate::llama_backend::Server::start(&dir, Path::new(&m.path), layers, ctx) {
         Ok(server) => {
             let mut p = plan.clone();
-            p.notes.insert(0, format!("llama.cpp runs this split ({} of {} layers on the graphics card): it reads prompts faster than Cerebro's engine does for splits today.", plan.gpu_layers, plan.total_layers));
+            p.notes.insert(0, match build {
+                crate::llama_backend::Build::Cuda => format!("llama.cpp runs this split ({} of {} layers on the graphics card): it reads prompts faster than Cerebro's engine does for splits today.", plan.gpu_layers, plan.total_layers),
+                crate::llama_backend::Build::Vulkan => "llama.cpp's Vulkan build runs this model on your graphics card: faster than Cerebro's engine on AMD and Intel graphics today.".to_owned(),
+            });
             let dialect = crate::toolcall::dialect_from_template(model.gguf().str("tokenizer.chat_template").unwrap_or(""));
             // The model stays open for its tokenizer and metadata; its weights are not read here.
             let session = Session::placeholder(&model);
