@@ -25,6 +25,7 @@ mod builtin_tools;
 mod agent_tools;
 mod trainer;
 mod engine;
+mod bench;
 mod dedup;
 mod gguf_edit;
 mod tune_screen;
@@ -100,6 +101,9 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::switches_reset,
             commands::tune_machine_start,
             commands::tune_machine_last,
+            commands::bench_run,
+            commands::bench_history,
+            commands::bench_stop,
             mcp::mcp_config_get,
             mcp::mcp_config_save,
             mcp::mcp_status,

@@ -10,6 +10,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type { CerebroService, Unsubscribe } from "./service";
 import type { ChatEvent, ChatRequest } from "./chat-types";
+import type { BenchEvent, BenchRun } from "./bench-types";
 import type { HistoryRange, MetricsSeries, MetricsSnapshot, RequestDetail } from "./monitor-types";
 import type { CatalogModel, DedupeResult, DiskReport, DuplicateGroup, GpuInfo, HardwareProfile, KvStoreUsage, LibraryModel, LiveStats, LoadedModel, LoadParams, ModelDetail, ModelSummary, NetworkState, GgufCopy, GeneratedImage } from "./types";
 import { CURRENT_CATALOG } from "./catalog";
@@ -227,6 +228,22 @@ export function createDesktopService(local: CerebroService): CerebroService {
     },
     cancelTune: (runId: string) => invoke<void>("tune_cancel", { runId }),
     resumeTune: (runId: string) => invoke<void>("tune_resume", { runId }),
+
+    async benchRun(modelId, placement, onEvent, signal) {
+      const channel = new Channel<BenchEvent>();
+      channel.onmessage = onEvent;
+      const stop = () => {
+        invoke("bench_stop").catch(() => {});
+      };
+      signal.addEventListener("abort", stop, { once: true });
+      try {
+        return await invoke<BenchRun>("bench_run", { modelId, placement, onEvent: channel });
+      } finally {
+        signal.removeEventListener("abort", stop);
+      }
+    },
+    benchHistory: () => invoke<BenchRun[]>("bench_history"),
+    benchStop: () => invoke<void>("bench_stop"),
 
     getMetrics: () => invoke<MetricsSnapshot>("metrics"),
     getMetricsHistory: (range: HistoryRange) => invoke<MetricsSeries>("metrics_history", { range }),

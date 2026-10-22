@@ -9,6 +9,10 @@
   max-width: 84rem;
 }
 
+.monitor .screen-tabs {
+  margin: var(--space-4) 0 0;
+}
+
 .monitor .screen-header {
   flex-wrap: wrap;
   row-gap: var(--space-4);

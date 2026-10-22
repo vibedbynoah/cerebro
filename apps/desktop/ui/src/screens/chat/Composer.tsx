@@ -1,5 +1,6 @@
-import { createSignal, For, onCleanup, Show, type JSX } from "solid-js";
+import { createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { Icon } from "../../components/icons";
+import { commandFor } from "../../lib/chat/commands";
 import { MODE_PRESETS, MODES, type Mode } from "../../lib/chat/modes";
 import { EFFORT_LABELS, EFFORTS, REASONING_LABELS, REASONING_NOTES, REASONING_SOURCES, VERBOSITIES, VERBOSITY_LABELS, type ChatPrefs, type Effort, type EffortLevel } from "../../lib/chat/prompt";
 import type { Attachment } from "../../lib/chat/store";
@@ -83,6 +84,9 @@ export function Composer(props: {
     setError("");
     area.style.height = "";
   };
+
+  /** The command the typed text names, when it names one of ours. */
+  const command = createMemo(() => commandFor(text()));
 
   const onKey = (e: KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
@@ -208,7 +212,7 @@ export function Composer(props: {
           ref={area}
           class="composer__input"
           rows="1"
-          placeholder={recording() ? "Listening…" : "Message the model. / for commands: /imagine a red fox in snow"}
+          placeholder={recording() ? "Listening…" : "Message the model, or type /bench to measure this computer"}
           aria-label="Message"
           onInput={(e) => {
             setText(e.currentTarget.value);
@@ -254,6 +258,14 @@ export function Composer(props: {
           </Show>
         </div>
       </div>
+      {/* A command we know runs here: say so before the message is sent, so nothing is lost. */}
+      <Show when={command()}>
+        {(c) => (
+          <p class="composer__hint composer__hint--command" data-testid="composer-command">
+            <kbd>Enter</kbd> runs {c().name} on this computer. The message is not sent to the model.
+          </p>
+        )}
+      </Show>
       <Show when={error()}>
         <p class="composer__error" role="alert">
           {error()}

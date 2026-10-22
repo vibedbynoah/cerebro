@@ -5,6 +5,7 @@ import { Icon } from "../components/icons";
 import { IllustrativeFlag } from "../components/Screen";
 import { SettingSwitch } from "../components/SettingSwitch";
 import { applyMode, loadSampler, MODE_PRESETS, modeOf, saveSampler, type Mode } from "../lib/chat/modes";
+import { parseCommand } from "../lib/chat/commands";
 import { buildRequest, DEFAULT_BASE_PROMPT, effectiveLevels, loadLevelEdits, loadPrefs, savePrefs, supportsNativeReasoning, type ChatPrefs, type Memory } from "../lib/chat/prompt";
 import {
   emptyConversation,
@@ -21,11 +22,13 @@ import {
   type LedgerState,
 } from "../lib/chat/store";
 import { chatToolRules, loadPolicy, mcpToolKey, savePolicy } from "../lib/permissions";
+import { hrefForMonitorTab } from "../lib/routes";
 import { notify } from "../lib/toast";
 import { useAppState } from "../state";
 import { DEFAULT_SAMPLER, LEDGER_FILES, type ChatTools, type ChatTurn, type LedgerFileName, type Sampler, type ToolActivity } from "../service/chat-types";
 import { useService } from "../service/context";
 import type { LibraryModel } from "../service/types";
+import { Arena } from "./chat/Arena";
 import { Composer } from "./chat/Composer";
 import { MessageView } from "./chat/Message";
 import type { ToolAnswer, ToolDecision } from "./chat/ToolCard";
@@ -65,6 +68,7 @@ export function Chat(): JSX.Element {
   const current = () => state.list.find((c) => c.id === currentId());
   const [memories, setMemories] = createSignal<Memory[]>(loadMemories());
   const [panel, setPanel] = createSignal<"none" | "memory" | "prompt">("none");
+  const [view, setView] = createSignal<"chat" | "arena">("chat");
   const [live, setLive] = createSignal<{ tps: number; ttft: number } | null>(null);
 
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -295,7 +299,29 @@ export function Chat(): JSX.Element {
     }
   };
 
+  /**
+   * A local command ("/bench") runs here, on this computer, and is never sent to the model. The
+   * Benchmark lab is a view on the Monitor screen, so the hash says which one to open.
+   */
+  const runCommand = (name: string) => {
+    if (name === "bench") {
+      location.hash = hrefForMonitorTab("benchmark");
+      notify("Benchmark lab", "Choose a model and run the benchmark on this computer.", "info");
+      return;
+    }
+    if (name === "arena") {
+      abort?.abort();
+      setView("arena");
+      notify("Arena", "Pick two models and ask them the same question.", "info");
+    }
+  };
+
   const send = (text: string, atts: Attachment[]) => {
+    const command = parseCommand(text);
+    if (command) {
+      runCommand(command.name);
+      return;
+    }
     const cid = ensureConversation();
     const conv = state.list.find((c) => c.id === cid)!;
     const fact = memoryCandidate(text);
@@ -351,7 +377,7 @@ export function Chat(): JSX.Element {
   );
 
   return (
-    <div class="screen chat" data-panel={panel() === "none" ? "closed" : "open"}>
+    <div class="screen chat" data-panel={view() === "chat" && panel() !== "none" ? "open" : "closed"} data-view={view()}>
       <aside class="chat-list" aria-label="Conversations">
         <button class="btn btn--primary chat-list__new" type="button" onClick={newChat} data-press>
           <Icon name="plus" size={16} />
@@ -373,62 +399,95 @@ export function Chat(): JSX.Element {
         </ul>
       </aside>
 
-      <section class="chat-main" aria-label="Chat">
+      <section class="chat-main" aria-label={view() === "arena" ? "Arena" : "Chat"} data-view={view()}>
         <header class="chat-head">
-          <h1 class="chat-head__title">Chat</h1>
-          <label class="chat-head__model">
-            <span class="sr-only">Model</span>
-            <select value={modelId()} onChange={(e) => setModelId(e.currentTarget.value)} aria-label="Model">
-              <For each={models()}>{(m) => <option value={m.id}>{m.name}</option>}</For>
-            </select>
-          </label>
-          <span class="chat-head__live mono" aria-live="off" data-testid="live-readout">
-            <Show when={live()}>
-              {(l) => (
-                <>
-                  {l().tps.toFixed(1)} tok/s · first token {l().ttft} ms
-                </>
-              )}
+          <h1 class="chat-head__title">{view() === "chat" ? "Chat" : "Arena"}</h1>
+          <div class="chat-tabs" role="group" aria-label="Chat view">
+            <button
+              class="chat-tabs__tab"
+              type="button"
+              aria-pressed={view() === "chat"}
+              onClick={() => setView("chat")}
+              data-testid="chat-tab"
+            >
+              Chat
+            </button>
+            <button
+              class="chat-tabs__tab"
+              type="button"
+              aria-pressed={view() === "arena"}
+              onClick={() => {
+                // A reply belongs to the conversation view; leaving it stops it rather than
+                // streaming unseen behind the Arena.
+                abort?.abort();
+                setView("arena");
+              }}
+              data-testid="arena-tab"
+            >
+              Arena
+            </button>
+          </div>
+          <Show when={view() === "chat"}>
+            <label class="chat-head__model">
+              <span class="sr-only">Model</span>
+              <select value={modelId()} onChange={(e) => setModelId(e.currentTarget.value)} aria-label="Model">
+                <For each={models()}>{(m) => <option value={m.id}>{m.name}</option>}</For>
+              </select>
+            </label>
+            <span class="chat-head__live mono" aria-live="off" data-testid="live-readout">
+              <Show when={live()}>
+                {(l) => (
+                  <>
+                    {l().tps.toFixed(1)} tok/s · first token {l().ttft} ms
+                  </>
+                )}
+              </Show>
+            </span>
+            {/* The web preview runs on example data; the desktop app's figures are measured. */}
+            <Show when={!__DESKTOP__}>
+              <IllustrativeFlag />
             </Show>
-          </span>
-          {/* The web preview runs on example data; the desktop app's figures are measured. */}
-          <Show when={!__DESKTOP__}>
-            <IllustrativeFlag />
+            <SamplerMenu sampler={sampler()} onChange={setSampler} />
+            <button class="icon-btn" type="button" aria-label="Memory" aria-pressed={panel() === "memory"} onClick={() => setPanel(panel() === "memory" ? "none" : "memory")}>
+              <Icon name="memory" size={18} />
+            </button>
           </Show>
-          <SamplerMenu sampler={sampler()} onChange={setSampler} />
-          <button class="icon-btn" type="button" aria-label="Memory" aria-pressed={panel() === "memory"} onClick={() => setPanel(panel() === "memory" ? "none" : "memory")}>
-            <Icon name="memory" size={18} />
-          </button>
         </header>
 
-        <div class="chat-thread" ref={thread} role="log" aria-live="polite" aria-relevant="additions">
-          <Show when={current()?.messages.length} fallback={<Empty onPick={(t) => send(t, [])} />}>
-            {/* The transcript's own heading: replies' Markdown headings (h3, h4) nest under it. */}
-            <h2 class="sr-only">Conversation</h2>
-            <For each={current()!.messages}>
-              {(m, i) => <MessageView m={m} last={i() === current()!.messages.length - 1} onRegenerate={regenerate} onMore={more} onToolDecide={(id, d) => decideTool(currentId(), m.id, id, d)} onToolAnswer={answerTool} />}
-            </For>
-          </Show>
+        <div class="chat-view" hidden={view() !== "chat"}>
+          <div class="chat-thread" ref={thread} role="log" aria-live="polite" aria-relevant="additions">
+            <Show when={current()?.messages.length} fallback={<Empty onPick={(t) => send(t, [])} />}>
+              {/* The transcript's own heading: replies' Markdown headings (h3, h4) nest under it. */}
+              <h2 class="sr-only">Conversation</h2>
+              <For each={current()!.messages}>
+                {(m, i) => <MessageView m={m} last={i() === current()!.messages.length - 1} onRegenerate={regenerate} onMore={more} onToolDecide={(id, d) => decideTool(currentId(), m.id, id, d)} onToolAnswer={answerTool} />}
+              </For>
+            </Show>
+          </div>
+
+          <Composer
+            levels={levels}
+            mode={modeOf(prefs(), sampler())}
+            onMode={pickMode}
+            prefs={prefs()}
+            setPrefs={setPrefs}
+            streaming={streaming()}
+            notes={built().notes}
+            onSend={send}
+            onStop={() => abort?.abort()}
+            onTranscribe={(s) => service.transcribe(s)}
+            onRecordStart={() => service.startRecording()}
+            onLevel={() => service.recordingLevel()}
+            onOpenPrompt={() => setPanel("prompt")}
+          />
         </div>
 
-        <Composer
-          levels={levels}
-          mode={modeOf(prefs(), sampler())}
-          onMode={pickMode}
-          prefs={prefs()}
-          setPrefs={setPrefs}
-          streaming={streaming()}
-          notes={built().notes}
-          onSend={send}
-          onStop={() => abort?.abort()}
-          onTranscribe={(s) => service.transcribe(s)}
-          onRecordStart={() => service.startRecording()}
-          onLevel={() => service.recordingLevel()}
-          onOpenPrompt={() => setPanel("prompt")}
-        />
+        <div class="chat-view" hidden={view() !== "arena"}>
+          <Arena models={models()} active={view() === "arena"} />
+        </div>
       </section>
 
-      <Show when={panel() !== "none"}>
+      <Show when={view() === "chat" && panel() !== "none"}>
         <aside class="chat-side card" aria-label={panel() === "memory" ? "Memory" : "System prompt"}>
           <div class="chat-side__head">
             <h2>{panel() === "memory" ? "Memory" : "System prompt"}</h2>

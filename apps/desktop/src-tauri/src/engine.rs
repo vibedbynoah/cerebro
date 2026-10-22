@@ -624,6 +624,8 @@ enum Job {
     Describe { id: String, data: String, reply: Sender<Result<String, String>> },
     /// The Tune screen's run (tune_screen.rs): measured on the engine thread, which owns the model.
     TuneModel { hub: Arc<crate::tune_screen::TuneHub> },
+    /// The Benchmark lab's run (bench.rs): one model, three depths and twenty questions.
+    Benchmark { model: LibraryModel, placement: String, events: crate::bench::BenchSink, reply: Sender<Result<crate::bench::BenchRun, String>> },
 }
 
 /// Cheap to clone: every field is shared.
@@ -675,6 +677,9 @@ struct Loaded {
     /// How this model writes tool calls, read from its chat template.
     dialect: crate::toolcall::Dialect,
     placement: Option<cerebro_engine::placement::Plan>,
+    /// The number of graphics-card layers the load forced (None: as many as fit). Kept so a later
+    /// run can measure the same placement the user chose.
+    gpu_layers: Option<usize>,
     /// The vision encoder, loaded the first time an image arrives (it takes RAM a text chat does
     /// not need).
     vision: Option<cerebro_engine::vision::VisionModel>,
@@ -885,6 +890,52 @@ impl Engine {
                             }
                             set(&st, |s| s.activity = "idle");
                         }
+                        Job::Benchmark { model, placement, events, reply } => {
+                            cn.store(false, Ordering::SeqCst);
+                            set(&st, |s| s.activity = "benchmark");
+                            // Benchmarks want the deepest window the model can hold; a model already
+                            // loaded at least that large is reused, anything else is loaded now.
+                            let wanted = crate::bench::session_ctx(model.context_max);
+                            let layers = model.arch.layers as usize;
+                            // The placement the user chose. "auto" keeps the placement the model is
+                            // loaded with, so the benchmark measures what the user picked.
+                            let loaded_forced = loaded.as_ref().filter(|l| l.info.id == model.id).and_then(|l| l.gpu_layers);
+                            let forced = crate::bench::forced_layers(&placement, layers, loaded_forced);
+                            let reuse = loaded.as_ref().is_some_and(|l| l.info.id == model.id && l.session.max_ctx >= wanted && l.gpu_layers == forced);
+                            let result = if reuse {
+                                let l = loaded.as_mut().expect("checked above");
+                                let plan = crate::bench::placement_of(&placement, l.placement.as_ref(), gpu_layers_of(l), layers);
+                                Ok(crate::bench::run(&l.model, &mut l.session, &l.tok, &l.info, plan, &events, &cn))
+                            } else {
+                                if let Some(l) = loaded.take() {
+                                    save_profile(&l);
+                                }
+                                set(&st, |s| {
+                                    s.loaded = None;
+                                    s.progress = None;
+                                });
+                                match load(&model, wanted, forced) {
+                                    Ok(mut l) => {
+                                        let plan = crate::bench::placement_of(&placement, l.placement.as_ref(), gpu_layers_of(&l), layers);
+                                        let run = crate::bench::run(&l.model, &mut l.session, &l.tok, &l.info, plan, &events, &cn);
+                                        loaded = Some(l);
+                                        Ok(run)
+                                    }
+                                    Err(e) => Err(e),
+                                }
+                            };
+                            if let Some(l) = loaded.as_mut() {
+                                let info = loaded_info(l, l.session.max_ctx);
+                                let progress = l.session.progress.clone();
+                                save_profile(l);
+                                set(&st, |s| {
+                                    s.loaded = Some(info);
+                                    s.progress = Some(progress);
+                                });
+                            }
+                            set(&st, |s| s.activity = "idle");
+                            let _ = reply.send(result);
+                        }
                         Job::Tune { events, reply } => {
                             cn.store(false, Ordering::SeqCst);
                             let msg = match loaded.as_mut() {
@@ -986,6 +1037,21 @@ impl Engine {
         rx.recv().map_err(|_| "The engine stopped during the reply.".to_owned())
     }
 
+    /// What the engine is doing now ("idle", "loading", "generating", "reading", "tuning" or
+    /// "benchmark"), for the commands that must not overlap a benchmark.
+    pub fn activity(&self) -> &'static str {
+        self.status.lock().unwrap_or_else(|e| e.into_inner()).activity
+    }
+
+    /// Runs the Benchmark lab on `model` in the placement the user chose ("auto", "gpu", "split"
+    /// or "cpu"), streaming each point through `events`; resolves with the finished run. The model
+    /// is left loaded afterwards.
+    pub fn bench(&self, model: LibraryModel, placement: String, events: crate::bench::BenchSink) -> Result<crate::bench::BenchRun, String> {
+        let (reply, rx) = channel();
+        self.send(Job::Benchmark { model, placement, events, reply })?;
+        rx.recv().map_err(|_| "The engine stopped during the benchmark.".to_owned())?
+    }
+
     /// The image test on the loaded vision model `id`.
     pub fn describe(&self, id: String, data: String) -> Result<String, String> {
         let (reply, rx) = channel();
@@ -1026,7 +1092,7 @@ fn assemble(model: Model, tok: Tokenizer, m: &LibraryModel, ctx: usize, gpu_laye
     let ctx = ctx.clamp(512, model.cfg.ctx_train.max(512));
     let (session, placement) = place(&model, ctx, gpu_layers);
     let dialect = crate::toolcall::dialect_from_template(model.gguf().str("tokenizer.chat_template").unwrap_or(""));
-    Loaded { model, session, tok, info: m.clone(), dialect, placement, vision: None, images: Default::default() }
+    Loaded { model, session, tok, info: m.clone(), dialect, placement, gpu_layers, vision: None, images: Default::default() }
 }
 
 /// Where a session for `model` runs: an NVIDIA card (with `gpu_layers` forced, or as many as fit),
@@ -1058,6 +1124,11 @@ fn place(model: &Model, ctx: usize, gpu_layers: Option<usize>) -> (Session, Opti
             }
         }
     }
+}
+
+/// The layers running on the graphics card, whichever backend holds the model.
+fn gpu_layers_of(l: &Loaded) -> usize {
+    l.session.gpu.as_ref().map_or(0, |g| g.gpu_layers()) + l.session.portable.as_ref().map_or(0, |p| p.gpu_layers())
 }
 
 fn loaded_info(l: &Loaded, ctx: usize) -> LoadedInfo {

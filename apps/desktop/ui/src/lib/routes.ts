@@ -78,6 +78,26 @@ export function hrefWithModel(id: RouteId, modelId: string): string {
   return `${hrefFor(id)}?model=${encodeURIComponent(modelId)}`;
 }
 
+/** The Monitor screen's two views: the live readings and the Benchmark lab. */
+export type MonitorTab = "live" | "benchmark";
+
+export function isMonitorTab(value: unknown): value is MonitorTab {
+  return value === "live" || value === "benchmark";
+}
+
+/** `#/monitor` for the live view, `#/monitor?tab=benchmark` for the Benchmark lab. */
+export function hrefForMonitorTab(tab: MonitorTab): string {
+  return tab === "live" ? hrefFor("monitor") : `${hrefFor("monitor")}?tab=benchmark`;
+}
+
+/** The Monitor view a link asks for ("?tab="). The live view when it names none. */
+export function monitorTabFromHash(hash: string): MonitorTab {
+  const q = hash.indexOf("?");
+  if (q < 0) return "live";
+  const tab = new URLSearchParams(hash.slice(q + 1)).get("tab");
+  return isMonitorTab(tab) ? tab : "live";
+}
+
 /** The model a link names (`?model=`), when it is a well-formed id; callers still check that the
  *  library has it before using it. */
 export function modelFromHash(hash: string): string | null {

@@ -36,6 +36,7 @@ import type { EngineSwitch, LocalApiView, McpServerView, RemoteOptions, RemotePa
 } from "./types";
 
 import type { ChatEvent, ChatRequest } from "./chat-types";
+import type { BenchEvent, BenchPlacementChoice, BenchRun } from "./bench-types";
 import type { HistoryRange, MetricsSeries, MetricsSnapshot, RequestDetail } from "./monitor-types";
 
 export type Unsubscribe = () => void;
@@ -137,6 +138,18 @@ export interface CerebroService {
   cancelTune(runId: string): Promise<void>;
   /** Continues a cancelled run: finished steps are kept and the interrupted one starts over. */
   resumeTune(runId: string): Promise<void>;
+
+  // ---- Benchmark lab. One run at a time; it loads the chosen model and leaves it loaded. ----
+
+  /** Measures `modelId` at 0 / 4K / 16K context and runs the 20-question check, streaming each
+   *  finished point and the final run. `placement` says where the model runs: "auto" (the
+   *  placement it is loaded with), "gpu", "split" or "cpu". Aborting the signal stops it
+   *  (`benchStop`) and still resolves with the run so far. Rejects while another benchmark runs. */
+  benchRun(modelId: string, placement: BenchPlacementChoice, onEvent: (e: BenchEvent) => void, signal: AbortSignal): Promise<BenchRun>;
+  /** Every finished, stopped or failed run kept on this machine, newest first. */
+  benchHistory(): Promise<BenchRun[]>;
+  /** Stops the running benchmark. Finished points are kept. */
+  benchStop(): Promise<void>;
 
   // ---- Monitor. The app polls getMetrics once a second; history and request bodies on demand. ----
 
