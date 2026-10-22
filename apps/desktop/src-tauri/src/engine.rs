@@ -137,7 +137,7 @@ fn file_type_name(t: u64) -> &'static str {
 }
 
 /// Architectures Cerebro Engine runs. qwen35 is the Qwen3.5/3.8 hybrid (Gated DeltaNet + gated attention).
-const SUPPORTED_ARCHS: &[&str] = &["qwen3", "qwen3moe", "qwen2", "llama", "qwen35", "qwen3vl", "qwen3tts"];
+const SUPPORTED_ARCHS: &[&str] = cerebro_engine::model::ARCHITECTURES;
 
 /// A short, stable id from the path (FNV-1a).
 fn id_of(path: &Path) -> String {
@@ -150,8 +150,9 @@ fn id_of(path: &Path) -> String {
 }
 
 fn describe(path: &Path, source: &'static str) -> Option<LibraryModel> {
-    let size = std::fs::metadata(path).ok()?.len();
     let g = Gguf::open(path).ok()?;
+    // All of a split model's files together.
+    let size = g.len() as u64;
     let arch = g.str("general.architecture").unwrap_or("unknown").to_owned();
     let k = |s: &str| format!("{arch}.{s}");
     let u = |s: &str| g.u64(&k(s)).ok();
@@ -1083,12 +1084,32 @@ fn assemble(model: Model, tok: Tokenizer, m: &LibraryModel, ctx: usize, gpu_laye
 }
 
 /// Where a session for `model` runs: an NVIDIA card (with `gpu_layers` forced, or as many as fit),
-/// else another graphics card through the portable backend, else the processor; with the plan.
+/// else the processor with the NVIDIA card multiplying its weights (GPU assist, for layer types the
+/// card does not run whole yet), else another graphics card through the portable backend, else the
+/// processor; with the plan.
 fn place(model: &Model, ctx: usize, gpu_layers: Option<usize>) -> (Session, Option<cerebro_engine::placement::Plan>) {
     match Session::new_gpu_with(model, ctx, gpu_layers) {
         Ok(s) => {
             let p = s.gpu.as_ref().map(|g| g.plan.clone());
             (s, p)
+        }
+        Err(e) if gpu_layers != Some(0) && matches!(e, cerebro_engine::Error::Unsupported(ref m) if m.contains("layer types")) => {
+            match Session::new_assisted(model, ctx) {
+                Ok(s) => {
+                    let mut p = cerebro_engine::gpu::plan_for(model, ctx, 0, None).ok();
+                    if let (Some(p), Some((placed, cands, bytes, _))) = (p.as_mut(), model.offload_stats()) {
+                        p.notes.insert(0, format!(
+                            "The processor runs this model's layers and the graphics card multiplies its weights: {placed} of {cands} weight matrices ({:.1} GiB) are on the card.",
+                            bytes as f64 / (1u64 << 30) as f64
+                        ));
+                    }
+                    (s, p)
+                }
+                Err(ae) => {
+                    eprintln!("GPU assist: {ae}");
+                    (Session::new(model, ctx), cerebro_engine::gpu::plan_for(model, ctx, 0, None).ok())
+                }
+            }
         }
         Err(e) => {
             // No NVIDIA GPU took it: another graphics card through the portable backend (Vulkan /
@@ -1119,8 +1140,8 @@ fn loaded_info(l: &Loaded, ctx: usize) -> LoadedInfo {
     LoadedInfo {
         model: l.info.clone(),
         ctx,
-        on_gpu: g.is_some() || portable.is_some(),
-        vram_bytes: g.map_or(0, |g| g.vram_bytes) + portable.map_or(0, |p| p.bytes as usize),
+        on_gpu: g.is_some() || portable.is_some() || l.model.offload_stats().is_some(),
+        vram_bytes: g.map_or(0, |g| g.vram_bytes) + portable.map_or(0, |p| p.bytes as usize) + l.model.offload_stats().map_or(0, |o| o.2),
         experts: g.and_then(|g| g.expert_cache()),
         context_used: l.session.tokens.len(),
         last_prefill_tps: None,
