@@ -683,41 +683,73 @@ __device__ __forceinline__ float unit_dot(int dtype, const unsigned char* blk, i
 // int8 layout), so they get the tensor-core GEMM too; decoding keeps the native-format matvec.
 extern "C" __global__ void k_to_q8(const unsigned char* __restrict__ w, int dtype, int bb, int rows, int cols,
                                    signed char* __restrict__ qs, float* __restrict__ ds) {
-    long long gw = ((long long)blockIdx.x * blockDim.x + threadIdx.x) >> 5;
-    int lane = threadIdx.x & 31;
+    // One thread per 32-value sub-block: two 16-byte loads of packed weights, the values in
+    // registers, the int8 scale from their maximum, two 16-byte stores.
+    long long id = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     int nsb = cols >> 5;
-    if (gw >= (long long)rows * nsb) return;
-    int row = (int)(gw / nsb), sb = (int)(gw - (long long)row * nsb);
-    int col = sb * 32 + lane;
-    int b = col >> 8, e = col & 255;
+    if (id >= (long long)rows * nsb) return;
+    int row = (int)(id / nsb), sb = (int)(id - (long long)row * nsb);
+    int b = sb >> 3, j = sb & 7;
     const unsigned char* blk = w + ((size_t)row * (cols >> 8) + b) * bb;
-    float v;
+    float v[32];
     if (dtype == 12 || dtype == 13) {
-        int j = e >> 5, l = e & 31;
         float d = __half2float(*reinterpret_cast<const __half*>(blk));
         float dmin = __half2float(*reinterpret_cast<const __half*>(blk + 2));
         int sc, m;
         scale_min_k4(j, blk + 4, sc, m);
-        int q;
+        float a = d * sc, c = dmin * m;
+        const unsigned char* q = blk + (dtype == 12 ? 16 : 48) + (j >> 1) * 32;
+        int4 q0 = *reinterpret_cast<const int4*>(q), q1 = *reinterpret_cast<const int4*>(q + 16);
+        const unsigned char* qb0 = reinterpret_cast<const unsigned char*>(&q0);
+        const unsigned char* qb1 = reinterpret_cast<const unsigned char*>(&q1);
+        int sh = (j & 1) * 4;
         if (dtype == 12) {
-            unsigned char c = blk[16 + (j >> 1) * 32 + l];
-            q = (j & 1) ? (c >> 4) : (c & 15);
+            #pragma unroll
+            for (int l = 0; l < 16; ++l) {
+                v[l] = a * ((qb0[l] >> sh) & 15) - c;
+                v[16 + l] = a * ((qb1[l] >> sh) & 15) - c;
+            }
         } else {
-            unsigned char c = blk[48 + (j >> 1) * 32 + l];
-            q = ((j & 1) ? (c >> 4) : (c & 15)) | (((blk[16 + l] >> j) & 1) << 4);
+            int4 h0 = *reinterpret_cast<const int4*>(blk + 16), h1 = *reinterpret_cast<const int4*>(blk + 32);
+            const unsigned char* hb0 = reinterpret_cast<const unsigned char*>(&h0);
+            const unsigned char* hb1 = reinterpret_cast<const unsigned char*>(&h1);
+            #pragma unroll
+            for (int l = 0; l < 16; ++l) {
+                v[l] = a * (((qb0[l] >> sh) & 15) | (((hb0[l] >> j) & 1) << 4)) - c;
+                v[16 + l] = a * (((qb1[l] >> sh) & 15) | (((hb1[l] >> j) & 1) << 4)) - c;
+            }
         }
-        v = d * sc * q - dmin * m;
     } else {
-        int n = e >> 7, r = e & 127, g = r >> 5, l = r & 31;
-        unsigned char c = blk[n * 64 + (g & 1) * 32 + l];
-        int lo = g < 2 ? (c & 15) : (c >> 4);
-        int hi = (blk[128 + n * 32 + l] >> (2 * g)) & 3;
-        int q = (lo | (hi << 4)) - 32;
+        int n = j >> 2, g = j & 3;
         float d = __half2float(*reinterpret_cast<const __half*>(blk + 208));
-        int sc = (signed char)blk[192 + n * 8 + 2 * g + (l >> 4)];
-        v = d * sc * q;
+        const unsigned char* ql = blk + n * 64 + (g & 1) * 32;
+        const unsigned char* qh = blk + 128 + n * 32;
+        int4 l0 = *reinterpret_cast<const int4*>(ql), l1 = *reinterpret_cast<const int4*>(ql + 16);
+        int4 h0 = *reinterpret_cast<const int4*>(qh), h1 = *reinterpret_cast<const int4*>(qh + 16);
+        const unsigned char* lb0 = reinterpret_cast<const unsigned char*>(&l0);
+        const unsigned char* lb1 = reinterpret_cast<const unsigned char*>(&l1);
+        const unsigned char* hb0 = reinterpret_cast<const unsigned char*>(&h0);
+        const unsigned char* hb1 = reinterpret_cast<const unsigned char*>(&h1);
+        float s0 = d * (signed char)blk[192 + n * 8 + 2 * g], s1 = d * (signed char)blk[192 + n * 8 + 2 * g + 1];
+        int lsh = g < 2 ? 0 : 4, hsh = 2 * g;
+        #pragma unroll
+        for (int l = 0; l < 16; ++l) {
+            v[l] = s0 * ((((lb0[l] >> lsh) & 15) | (((hb0[l] >> hsh) & 3) << 4)) - 32);
+            v[16 + l] = s1 * ((((lb1[l] >> lsh) & 15) | (((hb1[l] >> hsh) & 3) << 4)) - 32);
+        }
     }
-    quant32(v, qs + (size_t)row * cols, ds + (size_t)row * nsb, col, lane);
+    float amax = 0.f;
+    #pragma unroll
+    for (int l = 0; l < 32; ++l) amax = fmaxf(amax, fabsf(v[l]));
+    float dq = amax / 127.f, id_ = dq > 0.f ? 1.f / dq : 0.f;
+    int4 o[2];
+    signed char* ob = reinterpret_cast<signed char*>(o);
+    #pragma unroll
+    for (int l = 0; l < 32; ++l) ob[l] = (signed char)__float2int_rn(v[l] * id_);
+    int4* dst = reinterpret_cast<int4*>(qs + (size_t)row * cols + sb * 32);
+    dst[0] = o[0];
+    dst[1] = o[1];
+    ds[(size_t)row * nsb + sb] = dq;
 }
 
 // Batched expert matvec over the k chosen experts (gridDim.y = k). sel holds [ids k | weights k |

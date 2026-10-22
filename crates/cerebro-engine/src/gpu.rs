@@ -1807,6 +1807,20 @@ impl GpuState {
         // Native-format weights are converted to int8 for a prompt batch so they take the
         // tensor-core GEMM too (k_to_q8): scratch for the largest such matrix, made on first use.
         let k8: std::cell::RefCell<Option<(CudaSlice<i8>, CudaSlice<f32>)>> = std::cell::RefCell::new(None);
+        // CEREBRO_GPU_PROFILE: time the conversions and GEMMs of this chunk (synchronising after
+        // each, so only for measuring); the rest of the chunk is attention, norms and the like.
+        let profiling = std::env::var_os("CEREBRO_GPU_PROFILE").is_some();
+        let prof = std::cell::Cell::new([0f64; 3]);
+        let chunk_t0 = std::time::Instant::now();
+        let lap = |i: usize, t: std::time::Instant| -> Result<(), Error> {
+            if profiling {
+                s.synchronize().map_err(gerr)?;
+                let mut p = prof.get();
+                p[i] += t.elapsed().as_secs_f64();
+                prof.set(p);
+            }
+            Ok(())
+        };
         let mm = |m: &GMat, xq: &CudaSlice<i8>, xd: &CudaSlice<f32>, y: &mut CudaSlice<f32>, add: bool| -> Result<(), Error> {
             if let (GMat::K { parts, cols }, Some(k), true) = (m, &f.matmul_mma, t >= MMA_MIN_T) {
                 let rows: usize = parts.iter().map(|p| p.rows).sum();
@@ -1816,19 +1830,26 @@ impl GpuState {
                     *sc = Some((s.alloc_zeros::<i8>(n).map_err(gerr)?, s.alloc_zeros::<f32>(n / 32).map_err(gerr)?));
                 }
                 let (qs, ds) = sc.as_mut().expect("scratch");
+                if profiling {
+                    s.synchronize().map_err(gerr)?;
+                }
+                let t_conv = std::time::Instant::now();
                 let mut r0 = 0;
                 for p in parts {
                     let (r, c) = (p.rows as i32, *cols as i32);
-                    let warps = (p.rows * cols / 32) as u32;
-                    let cfg = LaunchConfig { grid_dim: (warps.div_ceil(8), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+                    let subs = (p.rows * cols / 32) as u32;
+                    let cfg = LaunchConfig { grid_dim: (subs.div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
                     let mut qv = qs.slice_mut(r0 * cols..(r0 + p.rows) * cols);
                     let mut dv = ds.slice_mut(r0 * cols / 32..(r0 + p.rows) * cols / 32);
                     unsafe { s.launch_builder(&f.k_to_q8).arg(&p.w).arg(&p.dtype).arg(&p.bb).arg(&r).arg(&c).arg(&mut qv).arg(&mut dv).launch(cfg) }.map_err(gerr)?;
                     r0 += p.rows;
                 }
+                lap(0, t_conv)?;
+                let t_mm = std::time::Instant::now();
                 let (rows_i, cols_i, add_i) = (rows as i32, *cols as i32, add as i32);
-                let cfg = LaunchConfig { grid_dim: ((rows as u32).div_ceil(64), (t as u32).div_ceil(64), 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
+                let cfg = LaunchConfig { grid_dim: ((t as u32).div_ceil(64), (rows as u32).div_ceil(64), 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
                 unsafe { s.launch_builder(k).arg(&*qs).arg(&*ds).arg(xq).arg(xd).arg(y).arg(&rows_i).arg(&cols_i).arg(&ti).arg(&add_i).launch(cfg) }.map_err(gerr)?;
+                lap(1, t_mm)?;
                 return Ok(());
             }
             if let GMat::K { parts, cols } = m {
@@ -1848,7 +1869,7 @@ impl GpuState {
             let (rows, cols, add) = (mrows as i32, mcols as i32, add as i32);
             match &f.matmul_mma {
                 Some(k) if t >= MMA_MIN_T => {
-                    let cfg = LaunchConfig { grid_dim: ((mrows as u32).div_ceil(64), (t as u32).div_ceil(64), 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
+                    let cfg = LaunchConfig { grid_dim: ((t as u32).div_ceil(64), (mrows as u32).div_ceil(64), 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
                     unsafe { s.launch_builder(k).arg(qs).arg(ds).arg(xq).arg(xd).arg(y).arg(&rows).arg(&cols).arg(&ti).arg(&add).launch(cfg) }.map_err(gerr)?;
                 }
                 _ => unsafe { s.launch_builder(&f.matmul_b).arg(qs).arg(ds).arg(xq).arg(xd).arg(y).arg(&rows).arg(&cols).arg(&ti).arg(&add).launch(rows_cfg(mrows)) }.map_err(gerr).map(|_| ())?,
@@ -1947,6 +1968,11 @@ impl GpuState {
         }
         let mut next = [0i32];
         s.memcpy_dtoh(&self.next, &mut next).map_err(gerr)?;
+        if profiling {
+            let p = prof.get();
+            let total = chunk_t0.elapsed().as_secs_f64();
+            eprintln!("gpu prefill chunk of {t}: {:.1} ms; native-to-int8 {:.1} ms, GEMM {:.1} ms, the rest {:.1} ms", total * 1e3, p[0] * 1e3, p[1] * 1e3, (total - p[0] - p[1]) * 1e3);
+        }
         Ok(next[0] as u32)
     }
 

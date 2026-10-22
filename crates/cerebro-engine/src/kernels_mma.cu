@@ -28,6 +28,13 @@ __device__ __forceinline__ void cp_async4(void* smem, const void* gmem, bool pre
 __device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n" ::); }
 template <int N> __device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
 
+// Exact int32 -> float for |v| < 2^22 without the slow I2F unit (16 per clock per SM on Ampere):
+// put v in the mantissa of 1.5 * 2^23 and subtract that. A 32-deep int8 product is at most
+// 32 * 127 * 127 = 516,128, well inside the range.
+__device__ __forceinline__ float i2f_small(int v) {
+    return __int_as_float(v + 0x4B400000) - 12582912.0f;
+}
+
 struct Stage {
     signed char a[BM * LDS];
     signed char b[BN * LDS];
@@ -41,7 +48,9 @@ extern "C" __global__ void __launch_bounds__(128) matmul_q8_mma(
     __shared__ __align__(16) Stage st[2];
     const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
     const int g = lane >> 2, tg = lane & 3;
-    const int r0 = blockIdx.x * BM, t0 = blockIdx.y * BN;
+    // Token tiles vary fastest (gridDim.x): the blocks sharing one weight tile run together, so it
+    // is read from memory once and from L2 for the other token tiles.
+    const int r0 = blockIdx.y * BM, t0 = blockIdx.x * BN;
     const int wm = (warp & 1) * 32, wn = (warp >> 1) * 32;
     const int nb = cols >> 5;
     const int stages = (cols + BK - 1) / BK;
@@ -116,10 +125,10 @@ extern "C" __global__ void __launch_bounds__(128) matmul_q8_mma(
                         "{%10,%10,%10,%10};\n"
                         : "=r"(c0), "=r"(c1), "=r"(c2), "=r"(c3)
                         : "r"(a[i][0]), "r"(a[i][1]), "r"(a[i][2]), "r"(a[i][3]), "r"(b[j][0]), "r"(b[j][1]), "r"(0));
-                    acc[i][j][0] += (float)c0 * sw[i][0] * sx[j][0];
-                    acc[i][j][1] += (float)c1 * sw[i][0] * sx[j][1];
-                    acc[i][j][2] += (float)c2 * sw[i][1] * sx[j][0];
-                    acc[i][j][3] += (float)c3 * sw[i][1] * sx[j][1];
+                    acc[i][j][0] = fmaf(i2f_small(c0), sw[i][0] * sx[j][0], acc[i][j][0]);
+                    acc[i][j][1] = fmaf(i2f_small(c1), sw[i][0] * sx[j][1], acc[i][j][1]);
+                    acc[i][j][2] = fmaf(i2f_small(c2), sw[i][1] * sx[j][0], acc[i][j][2]);
+                    acc[i][j][3] = fmaf(i2f_small(c3), sw[i][1] * sx[j][1], acc[i][j][3]);
                 }
         }
         __syncthreads(); // the next iteration's load overwrites this stage
