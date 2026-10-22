@@ -24,6 +24,10 @@ const ALIGN: usize = 4096;
 const NONE: u32 = u32::MAX;
 /// Counts halve after this many expert uses per layer (about this many tokens).
 const DECAY_EVERY: u64 = 256;
+/// The largest single read request for an expert range.
+const PIECE: usize = 256 << 10;
+/// A slot whose expert's use count is below this may take a guessed (read-ahead) expert.
+const SPARE_BELOW: f32 = 1.0;
 
 /// Where one expert's bytes are in the model: three (offset, len) ranges in the combined offset space.
 #[derive(Clone, Copy, Debug)]
@@ -113,6 +117,11 @@ impl ExpertCache {
     /// `experts[key]` for key = layer * n_expert + expert; `files` the model's files in order with
     /// their combined-space starts; `budget` the RAM the arena may take.
     pub fn new(experts: Vec<ExpertRanges>, files: &[(std::path::PathBuf, usize, usize)], budget: usize, readers: usize) -> std::io::Result<Self> {
+        Self::with_profile(experts, files, budget, readers, None)
+    }
+
+    /// `new`, starting from saved use counts (one per expert key) instead of zeros.
+    pub fn with_profile(experts: Vec<ExpertRanges>, files: &[(std::path::PathBuf, usize, usize)], budget: usize, readers: usize, profile: Option<Vec<f32>>) -> std::io::Result<Self> {
         let slot_bytes = experts.iter().map(|e| e.bytes()).max().unwrap_or(0).next_multiple_of(64).max(64);
         let n_slots = (budget / slot_bytes).min(experts.len()).max(1);
         let layout = std::alloc::Layout::from_size_align(n_slots * slot_bytes, ALIGN).map_err(std::io::Error::other)?;
@@ -133,7 +142,7 @@ impl ExpertCache {
         }
         Ok(Self {
             slot_of: (0..experts.len()).map(|_| AtomicU32::new(NONE)).collect(),
-            book: Mutex::new(Book { owner: vec![NONE; n_slots], count: vec![0.0; experts.len()], uses: 0 }),
+            book: Mutex::new(Book { owner: vec![NONE; n_slots], count: profile.filter(|p| p.len() == experts.len()).unwrap_or_else(|| vec![0.0; experts.len()]), uses: 0 }),
             experts,
             by_offset,
             arena,
@@ -157,6 +166,34 @@ impl ExpertCache {
             bytes_read: self.bytes.load(Ordering::Relaxed),
             read_s: self.read_ns.load(Ordering::Relaxed) as f64 * 1e-9,
         }
+    }
+
+    /// Reads the most-used experts of the saved profile into free slots (in batches, so it can run
+    /// beside decoding): a model loaded again starts with the experts its conversations used.
+    /// Returns how many were read.
+    pub fn warm(&self) -> usize {
+        let order: Vec<usize> = {
+            let book = self.book.lock().unwrap_or_else(|e| e.into_inner());
+            let mut v: Vec<usize> = (0..book.count.len()).filter(|&k| book.count[k] >= SPARE_BELOW).collect();
+            v.sort_by(|&a, &b| book.count[b].total_cmp(&book.count[a]));
+            v.truncate(self.n_slots * 9 / 10);
+            v
+        };
+        let mut n = 0;
+        for batch in order.chunks(64) {
+            let before = self.bytes.load(Ordering::Relaxed);
+            self.ensure_with(&[], batch);
+            if self.bytes.load(Ordering::Relaxed) == before {
+                break;
+            }
+            n += batch.len();
+        }
+        n
+    }
+
+    /// The use counts, for saving with the model (same format as the GPU's expert profile).
+    pub fn profile(&self) -> Vec<f32> {
+        self.book.lock().unwrap_or_else(|e| e.into_inner()).count.clone()
     }
 
     fn slot_ptr(&self, slot: u32) -> *mut u8 {
@@ -186,6 +223,12 @@ impl ExpertCache {
     /// among `keys`. When `keys` holds more experts than there are slots, only the first ones are
     /// cached and the rest are read from the mapping.
     pub fn ensure(&self, keys: &[usize]) {
+        self.ensure_with(keys, &[]);
+    }
+
+    /// `ensure` for `keys`, and reads `ahead` (experts likely needed next, e.g. the next layer's
+    /// routing guessed from the current input) in the same parallel batch without counting a use.
+    pub fn ensure_with(&self, keys: &[usize], ahead: &[usize]) {
         let mut book = self.book.lock().unwrap_or_else(|e| e.into_inner());
         book.uses += 1;
         if book.uses % (DECAY_EVERY * keys.len().max(1) as u64) == 0 {
@@ -194,12 +237,21 @@ impl ExpertCache {
         for &k in keys {
             book.count[k] += 1.0;
         }
-        let missing: Vec<usize> = keys.iter().copied().filter(|&k| self.slot_of[k].load(Ordering::Acquire) == NONE).collect();
-        self.hits.fetch_add((keys.len() - missing.len()) as u64, Ordering::Relaxed);
+        let cold = |k: &usize| self.slot_of[*k].load(Ordering::Acquire) == NONE;
+        let now_missing = keys.iter().filter(|k| cold(k)).count();
+        self.hits.fetch_add((keys.len() - now_missing) as u64, Ordering::Relaxed);
+        self.misses.fetch_add(now_missing as u64, Ordering::Relaxed);
+        let mut missing: Vec<usize> = keys.iter().copied().filter(cold).collect();
+        let n_now = missing.len();
+        for &k in ahead {
+            if cold(&k) && !missing.contains(&k) {
+                missing.push(k);
+            }
+        }
         if missing.is_empty() {
             return;
         }
-        self.misses.fetch_add(missing.len() as u64, Ordering::Relaxed);
+        let keys: Vec<usize> = keys.iter().chain(ahead).copied().collect();
         // Victims: free slots first, then the least-used experts not wanted now.
         let keep: std::collections::HashSet<usize> = keys.iter().copied().collect();
         let mut cand: Vec<(f32, u32)> = (0..self.n_slots as u32)
@@ -217,6 +269,12 @@ impl ExpertCache {
             return;
         }
         cand.select_nth_unstable_by(take - 1, |a, b| a.0.total_cmp(&b.0));
+        cand.truncate(take);
+        cand.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // Guessed experts only take free or barely used slots: a wrong guess must not push out
+        // an expert the conversation keeps using.
+        let spare = cand.iter().skip(n_now.min(take)).take_while(|c| c.0 < SPARE_BELOW).count();
+        let take = n_now.min(take) + spare;
         let mut jobs = Vec::with_capacity(take);
         for (i, &k) in missing.iter().take(take).enumerate() {
             let s = cand[i].1;
@@ -229,10 +287,31 @@ impl ExpertCache {
         }
         drop(book);
         let t = Instant::now();
-        let ok: Vec<bool> = {
+        // Every expert range in pieces of at most PIECE bytes, all read in parallel: a layer
+        // misses a few experts, and NVMe drives need many requests in flight to reach full speed.
+        let pieces: Vec<(usize, u32, usize, usize, usize)> = jobs
+            .iter()
+            .flat_map(|&(k, s)| {
+                let e = self.experts[k];
+                let mut at = 0usize;
+                let mut v = Vec::new();
+                for &(off, len) in &e.r {
+                    let mut p = 0;
+                    while p < len {
+                        let n = PIECE.min(len - p);
+                        v.push((k, s, off + p, n, at + p));
+                        p += n;
+                    }
+                    at += len;
+                }
+                v
+            })
+            .collect();
+        let ok_piece: Vec<(usize, bool)> = {
             use rayon::prelude::*;
-            jobs.par_iter().enumerate().map(|(i, &(k, s))| self.read_expert(k, s, i)).collect()
+            pieces.par_iter().enumerate().map(|(i, &(k, s, off, len, at))| (k, self.read_piece(s, off, len, at, i))).collect()
         };
+        let ok: Vec<bool> = jobs.iter().map(|&(k, _)| ok_piece.iter().filter(|p| p.0 == k).all(|p| p.1)).collect();
         self.read_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         let mut book = self.book.lock().unwrap_or_else(|e| e.into_inner());
         for (&(k, s), ok) in jobs.iter().zip(ok) {
@@ -245,21 +324,21 @@ impl ExpertCache {
         }
     }
 
-    /// Reads expert `k`'s three ranges into slot `s`. `lane` picks the reader handles.
-    fn read_expert(&self, k: usize, s: u32, lane: usize) -> bool {
-        let e = self.experts[k];
-        let dst = self.slot_ptr(s) as usize;
-        let mut at = 0usize;
-        let mut buf: Vec<u8> = Vec::new();
-        for &(off, len) in &e.r {
-            let Some(p) = self.parts.iter().rev().find(|p| p.base <= off) else { return false };
-            let local = off - p.base;
-            // Unbuffered reads need sector-aligned offsets and lengths: read the aligned span into
-            // an aligned scratch buffer and copy the exact bytes.
-            let lo = local / ALIGN * ALIGN;
-            let hi = (local + len).next_multiple_of(ALIGN).min(p.len.next_multiple_of(ALIGN));
-            let n = hi - lo;
-            buf.resize(n + ALIGN, 0);
+    /// Reads [off, off + len) of the model into slot `s` at byte `at`. `lane` picks the reader
+    /// handle. Unbuffered reads need sector-aligned offsets and lengths: the aligned span goes into
+    /// an aligned scratch buffer and the exact bytes are copied.
+    fn read_piece(&self, s: u32, off: usize, len: usize, at: usize, lane: usize) -> bool {
+        let Some(p) = self.parts.iter().rev().find(|p| p.base <= off) else { return false };
+        let local = off - p.base;
+        let lo = local / ALIGN * ALIGN;
+        let hi = (local + len).next_multiple_of(ALIGN).min(p.len.next_multiple_of(ALIGN));
+        let n = hi - lo;
+        thread_local!(static BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) });
+        BUF.with(|b| {
+            let mut buf = b.borrow_mut();
+            if buf.len() < n + ALIGN {
+                buf.resize(n + ALIGN, 0);
+            }
             let pad = buf.as_ptr().align_offset(ALIGN);
             let f = &p.files[lane % p.files.len()];
             let mut got = 0;
@@ -278,11 +357,10 @@ impl ExpertCache {
                 return false;
             }
             // SAFETY: at + len <= the expert's bytes <= slot_bytes; the slot is owned by this read.
-            unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr().add(pad + local - lo), (dst + at) as *mut u8, len) };
-            at += len;
+            unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr().add(pad + local - lo), self.slot_ptr(s).add(at), len) };
             self.bytes.fetch_add(n as u64, Ordering::Relaxed);
-        }
-        true
+            true
+        })
     }
 }
 

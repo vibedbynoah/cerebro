@@ -448,13 +448,41 @@ impl Model {
         if forced.is_none() && (expert_bytes <= budget || budget < 256 << 20) {
             return;
         }
-        match crate::experts::ExpertCache::new(experts, &g.files(), budget, 4) {
+        // The use counts saved with the model (the GPU expert cache's profile format).
+        let profile = std::fs::read_to_string(self.expert_profile_path()).ok().map(|t| t.split_whitespace().filter_map(|x| x.parse::<f32>().ok()).collect::<Vec<f32>>());
+        match crate::experts::ExpertCache::with_profile(experts, &g.files(), budget, 4, profile) {
             Ok(cache) => {
                 let st = cache.stats();
                 eprintln!("expert cache: {} of {} experts in memory ({:.1} of {:.1} GiB); the rest read from the drive as used", st.slots, c.n_layer * c.n_expert, (st.slots * st.slot_bytes) as f64 / (1u64 << 30) as f64, expert_bytes as f64 / (1u64 << 30) as f64);
-                g.set_experts(cache);
+                if g.set_experts(cache) {
+                    // Read the experts earlier conversations used most, beside the first message.
+                    let gg = g.clone();
+                    let _ = std::thread::Builder::new().name("cerebro-experts-warm".into()).spawn(move || {
+                        if let Some(c) = gg.experts() {
+                            let t = std::time::Instant::now();
+                            let n = c.warm();
+                            if n > 0 {
+                                eprintln!("expert cache: {n} experts from the saved profile read in {:.1} s", t.elapsed().as_secs_f64());
+                            }
+                        }
+                    });
+                }
             }
             Err(e) => eprintln!("expert cache off: {e}"),
+        }
+    }
+
+    /// Where a MoE model's expert use counts are kept: next to the model file.
+    fn expert_profile_path(&self) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!("{}.experts", self.path.display()))
+    }
+
+    /// Saves the RAM expert cache's use counts next to the model (MoE models larger than memory),
+    /// so the next load starts with the experts conversations use.
+    pub fn save_expert_profile(&self) {
+        if let Some(c) = self.gguf.experts() {
+            let text: Vec<String> = c.profile().iter().map(|v| (v.round() as u64).to_string()).collect();
+            let _ = std::fs::write(self.expert_profile_path(), text.join(" "));
         }
     }
 
@@ -791,7 +819,17 @@ impl Model {
         }
         let (ne, eff, dim) = (self.cfg.n_expert, self.cfg.expert_ffn, self.cfg.dim);
         if let Some(c) = self.gguf.experts() {
-            c.ensure(&experts.iter().map(|&(ex, _)| li * ne + ex).collect::<Vec<_>>());
+            // Read the next layer's likely experts in the same batch: its router on this input.
+            let ahead: Vec<usize> = match self.layers.get(li + 1).map(|l| &l.ffn) {
+                Some(Ffn::Moe(next)) => {
+                    let mut scores = vec![0f32; ne];
+                    let mut chosen = Vec::with_capacity(experts.len());
+                    route(&next.router, h, experts.len(), &mut scores, &mut chosen);
+                    chosen.iter().map(|&(ex, _)| (li + 1) * ne + ex).collect()
+                }
+                _ => Vec::new(),
+            };
+            c.ensure_with(&experts.iter().map(|&(ex, _)| li * ne + ex).collect::<Vec<_>>(), &ahead);
         }
         let parts: Vec<(Mat, Mat, Mat)> = experts.iter().map(|&(ex, _)| (e.gate.part(ex, ne), e.up.part(ex, ne), e.down.part(ex, ne))).collect();
         {
@@ -1393,7 +1431,7 @@ pub struct Session {
     qg: Vec<f32>,
     gate: Vec<f32>,
     /// Seconds per phase of CPU decoding: [q/k/v, rope+cache, attention, o, router, ffn/experts, output].
-    pub prof: [f64; 7],
+    pub prof: [f64; 10],
     pub logits: Vec<f32>,
     /// The last position's hidden state after the final norm (the input to the output head):
     /// what a TTS talker hands its code predictor. Processor sessions only.
@@ -1482,7 +1520,7 @@ impl Session {
             chosen: Vec::with_capacity(c.n_used),
             moe: MoeScratch::new(c),
             expert_counts: vec![0; c.n_layer * c.n_expert],
-            prof: [0.0; 7],
+            prof: [0.0; 10],
             att_part: Vec::new(),
             logits: vec![0.0; c.vocab],
             hidden: vec![0.0; c.dim],
@@ -2148,13 +2186,15 @@ impl Session {
             self.block_in(m, li, l, pos, true);
             self.qa_dim.quantize(&self.h);
             if let Some(d) = &l.delta {
+                let t = Instant::now();
                 self.delta_step(m, li, d);
+                self.prof[8] += t.elapsed().as_secs_f64();
                 self.block_out(m);
                 self.ffn_step(m, li, l);
                 continue;
             }
             let mut tp = Instant::now();
-            let mut lap = |i: usize, prof: &mut [f64; 7]| {
+            let mut lap = |i: usize, prof: &mut [f64; 10]| {
                 let n = Instant::now();
                 prof[i] += (n - tp).as_secs_f64();
                 tp = n;
@@ -2302,12 +2342,16 @@ impl Session {
             (Some(hm), Some(mut s)) => {
                 if attn {
                     if let Some(p) = hm.ple.as_ref().filter(|p| p.layer == li) {
+                        let t = Instant::now();
                         // Tokens 1..n-1 positions back; image slots hash as the image token.
                         let prev: Vec<Option<u32>> = (1..p.ngram).map(|k| pos.checked_sub(k).and_then(|i| self.tokens.get(i)).map(|&t| if t & 0x8000_0000 != 0 { p.image } else { t })).collect();
                         s.ple(m, p, hm.hc, c.dim, c.eps, &prev);
+                        self.prof[9] += t.elapsed().as_secs_f64();
                     }
                 }
+                let t = Instant::now();
                 s.mix(m, if attn { &hm.attn[li] } else { &hm.ffn[li] }, hm.hc, c.eps, &mut self.h);
+                self.prof[7] += t.elapsed().as_secs_f64();
                 self.hcs = Some(s);
             }
             (_, s) => {
@@ -2328,6 +2372,12 @@ impl Session {
                 }
             }
         }
+    }
+
+    /// Seconds spent per part of the forward pass since the session started (processor path).
+    pub fn profile(&self) -> Vec<(&'static str, f64)> {
+        let names = ["attention projections", "attention setup", "attention", "attention output", "expert routing", "feed-forward and experts", "output head", "hyper-connection mixers", "linear attention (DeltaNet)", "n-gram embeddings"];
+        names.iter().zip(self.prof.iter()).map(|(n, &s)| (*n, s)).filter(|x| x.1 > 0.0).collect()
     }
 
     /// The output head: final norm and logits.
@@ -2517,7 +2567,7 @@ impl Session {
     fn ffn_step(&mut self, m: &Model, li: usize, l: &Layer) {
         let c = &m.cfg;
         let mut tp = Instant::now();
-        let mut lap = |i: usize, prof: &mut [f64; 7]| {
+        let mut lap = |i: usize, prof: &mut [f64; 10]| {
             let n = Instant::now();
             prof[i] += (n - tp).as_secs_f64();
             tp = n;

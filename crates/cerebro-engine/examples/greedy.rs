@@ -92,6 +92,17 @@ fn main() {
     println!("output tokens {:?}", out);
     println!("{}{}", prompt, tok.decode(&out));
     eprintln!("prefill {:.1} tok/s, decode {:.1} tok/s", ids.len() as f64 / prefill, n as f64 / decode);
+    if std::env::var_os("PROFILE").is_some() {
+        let total: f64 = s.profile().iter().map(|x| x.1).sum();
+        for (name, secs) in s.profile() {
+            eprintln!("  {name:<28} {secs:7.2} s  {:4.1}%", 100.0 * secs / total.max(1e-9));
+        }
+        #[cfg(feature = "cuda")]
+        if let Some((placed, cands, bytes, calls)) = model.offload_stats() {
+            eprintln!("GPU assist: {placed}/{cands} matrices, {:.2} GiB, {calls} products", bytes as f64 / (1u64 << 30) as f64);
+        }
+    }
+    model.save_expert_profile();
     if let Some(c) = model.gguf().experts() {
         let x = c.stats();
         eprintln!(
