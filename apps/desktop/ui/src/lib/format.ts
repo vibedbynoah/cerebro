@@ -21,3 +21,23 @@ export function ratio(part: number, total: number): number {
   if (!(total > 0) || !Number.isFinite(part)) return 0;
   return Math.min(1, Math.max(0, part / total));
 }
+
+const DAY = 86_400_000;
+
+/**
+ * How old an ISO date is, in plain words: "today", "yesterday", "3 days ago", "2 weeks ago",
+ * "5 months ago", "a year ago". Used for a repository's age, which is what tells a reader how
+ * settled a model is.
+ */
+export function fmtAge(iso: string, now: number = Date.now()): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return "an unknown date";
+  const days = Math.floor((now - t) / DAY);
+  if (days <= 0) return "today";
+  if (days === 1) return "yesterday";
+  if (days < 14) return `${days} days ago`;
+  if (days < 60) return `${Math.floor(days / 7)} weeks ago`;
+  if (days < 365) return `${Math.floor(days / 30)} months ago`;
+  const years = Math.floor(days / 365);
+  return years === 1 ? "a year ago" : `${years} years ago`;
+}

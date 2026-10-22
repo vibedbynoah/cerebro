@@ -1,12 +1,16 @@
 import { createEffect, createMemo, createResource, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { FamilyTile } from "../../components/FamilyTile";
-import { ABILITY_LABELS, abilitiesOf, fitBadge, HUB_CATEGORIES, HUB_PICKS, type HubPick } from "../../lib/hub-picks";
 import { Icon } from "../../components/icons";
 import { LicenceNote } from "../../components/LicenceNote";
 import { memoryNeeds } from "../../components/QuantTable";
 import { ScreenHeader } from "../../components/Screen";
+import { VerifiedBadge } from "../../components/VerifiedBadge";
+import { ABILITY_LABELS, abilitiesOf, fitBadge, HUB_CATEGORIES, HUB_PICKS, type HubPick } from "../../lib/hub-picks";
+import { fitOf, recommendQuant, toGiB, type QuantFile, type QuantPick } from "../../lib/hub-quant";
+import { isVerified, sortRepos, verifiedPublisher, VERIFIED_NOTE } from "../../lib/hub-verified";
+import { fmtAge } from "../../lib/format";
 import { licenceForModel } from "../../lib/model-licences";
-import { estimateFor, recommend, type MemoryModel } from "../../lib/memory-estimate";
+import { estimateFor, type MemoryModel } from "../../lib/memory-estimate";
 import { contextLabel } from "../../onboarding/autoconfig";
 import { useService } from "../../service/context";
 import type { HubDownloadEvent, HubFile, HubFileMeta, HubRepo } from "../../service/types";
@@ -22,20 +26,18 @@ const KV_TYPE = "f16" as const;
 /** A hub file's architecture, for the memory estimate. */
 const memoryModel = (meta: HubFileMeta): MemoryModel => ({ architecture: meta.experts ? "moe" : "dense", layers: meta.layers, kvHeads: meta.kvHeads, headDim: meta.headDim, embedding: meta.embedding, contextMax: meta.contextMax, attentionLayers: meta.attentionLayers });
 
-/** How a file of `bytes` fits this machine: all in graphics memory, graphics memory + system
- *  memory (experts or layers on the processor), system memory only, or not at all. */
-function fitOf(bytes: number, vram: number, ram: number): { label: string; tone: "good" | "ok" | "slow" | "no" } {
-  const need = bytes * 1.1;
-  if (vram > 0 && need <= vram * 0.92) return { label: "Fits in graphics memory", tone: "good" };
-  if (need <= vram * 0.92 + ram * 0.7) return { label: vram > 0 ? "Graphics memory + system memory" : "Fits in system memory", tone: vram > 0 ? "ok" : "slow" };
-  if (need <= ram * 0.9 + vram) return { label: "Tight: needs most of system memory", tone: "slow" };
-  return { label: "Too large for this machine", tone: "no" };
-}
+/** A file of a repository, as the quant chooser sees it. */
+const quantFile = (f: HubFile): QuantFile => ({ path: f.path, quant: f.quant, sizeGiB: toGiB(f.size), parts: f.parts.length });
 
 /**
  * Model Hub on the desktop: live search of Hugging Face for GGUF models, every file of a repository
  * by quant with its real size and how it fits this machine, and downloads with progress into
  * Cerebro's model folder (the Models screen picks them up).
+ *
+ * Two things are picked for the user, both from what the machine really has: which publishers are
+ * worth trusting (Cerebro's own checked list) and which file of a repository to download (the
+ * largest one that fits, preferring Unsloth's dynamic quants). Everything else stays one click
+ * away; nothing is hidden.
  */
 export function LiveHub(): JSX.Element {
   const service = useService();
@@ -44,6 +46,7 @@ export function LiveHub(): JSX.Element {
   const [query, setQuery] = createSignal("");
   const [submitted, setSubmitted] = createSignal("");
   const [repo, setRepo] = createSignal<string | null>(null);
+  const [verifiedOnly, setVerifiedOnly] = createSignal(false);
   const [hw] = createResource(() => service.detectHardware().catch(() => undefined));
   const offline = () => app.settings()?.offlineMode === true || app.network() !== "online";
   const downloadsOff = () => app.settings()?.allowModelDownloads === false;
@@ -58,19 +61,22 @@ export function LiveHub(): JSX.Element {
   const vramGiB = () => hw()?.gpu?.vramTotalGiB ?? 0;
   const ramGiB = () => hw()?.ramTotalGiB ?? 0;
   const order = { good: 0, ok: 1, slow: 2, no: 3 } as const;
-  const picks = createMemo(() =>
-    HUB_PICKS.map((p) => ({ p, fit: fitBadge(p.sizeGiB, vramGiB(), ramGiB()) })).sort((a, b) => order[a.fit.tone] - order[b.fit.tone]),
-  );
+  const picks = createMemo(() => HUB_PICKS.map((p) => ({ p, fit: fitBadge(p.sizeGiB, vramGiB(), ramGiB()) })).sort((a, b) => order[a.fit.tone] - order[b.fit.tone]));
   const filesFor = () => (blocked() ? undefined : repo());
   const [results] = createResource(search, (q) => service.hubSearch!(q));
   const [files, { refetch }] = createResource(filesFor, (r) => service.hubFiles!(r));
   const selected = () => (results() ?? []).find((r) => r.id === repo()) ?? null;
   const [progress, setProgress] = createSignal<Record<string, { done: number; total: number; bps: number; error?: string; path?: string }>>({});
-  const vram = createMemo(() => (hw()?.gpu?.vramTotalGiB ?? 0) * GIB);
-  const ram = createMemo(() => (hw()?.ramTotalGiB ?? 0) * GIB);
   const [ctx, setCtx] = createSignal(8192);
   const ctxLabel = () => contextLabel(ctx());
   const [metas, setMetas] = createSignal<Record<string, HubFileMeta | null>>({});
+
+  /** The results as they are shown: the best match first, and at equal relevance the publishers on
+   *  Cerebro's list before the rest. */
+  const shown = createMemo(() => {
+    const sorted = sortRepos(results() ?? [], submitted());
+    return verifiedOnly() ? sorted.filter((r) => isVerified(r.id)) : sorted;
+  });
 
   // Read each file's GGUF header (metadata only) once its repository is listed, so the memory line
   // and the recommendation use the real architecture, not a guess.
@@ -102,20 +108,50 @@ export function LiveHub(): JSX.Element {
   const estimateOf = (f: HubFile) => {
     const meta = metas()[f.path];
     const h = hw();
-    return meta && h ? estimateFor(memoryModel(meta), { label: f.quant, sizeGiB: f.size / GIB }, ctx(), KV_TYPE, h) : null;
+    return meta && h ? estimateFor(memoryModel(meta), { label: f.quant, sizeGiB: toGiB(f.size) }, ctx(), KV_TYPE, h) : null;
   };
 
-  const best = createMemo(() => {
-    const h = hw();
+  /** The file Cerebro would use here, from the repository's own file list and this machine. */
+  const rec = createMemo<QuantPick | null>(() => {
     const list = files.error ? undefined : files();
-    if (!h || !list) return [];
-    const m = metas();
-    const candidates = list.flatMap((f) => {
-      const meta = m[f.path];
-      return meta ? [{ model: memoryModel(meta), quant: { label: f.quant, sizeGiB: f.size / GIB }, file: f }] : [];
-    });
-    return recommend(candidates, h, ctx(), KV_TYPE, 3);
+    const h = hw();
+    if (!list || !h) return null;
+    return recommendQuant(list.map(quantFile), h);
   });
+
+  const fileOf = (path: string): HubFile | undefined => (files() ?? []).find((f) => f.path === path);
+
+  /**
+   * The front page names the file each pick would use, so it reads that repository's own file list
+   * rather than guessing. A pick whose repository cannot be read keeps its typical size.
+   */
+  const [pickInfo] = createResource(
+    () => {
+      if (blocked()) return undefined;
+      const h = hw();
+      if (!h) return undefined;
+      return `${h.gpu?.vramTotalGiB ?? 0}:${h.ramTotalGiB ?? 0}`;
+    },
+    async () => {
+      const out: Record<string, QuantPick> = {};
+      await Promise.all(
+        picks().map(async ({ p }) => {
+          try {
+            const repos = await service.hubSearch!(p.query);
+            const repo = repos[0];
+            if (!repo) return;
+            const list = await service.hubFiles!(repo.id);
+            const pick = recommendQuant(list.map(quantFile), hw());
+            if (!pick) return;
+            out[p.title] = pick;
+          } catch {
+            // A repository that cannot be read keeps the typical size on its card.
+          }
+        }),
+      );
+      return out;
+    },
+  );
 
   const start = (r: string, f: HubFile) => {
     if (blocked()) return;
@@ -181,7 +217,7 @@ export function LiveHub(): JSX.Element {
           <h2 id="picks-title">Recommended for this computer</h2>
           <ul class="livehub__pick-grid">
             <For each={picks()}>
-              {(x) => <PickCard pick={x.p} fit={x.fit} disabled={blocked()} onOpen={() => runSearch(x.p.query)} />}
+              {(x) => <PickCard pick={x.p} fit={x.fit} info={pickInfo()?.[x.p.title]} disabled={blocked()} onOpen={() => runSearch(x.p.query)} />}
             </For>
           </ul>
         </section>
@@ -190,21 +226,31 @@ export function LiveHub(): JSX.Element {
         Live from huggingface.co. Sizes are the files' real sizes; fit is judged against this machine: {hw() ? `${hw()!.gpu ? `${hw()!.gpu!.name}, ${hw()!.gpu!.vramTotalGiB.toFixed(0)} GiB graphics memory · ` : ""}${hw()!.ramTotalGiB.toFixed(0)} GiB system memory` : "reading…"}
       </p>
       <Show when={submitted()}>
+        <div class="livehub__filters">
+          <button type="button" class="chip livehub__chip livehub__filter" aria-pressed={verifiedOnly()} disabled={blocked()} onClick={() => setVerifiedOnly(!verifiedOnly())}>
+            <Icon name="verified" size={12} />
+            Verified publishers only
+          </button>
+          <span class="livehub__muted">{VERIFIED_NOTE}</span>
+        </div>
       <div class="livehub__panes">
         <section class="livehub__results" aria-label="Repositories">
           <Show when={!results.loading} fallback={<p class="livehub__muted">Searching…</p>}>
             <Show when={!results.error} fallback={<p class="notice">{String(results.error?.message ?? results.error)}</p>}>
-              <Show when={(results() ?? []).length > 0} fallback={<p class="livehub__muted">No GGUF repositories match.</p>}>
+              <Show when={shown().length > 0} fallback={<p class="livehub__muted">{verifiedOnly() ? "No repository from a verified publisher matches this search." : "No GGUF repositories match."}</p>}>
                 <ul>
-                  <For each={results()}>
+                  <For each={shown()}>
                     {(r: HubRepo) => (
                       <li>
                         <button type="button" class="livehub__repo" aria-pressed={repo() === r.id} onClick={() => setRepo(r.id)}>
                           <FamilyTile name={r.id} size={34} />
                           <span class="livehub__repo-body">
-                          <span class="livehub__repo-name">{r.id}</span>
+                          <span class="livehub__repo-name">
+                            <span class="livehub__repo-id">{r.id}</span>
+                            <Show when={verifiedPublisher(r.id)}>{(v) => <VerifiedBadge publisher={v().name} />}</Show>
+                          </span>
                           <span class="livehub__muted">
-                            {compactCount(r.downloads)} downloads · {compactCount(r.likes)} likes{r.updated ? ` · ${r.updated.slice(0, 10)}` : ""}
+                            {compactCount(r.downloads)} downloads · updated {fmtAge(r.updated)} · {compactCount(r.likes)} likes
                           </span>
                           <span class="livehub__badges">
                             <For each={abilitiesOf(r.id, r.tags)}>{(a) => <span class="livehub__badge">{ABILITY_LABELS[a]}</span>}</For>
@@ -222,7 +268,12 @@ export function LiveHub(): JSX.Element {
         </section>
         <section class="livehub__files" aria-label="Files">
           <Show when={repo()} fallback={<p class="livehub__muted">Pick a repository to see its files.</p>}>
-            <h2 class="livehub__title">{repo()}</h2>
+            <div class="livehub__repo-head">
+              <h2 class="livehub__title">{repo()}</h2>
+              <Show when={selected() ? verifiedPublisher(selected()!.id) : null}>
+                {(v) => <VerifiedBadge publisher={v().name} />}
+              </Show>
+            </div>
             <Show when={selected()}>
               {(r) => <LicenceNote licence={licenceForModel(r().id, null, r().license)} class="livehub__licence" />}
             </Show>
@@ -243,28 +294,61 @@ export function LiveHub(): JSX.Element {
                 />
                 <span class="mono">{ctxLabel()}</span>
               </label>
-              <Show when={best().length > 0}>
-                <ol class="livehub__best" aria-label="Best for this computer">
-                  <For each={best()}>
-                    {(p) => (
-                      <li data-best={p.file.quant}>
-                        <span class="mono">{p.file.quant}</span> — {p.why} <span class="mono" data-estimate={p.file.path}>{memoryNeeds(p.estimate, ctxLabel())}</span>
-                      </li>
-                    )}
-                  </For>
-                </ol>
+              <Show when={rec()}>
+                {(r) => (
+                  <div class="livehub__rec" data-recommended={r().file.path}>
+                    <p class="livehub__rec-head">
+                      <Icon name="check" size={16} />
+                      <strong>Recommended for this computer</strong>
+                    </p>
+                    <p class="livehub__rec-why" data-rec-why={r().file.quant}>
+                      {r().why}
+                    </p>
+                    <p class="livehub__rec-meta">
+                      <span class="mono">{r().file.quant}</span>
+                      <span aria-hidden="true">·</span>
+                      <span>{gib(r().file.sizeGiB * GIB)} GiB</span>
+                      <Show when={r().file.parts > 1}>
+                        <span aria-hidden="true">·</span>
+                        <span>
+                          {r().file.parts} parts, one download
+                        </span>
+                      </Show>
+                    </p>
+                    <button
+                      type="button"
+                      class="btn btn--primary btn--sm livehub__rec-download"
+                      disabled={blocked()}
+                      aria-label={`Download the recommended file ${r().file.quant}`}
+                      onClick={() => {
+                        const f = fileOf(r().file.path);
+                        if (f) start(repo()!, f);
+                      }}
+                    >
+                      Download
+                    </button>
+                  </div>
+                )}
+              </Show>
+              <Show when={!rec() && !!hw() && !files.loading}>
+                <p class="livehub__muted">This repository has no file for Cerebro to pick.</p>
+              </Show>
+              <Show when={hw.error}>
+                <p class="livehub__muted">Cerebro could not read this computer's memory, so it cannot pick a file here.</p>
               </Show>
             </div>
             <Show when={!files.loading} fallback={<p class="livehub__muted">Reading the file list…</p>}>
               <Show when={!files.error} fallback={<p class="notice">{String(files.error?.message ?? files.error)}</p>}>
+                <div class="livehub__table-wrap">
                 <table class="livehub__table">
                   <thead>
                     <tr>
                       <th>Quant</th>
                       <th>Size</th>
-                      <th>Memory</th>
-                      <th>Fit here</th>
-                      <th />
+                      <th>On this computer</th>
+                      <th>
+                        <span class="sr-only">Download</span>
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
@@ -272,20 +356,35 @@ export function LiveHub(): JSX.Element {
                       {(f: HubFile) => {
                         const key = () => `${repo()}/${f.path}`;
                         const p = () => progress()[key()];
-                        const fit = () => fitOf(f.size, vram(), ram());
+                        const fit = () => fitOf(toGiB(f.size), vramGiB(), ramGiB());
+                        const isRec = () => rec()?.file.path === f.path;
                         return (
-                          <tr>
+                          <tr classList={{ "is-recommended": isRec() }} data-recommended={isRec() ? "true" : undefined}>
                             <td>
                               <span class="livehub__quant">{f.quant}</span>
-                              <span class="livehub__file">{f.path}{f.parts.length > 1 ? ` (+${f.parts.length - 1} parts)` : ""}</span>
+                              <span class="livehub__file" title={f.path}>
+                                {f.path}
+                              </span>
+                              <Show when={f.parts.length > 1}>
+                                <span class="livehub__file-note">{f.parts.length} parts, one download</span>
+                              </Show>
+                              <Show when={isRec()}>
+                                <span class="livehub__rec-badge">
+                                  <Icon name="check" size={12} />
+                                  Recommended for this computer
+                                </span>
+                              </Show>
                             </td>
                             <td class="num">{gib(f.size)} GiB</td>
                             <td class="num livehub__mem">
                               <Show when={estimateOf(f)} fallback={<span class="livehub__muted">—</span>}>
-                                {(e) => <span class="mono" data-estimate={f.path}>{memoryNeeds(e(), ctxLabel())}</span>}
+                                {(e) => (
+                                  // Short in the table; the whole sentence is the tooltip and what a screen reader hears.
+                                  <span class="mono" data-estimate={f.path} title={memoryNeeds(e(), ctxLabel())} aria-label={memoryNeeds(e(), ctxLabel())}>
+                                    {e().vramGiB.toFixed(1)} + {e().ramGiB.toFixed(1)} GiB
+                                  </span>
+                                )}
                               </Show>
-                            </td>
-                            <td>
                               <span class={`livehub__fit livehub__fit--${fit().tone}`}>{fit().label}</span>
                             </td>
                             <td class="livehub__action">
@@ -300,7 +399,7 @@ export function LiveHub(): JSX.Element {
                                       <Show when={p()?.error}>
                                         <span class="livehub__err">{p()!.error}</span>
                                       </Show>
-                                      <button class="btn btn--secondary" type="button" disabled={blocked() || fit().tone === "no"} onClick={() => start(repo()!, f)}>
+                                      <button class={`btn ${isRec() ? "btn--primary" : "btn--secondary"}`} type="button" disabled={blocked() || fit().tone === "no"} onClick={() => start(repo()!, f)}>
                                         {p()?.error ? "Resume" : "Download"}
                                       </button>
                                     </>
@@ -324,6 +423,7 @@ export function LiveHub(): JSX.Element {
                     </For>
                   </tbody>
                 </table>
+                </div>
               </Show>
             </Show>
           </Show>
@@ -341,18 +441,27 @@ function compactCount(n: number): string {
   return String(n);
 }
 
-function PickCard(props: { pick: HubPick; fit: { label: string; tone: string }; disabled: boolean; onOpen: () => void }): JSX.Element {
+function PickCard(props: { pick: HubPick; fit: { label: string; tone: string }; info: QuantPick | undefined; disabled: boolean; onOpen: () => void }): JSX.Element {
+  const publisher = () => verifiedPublisher(props.pick.publisher);
   return (
     <li class="livehub__pick card" data-fit={props.fit.tone}>
       <div class="livehub__pick-head">
         <FamilyTile name={props.pick.family} size={44} />
         <div>
           <h3>{props.pick.title}</h3>
-          <span class="livehub__muted mono">
-            {props.pick.params} · about {props.pick.sizeGiB.toFixed(1)} GiB
-          </span>
+          <span class="livehub__muted mono">{props.pick.params}</span>
         </div>
+        <Show when={publisher()}>{(v) => <VerifiedBadge publisher={v().name} />}</Show>
       </div>
+      <p class="livehub__pick-size">
+        <Show when={props.info} fallback={<span class="livehub__muted">about {props.pick.sizeGiB.toFixed(1)} GiB</span>}>
+          {(i) => (
+            <span class="livehub__muted">
+              Recommended <span class="mono">{i().file.quant}</span> · {gib(i().file.sizeGiB * GIB)} GiB
+            </span>
+          )}
+        </Show>
+      </p>
       <p>{props.pick.blurb}</p>
       <div class="livehub__badges">
         <For each={props.pick.abilities}>{(a) => <span class="livehub__badge">{ABILITY_LABELS[a]}</span>}</For>

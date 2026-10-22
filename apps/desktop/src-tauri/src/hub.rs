@@ -175,6 +175,43 @@ fn local_path(repo: &str, file: &str) -> PathBuf {
     p
 }
 
+/// The key the parts of one split model share: the file name without its "-00001-of-00003" tail,
+/// with the number of parts kept, so two different splits of the same name stay apart. None for a
+/// file that is not one part of a split model.
+fn split_key(path: &str) -> Option<String> {
+    let stem = path.strip_suffix(".gguf")?;
+    let (head, count) = stem.rsplit_once("-of-")?;
+    if count.len() != 5 || !count.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let (prefix, index) = head.rsplit_once('-')?;
+    if index.len() != 5 || !index.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!("{prefix}-of-{count}"))
+}
+
+/// One entry per model: the parts of a split model ("-00001-of-00003") are listed once, with all
+/// their parts and their total size, so one download brings in the whole model.
+fn group_files(entries: &[(String, u64)]) -> Vec<HubFile> {
+    let mut out: Vec<HubFile> = Vec::new();
+    let mut by_key: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (path, size) in entries {
+        let key = split_key(path).unwrap_or_else(|| path.clone());
+        if let Some(&i) = by_key.get(&key) {
+            let f = &mut out[i];
+            f.size += size;
+            f.parts.push(path.clone());
+            f.parts.sort();
+            f.path = f.parts[0].clone();
+            continue;
+        }
+        by_key.insert(key, out.len());
+        out.push(HubFile { path: path.clone(), size: *size, parts: vec![path.clone()], quant: quant_of(path), downloaded: false });
+    }
+    out
+}
+
 pub fn files(repo: &str) -> Result<Vec<HubFile>, String> {
     if !valid_repo(repo) {
         return Err("That is not a Hugging Face repository name.".into());
@@ -187,26 +224,15 @@ pub fn files(repo: &str) -> Result<Vec<HubFile>, String> {
         return Err(format!("Hugging Face answered {} for that repository.", resp.status().as_u16()));
     }
     let tree: Vec<TreeEntry> = resp.json().map_err(|_| "Hugging Face sent an unexpected answer.".to_owned())?;
-    let mut out: Vec<HubFile> = Vec::new();
-    let mut by_key: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for e in tree.iter().filter(|e| e.kind == "file" && e.path.ends_with(".gguf") && !e.path.to_lowercase().contains("mmproj")) {
-        let size = e.lfs.as_ref().map_or(e.size, |l| l.size);
-        // Parts of a split model ("-00001-of-00003") are listed once, under the first part.
-        let key = match (e.path.rfind("-000"), e.path.find("-of-")) {
-            (Some(i), Some(_)) => e.path[..i].to_owned(),
-            _ => e.path.clone(),
-        };
-        if let Some(&i) = by_key.get(&key) {
-            let f = &mut out[i];
-            f.size += size;
-            f.parts.push(e.path.clone());
-            f.parts.sort();
-            f.path = f.parts[0].clone();
-            continue;
-        }
-        by_key.insert(key, out.len());
-        out.push(HubFile { path: e.path.clone(), size, parts: vec![e.path.clone()], quant: quant_of(&e.path), downloaded: false });
-    }
+    let entries: Vec<(String, u64)> = tree
+        .iter()
+        .filter(|e| e.kind == "file" && e.path.ends_with(".gguf") && !e.path.to_lowercase().contains("mmproj"))
+        .map(|e| {
+            let size = e.lfs.as_ref().map_or(e.size, |l| l.size);
+            (e.path.clone(), size)
+        })
+        .collect();
+    let mut out = group_files(&entries);
     for f in &mut out {
         f.downloaded = f.parts.iter().all(|p| local_path(repo, p).exists());
     }
@@ -487,6 +513,43 @@ mod tests {
         assert_eq!(quant_of("Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL.gguf"), "UD-Q4_K_XL");
         assert_eq!(quant_of("gemma-4-e4b-it-Q8_0.gguf"), "Q8_0");
         assert_eq!(quant_of("x-IQ2_XXS-00001-of-00003.gguf"), "IQ2_XXS");
+    }
+
+    /// The parts of a split model are one file in the Hub: one download, one row, one model in the
+    /// library. Two different splits of the same name stay apart.
+    #[test]
+    fn the_parts_of_a_split_model_are_one_file() {
+        let entries = vec![
+            ("Qwen3-4B-UD-Q4_K_XL-00001-of-00003.gguf".to_string(), 10),
+            ("Qwen3-4B-UD-Q4_K_XL-00002-of-00003.gguf".to_string(), 20),
+            ("Qwen3-4B-UD-Q4_K_XL-00003-of-00003.gguf".to_string(), 30),
+            ("Qwen3-4B-UD-Q4_K_XL-00001-of-00002.gguf".to_string(), 40),
+            ("Qwen3-4B-Q4_K_M.gguf".to_string(), 50),
+        ];
+        let files = group_files(&entries);
+        assert_eq!(files.len(), 3);
+        let split = files.iter().find(|f| f.parts.len() == 3).expect("the split model");
+        assert_eq!(split.size, 60);
+        assert_eq!(split.path, "Qwen3-4B-UD-Q4_K_XL-00001-of-00003.gguf");
+        assert_eq!(split.quant, "UD-Q4_K_XL");
+        assert_eq!(split.parts.len(), 3);
+        // The other split is its own file, with its own total.
+        let other = files.iter().find(|f| f.parts.len() == 1 && f.size == 40).expect("the other split");
+        assert_eq!(other.size, 40);
+        // An ordinary file is untouched.
+        let plain = files.iter().find(|f| f.quant == "Q4_K_M").expect("the plain file");
+        assert_eq!(plain.size, 50);
+        assert_eq!(plain.parts.len(), 1);
+    }
+
+    #[test]
+    fn only_a_real_split_tail_makes_a_key() {
+        assert_eq!(split_key("Model-00001-of-00003.gguf"), Some("Model-of-00003".to_owned()));
+        assert_eq!(split_key("Model-00002-of-00003.gguf"), Some("Model-of-00003".to_owned()));
+        assert_eq!(split_key("Model-00001-of-00002.gguf"), Some("Model-of-00002".to_owned()));
+        assert_eq!(split_key("Model-Q4_K_M.gguf"), None);
+        assert_eq!(split_key("Model-0001-of-00003.gguf"), None);
+        assert_eq!(split_key("Model-00001-of-3.gguf"), None);
     }
 
     fn kv_str(key: &str, val: &str) -> Vec<u8> {

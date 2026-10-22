@@ -156,17 +156,20 @@
 .livehub__search { display: flex; gap: 12px; align-items: center; max-width: 880px; margin-top: 8px; }
 .livehub__search .input { flex: 1; }
 .livehub__note, .livehub__muted { color: var(--color-text-muted); font-size: 0.9rem; }
-.livehub__panes { display: grid; grid-template-columns: minmax(280px, 1fr) 2fr; gap: 24px; margin-top: 16px; }
+.livehub__panes { display: grid; grid-template-columns: minmax(240px, 290px) minmax(0, 1fr); gap: 24px; margin-top: 16px; }
 .livehub__results ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 70vh; overflow: auto; }
 .livehub__repo { width: 100%; text-align: left; display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--color-border); background: var(--color-surface-1); cursor: pointer; }
 .livehub__repo[aria-pressed="true"] { border-color: var(--color-accent); box-shadow: 0 0 0 1px var(--color-accent); }
 .livehub__repo-name { font-weight: 600; overflow-wrap: anywhere; }
 .livehub__title { font-size: 1.1rem; margin: 0 0 12px; overflow-wrap: anywhere; }
 .livehub__table { width: 100%; border-collapse: collapse; }
+/* Scrolls sideways on a narrow window instead of pushing the page wider. */
+.livehub__table-wrap { overflow-x: auto; max-width: 100%; }
 .livehub__table th { text-align: left; font-size: 0.8rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--color-text-muted); padding: 8px; }
 .livehub__table td { padding: 10px 8px; border-top: 1px solid var(--color-border); vertical-align: middle; }
 .livehub__quant { font-family: var(--font-family-code); font-weight: 600; display: block; }
-.livehub__file { font-size: 0.8rem; color: var(--color-text-muted); overflow-wrap: anywhere; }
+.livehub__file { font-size: 0.8rem; color: var(--color-text-muted); display: block; max-width: 26ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.livehub__file-note { font-size: 0.75rem; color: var(--color-text-muted); display: block; }
 .livehub__fit { font-size: 0.85rem; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
 .livehub__fit--good { background: var(--color-success-muted); color: var(--color-text-primary); }
 .livehub__fit--ok { background: var(--color-accent-muted); color: var(--color-accent-text); }
@@ -210,9 +213,8 @@
 
 .livehub__controls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); margin-bottom: var(--space-3); }
 .livehub__ctx { display: flex; align-items: center; gap: var(--space-2); font-size: 0.9rem; color: var(--color-text-muted); min-width: 0; }
-.livehub__best { flex-basis: 100%; display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; font-size: 0.9rem; color: var(--color-text-secondary); }
-.livehub__best li { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; min-width: 0; }
 .livehub__mem { font-size: 0.85rem; color: var(--color-text-secondary); white-space: nowrap; }
+.livehub__mem .livehub__fit { display: block; width: fit-content; margin-top: 4px; }
 
 .hub-card__licence {
   margin-top: var(--space-3);
@@ -223,6 +225,29 @@
 }
 
 /* ---- Live Hub front page: categories, recommended picks, family tiles ---- */
+
+/* The Verified badge: an icon and the word, so it never depends on colour alone. */
+.verified {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 8px 1px 5px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-2);
+  color: var(--color-text-primary);
+  font-size: 0.75rem;
+  font-weight: var(--weight-medium);
+  line-height: 1.5;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.verified .icon {
+  flex: none;
+  color: var(--color-success);
+}
 
 .family-tile {
   display: inline-grid;
@@ -250,10 +275,16 @@
 
 .livehub__chip {
   cursor: pointer;
+  /* The browser's own button background would sit under the label; these chips carry the app's. */
+  appearance: none;
+  background: transparent;
+  border-color: var(--color-border);
+  color: var(--color-text-primary);
 }
 
 .livehub__chip[aria-pressed="true"] {
   border-color: var(--color-accent);
+  background: var(--color-accent-muted);
   color: var(--color-accent-text);
 }
 
@@ -273,7 +304,7 @@
 
 .livehub__pick {
   display: grid;
-  grid-template-rows: auto 1fr auto auto;
+  grid-template-rows: auto auto 1fr auto auto;
   gap: var(--space-2);
   padding: var(--space-4);
 }
@@ -282,6 +313,15 @@
   display: flex;
   align-items: center;
   gap: var(--space-3);
+}
+
+.livehub__pick-head > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.livehub__pick-size {
+  margin: 0;
 }
 
 .livehub__pick h3 {
@@ -316,6 +356,45 @@
   font-size: 0.75rem;
 }
 
+/* The filter row: one chip, and the sentence that says what the badge means. */
+.livehub__filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.livehub__filter {
+  cursor: pointer;
+  border-color: var(--color-border-strong);
+  color: var(--color-text-primary);
+  font-size: 0.8125rem;
+  padding: 3px 10px;
+}
+
+.livehub__filter[aria-pressed="true"] {
+  border-color: var(--color-accent);
+  background: var(--color-accent-muted);
+  color: var(--color-accent-text);
+}
+
+.livehub__filter .icon {
+  color: var(--color-success);
+}
+
+.livehub__filter[aria-pressed="true"] .icon {
+  color: var(--color-accent-text);
+}
+
+/* The repository's title and its badge, on one line. */
+.livehub__repo-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 .livehub__repo {
   display: flex;
   align-items: flex-start;
@@ -328,3 +407,96 @@
   gap: 3px;
   min-width: 0;
 }
+
+.livehub__repo-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.livehub__repo-id {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* The file Cerebro would use here, and the reason in one sentence. */
+.livehub__rec {
+  flex-basis: 100%;
+  display: grid;
+  grid-template-areas:
+    "head head"
+    "why why"
+    "meta meta"
+    "action action";
+  gap: var(--space-1) var(--space-3);
+  margin: var(--space-2) 0 var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-2);
+}
+
+.livehub__rec-head {
+  grid-area: head;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: var(--text-small);
+  color: var(--color-text-primary);
+}
+
+.livehub__rec-head .icon {
+  color: var(--color-success);
+}
+
+.livehub__rec-why {
+  grid-area: why;
+  margin: 0;
+  font-size: var(--text-body);
+  line-height: var(--leading-snug);
+  color: var(--color-text-primary);
+}
+
+.livehub__rec-meta {
+  grid-area: meta;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.livehub__rec-download {
+  grid-area: action;
+  justify-self: start;
+  margin-top: var(--space-2);
+}
+
+/* The recommended file's row in the table. */
+.livehub__table tr.is-recommended {
+  background: var(--color-surface-2);
+}
+
+.livehub__rec-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 26ch;
+  margin-top: 4px;
+  padding: 1px 8px 1px 5px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-1);
+  color: var(--color-text-primary);
+  font-size: 0.75rem;
+}
+
+.livehub__rec-badge .icon {
+  color: var(--color-success);
+}
+
