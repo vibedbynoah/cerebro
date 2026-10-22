@@ -175,6 +175,9 @@ fn vec_f32(g: &Gguf, name: &str) -> Result<Vec<f32>, Error> {
     Ok(out)
 }
 
+/// The architectures this engine runs (`general.architecture`): the app lists models by it.
+pub const ARCHITECTURES: &[&str] = &["qwen3", "qwen3moe", "qwen2", "llama", "qwen35", "qwen3vl", "qwen3tts", "qwen4exp"];
+
 impl Model {
     /// Whether any attention or output matrix is Q8_0 (four-row dots only apply to those).
     pub fn uses_q8_0(&self) -> bool {
@@ -183,15 +186,16 @@ impl Model {
 
     pub fn load(path: &Path) -> Result<Self, Error> {
         let g = Arc::new(Gguf::open(path)?);
+        let arch_name = g.str("general.architecture").unwrap_or("");
+        if !ARCHITECTURES.contains(&arch_name) {
+            return Err(Error::Unsupported(format!("architecture {arch_name}")));
+        }
 
         let arch = g.str("general.architecture").unwrap_or("").to_owned();
         // qwen3vl: Qwen3 with multi-axis rotary positions (the language model of Qwen3-VL and
         // Qwen3-ASR); deepstack (image features added into early layers) is not run yet.
         // qwen3tts: the Qwen3-TTS talker, a qwen3vl model whose output head covers only the codec
         // tokens (logit i is the token `<|codec_0|>` + i; see tts.rs).
-        if !matches!(arch.as_str(), "qwen3" | "qwen3moe" | "qwen2" | "llama" | "qwen35" | "qwen3vl" | "qwen3tts" | "qwen4exp") {
-            return Err(Error::Unsupported(format!("architecture {arch}")));
-        }
         if g.u64(&format!("{arch}.n_deepstack_layers")).unwrap_or(0) > 0 {
             return Err(Error::Unsupported("deepstack layers (Qwen3-VL image features in early layers)".into()));
         }
