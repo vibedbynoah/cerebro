@@ -63,6 +63,8 @@ pub struct Machine {
     /// Effective read bandwidth of decode on each tier (measured values when known).
     pub gpu_bps: f64,
     pub ram_bps: f64,
+    /// Layers that do not fit in RAM may be read from the drive on every pass (stream.rs).
+    pub drive_tier: bool,
 }
 
 impl Machine {
@@ -71,7 +73,7 @@ impl Machine {
     /// and ~40 GB/s as the tail of a 31/40 split (11.8 tok/s measured, 9.2 estimated). Callers with
     /// their own measurements override.
     pub fn new(vram_free: u64, ram_available: u64, drive: Drive) -> Self {
-        Machine { vram_free, ram_available, drive, gpu_bps: 3.0e11, ram_bps: 3.0e10 }
+        Machine { vram_free, ram_available, drive, gpu_bps: 3.0e11, ram_bps: 3.0e10, drive_tier: true }
     }
 }
 
@@ -128,11 +130,43 @@ pub struct Plan {
     pub cpu_bytes: u64,
     pub ram_resident: u64,
     pub drive_bytes_per_token: u64,
+    /// Trailing processor layers read from the drive on every pass so the rest fits in RAM.
+    pub drive_layers: usize,
     /// Estimated decode speed (tokens/s): an estimate from tier bandwidths, not a measurement.
     pub est_decode_tps: f64,
     pub drive: Drive,
     /// Plain sentences for the user, most important first.
     pub notes: Vec<String>,
+}
+
+/// RAM the drive tier's ring of buffers takes for layers of `biggest` bytes (stream.rs).
+pub fn drive_ring_bytes(biggest: u64) -> u64 {
+    let n = ((512u64 << 20) / biggest.max(1)).clamp(2, 8);
+    n * biggest
+}
+
+/// How many trailing processor layers to read from the drive on every pass so that the rest of
+/// the processor's share, plus the drive tier's buffers, fits in `ram_budget`: 0 when everything
+/// fits. `layers` is each layer's weight bytes, `head` the output head's; layers before
+/// `gpu_layers` are on the GPU. Streaming every processor layer of a model with nothing on the GPU
+/// streams the head too. When even that does not fit, every processor layer is streamed (RAM then
+/// holds only the buffers and whatever the OS keeps).
+pub fn drive_layers(layers: &[u64], head: u64, gpu_layers: usize, ram_budget: u64) -> usize {
+    let cpu = &layers[gpu_layers.min(layers.len())..];
+    let total: u64 = cpu.iter().sum::<u64>() + head;
+    if total <= ram_budget || cpu.is_empty() {
+        return 0;
+    }
+    let ring = drive_ring_bytes(cpu.iter().copied().max().unwrap_or(0).max(if gpu_layers == 0 { head } else { 0 }));
+    let mut resident = total;
+    for k in 1..=cpu.len() {
+        resident -= cpu[cpu.len() - k];
+        let r = if k == cpu.len() && gpu_layers == 0 { resident - head } else { resident };
+        if r + ring <= ram_budget {
+            return k;
+        }
+    }
+    cpu.len()
 }
 
 /// VRAM left free for the driver, CUDA graphs and fragmentation.
@@ -194,8 +228,16 @@ pub fn plan_dense(cost: &ModelCost, m: &Machine, force_gpu_layers: Option<usize>
         _ => sum(&|l| l.kv_cpu, gpu_layers..n),
     };
     let ram_budget = m.ram_available.saturating_sub(RAM_MARGIN).saturating_sub(cpu_kv);
-    let ram_resident = cpu_weights.min(ram_budget);
-    let from_drive = cpu_weights - ram_resident;
+    // With the drive tier, the last layers that do not fit are read in large unbuffered requests
+    // at the drive's full speed; without it, the OS pages the overflow in 4 KB at a time.
+    let drive_layers = if m.drive_tier && cpu_weights > ram_budget { drive_layers(&cost.layers.iter().map(|l| l.native).collect::<Vec<_>>(), cost.head_native, gpu_layers, ram_budget) } else { 0 };
+    let (ram_resident, from_drive) = if drive_layers > 0 {
+        let streamed = sum(&|l| l.native, n - drive_layers..n) + if drive_layers == n { cost.head_native } else { 0 };
+        (cpu_weights - streamed, streamed)
+    } else {
+        let r = cpu_weights.min(ram_budget);
+        (r, cpu_weights - r)
+    };
     let gpu_read = match layout {
         Layout::GpuInt8 | Layout::GpuNative => vram_bytes.saturating_sub(cost.scratch).saturating_sub(sum(&|l| l.kv_gpu, 0..n)),
         Layout::Split => sum(&|l| if l.native_ok { l.native } else { l.int8 }, 0..gpu_layers),
@@ -211,7 +253,15 @@ pub fn plan_dense(cost: &ModelCost, m: &Machine, force_gpu_layers: Option<usize>
         Layout::Cpu if m.vram_free == 0 => notes.push("No supported GPU: everything runs on the processor.".to_owned()),
         Layout::Cpu => notes.push("Not even one layer fits in the free GPU memory: everything runs on the processor.".to_owned()),
     }
-    if from_drive > 0 {
+    if drive_layers > 0 {
+        notes.push(format!(
+            "{drive_layers} of the processor's layers ({:.1} GiB) do not fit in RAM and are read from the {} for every token at its full speed (about {:.1} s per token from the drive alone); {:.1} GiB stays in RAM. Freeing RAM, a smaller quant or a shorter context is faster.",
+            gib(from_drive),
+            m.drive.label(),
+            from_drive as f64 / m.drive.read_bps(),
+            gib(ram_resident)
+        ));
+    } else if from_drive > 0 {
         let per_tok = from_drive as f64 / m.drive.read_bps();
         notes.push(format!(
             "{:.1} GiB does not fit in RAM and is read from the {} for every token (about {:.1} s per token from the drive alone). Freeing RAM, a smaller quant or a shorter context helps most.",
@@ -222,7 +272,7 @@ pub fn plan_dense(cost: &ModelCost, m: &Machine, force_gpu_layers: Option<usize>
     } else if cpu_weights > 0 {
         notes.push(format!("The processor's share stays in RAM ({:.1} GiB); the {} is read only while loading.", gib(ram_resident), m.drive.label()));
     }
-    Plan { layout, gpu_layers, total_layers: n, vram_bytes, cpu_bytes: cpu_weights, ram_resident, drive_bytes_per_token: from_drive, est_decode_tps: est, drive: m.drive, notes }
+    Plan { layout, gpu_layers, total_layers: n, vram_bytes, cpu_bytes: cpu_weights, ram_resident, drive_bytes_per_token: from_drive, drive_layers, est_decode_tps: est, drive: m.drive, notes }
 }
 
 /// The plan for a mixture-of-experts model: attention, router and head on the GPU, experts in RAM,
@@ -257,6 +307,7 @@ pub fn plan_moe(dense_gpu: u64, expert_bytes: u64, active_fraction: f64, m: &Mac
         cpu_bytes: expert_bytes,
         ram_resident,
         drive_bytes_per_token: (miss * drive_share) as u64,
+        drive_layers: 0,
         est_decode_tps: if secs > 0.0 { 1.0 / secs } else { 0.0 },
         drive: m.drive,
         notes,

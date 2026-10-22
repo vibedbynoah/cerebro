@@ -107,6 +107,7 @@ pub const CPU_REPACK: &str = "cpu_repack";
 pub const CPU_PIN: &str = "cpu_pin";
 pub const PORTABLE_INTEGRATED: &str = "portable_integrated";
 pub const STREAM_LAYERS: &str = "stream_layers";
+pub const DRIVE_TIER: &str = "drive_tier";
 
 fn registry() -> &'static [Switch] {
     static R: OnceLock<Vec<Switch>> = OnceLock::new();
@@ -272,13 +273,25 @@ fn registry() -> &'static [Switch] {
                 id: STREAM_LAYERS,
                 name: "Layers read from the drive",
                 group: "Placement",
-                kind: Kind::Number { min: 0, max: 1024, zero_auto: false, unit: "layers" },
+                kind: Kind::Number { min: 0, max: 1024, zero_auto: true, unit: "layers" },
                 channel: Channel::Beta,
                 applies: Applies::Reload,
-                beginner: "Reads the last layers of a model from your drive as it writes, instead of keeping them in memory. Slower, but runs models bigger than your memory and leaves memory free for other apps.",
-                advanced: "The last N processor layers (and the output head when N covers every layer) are read with unbuffered I/O on every pass, 8 parallel 2 MB requests, double-buffered so the next layer is read while this one computes; RAM use is two layers. Dense and recurrent models; mixtures of experts read only their active experts already. 0 = off.",
+                beginner: "How many of a model's last layers are read from your drive as it writes instead of kept in memory. Automatic does it only for a model that does not fit in your memory, and only as many layers as needed. A higher number leaves memory free for other apps.",
+                advanced: "The last N processor layers (and the output head when N covers every layer) are read with unbuffered I/O on every pass, 16 parallel 4 MB requests into a ring of buffers (about 512 MB), so the next layers are read while this one computes. 0 = automatic: placement.rs streams the fewest trailing layers that let the rest plus the ring fit in available RAM minus 1.5 GB and the processor's KV cache. Dense and recurrent models; mixtures of experts read only their active experts already.",
                 env: "CEREBRO_STREAM_LAYERS",
                 default: zero,
+            },
+            Switch {
+                id: DRIVE_TIER,
+                name: "Read from the drive when memory runs short",
+                group: "Placement",
+                kind: Kind::Toggle,
+                channel: Channel::Beta,
+                applies: Applies::Reload,
+                beginner: "When a model does not fit in your memory, reads the part that does not fit straight from your drive at its full speed. Off leaves it to Windows, which reads it in small pieces and slows the whole computer down.",
+                advanced: "Off: no layer is streamed unless \"Layers read from the drive\" names a number; the overflow is paged in through the memory map 4 KB at a time and competes with every other program for the file cache.",
+                env: "CEREBRO_NO_DRIVE_TIER",
+                default: on,
             },
             Switch {
                 id: CPU_PIN,

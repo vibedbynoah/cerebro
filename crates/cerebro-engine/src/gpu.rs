@@ -1924,6 +1924,10 @@ impl GpuState {
     /// Returns the number of decode steps run; step i fed `first` (i = 0) or the token emitted before
     /// it. `emit` returning false stops generation.
     pub fn generate_greedy(&mut self, model: &Model, first: u32, pos: usize, max_new: usize, stop: &[u32], mut emit: impl FnMut(u32) -> bool) -> Result<usize, Error> {
+        // A split model's later layers and head run on the processor: Session::step does both.
+        if self.is_split() {
+            return Err(Error::Unsupported("generate_greedy runs whole-GPU models only; a split model steps through Session::step".into()));
+        }
         if self.moe.is_some() {
             let mut t = first;
             let mut n = 0;

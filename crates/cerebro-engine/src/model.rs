@@ -44,6 +44,8 @@ pub struct Config {
     pub rope_sections: Option<[usize; 4]>,
     /// Gated DeltaNet linear-attention layers (Qwen3.8 hybrid); None for pure attention models.
     pub ssm: Option<Ssm>,
+    /// The DeltaNet output gate is sigmoid(z) instead of silu(z) (qwen4exp).
+    pub delta_sigmoid: bool,
 }
 
 /// Shape of the Gated DeltaNet layers: `nk` key heads of `dk`, `nv` value heads of `dv`, a causal
@@ -74,7 +76,7 @@ pub struct Mat {
 }
 
 impl Mat {
-    fn of(t: &TensorInfo) -> Self {
+    pub(crate) fn of(t: &TensorInfo) -> Self {
         Self { dtype: t.dtype, rows: t.rows(), cols: t.cols(), offset: t.offset, row_bytes: t.dtype.row_bytes(t.cols()) }
     }
 
@@ -99,6 +101,17 @@ pub struct Moe {
     pub gate: Mat,
     pub up: Mat,
     pub down: Mat,
+    /// A shared expert every token uses next to the routed ones (Qwen3-Next, Qwen3.5-MoE,
+    /// qwen4exp, DeepSeek), when the model has one.
+    pub shared: Option<SharedExpert>,
+}
+
+pub struct SharedExpert {
+    pub gate: Mat,
+    pub up: Mat,
+    pub down: Mat,
+    /// dim values: the shared expert's output is scaled by sigmoid(gate_inp . x); None = unscaled.
+    pub gate_inp: Option<Vec<f32>>,
 }
 
 /// A Gated DeltaNet layer's weights (Qwen3.8 linear attention).
@@ -146,9 +159,10 @@ pub struct Model {
     inv_freq: Vec<f32>,
     /// Q8_0 matrices re-laid for the processor (`quant::repack_q8_0_x8`), by file offset.
     packs: std::sync::RwLock<std::collections::HashMap<usize, Arc<Vec<u8>>>>,
-    /// The drive tier (stream.rs): each layer's unit, and the output head's, when streamed.
-    stream_of: Vec<Option<usize>>,
-    stream_out: Option<usize>,
+    /// The drive tier (stream.rs): each layer's unit, and the output head's, once it is on.
+    stream_map: std::sync::OnceLock<(Vec<Option<usize>>, Option<usize>)>,
+    /// Hyper-connections and n-gram embeddings (hc.rs), for models that have them.
+    pub hc: Option<crate::hc::HcModel>,
 }
 
 fn vec_f32(g: &Gguf, name: &str) -> Result<Vec<f32>, Error> {
@@ -172,7 +186,7 @@ impl Model {
         // Qwen3-ASR); deepstack (image features added into early layers) is not run yet.
         // qwen3tts: the Qwen3-TTS talker, a qwen3vl model whose output head covers only the codec
         // tokens (logit i is the token `<|codec_0|>` + i; see tts.rs).
-        if !matches!(arch.as_str(), "qwen3" | "qwen3moe" | "qwen2" | "llama" | "qwen35" | "qwen3vl" | "qwen3tts") {
+        if !matches!(arch.as_str(), "qwen3" | "qwen3moe" | "qwen2" | "llama" | "qwen35" | "qwen3vl" | "qwen3tts" | "qwen4exp") {
             return Err(Error::Unsupported(format!("architecture {arch}")));
         }
         if g.u64(&format!("{arch}.n_deepstack_layers")).unwrap_or(0) > 0 {
@@ -183,10 +197,15 @@ impl Model {
         let n_head = g.u64(&k("attention.head_count"))? as usize;
         let head_dim = g.u64(&k("attention.key_length")).map(|v| v as usize).unwrap_or(dim / n_head);
         let embed_t = g.tensor("token_embd.weight")?;
+        // Gated attention (a per-head output gate packed after each query head) shows in the
+        // query projection's size: twice the heads' width.
+        let has_hc = g.u64(&k("hyper_connection.count")).is_ok();
+        let attn_gate = g.tensors.iter().any(|(k, t)| k.starts_with("blk.") && k.ends_with(".attn_q.weight") && t.rows() == 2 * n_head * head_dim);
         let cfg = Config {
             n_layer: g.u64(&k("block_count"))? as usize,
             dim,
-            ffn: g.u64(&k("feed_forward_length"))? as usize,
+            // Mixture-of-experts files may give only the experts' size.
+            ffn: g.u64(&k("feed_forward_length")).map(|v| v as usize).unwrap_or(0),
             n_head,
             n_kv: g.u64(&k("attention.head_count_kv")).map(|v| v as usize).unwrap_or(n_head),
             head_dim,
@@ -201,7 +220,7 @@ impl Model {
             n_used: g.u64(&k("expert_used_count")).unwrap_or(0) as usize,
             expert_ffn: g.u64(&k("expert_feed_forward_length")).unwrap_or(0) as usize,
             rope_dim: g.u64(&k("rope.dimension_count")).map_or(head_dim, |v| v as usize).min(head_dim),
-            attn_gate: arch == "qwen35",
+            attn_gate,
             rope_sections: g.meta.get(&k("rope.dimension_sections")).and_then(|v| v.as_array()).and_then(|a| {
                 let v: Vec<usize> = a.iter().filter_map(|x| x.as_u64()).map(|x| x as usize).collect();
                 (v.len() >= 3 && v.iter().sum::<usize>() > 0).then(|| [v[0], v[1], v[2], v.get(3).copied().unwrap_or(0)])
@@ -218,8 +237,11 @@ impl Model {
             } else {
                 None
             },
+            delta_sigmoid: arch == "qwen4exp",
             arch,
         };
+        // Hyper-connection models replace the per-block norms with mixers (hc.rs).
+        let hc = if has_hc { Some(crate::hc::HcModel::load(&g, &cfg.arch, cfg.n_layer, cfg.dim)?) } else { None };
         if cfg.n_head % cfg.n_kv != 0 || head_dim % 2 != 0 {
             return Err(Error::Format("inconsistent head counts".into()));
         }
@@ -252,10 +274,17 @@ impl Model {
             };
             let attn = |s: &str| if delta.is_some() { Ok(none.clone()) } else { t(s) };
             let has_qk_norm = delta.is_none() && g.tensors.contains_key(&format!("blk.{i}.attn_q_norm.weight"));
-            // Qwen3.8 names the pre-FFN norm post_attention_norm.
-            let ffn_norm = if g.tensors.contains_key(&format!("blk.{i}.ffn_norm.weight")) { nv("ffn_norm")? } else { nv("post_attention_norm")? };
+            // Qwen3.8 names the pre-FFN norm post_attention_norm; hyper-connection models have none.
+            let ffn_norm = if g.tensors.contains_key(&format!("blk.{i}.ffn_norm.weight")) {
+                nv("ffn_norm")?
+            } else if hc.is_some() {
+                Vec::new()
+            } else {
+                nv("post_attention_norm")?
+            };
+            let shared = |s: &str| g.tensors.contains_key(&format!("blk.{i}.{s}.weight"));
             layers.push(Layer {
-                attn_norm: nv("attn_norm")?,
+                attn_norm: if hc.is_some() && !shared("attn_norm") { Vec::new() } else { nv("attn_norm")? },
                 q: attn("attn_q")?,
                 k: attn("attn_k")?,
                 v: attn("attn_v")?,
@@ -265,7 +294,22 @@ impl Model {
                 delta,
                 ffn_norm,
                 ffn: if cfg.n_expert > 0 {
-                    Ffn::Moe(Moe { router: nv("ffn_gate_inp")?, gate: t("ffn_gate_exps")?, up: t("ffn_up_exps")?, down: t("ffn_down_exps")? })
+                    Ffn::Moe(Moe {
+                        router: nv("ffn_gate_inp")?,
+                        gate: t("ffn_gate_exps")?,
+                        up: t("ffn_up_exps")?,
+                        down: t("ffn_down_exps")?,
+                        shared: if shared("ffn_up_shexp") {
+                            Some(SharedExpert {
+                                gate: t("ffn_gate_shexp")?,
+                                up: t("ffn_up_shexp")?,
+                                down: t("ffn_down_shexp")?,
+                                gate_inp: if shared("ffn_gate_inp_shexp") { Some(nv("ffn_gate_inp_shexp")?) } else { None },
+                            })
+                        } else {
+                            None
+                        },
+                    })
                 } else {
                     Ffn::Dense { gate: t("ffn_gate")?, up: t("ffn_up")?, down: t("ffn_down")? }
                 },
@@ -274,7 +318,9 @@ impl Model {
         let output = g.tensors.get("output.weight").map(Mat::of).unwrap_or_else(|| Mat::of(embed_t));
         let rd = cfg.rope_dim;
         let inv_freq = (0..rd / 2).map(|i| 1.0 / cfg.rope_base.powf(2.0 * i as f32 / rd as f32)).collect();
-        let mut m = Self { path: path.to_path_buf(), embed: Mat::of(embed_t), out_norm: vec_f32(&g, "output_norm.weight")?, layers, output, inv_freq, cfg, gguf: g, packs: Default::default(), stream_of: Vec::new(), stream_out: None };
+        // Hyper-connection models norm the output in their last mixer.
+        let out_norm = if hc.is_some() && !g.tensors.contains_key("output_norm.weight") { Vec::new() } else { vec_f32(&g, "output_norm.weight")? };
+        let m = Self { path: path.to_path_buf(), embed: Mat::of(embed_t), out_norm, layers, output, inv_freq, cfg, gguf: g, packs: Default::default(), stream_map: Default::default(), hc };
         let n = crate::switches::get(crate::switches::STREAM_LAYERS).max(0) as usize;
         if n > 0 {
             m.stream_from_drive(n);
@@ -282,14 +328,47 @@ impl Model {
         Ok(m)
     }
 
+    /// Weight bytes of each layer and of the output head, as the processor reads them.
+    fn layer_bytes(&self) -> (Vec<u64>, u64) {
+        let g = &self.gguf;
+        let mut per = vec![0u64; self.cfg.n_layer];
+        for t in g.tensors.values() {
+            if let Some(i) = t.name.strip_prefix("blk.").and_then(|r| r.split('.').next()).and_then(|i| i.parse::<usize>().ok()) {
+                if let Some(p) = per.get_mut(i) {
+                    *p += t.size as u64;
+                }
+            }
+        }
+        (per, (self.output.rows * self.output.row_bytes) as u64)
+    }
+
+    /// The automatic drive tier, decided when a session starts (the GPU's share is known then):
+    /// when the processor's share does not fit in available RAM, the fewest trailing layers that
+    /// make it fit are read from the drive (placement::drive_layers). Once per model; an explicit
+    /// "Layers read from the drive" number was applied at load instead.
+    pub fn auto_drive_tier(&self, gpu_layers: usize, max_ctx: usize) {
+        if self.stream_map.get().is_some() || self.cfg.n_expert > 0 || !crate::switches::enabled(crate::switches::DRIVE_TIER) || crate::switches::get(crate::switches::STREAM_LAYERS) > 0 {
+            return;
+        }
+        let c = &self.cfg;
+        let (per, head) = self.layer_bytes();
+        let kv: u64 = self.layers.iter().skip(gpu_layers).filter(|l| l.delta.is_none()).count() as u64 * 2 * max_ctx as u64 * (c.n_kv * c.head_dim) as u64 * 2;
+        let budget = crate::gguf::available_ram().saturating_sub(crate::placement::RAM_MARGIN).saturating_sub(kv);
+        let k = crate::placement::drive_layers(&per, head, gpu_layers, budget);
+        if k > 0 && self.stream_from_drive(k) {
+            let streamed: u64 = per[c.n_layer - k..].iter().sum();
+            eprintln!("drive tier: {k} of {} layers ({:.1} GiB) read from the drive on every pass; {:.1} GiB of RAM available", c.n_layer - gpu_layers, streamed as f64 / (1u64 << 30) as f64, budget as f64 / (1u64 << 30) as f64);
+        }
+    }
+
     /// Reads the last `n` layers (and the output head too when `n` covers every layer) from the
     /// drive on every pass instead of keeping them in RAM (stream.rs). Not for mixtures of experts,
     /// which already read only their active experts. Leaves everything in RAM when a layer's
     /// tensors are not contiguous in the file or the file cannot be opened unbuffered.
-    fn stream_from_drive(&mut self, n: usize) {
+    fn stream_from_drive(&self, n: usize) -> bool {
         let c = &self.cfg;
-        if c.n_expert > 0 || n == 0 {
-            return;
+        if c.n_expert > 0 || n == 0 || self.stream_map.get().is_some() {
+            return false;
         }
         let g = self.gguf.clone();
         let first = c.n_layer.saturating_sub(n);
@@ -308,7 +387,7 @@ impl Model {
             let p = format!("blk.{li}.");
             let Some(r) = range_of(&|name: &str| name.starts_with(&p)) else {
                 eprintln!("drive tier off: layer {li}'s tensors are not contiguous in the file");
-                return;
+                return false;
             };
             *slot = Some(units.len());
             units.push(r);
@@ -322,38 +401,40 @@ impl Model {
             }
         }
         match g.set_stream(&self.path, &units) {
-            Ok(()) => {
-                self.stream_of = of;
-                self.stream_out = out;
+            Ok(()) => self.stream_map.set((of, out)).is_ok(),
+            Err(e) => {
+                eprintln!("drive tier off: {e}");
+                false
             }
-            Err(e) => eprintln!("drive tier off: {e}"),
         }
     }
 
     /// Before the processor reads layer `li`: makes sure the drive tier has it.
     #[inline]
     fn stream_enter(&self, li: usize) {
-        if let (Some(Some(u)), Some(s)) = (self.stream_of.get(li), self.gguf.stream()) {
-            s.enter(*u);
+        if let (Some((of, _)), Some(s)) = (self.stream_map.get(), self.gguf.stream()) {
+            if let Some(Some(u)) = of.get(li) {
+                s.enter(*u);
+            }
         }
     }
 
     #[inline]
     fn stream_enter_output(&self) {
-        if let (Some(u), Some(s)) = (self.stream_out, self.gguf.stream()) {
-            s.enter(u);
+        if let (Some((_, Some(u))), Some(s)) = (self.stream_map.get(), self.gguf.stream()) {
+            s.enter(*u);
         }
     }
 
     /// Layers read from the drive on every pass (0 when the drive tier is off).
     pub fn streamed_layers(&self) -> usize {
-        self.stream_of.iter().filter(|u| u.is_some()).count()
+        self.stream_map.get().map_or(0, |(of, _)| of.iter().filter(|u| u.is_some()).count())
     }
 
     fn streamed(&self, m: &Mat) -> bool {
-        self.gguf.stream().is_some_and(|_| {
+        self.stream_map.get().is_some_and(|(of, out)| {
             let li = self.layers.iter().position(|l| [&l.q, &l.k, &l.v, &l.o].iter().any(|x| x.offset == m.offset) || matches!(&l.ffn, Ffn::Dense { gate, up, down } if [gate, up, down].iter().any(|x| x.offset == m.offset)));
-            li.is_some_and(|li| self.stream_of[li].is_some()) || (self.stream_out.is_some() && m.offset == self.output.offset)
+            li.is_some_and(|li| of[li].is_some()) || (out.is_some() && m.offset == self.output.offset)
         })
     }
 
@@ -404,8 +485,15 @@ impl Model {
     /// interleaved copies), plus the output head and embedding table: what a prefault should touch.
     fn direct_ranges(&self, from: usize) -> Vec<(usize, usize)> {
         let packs = self.packs.read().unwrap_or_else(|e| e.into_inner());
-        let mut v: Vec<(usize, usize)> = self.layers[from.min(self.layers.len())..].iter().flat_map(layer_ranges).filter(|r| !packs.contains_key(&r.0)).collect();
-        if !packs.contains_key(&self.output.offset) {
+        let (of, out) = self.stream_map.get().map_or((&[][..], None), |(of, out)| (&of[..], *out));
+        let mut v: Vec<(usize, usize)> = self.layers[from.min(self.layers.len())..]
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !matches!(of.get(from + i), Some(Some(_))))
+            .flat_map(|(_, l)| layer_ranges(l))
+            .filter(|r| !packs.contains_key(&r.0))
+            .collect();
+        if !packs.contains_key(&self.output.offset) && out.is_none() {
             v.push((self.output.offset, self.output.rows * self.output.row_bytes));
         }
         v.push((self.embed.offset, self.embed.rows * self.embed.row_bytes));
@@ -491,6 +579,15 @@ impl Model {
     /// for every matrix that reads them.
     fn matvec(&self, m: &Mat, x: &[f32], qa: &QAct, out: &mut [f32]) {
         self.matvec_multi(&mut [(m, x, qa, out)]);
+    }
+
+    /// `matvec` for the building blocks in other modules (hc.rs).
+    pub(crate) fn matvec_pub(&self, m: &Mat, x: &[f32], qa: &QAct, out: &mut [f32]) {
+        self.matvec(m, x, qa, out);
+    }
+
+    pub(crate) fn matvec_many_pub(&self, jobs: &mut [(&Mat, &mut [f32])], x: &[f32], qa: &QAct) {
+        self.matvec_many(jobs, x, qa);
     }
 
     /// Several matrix-vector products that read the same input, in one parallel region: one dispatch
@@ -896,6 +993,14 @@ pub(crate) fn route(router: &[f32], h: &[f32], k: usize, scores: &mut [f32], cho
     }
 }
 
+/// The hidden size of the model's shared experts (0 without any).
+fn shared_ffn(m: &Model) -> usize {
+    m.layers.iter().find_map(|l| match &l.ffn {
+        Ffn::Moe(e) => e.shared.as_ref().map(|s| s.gate.rows),
+        _ => None,
+    }).unwrap_or(0)
+}
+
 #[inline]
 fn rmsnorm(x: &[f32], w: &[f32], eps: f32, out: &mut [f32]) {
     let ss: f32 = x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32;
@@ -1116,6 +1221,13 @@ pub struct Session {
     pub images: Vec<ImageSpan>,
     /// Layer ranges run by workers on other computers (cluster.rs); processor sessions only.
     pub remote: Option<crate::cluster::Remote>,
+    /// Hyper-connection streams and n-gram state (hc.rs), for models that have them.
+    hcs: Option<crate::hc::HcState>,
+    /// Shared-expert scratch: gate, up, quantised activation, output.
+    shg: Vec<f32>,
+    shu: Vec<f32>,
+    qa_sh: QAct,
+    sh_out: Vec<f32>,
     // Scratch buffers, reused every step.
     x: Vec<f32>,
     h: Vec<f32>,
@@ -1174,6 +1286,7 @@ impl Session {
     /// (see `Gguf::touch`); `CEREBRO_PREFAULT=0` turns that off.
     pub fn new(m: &Model, max_ctx: usize) -> Self {
         let g = m.gguf();
+        m.auto_drive_tier(0, max_ctx);
         m.prepare_cpu(0);
         if crate::switches::enabled(crate::switches::PREFAULT) {
             // As much of what the processor reads from the file as available RAM holds (interleaved
@@ -1252,6 +1365,11 @@ impl Session {
             portable: None,
             images: Vec::new(),
             remote: None,
+            hcs: m.hc.as_ref().map(|h| crate::hc::HcState::new(h, c.dim)),
+            shg: vec![0.0; shared_ffn(m)],
+            shu: vec![0.0; shared_ffn(m)],
+            qa_sh: QAct::new(shared_ffn(m).max(32)),
+            sh_out: vec![0.0; if shared_ffn(m) > 0 { c.dim } else { 0 }],
         }
     }
 
@@ -1386,8 +1504,12 @@ impl Session {
         if force_layers == Some(0) {
             return Err(Error::Unsupported("no layers on the graphics card (chosen when loading)".into()));
         }
+        if m.hc.is_some() || m.layers.iter().any(|l| matches!(&l.ffn, Ffn::Moe(e) if e.shared.is_some())) {
+            return Err(Error::Unsupported("this model's layer types run on the processor for now".into()));
+        }
         let g = crate::gpu::GpuState::load_with(m, max_ctx, force_layers)?;
         if g.is_split() {
+            m.auto_drive_tier(g.gpu_layers(), max_ctx);
             m.prepare_cpu(g.gpu_layers());
         }
         if g.is_split() && crate::switches::enabled(crate::switches::PREFAULT) {
@@ -1419,9 +1541,13 @@ impl Session {
         if !crate::switches::enabled(crate::switches::PORTABLE_GPU) {
             return Err(Error::Unsupported("other graphics cards are switched off (Turbo > Other graphics cards)".into()));
         }
+        if m.hc.is_some() || m.layers.iter().any(|l| matches!(&l.ffn, Ffn::Moe(e) if e.shared.is_some())) {
+            return Err(Error::Unsupported("this model's layer types run on the processor for now".into()));
+        }
         let p = crate::portable::PortableState::load(m, max_ctx)?;
         let from = p.gpu_layers();
         if p.is_split() {
+            m.auto_drive_tier(from, max_ctx);
             m.prepare_cpu(from);
         }
         if p.is_split() && crate::switches::enabled(crate::switches::PREFAULT) {
@@ -1536,6 +1662,9 @@ impl Session {
                     self.x.copy_from_slice(&e.data[i * e.dim..(i + 1) * e.dim]);
                 }
                 None => m.embed_row(id, &mut self.x),
+            }
+            if let Some(s) = self.hcs.as_mut() {
+                s.token = if id & 0x8000_0000 != 0 { u32::MAX } else { id };
             }
             self.layers_from(m, 0, slot);
             self.tokens.push(id);
@@ -1793,6 +1922,9 @@ impl Session {
         }
         let pos = self.tokens.len();
         m.embed_row(token, &mut self.x);
+        if let Some(s) = self.hcs.as_mut() {
+            s.token = token;
+        }
         self.layers_from(m, 0, pos);
         self.head(m);
         self.tokens.push(token);
@@ -1863,15 +1995,18 @@ impl Session {
         let group = c.n_head / c.n_kv;
         let scale = 1.0 / (hd as f32).sqrt();
         let cs: Vec<(f32, f32)> = m.rope_cs(self.rope_pos(pos));
+        if from == 0 {
+            if let Some(s) = self.hcs.as_mut() {
+                s.start(&self.x);
+            }
+        }
         for (li, l) in m.layers.iter().enumerate().take(to).skip(from) {
             m.stream_enter(li);
-            rmsnorm(&self.x, &l.attn_norm, c.eps, &mut self.h);
+            self.block_in(m, li, l, pos, true);
             self.qa_dim.quantize(&self.h);
             if let Some(d) = &l.delta {
                 self.delta_step(m, li, d);
-                for i in 0..c.dim {
-                    self.x[i] += self.tmp[i];
-                }
+                self.block_out(m);
                 self.ffn_step(m, li, l);
                 continue;
             }
@@ -2010,17 +2145,61 @@ impl Session {
             lap(2, &mut self.prof);
             m.matvec(&l.o, &self.att, &self.qa_att, &mut self.tmp[..c.dim]);
             lap(3, &mut self.prof);
-            for i in 0..c.dim {
-                self.x[i] += self.tmp[i];
-            }
+            self.block_out(m);
             self.ffn_step(m, li, l);
+        }
+    }
+
+    /// A block's input into `h`: the RMSNorm of the residual, or for hyper-connection models
+    /// (after the n-gram embedding on its layer) the mixer over the streams. `attn` picks the
+    /// token mixer's input, else the feed-forward's.
+    fn block_in(&mut self, m: &Model, li: usize, l: &Layer, pos: usize, attn: bool) {
+        let c = &m.cfg;
+        match (m.hc.as_ref(), self.hcs.take()) {
+            (Some(hm), Some(mut s)) => {
+                if attn {
+                    if let Some(p) = hm.ple.as_ref().filter(|p| p.layer == li) {
+                        // Tokens 1..n-1 positions back; image slots hash as the image token.
+                        let prev: Vec<Option<u32>> = (1..p.ngram).map(|k| pos.checked_sub(k).and_then(|i| self.tokens.get(i)).map(|&t| if t & 0x8000_0000 != 0 { p.image } else { t })).collect();
+                        s.ple(m, p, hm.hc, c.dim, c.eps, &prev);
+                    }
+                }
+                s.mix(m, if attn { &hm.attn[li] } else { &hm.ffn[li] }, hm.hc, c.eps, &mut self.h);
+                self.hcs = Some(s);
+            }
+            (_, s) => {
+                self.hcs = s;
+                rmsnorm(&self.x, if attn { &l.attn_norm } else { &l.ffn_norm }, c.eps, &mut self.h);
+            }
+        }
+    }
+
+    /// Adds a block's output (`tmp`) to the residual (every stream, for hyper-connection models).
+    fn block_out(&mut self, m: &Model) {
+        let dim = m.cfg.dim;
+        match (m.hc.as_ref(), self.hcs.as_mut()) {
+            (Some(hm), Some(s)) => s.combine(&self.tmp[..dim], hm.hc),
+            _ => {
+                for i in 0..dim {
+                    self.x[i] += self.tmp[i];
+                }
+            }
         }
     }
 
     /// The output head: final norm and logits.
     fn head(&mut self, m: &Model) {
         let to = Instant::now();
-        rmsnorm_inplace(&mut self.x, &m.out_norm, m.cfg.eps);
+        match (m.hc.as_ref(), self.hcs.take()) {
+            (Some(hm), Some(mut s)) => {
+                s.mix(m, &hm.head, hm.hc, m.cfg.eps, &mut self.x);
+                self.hcs = Some(s);
+            }
+            (_, s) => {
+                self.hcs = s;
+                rmsnorm_inplace(&mut self.x, &m.out_norm, m.cfg.eps);
+            }
+        }
         self.hidden.copy_from_slice(&self.x);
         self.qa_dim.quantize(&self.x);
         m.stream_enter_output();
@@ -2041,6 +2220,9 @@ impl Session {
         #[cfg(feature = "portable")]
         if self.portable.is_some() {
             return Err(Error::Unsupported("saving the cache is not available on the portable GPU backend yet".into()));
+        }
+        if m.hc.is_some() {
+            return Err(Error::Unsupported("saving the cache of a hyper-connection model is not available yet".into()));
         }
         w.write_all(KV_MAGIC).map_err(io)?;
         for v in [model_fingerprint(m), n as u64, kvd as u64, c.n_layer as u64] {
@@ -2183,6 +2365,9 @@ impl Session {
         for v in self.conv_hist.iter_mut().chain(self.ssm_state.iter_mut()) {
             v.fill(0.0);
         }
+        if let Some(s) = self.hcs.as_mut() {
+            s.reset();
+        }
     }
 
     /// The feed-forward half of a layer: norm, SwiGLU or experts, residual add.
@@ -2195,7 +2380,7 @@ impl Session {
             tp = n;
         };
         {
-            rmsnorm(&self.x, &l.ffn_norm, c.eps, &mut self.h);
+            self.block_in(m, li, l, 0, false);
             self.qa_dim.quantize(&self.h);
             match &l.ffn {
                 Ffn::Dense { gate, up, down } => {
@@ -2206,9 +2391,7 @@ impl Session {
                     }
                     self.qa_ffn.quantize(&self.g[..c.ffn]);
                     m.matvec(down, &self.g[..c.ffn], &self.qa_ffn, &mut self.tmp[..c.dim]);
-                    for i in 0..c.dim {
-                        self.x[i] += self.tmp[i];
-                    }
+                    self.block_out(m);
                 }
                 Ffn::Moe(e) => {
                     route(&e.router, &self.h, c.n_used, &mut self.router, &mut self.chosen);
@@ -2217,12 +2400,31 @@ impl Session {
                         self.expert_counts[li * c.n_expert + ex] += 1;
                     }
                     m.moe_cpu(li, &self.h, &self.qa_dim, &self.chosen, &mut self.moe, &mut self.tmp[..c.dim]);
-                    for i in 0..c.dim {
-                        self.x[i] += self.tmp[i];
+                    if let Some(sh) = &e.shared {
+                        self.shared_expert(m, sh);
+                        for i in 0..c.dim {
+                            self.tmp[i] += self.sh_out[i];
+                        }
                     }
+                    self.block_out(m);
                 }
             }
             lap(5, &mut self.prof);
+        }
+    }
+
+    /// The shared expert on the block input `h`, into `sh_out`: SwiGLU, scaled by its gate.
+    fn shared_expert(&mut self, m: &Model, sh: &SharedExpert) {
+        m.matvec_many(&mut [(&sh.gate, &mut self.shg[..]), (&sh.up, &mut self.shu[..])], &self.h, &self.qa_dim);
+        for i in 0..self.shg.len() {
+            let g = self.shg[i];
+            self.shg[i] = g / (1.0 + crate::quant::exp_fast(-g)) * self.shu[i];
+        }
+        self.qa_sh.quantize(&self.shg);
+        m.matvec(&sh.down, &self.shg, &self.qa_sh, &mut self.sh_out);
+        if let Some(w) = &sh.gate_inp {
+            let gate = 1.0 / (1.0 + (-crate::quant::dot_f32(w, &self.h)).exp());
+            self.sh_out.iter_mut().for_each(|v| *v *= gate);
         }
     }
 
@@ -2319,7 +2521,8 @@ impl Session {
             let r = 1.0 / (ms + c.eps).sqrt();
             for j in 0..dv {
                 let zj = zz[j];
-                o[j] = o[j] * r * d.norm[j] * (zj / (1.0 + (-zj).exp()));
+                let gate = if c.delta_sigmoid { 1.0 / (1.0 + (-zj).exp()) } else { zj / (1.0 + (-zj).exp()) };
+                o[j] = o[j] * r * d.norm[j] * gate;
             }
         });
         self.qa_dout.quantize(&self.dout);

@@ -1378,6 +1378,7 @@ impl PortableState {
             cpu_bytes: cpu,
             ram_resident: cpu,
             drive_bytes_per_token: 0,
+            drive_layers: 0,
             est_decode_tps: 0.0,
             drive: crate::placement::drive_of(&m.path),
             notes: vec![first, format!("Kernels picked for this GPU when loading: {}.", self.kernels)],

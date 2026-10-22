@@ -15,6 +15,7 @@ pub mod gguf;
 pub mod gpu;
 #[cfg(feature = "cuda")]
 pub mod gtensor;
+pub mod hc;
 pub mod hw;
 mod iq_tables;
 pub mod model;

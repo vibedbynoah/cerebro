@@ -3,7 +3,12 @@
 //! tokens are compared with the CPU reference. Appends one JSON line per configuration to `--out`.
 //!
 //! cargo run --release --example bench -- --model M.gguf --out runs.jsonl --machine "i9-12900H + RTX 3070 Ti"
-//!   [--reps 5] [--decode 256] [--lengths 32,512,2048] [--backends cpu,gpu] [--commit HASH]
+//!   [--reps 5] [--decode 256] [--lengths 32,512,2048] [--backends cpu,gpu,portable] [--commit HASH]
+//!   [--gpu-frac F] [--drive-frac F] [--label NAME]
+//! --gpu-frac / --drive-frac place that fraction of the model's layers on the graphics card / read
+//! them from the drive (the "Layers on the graphics card" / "Layers read from the drive" switches),
+//! so one placement description works for any model. `portable` is the Vulkan / DX12 / Metal backend
+//! (CEREBRO_PORTABLE_GPU picks the device, e.g. an integrated GPU by name).
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -40,7 +45,8 @@ fn prompt_of(tok: &Tokenizer, len: usize) -> Vec<u32> {
 
 /// Greedy decode of `n` tokens after `prompt`; returns (prefill s, decode s, tokens).
 fn run(model: &Model, sess: &mut Session, prompt: &[u32], n: usize, gpu: bool) -> (f64, f64, Vec<u32>) {
-    sess.tokens.clear();
+    // A fresh conversation each run, recurrent (DeltaNet) state included.
+    sess.clear().expect("clear");
     let t0 = Instant::now();
     sess.feed(model, prompt).expect("feed");
     let pre = t0.elapsed().as_secs_f64();
@@ -49,7 +55,7 @@ fn run(model: &Model, sess: &mut Session, prompt: &[u32], n: usize, gpu: bool) -
     let first = argmax(&sess.logits);
     out.push(first);
     #[cfg(feature = "cuda")]
-    if gpu {
+    if gpu && sess.gpu.as_ref().is_some_and(|g| !g.is_split()) {
         let pos = sess.tokens.len();
         let g = sess.gpu.as_mut().expect("gpu");
         g.generate_greedy(model, first, pos, n - 1, &[], |t| {
@@ -70,6 +76,13 @@ fn run(model: &Model, sess: &mut Session, prompt: &[u32], n: usize, gpu: bool) -
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let model_path = PathBuf::from(arg(&a, "--model").expect("--model"));
+    // --print-layers: the model's layer count, for scripts that place fractions of it elsewhere.
+    if a.iter().any(|x| x == "--print-layers") {
+        let g = cerebro_engine::gguf::Gguf::open(&model_path).expect("open");
+        let arch = g.str("general.architecture").unwrap_or("").to_owned();
+        println!("{}", g.u64(&format!("{arch}.block_count")).unwrap_or(0));
+        return;
+    }
     let out_path = PathBuf::from(arg(&a, "--out").unwrap_or_else(|| "bench.jsonl".into()));
     let machine = arg(&a, "--machine").unwrap_or_else(|| "unknown".into());
     let commit = arg(&a, "--commit").unwrap_or_default();
@@ -79,6 +92,19 @@ fn main() {
     let decode: usize = arg(&a, "--decode").and_then(|v| v.parse().ok()).unwrap_or(256);
     let lengths: Vec<usize> = arg(&a, "--lengths").unwrap_or_else(|| "32,512,2048".into()).split(',').filter_map(|v| v.parse().ok()).collect();
     let backends: Vec<String> = arg(&a, "--backends").unwrap_or_else(|| "cpu,gpu".into()).split(',').map(String::from).collect();
+    // Fractions of the model's layers -> the layer-count switches, before the model loads.
+    let frac = |n: &str| arg(&a, n).and_then(|v| v.parse::<f64>().ok()).filter(|f| (0.0..=1.0).contains(f));
+    if frac("--gpu-frac").is_some() || frac("--drive-frac").is_some() {
+        let g = cerebro_engine::gguf::Gguf::open(&model_path).expect("open");
+        let arch = g.str("general.architecture").unwrap_or("").to_owned();
+        let n = g.u64(&format!("{arch}.block_count")).expect("block count") as f64;
+        if let Some(f) = frac("--gpu-frac") {
+            std::env::set_var("CEREBRO_GPU_LAYERS", ((f * n).round() as u64).max(1).to_string());
+        }
+        if let Some(f) = frac("--drive-frac") {
+            std::env::set_var("CEREBRO_STREAM_LAYERS", ((f * n).round() as u64).max(1).to_string());
+        }
+    }
 
     let model = Model::load(&model_path).expect("load");
     let tok = Tokenizer::from_gguf(model.gguf()).expect("tokenizer");
@@ -96,7 +122,20 @@ fn main() {
 
     for be in &backends {
         let gpu = be == "gpu";
-        let mut sess = if gpu {
+        #[cfg(feature = "portable")]
+        let portable = be == "portable";
+        #[cfg(not(feature = "portable"))]
+        let portable = false;
+        let mut sess = if portable {
+            #[cfg(feature = "portable")]
+            {
+                Session::new_portable(&model, ctx).expect("portable session")
+            }
+            #[cfg(not(feature = "portable"))]
+            {
+                panic!("built without the portable backend")
+            }
+        } else if gpu {
             #[cfg(feature = "cuda")]
             {
                 Session::new_gpu(&model, ctx).expect("gpu session")
@@ -138,9 +177,17 @@ fn main() {
             let gpu_layers = sess.gpu.as_ref().map(|g| g.gpu_layers()).unwrap_or(0);
             #[cfg(not(feature = "cuda"))]
             let gpu_layers = 0usize;
+            #[cfg(feature = "portable")]
+            let (gpu_layers, device) = match sess.portable.as_ref() {
+                Some(p) => (p.gpu_layers(), format!("{} ({}, {})", p.info.name, p.info.backend, p.info.kind)),
+                None => (gpu_layers, String::new()),
+            };
+            #[cfg(not(feature = "portable"))]
+            let device = String::new();
             let drive = model.gguf().stream().map(|s| s.stats());
             let line = serde_json::json!({
                 "label": label,
+                "device": device,
                 "gpu_layers": gpu_layers,
                 "drive_layers": model.streamed_layers(),
                 "total_layers": model.cfg.n_layer,

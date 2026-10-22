@@ -92,8 +92,17 @@ impl TensorInfo {
     }
 }
 
+/// One file of a model: a whole model, or one part of a split model ("-00001-of-00003.gguf").
+struct Part {
+    /// Where this file starts in the model's combined offset space.
+    base: usize,
+    map: Mmap,
+}
+
 pub struct Gguf {
-    mmap: Mmap,
+    /// The model's files in order. Tensor offsets are in one combined space: part i's bytes start
+    /// at `parts[i].base` (the sum of the earlier parts' lengths); a tensor never spans two parts.
+    parts: Vec<Part>,
     pub version: u32,
     pub meta: HashMap<String, Value>,
     pub tensors: HashMap<String, TensorInfo>,
@@ -169,16 +178,61 @@ impl<'a> Reader<'a> {
 }
 
 impl Gguf {
+    /// Opens a model file. Any part of a split model ("name-00002-of-00003.gguf") opens the
+    /// whole model: every part is mapped, the first part's metadata applies, and the tensors of
+    /// all parts are listed together.
     pub fn open(path: &Path) -> Result<Self, Error> {
-        let file = File::open(path)?;
-        // SAFETY: the file is opened read-only and the map is never written; a concurrent writer could
-        // change bytes under us, which every read below tolerates because all sizes are re-checked.
-        let mmap = unsafe { Mmap::map(&file)? };
-        Self::parse(mmap)
+        let files = split_parts(path).unwrap_or_else(|| vec![path.to_path_buf()]);
+        let mut parts = Vec::with_capacity(files.len());
+        let mut first: Option<(u32, HashMap<String, Value>, usize)> = None;
+        let mut tensors = HashMap::new();
+        let mut base = 0usize;
+        for f in &files {
+            let file = File::open(f).map_err(|e| Error::Format(format!("{}: {e}", f.display())))?;
+            // SAFETY: the file is opened read-only and the map is never written; a concurrent writer
+            // could change bytes under us, which every read below tolerates because sizes are re-checked.
+            let map = unsafe { Mmap::map(&file)? };
+            let (version, meta, ts, alignment) = Self::parse(&map)?;
+            for (name, mut t) in ts {
+                t.offset += base;
+                if tensors.insert(name.clone(), t).is_some() {
+                    return Err(Error::Format(format!("tensor {name} is in two parts of the model")));
+                }
+            }
+            if first.is_none() {
+                first = Some((version, meta, alignment));
+            }
+            let len = map.len();
+            parts.push(Part { base, map });
+            base = base.checked_add(len).ok_or_else(|| Error::Format("model too large".into()))?;
+        }
+        let (version, meta, alignment) = first.ok_or_else(|| Error::Format("no model file".into()))?;
+        if let Some(n) = meta.get("split.count").and_then(Value::as_u64) {
+            if n as usize != parts.len() {
+                return Err(Error::Format(format!("this model has {n} parts but {} were found next to it", parts.len())));
+            }
+        }
+        Ok(Self { parts, version, meta, tensors, alignment, stream: Default::default() })
     }
 
-    fn parse(mmap: Mmap) -> Result<Self, Error> {
-        let mut r = Reader { buf: &mmap, pos: 0 };
+    /// The part holding combined offset `offset`, and the offset inside it.
+    #[inline]
+    fn locate(&self, offset: usize) -> (&Part, usize) {
+        let i = match self.parts.len() {
+            1 => 0,
+            _ => self.parts.partition_point(|p| p.base <= offset).saturating_sub(1),
+        };
+        let p = &self.parts[i];
+        (p, offset - p.base)
+    }
+
+    /// The number of files the model is stored in.
+    pub fn part_count(&self) -> usize {
+        self.parts.len()
+    }
+
+    fn parse(mmap: &[u8]) -> Result<(u32, HashMap<String, Value>, HashMap<String, TensorInfo>, usize), Error> {
+        let mut r = Reader { buf: mmap, pos: 0 };
         if r.u32()? != MAGIC {
             return Err(Error::Format("not a GGUF file".into()));
         }
@@ -237,11 +291,12 @@ impl Gguf {
             }
             tensors.insert(name.clone(), TensorInfo { name, dims, dtype, offset, size });
         }
-        Ok(Self { mmap, version, meta, tensors, alignment, stream: Default::default() })
+        Ok((version, meta, tensors, alignment))
     }
 
     pub fn bytes(&self, t: &TensorInfo) -> &[u8] {
-        &self.mmap[t.offset..t.offset + t.size]
+        let (p, o) = self.locate(t.offset);
+        &p.map[o..o + t.size]
     }
 
     /// A byte range already validated when the tensor table was parsed.
@@ -251,11 +306,12 @@ impl Gguf {
     /// 36.2 after touching up front (Qwen3-Coder-30B-A3B hybrid, i9-12900H + RTX 3070 Ti).
     pub fn touch(&self, ranges: &[(usize, usize)]) {
         use rayon::prelude::*;
-        let m: &[u8] = &self.mmap;
         // Large ranges are split so every thread takes part.
         const PIECE: usize = 32 << 20;
         let pieces: Vec<(usize, usize)> = ranges.iter().flat_map(|&(o, l)| (0..l.div_ceil(PIECE)).map(move |i| (o + i * PIECE, PIECE.min(l - i * PIECE)))).collect();
         pieces.par_iter().for_each(|&(o, l)| {
+            let (p, o) = self.locate(o);
+            let m: &[u8] = &p.map;
             let end = (o + l).min(m.len());
             let mut acc = 0u8;
             for i in (o..end).step_by(4096) {
@@ -266,8 +322,9 @@ impl Gguf {
         });
     }
 
+    /// Bytes in all of the model's files together.
     pub fn len(&self) -> usize {
-        self.mmap.len()
+        self.parts.last().map_or(0, |p| p.base + p.map.len())
     }
 
     /// Tells the OS these file bytes will not be read soon (e.g. experts now served from VRAM): their
@@ -304,25 +361,32 @@ impl Gguf {
         let _ = ranges;
     }
 
+    /// The mapped pages covering a range (which lies inside one part).
     #[cfg(windows)]
     fn page_range(&self, offset: usize, len: usize) -> (usize, usize) {
-        let base = self.mmap.as_ptr() as usize;
-        let start = (base + offset) & !4095;
-        let end = (base + offset + len + 4095) & !4095;
-        (start, end.min(base + self.mmap.len()).max(start))
+        let (p, o) = self.locate(offset);
+        let base = p.map.as_ptr() as usize;
+        let start = (base + o) & !4095;
+        let end = (base + o + len + 4095) & !4095;
+        (start, end.min(base + p.map.len()).max(start))
     }
 
+    #[inline]
     pub fn bytes_at(&self, offset: usize, len: usize) -> &[u8] {
         if let Some(b) = self.stream.get().and_then(|s| s.lookup(offset, len)) {
             return b;
         }
-        &self.mmap[offset..offset + len]
+        let (p, o) = self.locate(offset);
+        &p.map[o..o + len]
     }
 
     /// Serves these file ranges from the drive on every pass (stream.rs) and drops them from RAM.
-    /// Once per file.
+    /// Once per model; single-file models only (a split model's parts are separate files).
     pub fn set_stream(&self, path: &Path, units: &[(usize, usize)]) -> std::io::Result<()> {
-        let s = crate::stream::Stream::new(path, self.mmap.len(), units)?;
+        if self.parts.len() != 1 {
+            return Err(std::io::Error::other("reading layers from the drive is not available for a model stored in several files yet"));
+        }
+        let s = crate::stream::Stream::new(path, self.len(), units)?;
         for &(lo, hi) in units {
             self.release(lo, hi - lo);
         }
@@ -394,4 +458,39 @@ pub fn available_ram() -> u64 {
         }
     }
     u64::MAX
+}
+
+/// The files of a split model, in order, when `path` is one part of one ("name-00002-of-00003.gguf"
+/// gives name-00001.. to name-00003..). None for an ordinary file.
+pub fn split_parts(path: &Path) -> Option<Vec<std::path::PathBuf>> {
+    let name = path.file_name()?.to_str()?;
+    let stem = name.strip_suffix(".gguf")?;
+    let (head, count) = stem.rsplit_once("-of-")?;
+    let (prefix, _index) = head.rsplit_once('-')?;
+    if count.len() != 5 || !count.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: usize = count.parse().ok()?;
+    if n < 2 {
+        return None;
+    }
+    let dir = path.parent().unwrap_or(Path::new("."));
+    Some((1..=n).map(|i| dir.join(format!("{prefix}-{i:05}-of-{count}.gguf"))).collect())
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+
+    #[test]
+    fn split_names_list_every_part_and_plain_names_none() {
+        let p = Path::new("C:/m/Model-UD-IQ3_XXS-00002-of-00003.gguf");
+        let parts = split_parts(p).unwrap();
+        assert_eq!(parts.len(), 3);
+        assert!(parts[0].ends_with("Model-UD-IQ3_XXS-00001-of-00003.gguf"));
+        assert!(parts[2].ends_with("Model-UD-IQ3_XXS-00003-of-00003.gguf"));
+        assert!(split_parts(Path::new("C:/m/Qwen3-8B-Q4_K_M.gguf")).is_none());
+        assert!(split_parts(Path::new("C:/m/x-00001-of-00001.gguf")).is_none());
+        assert!(split_parts(Path::new("C:/m/x-1-of-3.gguf")).is_none());
+    }
 }
