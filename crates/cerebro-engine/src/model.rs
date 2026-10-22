@@ -166,6 +166,9 @@ pub struct Model {
     /// GPU assist (gpu.rs Offload): matrices the GPU multiplies for a processor session.
     #[cfg(feature = "cuda")]
     offload: std::sync::OnceLock<std::sync::Mutex<crate::gpu::Offload>>,
+    /// Prompt batches of the processor's weights on the GPU (gpu.rs BatchGpu).
+    #[cfg(feature = "cuda")]
+    batch_gpu: std::sync::OnceLock<Option<std::sync::Mutex<crate::gpu::BatchGpu>>>,
 }
 
 fn vec_f32(g: &Gguf, name: &str) -> Result<Vec<f32>, Error> {
@@ -327,7 +330,7 @@ impl Model {
         let inv_freq = (0..rd / 2).map(|i| 1.0 / cfg.rope_base.powf(2.0 * i as f32 / rd as f32)).collect();
         // Hyper-connection models norm the output in their last mixer.
         let out_norm = if hc.is_some() && !g.tensors.contains_key("output_norm.weight") { Vec::new() } else { vec_f32(&g, "output_norm.weight")? };
-        let m = Self { path: path.to_path_buf(), embed: Mat::of(embed_t), out_norm, layers, output, inv_freq, cfg, gguf: g, packs: Default::default(), stream_map: Default::default(), hc, #[cfg(feature = "cuda")] offload: Default::default() };
+        let m = Self { path: path.to_path_buf(), embed: Mat::of(embed_t), out_norm, layers, output, inv_freq, cfg, gguf: g, packs: Default::default(), stream_map: Default::default(), hc, #[cfg(feature = "cuda")] offload: Default::default(), #[cfg(feature = "cuda")] batch_gpu: Default::default() };
         let n = crate::switches::get(crate::switches::STREAM_LAYERS).max(0) as usize;
         if n > 0 {
             m.stream_from_drive(n);
@@ -704,6 +707,20 @@ impl Model {
         v
     }
 
+    /// Sends prompt batches of the processor's weights to the GPU from now on (when there is a CUDA
+    /// GPU with tensor cores and "Use the graphics card" is on). Returns whether it is on.
+    #[cfg(feature = "cuda")]
+    pub fn enable_batch_gpu(&self) -> bool {
+        self.batch_gpu
+            .get_or_init(|| {
+                if !crate::switches::enabled(crate::switches::GPU_ENABLED) {
+                    return None;
+                }
+                crate::gpu::BatchGpu::new().map_err(|e| eprintln!("prompt batches stay on the processor: {e}")).ok().map(std::sync::Mutex::new)
+            })
+            .is_some()
+    }
+
     /// Turns GPU assist on for this model (once): the matrices of `dense_mats` that fit in VRAM.
     #[cfg(feature = "cuda")]
     pub fn enable_offload(&self) -> Result<(usize, usize, usize), Error> {
@@ -990,6 +1007,21 @@ impl Model {
     /// memory bus once per batch instead of once per token.
     fn matmul_batch(&self, m: &Mat, xs: &[f32], qas: &[QAct], out: &mut [f32]) {
         let g: &Gguf = &self.gguf;
+        #[cfg(feature = "cuda")]
+        if qas.len() >= crate::gpu::BATCH_GPU_MIN_TOKENS && crate::gpu::BatchGpu::takes(m) {
+            if let Some(Some(b)) = self.batch_gpu.get() {
+                let mut b = b.lock().unwrap_or_else(|e| e.into_inner());
+                match b.run(m, g.bytes_at(m.offset, m.rows * m.row_bytes), qas, out) {
+                    Ok(()) => return,
+                    Err(e) => {
+                        static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                        if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            eprintln!("a prompt batch stayed on the processor ({}x{} {:?}): {e}", m.rows, m.cols, m.dtype);
+                        }
+                    }
+                }
+            }
+        }
         let (cols, rows, rb) = (m.cols, m.rows, m.row_bytes);
         assert!(out.len() >= qas.len() * rows && xs.len() >= qas.len() * cols);
         let pool = crate::pool::global();
@@ -1739,6 +1771,7 @@ impl Session {
         // The graphics card's share first, so the RAM left for experts (Session::new) counts it.
         let (placed, cands, bytes) = m.enable_offload()?;
         eprintln!("GPU assist: {placed} of {cands} weight matrices on the graphics card ({:.2} GiB)", bytes as f64 / (1u64 << 30) as f64);
+        m.enable_batch_gpu();
         Ok(Self::new(m, max_ctx))
     }
 
@@ -1764,6 +1797,8 @@ impl Session {
         if g.is_split() {
             m.auto_drive_tier(g.gpu_layers(), max_ctx);
             m.prepare_cpu(g.gpu_layers());
+            // The processor's layers read prompts with the GPU's help.
+            m.enable_batch_gpu();
         }
         if g.is_split() && crate::switches::enabled(crate::switches::PREFAULT) {
             // The CPU's share is read into RAM now (as a CPU session does at start), not by page

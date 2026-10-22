@@ -2239,3 +2239,121 @@ impl Offload {
         Ok(())
     }
 }
+
+/// Prompt batches on the GPU for weights that live in RAM: the processor's batched matmuls (a split
+/// model's processor layers, GPU assist, a processor session on a computer with a GPU) send each
+/// matrix to the GPU in its file format, convert it to int8 there and run the tensor-core GEMM over
+/// the whole chunk of tokens. Copying a layer over PCIe takes milliseconds; multiplying it by a
+/// few hundred tokens on the processor takes far longer. Formats without a GPU converter (the
+/// i-quants) stay on the processor.
+pub struct BatchGpu {
+    stream: Arc<CudaStream>,
+    k_to_q8: CudaFunction,
+    q80_split: CudaFunction,
+    gemm: CudaFunction,
+    w: CudaSlice<u8>,
+    qs: CudaSlice<i8>,
+    ds: CudaSlice<f32>,
+    xq: CudaSlice<i8>,
+    xd: CudaSlice<f32>,
+    y: CudaSlice<f32>,
+    pub calls: u64,
+}
+
+/// The fewest tokens for which a batch goes to the GPU.
+pub const BATCH_GPU_MIN_TOKENS: usize = 32;
+
+impl BatchGpu {
+    pub fn new() -> Result<Self, Error> {
+        let ctx = CudaContext::new(0).map_err(gerr)?;
+        unsafe { ctx.disable_event_tracking() };
+        if ctx.compute_capability().map_err(gerr)?.0 < 8 {
+            return Err(Error::Unsupported("prompt batches on the GPU need tensor cores (sm_80 or newer)".into()));
+        }
+        let stream = ctx.new_stream().map_err(gerr)?;
+        let module = ctx.load_module(Ptx::from_src(PTX)).map_err(gerr)?;
+        let mma = ctx.load_module(Ptx::from_src(PTX_MMA)).map_err(gerr)?;
+        let z8 = |n| stream.alloc_zeros::<i8>(n).map_err(gerr);
+        let zf = |n| stream.alloc_zeros::<f32>(n).map_err(gerr);
+        Ok(Self {
+            k_to_q8: module.load_function("k_to_q8").map_err(gerr)?,
+            q80_split: module.load_function("q80_split").map_err(gerr)?,
+            gemm: mma.load_function("matmul_q8_mma").map_err(gerr)?,
+            w: stream.alloc_zeros::<u8>(1).map_err(gerr)?,
+            qs: z8(1)?,
+            ds: zf(1)?,
+            xq: z8(1)?,
+            xd: zf(1)?,
+            y: zf(1)?,
+            stream,
+            calls: 0,
+        })
+    }
+
+    /// Whether this matrix's format converts on the GPU.
+    pub fn takes(m: &Mat) -> bool {
+        m.cols % 32 == 0 && (m.dtype == DType::Q8_0 || (gpu_block(m.dtype).is_some() && m.cols % 256 == 0))
+    }
+
+    /// out[t * rows + r] = M x_t for the T tokens of `qas` (the processor's int8 activations);
+    /// `bytes` is the matrix as stored in the file.
+    pub fn run(&mut self, m: &Mat, bytes: &[u8], qas: &[QAct], out: &mut [f32]) -> Result<(), Error> {
+        let log = std::env::var_os("CEREBRO_BATCH_GPU_LOG").is_some();
+        let t0 = std::time::Instant::now();
+        let (rows, cols, t) = (m.rows, m.cols, qas.len());
+        let s = self.stream.clone();
+        let grow8 = |b: &mut CudaSlice<i8>, n: usize| -> Result<(), Error> {
+            if b.len() < n {
+                *b = s.alloc_zeros::<i8>(n).map_err(gerr)?;
+            }
+            Ok(())
+        };
+        let growf = |b: &mut CudaSlice<f32>, n: usize| -> Result<(), Error> {
+            if b.len() < n {
+                *b = s.alloc_zeros::<f32>(n).map_err(gerr)?;
+            }
+            Ok(())
+        };
+        grow8(&mut self.qs, rows * cols)?;
+        growf(&mut self.ds, rows * cols / 32)?;
+        grow8(&mut self.xq, t * cols)?;
+        growf(&mut self.xd, t * cols / 32)?;
+        growf(&mut self.y, t * rows)?;
+        // The weights, converted on the GPU.
+        let wb: std::borrow::Cow<'_, [u8]> = if m.dtype == DType::Q8_0 { std::borrow::Cow::Borrowed(bytes) } else { std::borrow::Cow::Owned(to_gpu_layout(m.dtype, bytes)) };
+        if self.w.len() < wb.len() {
+            self.w = s.alloc_zeros::<u8>(wb.len()).map_err(gerr)?;
+        }
+        s.memcpy_htod(&wb[..], &mut self.w.slice_mut(0..wb.len())).map_err(gerr)?;
+        if m.dtype == DType::Q8_0 {
+            let nb = (rows * cols / 32) as i32;
+            let cfg = LaunchConfig { grid_dim: ((nb as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+            unsafe { s.launch_builder(&self.q80_split).arg(&self.w).arg(&nb).arg(&mut self.qs).arg(&mut self.ds).launch(cfg) }.map_err(gerr)?;
+        } else {
+            let (bb, dtype) = gpu_block(m.dtype).expect("takes() checked the format");
+            let (bb, r, c) = (bb as i32, rows as i32, cols as i32);
+            let subs = (rows * cols / 32) as u32;
+            let cfg = LaunchConfig { grid_dim: (subs.div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+            unsafe { s.launch_builder(&self.k_to_q8).arg(&self.w).arg(&dtype).arg(&bb).arg(&r).arg(&c).arg(&mut self.qs).arg(&mut self.ds).launch(cfg) }.map_err(gerr)?;
+        }
+        // The activations, token-major.
+        let mut hq = Vec::with_capacity(t * cols);
+        let mut hd = Vec::with_capacity(t * cols / 32);
+        for qa in qas {
+            hq.extend_from_slice(&qa.q[..cols]);
+            hd.extend_from_slice(&qa.d[..cols / 32]);
+        }
+        s.memcpy_htod(&hq, &mut self.xq.slice_mut(0..t * cols)).map_err(gerr)?;
+        s.memcpy_htod(&hd, &mut self.xd.slice_mut(0..t * cols / 32)).map_err(gerr)?;
+        let (ri, ci, ti, add) = (rows as i32, cols as i32, t as i32, 0i32);
+        let cfg = LaunchConfig { grid_dim: ((t as u32).div_ceil(64), (rows as u32).div_ceil(64), 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
+        unsafe { s.launch_builder(&self.gemm).arg(&self.qs).arg(&self.ds).arg(&self.xq).arg(&self.xd).arg(&mut self.y).arg(&ri).arg(&ci).arg(&ti).arg(&add).launch(cfg) }.map_err(gerr)?;
+        s.memcpy_dtoh(&self.y.slice(0..t * rows), &mut out[..t * rows]).map_err(gerr)?;
+        s.synchronize().map_err(gerr)?;
+        self.calls += 1;
+        if log {
+            eprintln!("batch gpu: {rows}x{cols} {:?} x {t} tokens: {:.2} ms", m.dtype, t0.elapsed().as_secs_f64() * 1e3);
+        }
+        Ok(())
+    }
+}

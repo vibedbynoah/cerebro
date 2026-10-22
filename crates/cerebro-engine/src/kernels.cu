@@ -752,6 +752,18 @@ extern "C" __global__ void k_to_q8(const unsigned char* __restrict__ w, int dtyp
     ds[(size_t)row * nsb + sb] = dq;
 }
 
+// GGUF Q8_0 rows (34-byte blocks: f16 scale, 32 int8) -> the int8 + f32-scale layout the prompt
+// GEMM reads. One thread per block.
+extern "C" __global__ void q80_split(const unsigned char* __restrict__ w, int nblocks,
+                                     signed char* __restrict__ qs, float* __restrict__ ds) {
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nblocks) return;
+    const unsigned char* b = w + i * 34;
+    ds[i] = __half2float(*reinterpret_cast<const __half*>(b));
+    #pragma unroll
+    for (int j = 0; j < 32; ++j) qs[i * 32 + j] = (signed char)b[2 + j];
+}
+
 // Batched expert matvec over the k chosen experts (gridDim.y = k). sel holds [ids k | weights k |
 // cache slots k]; experts not cached (slot < 0) are skipped here and computed on the CPU. Expert j's
 // matrix starts at pool + slot*slot_bytes + off; its input at xq + j*xstride; output at y + j*rows.
