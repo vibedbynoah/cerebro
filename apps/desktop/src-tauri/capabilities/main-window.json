@@ -55,6 +55,7 @@
     "allow-tts-stop",
     "allow-mic-level",
     "allow-stt-transcribe",
+    "allow-stt-transcribe-file",
     "allow-model-describe-image",
     "allow-tune-subscribe",
     "allow-tune-cancel",

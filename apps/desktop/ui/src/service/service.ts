@@ -242,6 +242,9 @@ export interface CerebroService {
   chatToolAnswer(id: string, answer: Record<string, unknown>): Promise<boolean>;
   /** Transcribes a push-to-talk recording on this machine. */
   transcribe(seconds: number): Promise<string>;
+  /** Transcribes an audio file (WAV) on this machine with the speech model in use. `data` is the
+   *  file's bytes, base64-encoded. */
+  transcribeAudio(audio: { name: string; data: string }): Promise<string>;
 
   // ---- Model Hub (desktop: live Hugging Face). Absent in the web preview. ----
 

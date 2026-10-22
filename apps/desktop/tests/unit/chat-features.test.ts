@@ -37,6 +37,7 @@ function message(id: string, role: "user" | "assistant", text: string): ChatMess
     source: "native",
     streaming: false,
     error: null,
+    sources: [],
   };
 }
 

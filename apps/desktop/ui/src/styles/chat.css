@@ -1808,3 +1808,45 @@
   color: var(--color-text-muted);
   font-size: var(--text-small);
 }
+
+/* The passages of the user's documents a reply used, as chips under the reply. */
+
+.msg__sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chip--source {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 320px;
+  padding: 2px var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-1);
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: var(--text-small);
+  cursor: pointer;
+}
+
+.chip--source:hover {
+  background: var(--color-surface-2);
+  color: var(--color-text-primary);
+}
+
+.chip--source:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.msg__source-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}

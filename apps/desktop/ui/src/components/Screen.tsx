@@ -27,7 +27,7 @@ export function ScreenHeader(props: { route: RouteId; title?: string; lede?: JSX
 
 export function Section(props: { title: string; description?: JSX.Element; children: JSX.Element; id?: string }): JSX.Element {
   return (
-    <section class="section reveal" data-reveal aria-labelledby={props.id ? `${props.id}-title` : undefined}>
+    <section class="section reveal" id={props.id} data-reveal aria-labelledby={props.id ? `${props.id}-title` : undefined}>
       <div class="section__head">
         <h2 class="section__title" id={props.id ? `${props.id}-title` : undefined}>
           {props.title}

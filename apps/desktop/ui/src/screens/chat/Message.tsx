@@ -3,6 +3,7 @@ import { Icon } from "../../components/icons";
 import { parseMarkdown, plainText } from "../../lib/chat/markdown";
 import { EFFORT_LABELS, REASONING_LABELS } from "../../lib/chat/prompt";
 import type { ChatMessage } from "../../lib/chat/store";
+import type { Source } from "../../lib/rag";
 import { LedgerPanel } from "./Ledger";
 import { Markdown } from "./Markdown";
 import { useService } from "../../service/context";
@@ -23,6 +24,8 @@ export function MessageView(props: {
   onBranch?: (id: string, delta: number) => void;
   onToolDecide?: (id: string, decision: ToolDecision) => void;
   onToolAnswer?: (id: string, answer: ToolAnswer) => void;
+  /** Opens a passage of the user's documents in the Documents screen. */
+  onOpenSource?: (source: Source) => void;
 }): JSX.Element {
   return (
     <Show when={props.m.role === "assistant"} fallback={<UserMessage {...props} />}>
@@ -156,6 +159,7 @@ function AssistantMessage(props: {
   onBranch?: (id: string, delta: number) => void;
   onToolDecide?: (id: string, decision: ToolDecision) => void;
   onToolAnswer?: (id: string, answer: ToolAnswer) => void;
+  onOpenSource?: (source: Source) => void;
 }): JSX.Element {
   const m = () => props.m;
   const [speaking, setSpeaking] = createSignal(false);
@@ -217,6 +221,20 @@ function AssistantMessage(props: {
       </Show>
       <Show when={m().text} fallback={<Show when={m().streaming && !m().tools.some((t) => t.state === "approval" || t.state === "question" || t.state === "plan")}><p class="msg__typing" aria-label="Writing">●●●</p></Show>}>
         <Markdown text={m().text} />
+      </Show>
+      <Show when={m().sources.length}>
+        <ul class="msg__sources" role="list" aria-label="Passages from your documents">
+          <For each={m().sources}>
+            {(s) => (
+              <li>
+                <button type="button" class="chip chip--source" onClick={() => props.onOpenSource?.(s)} title={s.text} data-testid="source-chip">
+                  <span class="mono">{s.n}</span>
+                  <span class="msg__source-name">{s.docName}</span>
+                </button>
+              </li>
+            )}
+          </For>
+        </ul>
       </Show>
       <Show when={m().image}>{(img) => <ImageCard prompt={img().prompt} seed={img().seed} />}</Show>
       <Show when={m().checks.length}>

@@ -34,6 +34,16 @@ export const COMMANDS: readonly CommandDef[] = [
   { name: "memories", args: "", description: "Open what Cerebro remembers about you.", aliases: ["forget"] },
   { name: "stats", args: "", description: "This chat's speed and token totals." },
   { name: "prompts", args: "", description: "Open your saved prompts.", aliases: ["prompt"] },
+  { name: "docs", args: "[off | collection | folder | tag]", description: "Answer from your documents, or search one collection, folder or tag." },
+  { name: "summarise", args: "[text]", description: "Summarise text, or the last message." },
+  { name: "translate", args: "[language]", description: "Translate the last message into another language." },
+  { name: "rewrite", args: "[shorter | clearer | formal | friendly]", description: "Rewrite the last message." },
+  { name: "extract", args: "<fields>", description: "Pull the fields you name out of the last message, as JSON." },
+  { name: "explain", args: "[code]", description: "Explain a piece of code." },
+  { name: "compare", args: "", description: "Compare the last two messages: what agrees, what changed." },
+  { name: "notes", args: "[text]", description: "Meeting notes from a pasted transcript." },
+  { name: "read", args: "[text]", description: "Read the text aloud with the speech model." },
+  { name: "describe", args: "", description: "Describe the image attached to the last message." },
   { name: "help", args: "", description: "List every command." },
 ];
 

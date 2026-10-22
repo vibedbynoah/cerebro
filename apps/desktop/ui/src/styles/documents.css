@@ -1,5 +1,252 @@
 /* Documents screen (screens/Documents.tsx). Built only from design-system tokens. */
 
+/* ---- The tabs: Search, Files, Convert, Quick tools ---- */
+
+.doc-tabs {
+  display: flex;
+  gap: var(--space-1);
+  margin-bottom: var(--space-6);
+  padding: var(--space-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-1);
+}
+
+.doc-tab {
+  flex: 1;
+  min-height: 34px;
+  padding-inline: var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: var(--text-small);
+  cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+
+.doc-tab:hover {
+  background: var(--state-hover);
+  color: var(--color-text-primary);
+}
+
+.doc-tab[aria-selected="true"] {
+  background: var(--color-surface-3);
+  color: var(--color-text-primary);
+  font-weight: var(--weight-semibold);
+}
+
+.doc-tab:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.doc-panel[hidden] {
+  display: none;
+}
+
+.doc-note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-8);
+}
+
+/* ---- Files: what happened to each file ---- */
+
+.doc-results {
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-4) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.doc-result {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-small);
+  color: var(--color-text-primary);
+}
+
+.doc-result[data-ok="false"] {
+  color: var(--color-danger);
+}
+
+.doc-result__name {
+  font-weight: var(--weight-medium);
+}
+
+/* ---- Collections ---- */
+
+.doc-new-collection {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.doc-collections {
+  display: grid;
+  gap: var(--space-1);
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.doc-collection {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto 28px;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--color-border);
+  font-size: var(--text-small);
+}
+
+.doc-collection__name {
+  color: var(--color-text-primary);
+}
+
+/* ---- A file's folder, tags and collections ---- */
+
+.doc-more {
+  grid-column: 1 / -1;
+}
+
+.doc-more__body {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3) 0 var(--space-2);
+}
+
+.doc-field {
+  display: grid;
+  gap: var(--space-1);
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.doc-field legend {
+  padding: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-small);
+}
+
+/* ---- Convert ---- */
+
+.doc-formats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-4);
+  padding: 0;
+  list-style: none;
+}
+
+.doc-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 36px;
+  padding-inline: var(--space-4);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-1);
+  color: var(--color-text-primary);
+  font: inherit;
+  font-size: var(--text-small);
+  cursor: pointer;
+}
+
+.doc-pick:hover {
+  background: var(--color-surface-2);
+}
+
+.doc-pick--small {
+  min-height: 30px;
+  padding-inline: var(--space-3);
+}
+
+.doc-convert__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.doc-preview {
+  max-height: 320px;
+  margin: 0;
+  padding: var(--space-3);
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-1);
+  color: var(--color-text-secondary);
+  font-family: var(--font-family-code);
+  font-size: var(--text-code);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---- Quick tools ---- */
+
+.doc-tools {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-4);
+}
+
+.tool-card {
+  display: grid;
+  gap: var(--space-3);
+  align-content: start;
+  padding: var(--space-4);
+}
+
+.tool-card__title {
+  margin: 0;
+  font-size: var(--text-body);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.tool-card__blurb {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.tool-card__field {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.tool-card__label {
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.tool-card__input {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.tool-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.tool-card__result {
+  display: grid;
+  gap: var(--space-2);
+}
+
 .doc-drop {
   display: grid;
   justify-items: center;

@@ -89,6 +89,7 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::tts_stop,
             commands::mic_level,
             commands::stt_transcribe,
+            commands::stt_transcribe_file,
             commands::model_describe_image,
             commands::tune_subscribe,
             commands::tune_cancel,

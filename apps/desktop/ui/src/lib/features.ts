@@ -8,7 +8,7 @@ import type { RouteId } from "./routes";
  * guide shows once more.
  */
 
-export const GUIDE_VERSION = "2026-10-21";
+export const GUIDE_VERSION = "2026-10-22";
 
 export interface Feature {
   title: string;
@@ -39,7 +39,8 @@ export const FEATURE_GROUPS: readonly FeatureGroup[] = [
     title: "Chat",
     features: [
       { title: "Speed or accuracy, one slider", text: "From a one-line prompt with greedy decoding on the graphics card, to long thinking with review passes, to Orchestrate. Moving it tells you what changed.", icon: "bolt", route: "chat", isNew: true },
-      { title: "/ commands", text: "Type / in a message for 19 commands: switch model, change speed, make an image, read aloud, export, and more. They run here and never reach the model.", icon: "code", route: "chat", isNew: true },
+      { title: "/ commands", text: "Type / in a message for 29 commands: switch model, change speed, answer from your documents, make an image, read aloud, export, and more. They run here and never reach the model.", icon: "code", route: "chat", isNew: true },
+      { title: "Answer from your documents", text: "Turn on \"Use my documents\" and the passages that match each message are sent with it, numbered. The reply shows the files it used, and a chip opens the passage.", icon: "documents", route: "chat", isNew: true },
       { title: "Settings per model", text: "Save the current settings for a model from the live panel; they come back whenever you pick that model.", icon: "sliders", route: "chat", isNew: true },
       { title: "Live panel", text: "Speed, context, graphics memory, temperature and power beside the chat, with the settings you change most. Ctrl . opens it.", icon: "activity", route: "chat", isNew: true },
       { title: "Cloud models with your own keys", text: "Add models you already pay for elsewhere. Keys stay in the Windows Credential Manager, and the chat says clearly when it goes to the cloud.", icon: "online", route: "settings", isNew: true },
@@ -57,6 +58,9 @@ export const FEATURE_GROUPS: readonly FeatureGroup[] = [
     features: [
       { title: "Image Studio", text: "Make a 512 x 512 image in about a fifth of a second on a recent NVIDIA card, with the seed kept so you can make it again.", icon: "images", route: "images", isNew: true },
       { title: "Documents", text: "Search your own files on this machine.", icon: "documents", route: "documents" },
+      { title: "Documents as collections", text: "Group indexed files in named collections, and let Chat search one collection instead of everything.", icon: "folder", route: "documents", isNew: true },
+      { title: "Converters", text: "Turn PDF, Word, HTML, Markdown, CSV, JSON and plain text into clean text on this computer, and save the result as Markdown or plain text.", icon: "download", route: "documents", isNew: true },
+      { title: "Quick tools", text: "Summarise, translate, rewrite, extract, explain code, compare two documents, take meeting notes, read aloud and describe an image. One step, one answer.", icon: "bolt", route: "documents", isNew: true },
       { title: "Train", text: "Fine-tune a model on your own examples.", icon: "chip", route: "train" },
     ],
   },

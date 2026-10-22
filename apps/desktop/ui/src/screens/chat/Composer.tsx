@@ -68,6 +68,15 @@ export function Composer(props: {
   onLevel?: () => Promise<number>;
   onOpenPrompt: () => void;
   onOpenPrompts: () => void;
+  /** Answer from the user's documents (off until they turn it on). */
+  docsOn: boolean;
+  onDocs: (on: boolean) => void;
+  /** Which files to search: the choices, and the one in force. */
+  docsScopes: { key: string; label: string }[];
+  docsScope: string;
+  onDocsScope: (key: string) => void;
+  /** Where the passages go when a cloud model answers (empty for a model on this computer). */
+  docsNote: string;
   /** A prompt chosen in the library: replaces the composer text whenever `at` changes. */
   draft?: { text: string; at: number } | null;
 }): JSX.Element {
@@ -477,6 +486,23 @@ export function Composer(props: {
                   <Icon name="chevron" size={14} />
                 </button>
               </span>
+            </Show>
+            <label class="composer__check" title="Answer from your own documents: the passages that match each message are added to the request.">
+              <input type="checkbox" checked={props.docsOn} onChange={(e) => props.onDocs(e.currentTarget.checked)} />
+              <span>Use my documents</span>
+            </label>
+            <Show when={props.docsOn}>
+              <label class="composer__select">
+                <span>Search</span>
+                <select value={props.docsScope} onChange={(e) => props.onDocsScope(e.currentTarget.value)} aria-describedby="docs-note">
+                  <For each={props.docsScopes}>{(s) => <option value={s.key}>{s.label}</option>}</For>
+                </select>
+              </label>
+            </Show>
+            <Show when={props.docsOn && props.docsNote}>
+              <p class="composer__hint" id="docs-note">
+                {props.docsNote}
+              </p>
             </Show>
             <button class="btn btn--tertiary btn--sm" type="button" onClick={() => props.onOpenPrompt()} data-press>
               <Icon name="code" size={14} />

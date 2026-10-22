@@ -29,7 +29,13 @@ import {
 import { chatJump, publishChats, setChatJump } from "../lib/chat/navigation";
 import { loadPrompts, savePrompts, type SavedPrompt } from "../lib/chat/prompts";
 import { searchConversations } from "../lib/chat/search";
+import { docsInScope, folderNames as docFolderNames, loadCollections, scopeKey, tagNames as docTagNames } from "../lib/collections";
+import { loadDocs } from "../lib/documents";
+import { assembleContext, ragPrompt, retrieve, type ContextBlock, type Source } from "../lib/rag";
+import { buildQuickToolPrompt, quickTool, REWRITE_STYLES, TRANSLATE_LANGUAGES, type QuickToolId, type QuickToolInputValue } from "../lib/quick-tools";
+import { loadDocsPrefs, saveDocsPrefs, scopeOf, type DocsPrefs } from "../lib/chat/docs";
 import { chatToolRules, loadPolicy, mcpToolKey, savePolicy } from "../lib/permissions";
+import { hrefFor } from "../lib/routes";
 import { notify, notifyAction } from "../lib/toast";
 import { COMMANDS, numberArg, orchestrateArg, speedArg, switchArg } from "../lib/chat/commands";
 import { parseMarkdown, plainText } from "../lib/chat/markdown";
@@ -38,7 +44,7 @@ import { Dialog } from "@ark-ui/solid/dialog";
 import { Portal } from "solid-js/web";
 import "../styles/guide.css";
 import { useAppState } from "../state";
-import { DEFAULT_SAMPLER, LEDGER_FILES, type ChatTools, type ChatTurn, type LedgerFileName, type Sampler, type ToolActivity } from "../service/chat-types";
+import { DEFAULT_SAMPLER, LEDGER_FILES, type ChatRequest, type ChatTools, type ChatTurn, type LedgerFileName, type Sampler, type ToolActivity } from "../service/chat-types";
 import { useService } from "../service/context";
 import type { CloudProvider, LibraryModel } from "../service/types";
 import { HighlightQuery } from "../components/ChatSearch";
@@ -96,6 +102,16 @@ export function Chat(): JSX.Element {
   const cloudOf = () => cloudModels().find((m) => m.id === modelId()) ?? null;
 
   const [prefs, setPrefsSignal] = createSignal<ChatPrefs>(loadPrefs());
+  // The user's documents: off until they ask for them, and then only the files they pick.
+  const [docsPrefs, setDocsPrefsSignal] = createSignal<DocsPrefs>(loadDocsPrefs());
+  // The collections the Documents screen keeps; the screen is remounted when the route changes, so
+  // these are the ones the user can see now.
+  const collections = loadCollections();
+  const setDocsPrefs = (p: Partial<DocsPrefs>) => {
+    const next = { ...docsPrefs(), ...p };
+    setDocsPrefsSignal(next);
+    saveDocsPrefs(next);
+  };
   const levels = effectiveLevels(loadLevelEdits());
   const setPrefs = (p: Partial<ChatPrefs>) => {
     const next = { ...prefs(), ...p };
@@ -306,26 +322,22 @@ export function Chat(): JSX.Element {
     }
   };
 
-  const run = async (cid: string, parentId: string | null) => {
-    const conv = state.list.find((c) => c.id === cid);
-    if (!conv || !modelId()) return;
-    const cm = cloudOf();
-    if (cm && app.settings()?.offlineMode) {
-      notify("Offline mode is on", `${cm.provider} is a cloud model, so it is blocked. Turn offline mode off in Settings, or pick a model on this computer.`, "warning");
-      return;
-    }
-    if (!cm && !(await ensureLoaded())) return;
-    const tools = cm ? null : await toolsForRequest();
-    const req = built();
+  /** The passages of the user's documents that answer this message, when they are switched on. */
+  const docsContext = (question: string): ContextBlock | null => {
+    if (!docsPrefs().on || !question.trim()) return null;
+    const scope = scopeOf(docsPrefs(), collections);
+    const docs = docsInScope(loadDocs(), scope);
+    if (!docs.length) return null;
+    const found = retrieve(docs, question, { limit: 6 });
+    if (!found.length) return null;
+    return assembleContext(found);
+  };
+
+  /** Streams a reply into a new message of the chat, and keeps the sources it used. */
+  const streamReply = async (cid: string, parentId: string | null, request: ChatRequest, sources: Source[] = []) => {
     const p = prefs();
-    const path = branchPath(treeOf(conv));
-    const at = parentId === null ? -1 : path.findIndex((n) => n.id === parentId);
-    const context = (at >= 0 ? path.slice(0, at + 1) : path).map((n) => n.message);
-    const turns: ChatTurn[] = context
-      .filter((m) => !m.streaming && !m.error)
-      .map((m) => ({ role: m.role, text: m.text, ...(m.attachments.length ? { attachments: m.attachments.map(({ name, type, bytes, preview }) => ({ name, type, bytes, ...(preview ? { data: preview } : {}) })) } : {}) }));
     const mid = newId();
-    const reply: ChatMessage = { id: mid, role: "assistant", text: "", thinking: "", checks: [], image: null, tools: [], ledger: null, attachments: [], stats: null, effort: p.effort, verbosity: p.verbosity, source: p.source, streaming: true, error: null };
+    const reply: ChatMessage = { id: mid, role: "assistant", text: "", thinking: "", checks: [], image: null, tools: [], ledger: null, attachments: [], stats: null, effort: p.effort, verbosity: p.verbosity, source: p.source, streaming: true, error: null, sources };
     addMessage(cid, reply, parentId);
     abort = new AbortController();
     let tokens = 0;
@@ -342,20 +354,7 @@ export function Chat(): JSX.Element {
     };
     try {
       await service.chat(
-        {
-          modelId: modelId(),
-          systemPrompt: req.systemPrompt,
-          turns,
-          sampler: sampler(),
-          native: req.native,
-          passes: req.passes,
-          effort: p.effort,
-          verbosity: p.verbosity,
-          source: p.source,
-          tools,
-          orchestrate: p.orchestrate ? { workers: p.workers, rounds: p.rounds } : null,
-          keepCache: app.settings()?.keepChatCaches !== false,
-        },
+        request,
         (e) => {
           switch (e.type) {
             case "start":
@@ -440,6 +439,48 @@ export function Chat(): JSX.Element {
     }
   };
 
+  const run = async (cid: string, parentId: string | null) => {
+    const conv = state.list.find((c) => c.id === cid);
+    if (!conv || !modelId()) return;
+    const cm = cloudOf();
+    if (cm && app.settings()?.offlineMode) {
+      notify("Offline mode is on", `${cm.provider} is a cloud model, so it is blocked. Turn offline mode off in Settings, or pick a model on this computer.`, "warning");
+      return;
+    }
+    if (!cm && !(await ensureLoaded())) return;
+    const tools = cm ? null : await toolsForRequest();
+    const req = built();
+    const p = prefs();
+    const path = branchPath(treeOf(conv));
+    const at = parentId === null ? -1 : path.findIndex((n) => n.id === parentId);
+    const context = (at >= 0 ? path.slice(0, at + 1) : path).map((n) => n.message);
+    // The user's documents: the passages that answer the message go into the request, numbered.
+    const question = [...context].reverse().find((m) => m.role === "user")?.text ?? "";
+    const rag = docsContext(question);
+    const turns: ChatTurn[] = context
+      .filter((m) => !m.streaming && !m.error)
+      .map((m) => ({ role: m.role, text: m.text, ...(m.attachments.length ? { attachments: m.attachments.map(({ name, type, bytes, preview }) => ({ name, type, bytes, ...(preview ? { data: preview } : {}) })) } : {}) }));
+    await streamReply(
+      cid,
+      parentId,
+      {
+        modelId: modelId(),
+        systemPrompt: rag ? [req.systemPrompt, ragPrompt(rag)].filter(Boolean).join("\n\n") : req.systemPrompt,
+        turns,
+        sampler: sampler(),
+        native: req.native,
+        passes: req.passes,
+        effort: p.effort,
+        verbosity: p.verbosity,
+        source: p.source,
+        tools,
+        orchestrate: p.orchestrate ? { workers: p.workers, rounds: p.rounds } : null,
+        keepCache: app.settings()?.keepChatCaches !== false,
+      },
+      rag?.sources ?? [],
+    );
+  };
+
   const send = (text: string, atts: Attachment[]) => {
     const cid = ensureConversation();
     const conv = state.list.find((c) => c.id === cid)!;
@@ -465,6 +506,7 @@ export function Chat(): JSX.Element {
       source: prefs().source,
       streaming: false,
       error: null,
+      sources: [],
     };
     batch(() => {
       if (!conv.messages.length) setState("list", (c) => c.id === cid, "title", titleFrom(text || atts[0]?.name || ""));
@@ -530,6 +572,88 @@ export function Chat(): JSX.Element {
   };
 
   const more = () => send("Tell me more.", []);
+
+  /** A quick tool run from a / command: the tool's answer becomes a reply in this chat. */
+  const runToolCommand = async (tool: QuickToolId, arg: string) => {
+    const def = quickTool(tool);
+    if (!def) return;
+    const messages = current()?.messages ?? [];
+    const lastUser = () => [...messages].reverse().find((m) => m.role === "user")?.text.trim() ?? "";
+    const lastReply = () => [...messages].reverse().find((m) => m.role === "assistant" && m.text.trim())?.text.trim() ?? "";
+    const input: QuickToolInputValue = {};
+    if (tool === "translate") {
+      input.language = TRANSLATE_LANGUAGES.find((l) => l.toLowerCase() === arg.trim().toLowerCase()) ?? "English";
+      input.text = lastUser() || lastReply();
+    } else if (tool === "rewrite") {
+      input.style = REWRITE_STYLES.find((s) => s.id === arg.trim().toLowerCase())?.id ?? "clearer";
+      input.text = lastUser() || lastReply();
+    } else if (tool === "extract") {
+      input.fields = arg.trim();
+      input.text = lastUser() || lastReply();
+    } else if (tool === "compare") {
+      const users = messages.filter((m) => m.role === "user" && m.text.trim()).map((m) => m.text.trim());
+      if (users.length < 2) return notify("/compare needs two texts", "Send two messages, then run /compare again.", "warning");
+      input.text = users[users.length - 2] ?? "";
+      input.second = users[users.length - 1] ?? "";
+    } else if (tool === "describe") {
+      const image = [...messages].reverse().flatMap((m) => m.attachments).find((a) => a.preview && a.type.startsWith("image/"));
+      if (!image?.preview) return notify("/describe needs an image", "Attach a picture to a message, then run /describe.", "warning");
+      input.attachment = { name: image.name, type: image.type, bytes: image.bytes, data: image.preview };
+      input.text = arg.trim();
+    } else if (tool === "read") {
+      const text = arg.trim() || lastReply() || lastUser();
+      if (!text) return notify("/read needs some text", "Type /help to see how each command is used.", "warning");
+      return void service.readAloud(text).catch((e: unknown) => notify("Could not read aloud", e instanceof Error ? e.message : undefined, "error"));
+    } else {
+      input.text = arg.trim() || lastUser() || lastReply();
+    }
+    if (!input.text?.trim() && tool !== "describe") return notify(`/${def.command} needs some text`, "Type /help to see how each command is used.", "warning");
+    const cm = cloudOf();
+    if (cm && app.settings()?.offlineMode) {
+      notify("Offline mode is on", `${cm.provider} is a cloud model, so it is blocked. Turn offline mode off in Settings, or pick a model on this computer.`, "warning");
+      return;
+    }
+    if (!cm && !(await ensureLoaded())) return;
+    const prompt = buildQuickToolPrompt(tool, input);
+    const cid = ensureConversation();
+    const parentId = state.list.find((c) => c.id === cid)?.messages.slice(-1)[0]?.id ?? null;
+    await streamReply(cid, parentId, {
+      modelId: modelId(),
+      systemPrompt: prompt.system,
+      turns: [{ role: "user", text: prompt.user || "Do the task." }],
+      sampler: sampler(),
+      native: null,
+      passes: 0,
+      effort: prefs().effort,
+      verbosity: prefs().verbosity,
+      source: prefs().source,
+      tools: null,
+      orchestrate: null,
+      keepCache: app.settings()?.keepChatCaches !== false,
+    });
+  };
+
+  /** The files the chat may search: everything, or one collection, folder or tag. */
+  const docsScopes = createMemo(() => {
+    const docs = loadDocs();
+    const out: { key: string; label: string }[] = [{ key: "all", label: "All documents" }];
+    for (const c of collections) out.push({ key: scopeKey({ kind: "collection", id: c.id }), label: `Collection: ${c.name}` });
+    for (const f of docFolderNames(docs)) out.push({ key: scopeKey({ kind: "folder", name: f }), label: `Folder: ${f}` });
+    for (const t of docTagNames(docs)) out.push({ key: scopeKey({ kind: "tag", name: t }), label: `Tag: ${t}` });
+    return out;
+  });
+
+  /** Where the passages go when a cloud model answers. */
+  const docsNote = createMemo(() => {
+    const c = cloudOf();
+    if (!docsPrefs().on || !c) return "";
+    return `Your passages are sent to ${c.provider}, with your own API key.`;
+  });
+
+  /** Opens a passage of the user's documents in the Documents screen. */
+  const openSource = (s: Source) => {
+    window.location.hash = `${hrefFor("documents")}?doc=${encodeURIComponent(s.docId)}&p=${encodeURIComponent(String(s.index))}`;
+  };
 
   /** A / command from the composer (lib/chat/commands.ts). Runs here; nothing reaches the model. */
   const command = (name: string, arg: string) => {
@@ -648,6 +772,46 @@ export function Chat(): JSX.Element {
         return setVoice(true);
       case "prompts":
         return setPanel("prompts");
+      case "docs": {
+        const docs = loadDocs();
+        const q = arg.trim().toLowerCase();
+        if (!q) {
+          const on = !docsPrefs().on;
+          setDocsPrefs({ on });
+          return notify(on ? "Using your documents" : "Not using your documents", on ? `${docs.length} indexed file${docs.length === 1 ? "" : "s"} can be searched. /docs <name> searches one collection, folder or tag.` : "Chat answers without your documents.");
+        }
+        if (q === "off" || q === "no") {
+          setDocsPrefs({ on: false });
+          return notify("Not using your documents");
+        }
+        const collection = collections.find((c) => c.name.toLowerCase() === q);
+        if (collection) {
+          setDocsPrefs({ on: true, scope: scopeKey({ kind: "collection", id: collection.id }) });
+          return notify(`Using your documents: ${collection.name}`);
+        }
+        const folder = docFolderNames(docs).find((f) => f.toLowerCase() === q);
+        if (folder) {
+          setDocsPrefs({ on: true, scope: scopeKey({ kind: "folder", name: folder }) });
+          return notify(`Using your documents: the folder ${folder}`);
+        }
+        const tag = docTagNames(docs).find((t) => t.toLowerCase() === q);
+        if (tag) {
+          setDocsPrefs({ on: true, scope: scopeKey({ kind: "tag", name: tag }) });
+          return notify(`Using your documents: the tag ${tag}`);
+        }
+        setDocsPrefs({ on: true, scope: "all" });
+        return notify("No collection, folder or tag with that name", "Searching all your documents instead. Give a file a folder or a tag on the Documents screen.", "warning");
+      }
+      case "summarise":
+      case "translate":
+      case "rewrite":
+      case "extract":
+      case "explain":
+      case "compare":
+      case "notes":
+      case "read":
+      case "describe":
+        return void runToolCommand(name as QuickToolId, arg);
     }
   };
   const [helpOpen, setHelpOpen] = createSignal(false);
@@ -679,8 +843,8 @@ export function Chat(): JSX.Element {
     const mid = newId();
     setState("list", (c) => c.id === cid, "messages", (l) => [
       ...l,
-      { id: newId(), role: "user", text: `/image ${prompt}`, thinking: "", checks: [], image: null, tools: [], ledger: null, attachments: [], stats: null, effort: prefs().effort, verbosity: prefs().verbosity, source: prefs().source, streaming: false, error: null } satisfies ChatMessage,
-      { id: mid, role: "assistant", text: "Making the image…", thinking: "", checks: [], image: null, tools: [], ledger: null, attachments: [], stats: null, effort: prefs().effort, verbosity: prefs().verbosity, source: prefs().source, streaming: true, error: null } satisfies ChatMessage,
+      { id: newId(), role: "user", text: `/image ${prompt}`, thinking: "", checks: [], image: null, tools: [], ledger: null, attachments: [], stats: null, effort: prefs().effort, verbosity: prefs().verbosity, source: prefs().source, streaming: false, error: null, sources: [] } satisfies ChatMessage,
+      { id: mid, role: "assistant", text: "Making the image…", thinking: "", checks: [], image: null, tools: [], ledger: null, attachments: [], stats: null, effort: prefs().effort, verbosity: prefs().verbosity, source: prefs().source, streaming: true, error: null, sources: [] } satisfies ChatMessage,
     ]);
     try {
       const g = await service.generateImage({ modelId: im.id, prompt, size: 512, steps: 1, seed: null });
@@ -1016,6 +1180,7 @@ export function Chat(): JSX.Element {
                   onBranch={switchMessageBranch}
                   onToolDecide={(id, d) => decideTool(currentId(), m.id, id, d)}
                   onToolAnswer={answerTool}
+                  onOpenSource={openSource}
                 />
               )}
             </For>
@@ -1076,6 +1241,12 @@ export function Chat(): JSX.Element {
           onLevel={() => service.recordingLevel()}
           onOpenPrompt={() => setPanel("prompt")}
           onOpenPrompts={() => setPanel("prompts")}
+          docsOn={docsPrefs().on}
+          onDocs={(on) => setDocsPrefs({ on })}
+          docsScopes={docsScopes()}
+          docsScope={docsPrefs().scope}
+          onDocsScope={(scope) => setDocsPrefs({ scope })}
+          docsNote={docsNote()}
           draft={draft()}
         />
       </section>

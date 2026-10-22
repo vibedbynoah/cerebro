@@ -276,6 +276,14 @@ const WITH_ARGS = {
   tts_sample: (p) => isPlain(p) && hasOnlyKeys(p, ["modelId", "text"]) && isModelId(p.modelId) && typeof p.text === "string" && p.text.length > 0 && p.text.length <= 280,
   tts_read: (p) => isPlain(p) && hasOnlyKeys(p, ["text"]) && typeof p.text === "string" && p.text.length > 0 && p.text.length <= 100_000,
   stt_transcribe: (p) => isPlain(p) && hasOnlyKeys(p, [], ["modelId"]) && (p.modelId === undefined || p.modelId === null || isModelId(p.modelId)),
+  stt_transcribe_file: (p) =>
+    isPlain(p) &&
+    hasOnlyKeys(p, ["data"], ["modelId"]) &&
+    typeof p.data === "string" &&
+    p.data.length > 0 &&
+    p.data.length <= 40_000_000 &&
+    /^[A-Za-z0-9+/=\s]+$/.test(p.data) &&
+    (p.modelId === undefined || p.modelId === null || isModelId(p.modelId)),
   model_describe_image: (p) => isPlain(p) && hasOnlyKeys(p, ["id", "data"]) && isModelId(p.id) && typeof p.data === "string" && p.data.length <= 28_000_000 && /^data:image\/(png|jpeg|gif|webp);base64,/.test(p.data),
   tune_subscribe: (p) => isPlain(p) && hasOnlyKeys(p, ["onEvent"]) && isChannel(p.onEvent),
   tune_cancel: (p) => isPlain(p) && hasOnlyKeys(p, ["runId"]) && typeof p.runId === "string" && /^tune-\d{1,9}$/.test(p.runId),

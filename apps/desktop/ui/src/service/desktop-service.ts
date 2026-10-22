@@ -324,6 +324,7 @@ export function createDesktopService(local: CerebroService): CerebroService {
     chatToolDecide: (id, allow) => invoke<boolean>("chat_tool_decide", { id, allow }),
     chatToolAnswer: (id, answer) => invoke<boolean>("chat_tool_answer", { id, answer }),
     transcribe: () => invoke<string>("stt_transcribe", {}),
+    transcribeAudio: (audio) => invoke<string>("stt_transcribe_file", { data: audio.data, modelId: null }),
 
     hubSearch: (query) => invoke<HubRepo[]>("hub_search", { query }),
     hubFiles: (repo) => invoke<HubFile[]>("hub_files", { repo }),
