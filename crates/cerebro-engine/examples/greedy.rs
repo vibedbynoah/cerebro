@@ -64,6 +64,10 @@ fn main() {
             }
         }))
     });
+    // A cache warming from the saved profile competes for the drive: time the steady state.
+    while model.gguf().experts().is_some_and(|c| !c.warmed()) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     s.feed(&model, &ids).expect("feed");
     if let Some((done, h)) = watch {
         done.store(true, std::sync::atomic::Ordering::Relaxed);

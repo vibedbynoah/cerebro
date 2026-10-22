@@ -25,7 +25,7 @@ const NONE: u32 = u32::MAX;
 /// Counts halve after this many expert uses per layer (about this many tokens).
 const DECAY_EVERY: u64 = 256;
 /// The largest single read request for an expert range.
-const PIECE: usize = 256 << 10;
+const PIECE: usize = 4 << 20;
 /// A slot whose expert's use count is below this may take a guessed (read-ahead) expert.
 const SPARE_BELOW: f32 = 1.0;
 
@@ -82,6 +82,8 @@ pub struct ExpertCache {
     misses: AtomicU64,
     bytes: AtomicU64,
     read_ns: AtomicU64,
+    /// The saved profile's experts have been read (or there was nothing to read).
+    warmed: std::sync::atomic::AtomicBool,
 }
 
 // SAFETY: a slot is written only by `ensure` while it is owned by no cached expert (its key's
@@ -154,6 +156,7 @@ impl ExpertCache {
             misses: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             read_ns: AtomicU64::new(0),
+            warmed: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -188,7 +191,13 @@ impl ExpertCache {
             }
             n += batch.len();
         }
+        self.warmed.store(true, Ordering::Release);
         n
+    }
+
+    /// Whether the warm-up from the saved profile is over (benchmarks wait for it).
+    pub fn warmed(&self) -> bool {
+        self.warmed.load(Ordering::Acquire)
     }
 
     /// The use counts, for saving with the model (same format as the GPU's expert profile).
@@ -307,10 +316,14 @@ impl ExpertCache {
                 v
             })
             .collect();
-        let ok_piece: Vec<(usize, bool)> = {
-            use rayon::prelude::*;
-            pieces.par_iter().enumerate().map(|(i, &(k, s, off, len, at))| (k, self.read_piece(s, off, len, at, i))).collect()
-        };
+        // On the compute pool's own threads: they are idle while the experts load, and a separate
+        // reader pool competed with them for the cores (0.18 GB/s measured that way).
+        let flags: Vec<std::sync::atomic::AtomicBool> = pieces.iter().map(|_| std::sync::atomic::AtomicBool::new(false)).collect();
+        crate::pool::global().run(pieces.len(), &|i| {
+            let (_, s, off, len, at) = pieces[i];
+            flags[i].store(self.read_piece(s, off, len, at, i), Ordering::Relaxed);
+        });
+        let ok_piece: Vec<(usize, bool)> = pieces.iter().zip(&flags).map(|(p, f)| (p.0, f.load(Ordering::Relaxed))).collect();
         let ok: Vec<bool> = jobs.iter().map(|&(k, _)| ok_piece.iter().filter(|p| p.0 == k).all(|p| p.1)).collect();
         self.read_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         let mut book = self.book.lock().unwrap_or_else(|e| e.into_inner());

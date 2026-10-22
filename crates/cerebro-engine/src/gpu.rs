@@ -2138,6 +2138,9 @@ pub struct Offload {
     pub calls: u64,
 }
 
+/// The smallest matrix GPU assist takes (rows x cols weights).
+const OFFLOAD_MIN_WEIGHTS: usize = 8 << 20;
+
 impl Offload {
     pub fn new(model: &Model) -> Result<Self, Error> {
         let ctx = CudaContext::new(0).map_err(gerr)?;
@@ -2154,7 +2157,10 @@ impl Offload {
         let cands = model.dense_mats();
         let candidates = cands.len();
         for m in cands {
-            if mats.contains_key(&m.offset) || m.rows == 0 || m.cols % 32 != 0 {
+            // A product pays a fixed cost for the round trip (copy in, launch, copy out, wait);
+            // below about 8M weights the processor finishes first (Qwen3.6-35B-A3B: 4.6 tok/s on
+            // the CPU alone, 2.4 with every small matrix sent to the GPU).
+            if mats.contains_key(&m.offset) || m.rows == 0 || m.cols % 32 != 0 || m.rows * m.cols < OFFLOAD_MIN_WEIGHTS {
                 continue;
             }
             let gm = match gpu_block(m.dtype) {

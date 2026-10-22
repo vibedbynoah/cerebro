@@ -176,7 +176,7 @@ fn vec_f32(g: &Gguf, name: &str) -> Result<Vec<f32>, Error> {
 }
 
 /// The architectures this engine runs (`general.architecture`): the app lists models by it.
-pub const ARCHITECTURES: &[&str] = &["qwen3", "qwen3moe", "qwen2", "llama", "qwen35", "qwen3vl", "qwen3tts", "qwen4exp"];
+pub const ARCHITECTURES: &[&str] = &["qwen3", "qwen3moe", "qwen2", "llama", "qwen35", "qwen35moe", "qwen3vl", "qwen3tts", "qwen4exp"];
 
 impl Model {
     /// Whether any attention or output matrix is Q8_0 (four-row dots only apply to those).
@@ -438,8 +438,13 @@ impl Model {
         }
         let expert_bytes: usize = experts.iter().map(|e| e.bytes()).sum();
         // Read every token besides the experts: everything except the experts and the tables only
-        // looked up a row at a time (token and per-layer embeddings).
-        let per_token: usize = g.tensors.values().filter(|t| !t.name.contains("_exps") && !t.name.contains("token_embd")).map(|t| t.size).sum();
+        // looked up a row at a time (token and per-layer embeddings). With GPU assist the matrices
+        // on the graphics card are not read from RAM at all.
+        #[cfg(feature = "cuda")]
+        let on_gpu: usize = self.offload_stats().map_or(0, |o| o.2);
+        #[cfg(not(feature = "cuda"))]
+        let on_gpu = 0usize;
+        let per_token: usize = g.tensors.values().filter(|t| !t.name.contains("_exps") && !t.name.contains("token_embd")).map(|t| t.size).sum::<usize>().saturating_sub(on_gpu);
         let kv: usize = self.layers.iter().filter(|l| l.delta.is_none()).count() * 2 * max_ctx * c.n_kv * c.head_dim * 2;
         let budget = (crate::gguf::available_ram() as usize).saturating_sub(crate::placement::RAM_MARGIN as usize + per_token + kv);
         // CEREBRO_EXPERT_CACHE_MB pins the cache size (benchmarks: experts mostly from the drive).
@@ -450,7 +455,9 @@ impl Model {
         }
         // The use counts saved with the model (the GPU expert cache's profile format).
         let profile = std::fs::read_to_string(self.expert_profile_path()).ok().map(|t| t.split_whitespace().filter_map(|x| x.parse::<f32>().ok()).collect::<Vec<f32>>());
-        match crate::experts::ExpertCache::with_profile(experts, &g.files(), budget, 4, profile) {
+        // 16 handles per file: each carries one request at a time, and a drive reaches its speed
+        // with many requests in flight (4 measured 0.39 GB/s on a 2.1 GB/s drive).
+        match crate::experts::ExpertCache::with_profile(experts, &g.files(), budget, 16, profile) {
             Ok(cache) => {
                 let st = cache.stats();
                 eprintln!("expert cache: {} of {} experts in memory ({:.1} of {:.1} GiB); the rest read from the drive as used", st.slots, c.n_layer * c.n_expert, (st.slots * st.slot_bytes) as f64 / (1u64 << 30) as f64, expert_bytes as f64 / (1u64 << 30) as f64);
@@ -738,7 +745,7 @@ impl Model {
         #[cfg(feature = "cuda")]
         if let Some(off) = self.offload.get() {
             let mut o = off.lock().unwrap_or_else(|e| e.into_inner());
-            if jobs.iter().all(|j| o.has(j.0) && j.2.q.len() >= j.0.cols) {
+            if !jobs.is_empty() && jobs.iter().all(|j| o.has(j.0) && j.2.q.len() >= j.0.cols) {
                 for j in jobs.iter_mut() {
                     if let Err(e) = o.run(j.0, j.2, j.3) {
                         panic!("GPU assist failed: {e}");
@@ -1664,10 +1671,10 @@ impl Session {
         if !crate::switches::enabled(crate::switches::GPU_ENABLED) {
             return Err(Error::Unsupported("the graphics card is switched off (Use the graphics card)".into()));
         }
-        let s = Self::new(m, max_ctx);
+        // The graphics card's share first, so the RAM left for experts (Session::new) counts it.
         let (placed, cands, bytes) = m.enable_offload()?;
         eprintln!("GPU assist: {placed} of {cands} weight matrices on the graphics card ({:.2} GiB)", bytes as f64 / (1u64 << 30) as f64);
-        Ok(s)
+        Ok(Self::new(m, max_ctx))
     }
 
     /// A session whose whole forward pass runs on the first CUDA GPU.

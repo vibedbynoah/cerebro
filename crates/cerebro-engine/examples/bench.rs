@@ -148,6 +148,9 @@ fn main() {
         } else {
             Session::new(&model, ctx)
         };
+        while model.gguf().experts().is_some_and(|c| !c.warmed()) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         for (li, &len) in lengths.iter().enumerate() {
             let p = prompt_of(&tok, len);
             let _ = run(&model, &mut sess, &p, 16.min(decode), gpu); // warm-up
