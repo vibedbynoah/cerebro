@@ -1518,6 +1518,12 @@ impl Session {
         Self::empty(m, max_ctx)
     }
 
+    /// A session that holds almost nothing (no cache, no warm-up): for a model whose replies come
+    /// from somewhere else (another backend), so the code around sessions keeps working.
+    pub fn placeholder(m: &Model) -> Self {
+        Self::empty(m, 16)
+    }
+
     fn empty(m: &Model, max_ctx: usize) -> Self {
         Self::empty_from(m, max_ctx, 0)
     }

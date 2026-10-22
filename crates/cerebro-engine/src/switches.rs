@@ -109,6 +109,7 @@ pub const PORTABLE_INTEGRATED: &str = "portable_integrated";
 pub const STREAM_LAYERS: &str = "stream_layers";
 pub const DRIVE_TIER: &str = "drive_tier";
 pub const EXPERT_RAM_CACHE: &str = "expert_ram_cache";
+pub const LLAMA_SPLITS: &str = "llama_splits";
 
 fn registry() -> &'static [Switch] {
     static R: OnceLock<Vec<Switch>> = OnceLock::new();
@@ -281,6 +282,18 @@ fn registry() -> &'static [Switch] {
                 advanced: "The last N processor layers (and the output head when N covers every layer) are read with unbuffered I/O on every pass, 16 parallel 4 MB requests into a ring of buffers (about 512 MB), so the next layers are read while this one computes. 0 = automatic: placement.rs streams the fewest trailing layers that let the rest plus the ring fit in available RAM minus 1.5 GB and the processor's KV cache. Dense and recurrent models; mixtures of experts read only their active experts already.",
                 env: "CEREBRO_STREAM_LAYERS",
                 default: zero,
+            },
+            Switch {
+                id: LLAMA_SPLITS,
+                name: "Use llama.cpp for split models",
+                group: "Placement",
+                kind: Kind::Toggle,
+                channel: Channel::Beta,
+                applies: Applies::Reload,
+                beginner: "A model too big for your graphics card is split between the card and the processor. llama.cpp runs such splits faster than Cerebro's engine does today, so Cerebro uses it for them. The first time, it downloads the official llama.cpp release (about 650 MB for NVIDIA cards).",
+                advanced: "When the plan is a split and llama.cpp runs the architecture, the app starts the official llama.cpp release's llama-server on 127.0.0.1 with the same GPU layer count and streams over its OpenAI-compatible API. Downloads are checked against the SHA-256 GitHub publishes. Off: every split runs on Cerebro's engine.",
+                env: "CEREBRO_NO_LLAMA_SPLITS",
+                default: on,
             },
             Switch {
                 id: EXPERT_RAM_CACHE,
