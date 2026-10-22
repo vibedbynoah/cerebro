@@ -1104,6 +1104,9 @@ impl MoeScratch {
     }
 }
 
+/// Prompt tokens per layer-major chunk (step_layer_major).
+const LAYER_MAJOR_CHUNK: usize = 256;
+
 /// Positions per CPU attention work item.
 const ATT_SPAN: usize = 256;
 
@@ -1652,6 +1655,11 @@ impl Session {
                 self.step_batch(m, c);
                 self.progress.set(self.tokens.len());
             }
+        } else if self.processor_only() && crate::switches::enabled(crate::switches::CPU_BATCH_PREFILL) {
+            for c in prompt[common..].chunks(LAYER_MAJOR_CHUNK) {
+                self.step_layer_major(m, c);
+                self.progress.set(self.tokens.len());
+            }
         } else {
             for &tok in &prompt[common..] {
                 self.step(m, tok);
@@ -1660,6 +1668,63 @@ impl Session {
         }
         self.stats = Stats { prompt_tokens: prompt.len(), reused_tokens: common, prefill_ms: t0.elapsed().as_secs_f64() * 1000.0, ..Default::default() };
         Ok(common)
+    }
+
+    /// Whether every layer runs on this computer's processor (no GPU session, no workers).
+    fn processor_only(&self) -> bool {
+        #[cfg(feature = "cuda")]
+        if self.gpu.is_some() {
+            return false;
+        }
+        #[cfg(feature = "portable")]
+        if self.portable.is_some() {
+            return false;
+        }
+        self.remote.is_none()
+    }
+
+    /// A prompt chunk through the model layer by layer: every token through layer 0, then every
+    /// token through layer 1, and so on, with the per-token kernels. The results are the same as
+    /// one token at a time (each layer's cache and recurrent state still fill in token order), but
+    /// a layer's weights and experts are fetched once for the whole chunk: for a mixture of
+    /// experts larger than memory that is one expert load per chunk instead of one per token.
+    /// For the layer types the batched path does not cover (recurrent, gated attention, experts,
+    /// hyper-connections).
+    fn step_layer_major(&mut self, m: &Model, toks: &[u32]) {
+        let dim = m.cfg.dim;
+        let n = toks.len();
+        let pos0 = self.tokens.len();
+        let wide = self.hcs.as_ref().map_or(0, |s| s.xh.len());
+        let mut xs = vec![0f32; n * dim];
+        let mut xhs = vec![0f32; n * wide];
+        for (t, &tok) in toks.iter().enumerate() {
+            m.embed_row(tok, &mut xs[t * dim..(t + 1) * dim]);
+        }
+        // The chunk's tokens go in first, so n-gram lookups see the chunk's earlier tokens.
+        self.tokens.extend_from_slice(toks);
+        for li in 0..m.cfg.n_layer {
+            for t in 0..n {
+                self.x.copy_from_slice(&xs[t * dim..(t + 1) * dim]);
+                if let Some(s) = self.hcs.as_mut() {
+                    // Layer 0 starts the streams from the embedding (layers_range).
+                    if li > 0 {
+                        s.xh.copy_from_slice(&xhs[t * wide..(t + 1) * wide]);
+                    }
+                    s.token = toks[t];
+                }
+                self.layers_range(m, li, li + 1, pos0 + t);
+                xs[t * dim..(t + 1) * dim].copy_from_slice(&self.x);
+                if let Some(s) = self.hcs.as_ref() {
+                    xhs[t * wide..(t + 1) * wide].copy_from_slice(&s.xh);
+                }
+            }
+        }
+        // Logits for the last token.
+        self.x.copy_from_slice(&xs[(n - 1) * dim..]);
+        if let Some(s) = self.hcs.as_mut() {
+            s.xh.copy_from_slice(&xhs[(n - 1) * wide..]);
+        }
+        self.head(m);
     }
 
     /// Appends one token: runs the full forward pass and writes logits.
