@@ -378,7 +378,7 @@ pub fn parse_event(kind: Kind, data: &str) -> (Option<String>, Option<String>, b
 }
 
 /// Streams a reply from `provider` / `model`; `on_piece` returns false to stop.
-pub fn chat(provider_id: &str, model: &str, system: &str, turns: &[Turn<'_>], s: &Settings, mut on_piece: impl FnMut(Piece<'_>) -> bool) -> Result<Outcome, String> {
+pub fn chat(provider_id: &str, model: &str, system: &str, turns: &[Turn<'_>], s: &Settings, on_piece: impl FnMut(Piece<'_>) -> bool) -> Result<Outcome, String> {
     CANCEL.store(false, Ordering::SeqCst);
     let (p, k) = find(provider_id)?;
     let body = request_body(p.kind, model, system, turns, s);
@@ -388,7 +388,29 @@ pub fn chat(provider_id: &str, model: &str, system: &str, turns: &[Turn<'_>], s:
         Kind::Anthropic => c.post(format!("{}/messages", base(&p))).header("x-api-key", &k).header("anthropic-version", "2023-06-01"),
         Kind::Gemini => c.post(format!("{}/models/{model}:streamGenerateContent?alt=sse", base(&p))).header("x-goog-api-key", &k),
     };
-    let r = req.json(&body).send().map_err(|e| net_error(&e, &p.name))?;
+    stream(req.json(&body), p.kind, &p.name, on_piece)
+}
+
+/// A reply from any OpenAI-compatible address (`base` ends in /v1), e.g. a local llama.cpp server.
+#[allow(clippy::too_many_arguments)]
+pub fn chat_at(base: &str, key: Option<&str>, name: &str, model: &str, system: &str, turns: &[Turn<'_>], s: &Settings, on_piece: impl FnMut(Piece<'_>) -> bool) -> Result<Outcome, String> {
+    CANCEL.store(false, Ordering::SeqCst);
+    let body = request_body(Kind::OpenAi, model, system, turns, s);
+    let mut req = client(None)?.post(format!("{base}/chat/completions"));
+    if let Some(k) = key {
+        req = req.bearer_auth(k);
+    }
+    stream(req.json(&body), Kind::OpenAi, name, on_piece)
+}
+
+/// Sends a streaming request and passes its pieces on until it ends or `on_piece` says stop.
+fn stream(req: reqwest::blocking::RequestBuilder, kind: Kind, name: &str, mut on_piece: impl FnMut(Piece<'_>) -> bool) -> Result<Outcome, String> {
+    struct P<'a> {
+        name: &'a str,
+        kind: Kind,
+    }
+    let p = P { name, kind };
+    let r = req.send().map_err(|e| net_error(&e, p.name))?;
     let status = r.status();
     if !status.is_success() {
         let text = r.text().unwrap_or_default();

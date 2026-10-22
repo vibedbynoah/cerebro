@@ -721,6 +721,9 @@ struct Loaded {
     /// The vision encoder, loaded the first time an image arrives (it takes RAM a text chat does
     /// not need).
     vision: Option<cerebro_engine::vision::VisionModel>,
+    /// llama.cpp running this model (llama_backend.rs), when it serves the placement; replies come
+    /// from it and `session` is a placeholder.
+    llama: Option<crate::llama_backend::Server>,
     /// Encoded images of recent chats by `vision_input::key`, so a chat's images are encoded once.
     images: std::collections::HashMap<u64, Arc<cerebro_engine::vision::ImageEmbedding>>,
 }
@@ -870,6 +873,9 @@ impl Engine {
                         Job::Chat { req, events, reply } => {
                             cn.store(false, Ordering::SeqCst);
                             match loaded.as_mut() {
+                                Some(l) if l.info.id == req.model_id && l.llama.is_some() => {
+                                    crate::llama_backend::reply(l.llama.as_ref().expect("checked"), &req, &events);
+                                }
                                 Some(l) if l.info.id == req.model_id && req.orchestrate.is_some() => {
                                     let root = lr.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(std::env::temp_dir);
                                     run_orchestrate(l, &req, &events, &st, &cn, &root);
@@ -1154,7 +1160,49 @@ fn load(m: &LibraryModel, ctx: usize, gpu_layers: Option<usize>) -> Result<Loade
     }
     let model = Model::load(Path::new(&m.path)).map_err(|e| format!("Could not load the model: {e}"))?;
     let tok = Tokenizer::from_gguf(model.gguf()).map_err(|e| format!("Could not read the tokenizer: {e}"))?;
-    Ok(assemble(model, tok, m, ctx, gpu_layers))
+    match with_llama(model, tok, m, ctx, gpu_layers) {
+        Ok(l) => Ok(l),
+        Err((model, tok)) => Ok(assemble(model, tok, m, ctx, gpu_layers)),
+    }
+}
+
+/// A split model on llama.cpp when that is switched on, the architecture is one llama.cpp runs and
+/// it can start (installing the release first if needed); None leaves the model to Cerebro's engine.
+fn with_llama(model: Model, tok: Tokenizer, m: &LibraryModel, ctx: usize, gpu_layers: Option<usize>) -> Result<Loaded, (Model, Tokenizer)> {
+    if !cerebro_engine::switches::enabled(cerebro_engine::switches::LLAMA_SPLITS) || gpu_layers == Some(0) || !crate::llama_backend::runs(&m.arch_name) {
+        return Err((model, tok));
+    }
+    let ctx = ctx.clamp(512, model.cfg.ctx_train.max(512));
+    let vram = cerebro_engine::hw::gpus().first().map_or(0, |g| g.vram_free);
+    let plan = match cerebro_engine::gpu::plan_for(&model, ctx, vram, gpu_layers) {
+        Ok(p) if p.layout == cerebro_engine::placement::Layout::Split && p.gpu_layers > 0 => p,
+        _ => return Err((model, tok)),
+    };
+    let dir = match crate::llama_backend::install(crate::llama_backend::Build::Cuda, |done, total| {
+        if done % (64 << 20) < (1 << 20) {
+            eprintln!("llama.cpp download: {} of {} MB", done >> 20, total >> 20);
+        }
+    }) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("llama.cpp is not available, so Cerebro's engine runs this split: {e}");
+            return Err((model, tok));
+        }
+    };
+    match crate::llama_backend::Server::start(&dir, Path::new(&m.path), plan.gpu_layers, ctx) {
+        Ok(server) => {
+            let mut p = plan.clone();
+            p.notes.insert(0, format!("llama.cpp runs this split ({} of {} layers on the graphics card): it reads prompts faster than Cerebro's engine does for splits today.", plan.gpu_layers, plan.total_layers));
+            let dialect = crate::toolcall::dialect_from_template(model.gguf().str("tokenizer.chat_template").unwrap_or(""));
+            // The model stays open for its tokenizer and metadata; its weights are not read here.
+            let session = Session::placeholder(&model);
+            Ok(Loaded { model, session, tok, info: m.clone(), dialect, placement: Some(p), gpu_layers, vision: None, llama: Some(server), images: Default::default() })
+        }
+        Err(e) => {
+            eprintln!("llama.cpp could not start, so Cerebro's engine runs this split: {e}");
+            Err((model, tok))
+        }
+    }
 }
 
 /// A model across computers: a processor session here for the first layers, each worker's range
@@ -1173,7 +1221,7 @@ fn load_cluster(m: &LibraryModel, ctx: usize, local_share: f64, workers: &[crate
     let mut session = Session::new(&model, ctx);
     session.remote = Some(remote);
     let dialect = crate::toolcall::dialect_from_template(model.gguf().str("tokenizer.chat_template").unwrap_or(""));
-    Ok((Loaded { model, session, tok, info: m.clone(), dialect, placement: None, gpu_layers: None, vision: None, images: Default::default() }, links))
+    Ok((Loaded { model, session, tok, info: m.clone(), dialect, placement: None, gpu_layers: None, vision: None, llama: None, images: Default::default() }, links))
 }
 
 /// A loaded model from its weights and tokenizer: the session placed as `place` decides.
@@ -1181,7 +1229,7 @@ fn assemble(model: Model, tok: Tokenizer, m: &LibraryModel, ctx: usize, gpu_laye
     let ctx = ctx.clamp(512, model.cfg.ctx_train.max(512));
     let (session, placement) = place(&model, ctx, gpu_layers);
     let dialect = crate::toolcall::dialect_from_template(model.gguf().str("tokenizer.chat_template").unwrap_or(""));
-    Loaded { model, session, tok, info: m.clone(), dialect, placement, gpu_layers, vision: None, images: Default::default() }
+    Loaded { model, session, tok, info: m.clone(), dialect, placement, gpu_layers, vision: None, llama: None, images: Default::default() }
 }
 
 /// Where a session for `model` runs: an NVIDIA card (with `gpu_layers` forced, or as many as fit),

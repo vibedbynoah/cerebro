@@ -18,6 +18,7 @@ mod mcp;
 mod remote;
 mod mcp_server;
 mod local_api;
+pub mod llama_backend;
 mod toolcall;
 mod orchestrate;
 mod commands;
