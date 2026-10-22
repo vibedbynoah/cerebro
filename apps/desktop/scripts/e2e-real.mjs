@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { chromium } from "playwright-core";
 
-const exe = new URL("../../../target/release/cerebro-desktop.exe", import.meta.url).pathname.replace(/^\/(\w:)/, "$1");
+const exe = process.env.CEREBRO_E2E_EXE ?? new URL("../../../target/release/cerebro-desktop.exe", import.meta.url).pathname.replace(/^\/(\w:)/, "$1");
 const want = (process.argv[2] ?? "0.6B").toLowerCase();
 const out = new URL("../test-results/e2e-real/", import.meta.url).pathname.replace(/^\/(\w:)/, "$1");
 mkdirSync(out, { recursive: true });
@@ -42,13 +42,22 @@ try {
     await shot("setup-this-machine");
     await page.keyboard.press("Escape");
     await sleep(800);
-    for (let i = 0; i < 6 && (await page.getByText("SET UP CEREBRO").first().isVisible().catch(() => false)); i++) {
-      const accept = page.getByRole("button", { name: /accept and continue/i });
-      if (await accept.isVisible().catch(() => false)) await accept.click();
-      else await page.keyboard.press("Enter");
-      await sleep(1000);
-    }
-    await shot("after-setup");
+  }
+  // The rest of setup, or accepting changed terms again.
+  for (let i = 0; i < 8 && (await page.getByText("SET UP CEREBRO").first().isVisible().catch(() => false)); i++) {
+    const accept = page.getByRole("button", { name: /accept and continue/i });
+    if (await accept.isVisible().catch(() => false)) await accept.click();
+    else await page.keyboard.press("Enter");
+    await sleep(1000);
+  }
+  await shot("after-setup");
+  // The feature guide opens the first time; read it, then close it.
+  const guide = page.getByTestId("feature-guide");
+  report.guide = await guide.isVisible().catch(() => false);
+  if (report.guide) {
+    await shot("feature-guide");
+    await guide.getByRole("button", { name: "Close" }).click();
+    await sleep(500);
   }
   report.hardware = await call("hw_detect");
   const lib = await call("library_list");

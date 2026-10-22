@@ -285,6 +285,8 @@ export interface LibraryModel extends Omit<ModelSummary, "defaultsTps" | "tunedT
   tuneResult: TuneResult | null;
   /** Vision only: the projector (mmproj) file paired with it, or null when none was found. */
   projector: { file: string; sizeGiB: number } | null;
+  /** False when the engine cannot run its architecture yet (desktop); absent means it can. */
+  supported?: boolean;
 }
 
 /** Engine slot a loaded model occupies. */

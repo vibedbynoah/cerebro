@@ -64,10 +64,15 @@ export function Chat(): JSX.Element {
   const service = useService();
   const app = useAppState();
   const [library] = createResource(() => service.listLibrary().catch(() => [] as LibraryModel[]));
-  const models = createMemo(() => (library() ?? []).filter((m) => m.kind === "text" || m.kind === "vision"));
+  // Models the engine can run; ones it cannot are listed (and explained) on the Models screen.
+  const models = createMemo(() => (library() ?? []).filter((m) => (m.kind === "text" || m.kind === "vision") && m.supported !== false));
   const [modelId, setModelId] = createSignal<string>("");
+  // Start on the model that is already in memory, so the first message needs no load.
+  const [loadedNow] = createResource(() => service.listLoaded().catch(() => []));
   createEffect(() => {
-    if (!modelId() && models().length) setModelId(models()[0]!.id);
+    if (modelId() || !models().length || loadedNow.loading) return;
+    const inMemory = loadedNow()?.find((l) => l.slot === "llm" && models().some((m) => m.id === l.id));
+    setModelId(inMemory?.id ?? models()[0]!.id);
   });
   const model = () => models().find((m) => m.id === modelId());
   // A model's own saved settings come back when it is picked (lib/chat/presets.ts).
@@ -285,6 +290,22 @@ export function Chat(): JSX.Element {
     });
   };
 
+  /** Loads the picked model when another one (or none) is in memory. False when it cannot load. */
+  const ensureLoaded = async (): Promise<boolean> => {
+    const id = modelId();
+    const now = await service.listLoaded().catch(() => [] as Awaited<ReturnType<typeof service.listLoaded>>);
+    if (now.some((l) => l.slot === "llm" && l.id === id)) return true;
+    const m = model();
+    notify(`Loading ${m?.name ?? "the model"}`, "It answers as soon as it is in memory.", "info");
+    try {
+      await service.loadModel(id, m?.tunedParams ?? null);
+      return true;
+    } catch (e) {
+      notify("Could not load the model", e instanceof Error ? e.message : String(e), "error");
+      return false;
+    }
+  };
+
   const run = async (cid: string, parentId: string | null) => {
     const conv = state.list.find((c) => c.id === cid);
     if (!conv || !modelId()) return;
@@ -293,6 +314,7 @@ export function Chat(): JSX.Element {
       notify("Offline mode is on", `${cm.provider} is a cloud model, so it is blocked. Turn offline mode off in Settings, or pick a model on this computer.`, "warning");
       return;
     }
+    if (!cm && !(await ensureLoaded())) return;
     const tools = cm ? null : await toolsForRequest();
     const req = built();
     const p = prefs();
