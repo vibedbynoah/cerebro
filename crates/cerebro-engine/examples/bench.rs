@@ -77,10 +77,11 @@ fn main() {
     let a: Vec<String> = std::env::args().collect();
     let model_path = PathBuf::from(arg(&a, "--model").expect("--model"));
     // --print-layers: the model's layer count, for scripts that place fractions of it elsewhere.
-    if a.iter().any(|x| x == "--print-layers") {
+    if a.iter().any(|x| x == "--print-layers" || x == "--print-experts") {
         let g = cerebro_engine::gguf::Gguf::open(&model_path).expect("open");
         let arch = g.str("general.architecture").unwrap_or("").to_owned();
-        println!("{}", g.u64(&format!("{arch}.block_count")).unwrap_or(0));
+        let key = if a.iter().any(|x| x == "--print-experts") { "expert_count" } else { "block_count" };
+        println!("{}", g.u64(&format!("{arch}.{key}")).unwrap_or(0));
         return;
     }
     let out_path = PathBuf::from(arg(&a, "--out").unwrap_or_else(|| "bench.jsonl".into()));

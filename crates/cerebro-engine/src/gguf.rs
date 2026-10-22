@@ -97,6 +97,7 @@ struct Part {
     /// Where this file starts in the model's combined offset space.
     base: usize,
     map: Mmap,
+    path: std::path::PathBuf,
 }
 
 pub struct Gguf {
@@ -109,6 +110,8 @@ pub struct Gguf {
     pub alignment: usize,
     /// Layers read from the drive on every pass (stream.rs), when switched on.
     stream: std::sync::OnceLock<crate::stream::Stream>,
+    /// The RAM expert cache of a mixture-of-experts model larger than memory (experts.rs).
+    experts: std::sync::OnceLock<crate::experts::ExpertCache>,
 }
 
 struct Reader<'a> {
@@ -203,7 +206,7 @@ impl Gguf {
                 first = Some((version, meta, alignment));
             }
             let len = map.len();
-            parts.push(Part { base, map });
+            parts.push(Part { base, map, path: f.clone() });
             base = base.checked_add(len).ok_or_else(|| Error::Format("model too large".into()))?;
         }
         let (version, meta, alignment) = first.ok_or_else(|| Error::Format("no model file".into()))?;
@@ -212,7 +215,7 @@ impl Gguf {
                 return Err(Error::Format(format!("this model has {n} parts but {} were found next to it", parts.len())));
             }
         }
-        Ok(Self { parts, version, meta, tensors, alignment, stream: Default::default() })
+        Ok(Self { parts, version, meta, tensors, alignment, stream: Default::default(), experts: Default::default() })
     }
 
     /// The part holding combined offset `offset`, and the offset inside it.
@@ -373,6 +376,9 @@ impl Gguf {
 
     #[inline]
     pub fn bytes_at(&self, offset: usize, len: usize) -> &[u8] {
+        if let Some(b) = self.experts.get().and_then(|c| c.lookup(offset, len)) {
+            return b;
+        }
         if let Some(b) = self.stream.get().and_then(|s| s.lookup(offset, len)) {
             return b;
         }
@@ -395,6 +401,19 @@ impl Gguf {
 
     pub fn stream(&self) -> Option<&crate::stream::Stream> {
         self.stream.get()
+    }
+
+    /// The model's files with where each starts in the combined offset space and its length.
+    pub fn files(&self) -> Vec<(std::path::PathBuf, usize, usize)> {
+        self.parts.iter().map(|p| (p.path.clone(), p.base, p.map.len())).collect()
+    }
+
+    pub fn set_experts(&self, c: crate::experts::ExpertCache) -> bool {
+        self.experts.set(c).is_ok()
+    }
+
+    pub fn experts(&self) -> Option<&crate::experts::ExpertCache> {
+        self.experts.get()
     }
 
     pub fn tensor(&self, name: &str) -> Result<&TensorInfo, Error> {

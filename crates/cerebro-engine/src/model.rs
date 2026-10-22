@@ -163,6 +163,9 @@ pub struct Model {
     stream_map: std::sync::OnceLock<(Vec<Option<usize>>, Option<usize>)>,
     /// Hyper-connections and n-gram embeddings (hc.rs), for models that have them.
     pub hc: Option<crate::hc::HcModel>,
+    /// GPU assist (gpu.rs Offload): matrices the GPU multiplies for a processor session.
+    #[cfg(feature = "cuda")]
+    offload: std::sync::OnceLock<std::sync::Mutex<crate::gpu::Offload>>,
 }
 
 fn vec_f32(g: &Gguf, name: &str) -> Result<Vec<f32>, Error> {
@@ -320,7 +323,7 @@ impl Model {
         let inv_freq = (0..rd / 2).map(|i| 1.0 / cfg.rope_base.powf(2.0 * i as f32 / rd as f32)).collect();
         // Hyper-connection models norm the output in their last mixer.
         let out_norm = if hc.is_some() && !g.tensors.contains_key("output_norm.weight") { Vec::new() } else { vec_f32(&g, "output_norm.weight")? };
-        let m = Self { path: path.to_path_buf(), embed: Mat::of(embed_t), out_norm, layers, output, inv_freq, cfg, gguf: g, packs: Default::default(), stream_map: Default::default(), hc };
+        let m = Self { path: path.to_path_buf(), embed: Mat::of(embed_t), out_norm, layers, output, inv_freq, cfg, gguf: g, packs: Default::default(), stream_map: Default::default(), hc, #[cfg(feature = "cuda")] offload: Default::default() };
         let n = crate::switches::get(crate::switches::STREAM_LAYERS).max(0) as usize;
         if n > 0 {
             m.stream_from_drive(n);
@@ -409,6 +412,48 @@ impl Model {
         }
     }
 
+    /// The RAM expert cache for a mixture-of-experts model whose experts do not fit in available
+    /// RAM next to the weights read every token (experts.rs). Decided once per model when a session
+    /// starts; a model that fits keeps its experts memory-mapped.
+    pub fn auto_expert_cache(&self, max_ctx: usize) {
+        let c = &self.cfg;
+        let g = &self.gguf;
+        if c.n_expert == 0 || g.experts().is_some() || !crate::switches::enabled(crate::switches::EXPERT_RAM_CACHE) {
+            return;
+        }
+        let mut experts = Vec::with_capacity(c.n_layer * c.n_expert);
+        for l in &self.layers {
+            let Ffn::Moe(e) = &l.ffn else { return };
+            for ex in 0..c.n_expert {
+                let r = |m: &Mat| {
+                    let p = m.part(ex, c.n_expert);
+                    (p.offset, p.rows * p.row_bytes)
+                };
+                experts.push(crate::experts::ExpertRanges { r: [r(&e.gate), r(&e.up), r(&e.down)] });
+            }
+        }
+        let expert_bytes: usize = experts.iter().map(|e| e.bytes()).sum();
+        // Read every token besides the experts: everything except the experts and the tables only
+        // looked up a row at a time (token and per-layer embeddings).
+        let per_token: usize = g.tensors.values().filter(|t| !t.name.contains("_exps") && !t.name.contains("token_embd")).map(|t| t.size).sum();
+        let kv: usize = self.layers.iter().filter(|l| l.delta.is_none()).count() * 2 * max_ctx * c.n_kv * c.head_dim * 2;
+        let budget = (crate::gguf::available_ram() as usize).saturating_sub(crate::placement::RAM_MARGIN as usize + per_token + kv);
+        // CEREBRO_EXPERT_CACHE_MB pins the cache size (benchmarks: experts mostly from the drive).
+        let forced = std::env::var("CEREBRO_EXPERT_CACHE_MB").ok().and_then(|v| v.parse::<usize>().ok()).map(|mb| mb << 20);
+        let budget = forced.unwrap_or(budget);
+        if forced.is_none() && (expert_bytes <= budget || budget < 256 << 20) {
+            return;
+        }
+        match crate::experts::ExpertCache::new(experts, &g.files(), budget, 4) {
+            Ok(cache) => {
+                let st = cache.stats();
+                eprintln!("expert cache: {} of {} experts in memory ({:.1} of {:.1} GiB); the rest read from the drive as used", st.slots, c.n_layer * c.n_expert, (st.slots * st.slot_bytes) as f64 / (1u64 << 30) as f64, expert_bytes as f64 / (1u64 << 30) as f64);
+                g.set_experts(cache);
+            }
+            Err(e) => eprintln!("expert cache off: {e}"),
+        }
+    }
+
     /// Before the processor reads layer `li`: makes sure the drive tier has it.
     #[inline]
     fn stream_enter(&self, li: usize) {
@@ -490,7 +535,14 @@ impl Model {
             .iter()
             .enumerate()
             .filter(|(i, _)| !matches!(of.get(from + i), Some(Some(_))))
-            .flat_map(|(_, l)| layer_ranges(l))
+            .flat_map(|(_, l)| {
+                let mut r = layer_ranges(l);
+                if let (Some(_), Ffn::Moe(e)) = (self.gguf.experts(), &l.ffn) {
+                    let skip = [e.gate.offset, e.up.offset, e.down.offset];
+                    r.retain(|x| !skip.contains(&x.0));
+                }
+                r
+            })
             .filter(|r| !packs.contains_key(&r.0))
             .collect();
         if !packs.contains_key(&self.output.offset) && out.is_none() {
@@ -581,6 +633,58 @@ impl Model {
         self.matvec_multi(&mut [(m, x, qa, out)]);
     }
 
+    /// The weight matrices a token reads besides the experts and the row-lookup tables, layer by
+    /// layer and then the output head: what GPU assist puts on the graphics card.
+    pub fn dense_mats(&self) -> Vec<&Mat> {
+        let mut v: Vec<&Mat> = Vec::new();
+        for (li, l) in self.layers.iter().enumerate() {
+            match &l.delta {
+                Some(d) => v.extend([&d.qkv, &d.z, &d.alpha, &d.beta, &d.out]),
+                None => v.extend([&l.q, &l.k, &l.v, &l.o]),
+            }
+            match &l.ffn {
+                Ffn::Dense { gate, up, down } => v.extend([gate, up, down]),
+                Ffn::Moe(e) => {
+                    if let Some(s) = &e.shared {
+                        v.extend([&s.gate, &s.up, &s.down]);
+                    }
+                }
+            }
+            if let Some(h) = &self.hc {
+                v.extend([&h.attn[li].down, &h.attn[li].up, &h.ffn[li].down, &h.ffn[li].up]);
+                if let Some(p) = h.ple.as_ref().filter(|p| p.layer == li) {
+                    v.extend([&p.key, &p.value]);
+                }
+            }
+        }
+        if let Some(h) = &self.hc {
+            v.extend([&h.head.down, &h.head.up]);
+        }
+        v.push(&self.output);
+        v.retain(|m| m.rows > 0);
+        v
+    }
+
+    /// Turns GPU assist on for this model (once): the matrices of `dense_mats` that fit in VRAM.
+    #[cfg(feature = "cuda")]
+    pub fn enable_offload(&self) -> Result<(usize, usize, usize), Error> {
+        if self.offload.get().is_none() {
+            let o = crate::gpu::Offload::new(self)?;
+            let _ = self.offload.set(std::sync::Mutex::new(o));
+        }
+        let o = self.offload.get().expect("set").lock().unwrap_or_else(|e| e.into_inner());
+        Ok((o.placed, o.candidates, o.bytes))
+    }
+
+    /// GPU assist's counters: matrices placed, candidates, VRAM bytes, products computed.
+    #[cfg(feature = "cuda")]
+    pub fn offload_stats(&self) -> Option<(usize, usize, usize, u64)> {
+        self.offload.get().map(|o| {
+            let o = o.lock().unwrap_or_else(|e| e.into_inner());
+            (o.placed, o.candidates, o.bytes, o.calls)
+        })
+    }
+
     /// `matvec` for the building blocks in other modules (hc.rs).
     pub(crate) fn matvec_pub(&self, m: &Mat, x: &[f32], qa: &QAct, out: &mut [f32]) {
         self.matvec(m, x, qa, out);
@@ -599,6 +703,18 @@ impl Model {
 
     /// Matrix-vector products with their own inputs (e.g. one per expert), in one parallel region.
     fn matvec_multi(&self, jobs: &mut [(&Mat, &[f32], &QAct, &mut [f32])]) {
+        #[cfg(feature = "cuda")]
+        if let Some(off) = self.offload.get() {
+            let mut o = off.lock().unwrap_or_else(|e| e.into_inner());
+            if jobs.iter().all(|j| o.has(j.0) && j.2.q.len() >= j.0.cols) {
+                for j in jobs.iter_mut() {
+                    if let Err(e) = o.run(j.0, j.2, j.3) {
+                        panic!("GPU assist failed: {e}");
+                    }
+                }
+                return;
+            }
+        }
         let g: &Gguf = &self.gguf;
         let total: usize = jobs.iter().map(|j| j.0.rows).sum();
         let pool = crate::pool::global();
@@ -670,6 +786,9 @@ impl Model {
             return;
         }
         let (ne, eff, dim) = (self.cfg.n_expert, self.cfg.expert_ffn, self.cfg.dim);
+        if let Some(c) = self.gguf.experts() {
+            c.ensure(&experts.iter().map(|&(ex, _)| li * ne + ex).collect::<Vec<_>>());
+        }
         let parts: Vec<(Mat, Mat, Mat)> = experts.iter().map(|&(ex, _)| (e.gate.part(ex, ne), e.up.part(ex, ne), e.down.part(ex, ne))).collect();
         {
             let mut jobs: Vec<(&Mat, &[f32], &QAct, &mut [f32])> = Vec::with_capacity(2 * parts.len());
@@ -709,6 +828,9 @@ impl Model {
         let Ffn::Moe(e) = &self.layers[li].ffn else { return };
         let (ne, eff, dim) = (self.cfg.n_expert, self.cfg.expert_ffn, self.cfg.dim);
         let g: &Gguf = &self.gguf;
+        if let Some(c) = g.experts() {
+            c.ensure(&groups.iter().map(|(ex, _)| li * ne + ex).collect::<Vec<_>>());
+        }
         let t_n = h.len() / dim;
         let mut qa: Vec<QAct> = (0..t_n).map(|_| QAct::new(dim)).collect();
         for (t, q) in qa.iter_mut().enumerate() {
@@ -908,6 +1030,8 @@ pub(crate) fn dot_any(dt: DType, row: &[u8], x: &[f32], qa: &QAct) -> f32 {
     match dt {
         DType::Q8_0 => dot_q8_0_q8(row, qa),
         DType::Q4K | DType::Q5K | DType::Q6K => dot_k_q8(dt, row, qa),
+        DType::IQ4NL => crate::quant::dot_iq4nl_q8(row, qa),
+        DType::IQ2S => crate::quant::dot_iq2s_k8(row, qa).unwrap_or_else(|| dot_row(dt, row, x)),
         _ => dot_row(dt, row, x),
     }
 }
@@ -1287,6 +1411,7 @@ impl Session {
     pub fn new(m: &Model, max_ctx: usize) -> Self {
         let g = m.gguf();
         m.auto_drive_tier(0, max_ctx);
+        m.auto_expert_cache(max_ctx);
         m.prepare_cpu(0);
         if crate::switches::enabled(crate::switches::PREFAULT) {
             // As much of what the processor reads from the file as available RAM holds (interleaved
@@ -1489,6 +1614,20 @@ impl Session {
     }
 
     /// Appends one token: runs the full forward pass and writes logits.
+    /// A processor session with GPU assist: the CPU runs the forward pass and the first CUDA GPU
+    /// multiplies the weight matrices read every token (gpu.rs Offload). For architectures the
+    /// whole-GPU path does not run yet; works for every architecture the processor runs.
+    #[cfg(feature = "cuda")]
+    pub fn new_assisted(m: &Model, max_ctx: usize) -> Result<Self, Error> {
+        if !crate::switches::enabled(crate::switches::GPU_ENABLED) {
+            return Err(Error::Unsupported("the graphics card is switched off (Use the graphics card)".into()));
+        }
+        let s = Self::new(m, max_ctx);
+        let (placed, cands, bytes) = m.enable_offload()?;
+        eprintln!("GPU assist: {placed} of {cands} weight matrices on the graphics card ({:.2} GiB)", bytes as f64 / (1u64 << 30) as f64);
+        Ok(s)
+    }
+
     /// A session whose whole forward pass runs on the first CUDA GPU.
     #[cfg(feature = "cuda")]
     pub fn new_gpu(m: &Model, max_ctx: usize) -> Result<Self, Error> {

@@ -677,6 +677,49 @@ __device__ __forceinline__ float unit_dot(int dtype, const unsigned char* blk, i
     }
 }
 
+// K-quant rows (Q4_K / Q5_K / Q6_K, GPU layout) -> int8 with one scale per 32 values, the layout the
+// tensor-core prompt GEMM reads. One warp per 32-value sub-block, one value per lane; the bit unpacking
+// is unit_dot's. Used for prompt batches of weights kept in their own format (models too big for the
+// int8 layout), so they get the tensor-core GEMM too; decoding keeps the native-format matvec.
+extern "C" __global__ void k_to_q8(const unsigned char* __restrict__ w, int dtype, int bb, int rows, int cols,
+                                   signed char* __restrict__ qs, float* __restrict__ ds) {
+    long long gw = ((long long)blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    int lane = threadIdx.x & 31;
+    int nsb = cols >> 5;
+    if (gw >= (long long)rows * nsb) return;
+    int row = (int)(gw / nsb), sb = (int)(gw - (long long)row * nsb);
+    int col = sb * 32 + lane;
+    int b = col >> 8, e = col & 255;
+    const unsigned char* blk = w + ((size_t)row * (cols >> 8) + b) * bb;
+    float v;
+    if (dtype == 12 || dtype == 13) {
+        int j = e >> 5, l = e & 31;
+        float d = __half2float(*reinterpret_cast<const __half*>(blk));
+        float dmin = __half2float(*reinterpret_cast<const __half*>(blk + 2));
+        int sc, m;
+        scale_min_k4(j, blk + 4, sc, m);
+        int q;
+        if (dtype == 12) {
+            unsigned char c = blk[16 + (j >> 1) * 32 + l];
+            q = (j & 1) ? (c >> 4) : (c & 15);
+        } else {
+            unsigned char c = blk[48 + (j >> 1) * 32 + l];
+            q = ((j & 1) ? (c >> 4) : (c & 15)) | (((blk[16 + l] >> j) & 1) << 4);
+        }
+        v = d * sc * q - dmin * m;
+    } else {
+        int n = e >> 7, r = e & 127, g = r >> 5, l = r & 31;
+        unsigned char c = blk[n * 64 + (g & 1) * 32 + l];
+        int lo = g < 2 ? (c & 15) : (c >> 4);
+        int hi = (blk[128 + n * 32 + l] >> (2 * g)) & 3;
+        int q = (lo | (hi << 4)) - 32;
+        float d = __half2float(*reinterpret_cast<const __half*>(blk + 208));
+        int sc = (signed char)blk[192 + n * 8 + 2 * g + (l >> 4)];
+        v = d * sc * q;
+    }
+    quant32(v, qs + (size_t)row * cols, ds + (size_t)row * nsb, col, lane);
+}
+
 // Batched expert matvec over the k chosen experts (gridDim.y = k). sel holds [ids k | weights k |
 // cache slots k]; experts not cached (slot < 0) are skipped here and computed on the CPU. Expert j's
 // matrix starts at pool + slot*slot_bytes + off; its input at xq + j*xstride; output at y + j*rows.

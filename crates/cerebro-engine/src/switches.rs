@@ -108,6 +108,7 @@ pub const CPU_PIN: &str = "cpu_pin";
 pub const PORTABLE_INTEGRATED: &str = "portable_integrated";
 pub const STREAM_LAYERS: &str = "stream_layers";
 pub const DRIVE_TIER: &str = "drive_tier";
+pub const EXPERT_RAM_CACHE: &str = "expert_ram_cache";
 
 fn registry() -> &'static [Switch] {
     static R: OnceLock<Vec<Switch>> = OnceLock::new();
@@ -280,6 +281,18 @@ fn registry() -> &'static [Switch] {
                 advanced: "The last N processor layers (and the output head when N covers every layer) are read with unbuffered I/O on every pass, 16 parallel 4 MB requests into a ring of buffers (about 512 MB), so the next layers are read while this one computes. 0 = automatic: placement.rs streams the fewest trailing layers that let the rest plus the ring fit in available RAM minus 1.5 GB and the processor's KV cache. Dense and recurrent models; mixtures of experts read only their active experts already.",
                 env: "CEREBRO_STREAM_LAYERS",
                 default: zero,
+            },
+            Switch {
+                id: EXPERT_RAM_CACHE,
+                name: "Keep the most-used experts in memory",
+                group: "Placement",
+                kind: Kind::Toggle,
+                channel: Channel::Beta,
+                applies: Applies::Reload,
+                beginner: "For a mixture-of-experts model bigger than your memory: Cerebro keeps the experts your conversation uses in memory and reads the others from the drive at full speed, instead of leaving it to Windows.",
+                advanced: "When a MoE model's experts do not fit in available RAM (minus 1.5 GB, the KV cache and the weights read every token), experts.rs keeps an arena of whole-expert slots, filled on demand with parallel unbuffered reads and kept by decayed use counts. Off: the experts stay memory-mapped and the OS pages them in 4 KB at a time.",
+                env: "CEREBRO_NO_EXPERT_CACHE",
+                default: on,
             },
             Switch {
                 id: DRIVE_TIER,

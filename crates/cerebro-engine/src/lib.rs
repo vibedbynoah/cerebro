@@ -10,6 +10,7 @@ pub mod audio;
 pub mod chat;
 pub mod cluster;
 pub mod diffusion;
+pub mod experts;
 pub mod gguf;
 #[cfg(feature = "cuda")]
 pub mod gpu;

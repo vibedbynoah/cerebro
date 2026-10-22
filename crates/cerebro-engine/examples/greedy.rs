@@ -13,13 +13,21 @@ fn main() {
     let n: usize = a.next().and_then(|v| v.parse().ok()).unwrap_or(32);
     let mode = a.next();
     let gpu = mode.as_deref() == Some("gpu");
+    // "assist": the processor runs the model and the GPU multiplies the matrices (GPU assist).
+    let assist = mode.as_deref() == Some("assist");
     // "portable": the Vulkan / DX12 / Metal backend (CEREBRO_PORTABLE_GPU / _BACKEND pick the device).
     let portable = mode.as_deref() == Some("portable");
     let model = Model::load(std::path::Path::new(&path)).expect("load");
     let tok = Tokenizer::from_gguf(model.gguf()).expect("tokenizer");
     let ids = tok.encode(&prompt);
     #[cfg(feature = "cuda")]
-    let mut s = if gpu { Session::new_gpu(&model, 4096).expect("gpu session") } else { Session::new(&model, 4096) };
+    let mut s = if gpu {
+        Session::new_gpu(&model, 4096).expect("gpu session")
+    } else if assist {
+        Session::new_assisted(&model, 4096).expect("assisted session")
+    } else {
+        Session::new(&model, 4096)
+    };
     #[cfg(feature = "cuda")]
     if let Some(g) = s.gpu.as_ref() {
         let p = &g.plan;
@@ -84,6 +92,18 @@ fn main() {
     println!("output tokens {:?}", out);
     println!("{}{}", prompt, tok.decode(&out));
     eprintln!("prefill {:.1} tok/s, decode {:.1} tok/s", ids.len() as f64 / prefill, n as f64 / decode);
+    if let Some(c) = model.gguf().experts() {
+        let x = c.stats();
+        eprintln!(
+            "expert cache: {} slots, {} hits, {} misses ({:.0}% hit), {:.2} GB read from the drive in {:.2} s",
+            x.slots,
+            x.hits,
+            x.misses,
+            100.0 * x.hits as f64 / (x.hits + x.misses).max(1) as f64,
+            x.bytes_read as f64 / 1e9,
+            x.read_s
+        );
+    }
     if let Some(st) = model.gguf().stream() {
         let x = st.stats();
         eprintln!(

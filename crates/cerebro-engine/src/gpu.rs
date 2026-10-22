@@ -123,6 +123,7 @@ struct Funcs {
     moe_combine: CudaFunction,
     matvec_k: CudaFunction,
     kmatmul: CudaFunction,
+    k_to_q8: CudaFunction,
     router_b: CudaFunction,
     scatter_add: CudaFunction,
     add_inplace: CudaFunction,
@@ -549,6 +550,7 @@ impl GpuState {
             moe_combine: lf("moe_combine")?,
             matvec_k: lf("matvec_k")?,
             kmatmul: lf("kmatmul")?,
+            k_to_q8: lf("k_to_q8")?,
             router_b: lf("router_topk_batch")?,
             scatter_add: lf("scatter_add")?,
             add_inplace: lf("add_inplace")?,
@@ -1011,8 +1013,11 @@ impl GpuState {
                 ahead.extend(r);
             }
         }
-        model.gguf().touch(&touch);
-        model.gguf().prefetch(&ahead);
+        // With the RAM expert cache the processor's experts come from there, not the OS file cache.
+        if model.gguf().experts().is_none() {
+            model.gguf().touch(&touch);
+            model.gguf().prefetch(&ahead);
+        }
         Ok(mg)
     }
 
@@ -1799,7 +1804,33 @@ impl GpuState {
         let norm_cfg = LaunchConfig { grid_dim: (t as u32, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
         let null_f: u64 = 0;
         let null_i: u64 = 0;
+        // Native-format weights are converted to int8 for a prompt batch so they take the
+        // tensor-core GEMM too (k_to_q8): scratch for the largest such matrix, made on first use.
+        let k8: std::cell::RefCell<Option<(CudaSlice<i8>, CudaSlice<f32>)>> = std::cell::RefCell::new(None);
         let mm = |m: &GMat, xq: &CudaSlice<i8>, xd: &CudaSlice<f32>, y: &mut CudaSlice<f32>, add: bool| -> Result<(), Error> {
+            if let (GMat::K { parts, cols }, Some(k), true) = (m, &f.matmul_mma, t >= MMA_MIN_T) {
+                let rows: usize = parts.iter().map(|p| p.rows).sum();
+                let n = rows * cols;
+                let mut sc = k8.borrow_mut();
+                if sc.as_ref().is_none_or(|(q, _)| q.len() < n) {
+                    *sc = Some((s.alloc_zeros::<i8>(n).map_err(gerr)?, s.alloc_zeros::<f32>(n / 32).map_err(gerr)?));
+                }
+                let (qs, ds) = sc.as_mut().expect("scratch");
+                let mut r0 = 0;
+                for p in parts {
+                    let (r, c) = (p.rows as i32, *cols as i32);
+                    let warps = (p.rows * cols / 32) as u32;
+                    let cfg = LaunchConfig { grid_dim: (warps.div_ceil(8), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+                    let mut qv = qs.slice_mut(r0 * cols..(r0 + p.rows) * cols);
+                    let mut dv = ds.slice_mut(r0 * cols / 32..(r0 + p.rows) * cols / 32);
+                    unsafe { s.launch_builder(&f.k_to_q8).arg(&p.w).arg(&p.dtype).arg(&p.bb).arg(&r).arg(&c).arg(&mut qv).arg(&mut dv).launch(cfg) }.map_err(gerr)?;
+                    r0 += p.rows;
+                }
+                let (rows_i, cols_i, add_i) = (rows as i32, *cols as i32, add as i32);
+                let cfg = LaunchConfig { grid_dim: ((rows as u32).div_ceil(64), (t as u32).div_ceil(64), 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
+                unsafe { s.launch_builder(k).arg(&*qs).arg(&*ds).arg(xq).arg(xd).arg(y).arg(&rows_i).arg(&cols_i).arg(&ti).arg(&add_i).launch(cfg) }.map_err(gerr)?;
+                return Ok(());
+            }
             if let GMat::K { parts, cols } = m {
                 // The file's own format: one kmatmul per stacked part, rows offset into each token's row.
                 let ystride: usize = parts.iter().map(|p| p.rows).sum();
@@ -2056,5 +2087,123 @@ mod tests {
             assert!(e_new < 1e-4, "grouped kernel error {e_new} at len {len}");
             assert!(e_new <= e_old * 4.0 + 1e-6, "grouped kernel is much less accurate than before at len {len}");
         }
+    }
+}
+
+/// GPU assist: the processor runs the forward pass and the graphics card multiplies the weight
+/// matrices read every token. For any architecture, including ones without a full GPU path yet:
+/// whatever the CPU computes stays on the CPU (attention, recurrent layers, routing, experts from
+/// the RAM cache) and every matrix-vector product whose matrix is in VRAM runs here instead. The
+/// matrices are uploaded once, K-quants in their own layout and everything else as int8; one that
+/// does not fit stays on the processor. The activations are the processor's own int8 quantisation,
+/// so the GPU computes the same products the CPU kernels would.
+pub struct Offload {
+    stream: Arc<CudaStream>,
+    matvec: CudaFunction,
+    matvec_k: CudaFunction,
+    mats: std::collections::HashMap<usize, GMat>,
+    xq: CudaSlice<i8>,
+    xd: CudaSlice<f32>,
+    y: CudaSlice<f32>,
+    /// VRAM the matrices take, and how many of the candidates are there.
+    pub bytes: usize,
+    pub placed: usize,
+    pub candidates: usize,
+    pub calls: u64,
+}
+
+impl Offload {
+    pub fn new(model: &Model) -> Result<Self, Error> {
+        let ctx = CudaContext::new(0).map_err(gerr)?;
+        unsafe { ctx.disable_event_tracking() };
+        let stream = ctx.new_stream().map_err(gerr)?;
+        let module = ctx.load_module(Ptx::from_src(PTX)).map_err(gerr)?;
+        let matvec = module.load_function("matvec_q8").map_err(gerr)?;
+        let matvec_k = module.load_function("matvec_k").map_err(gerr)?;
+        let (free, _) = ctx.mem_get_info().map_err(gerr)?;
+        let mut budget = (free as usize).saturating_sub(crate::placement::VRAM_MARGIN as usize);
+        let g = model.gguf();
+        let mut mats = std::collections::HashMap::new();
+        let (mut bytes, mut maxc, mut maxr) = (0usize, 32usize, 1usize);
+        let cands = model.dense_mats();
+        let candidates = cands.len();
+        for m in cands {
+            if mats.contains_key(&m.offset) || m.rows == 0 || m.cols % 32 != 0 {
+                continue;
+            }
+            let gm = match gpu_block(m.dtype) {
+                Some((bb, dtype)) if m.cols % 256 == 0 => {
+                    let need = m.rows * m.row_bytes / 210 * 224 + m.rows * m.row_bytes;
+                    if need > budget {
+                        continue;
+                    }
+                    let w = to_gpu_layout(m.dtype, g.bytes_at(m.offset, m.rows * m.row_bytes));
+                    budget -= w.len();
+                    bytes += w.len();
+                    GMat::K { parts: vec![KPart { w: stream.clone_htod(&w).map_err(gerr)?, dtype, bb: bb as i32, rows: m.rows }], cols: m.cols }
+                }
+                _ => {
+                    let need = m.rows * m.cols + m.rows * m.cols / 32 * 4;
+                    if need > budget {
+                        continue;
+                    }
+                    let (qs, ds, rows, cols) = repack(g, &[m]);
+                    budget -= need;
+                    bytes += need;
+                    GMat::Q8 { qs: stream.clone_htod(&qs).map_err(gerr)?, ds: stream.clone_htod(&ds).map_err(gerr)?, rows, cols }
+                }
+            };
+            maxc = maxc.max(m.cols);
+            maxr = maxr.max(m.rows);
+            mats.insert(m.offset, gm);
+        }
+        let placed = mats.len();
+        Ok(Self {
+            xq: stream.alloc_zeros::<i8>(maxc).map_err(gerr)?,
+            xd: stream.alloc_zeros::<f32>(maxc / 32).map_err(gerr)?,
+            y: stream.alloc_zeros::<f32>(maxr).map_err(gerr)?,
+            stream,
+            matvec,
+            matvec_k,
+            mats,
+            bytes,
+            placed,
+            candidates,
+            calls: 0,
+        })
+    }
+
+    pub fn has(&self, m: &Mat) -> bool {
+        self.mats.contains_key(&m.offset)
+    }
+
+    /// out = M x on the GPU, x given as the processor's int8 activations.
+    pub fn run(&mut self, m: &Mat, qa: &QAct, out: &mut [f32]) -> Result<(), Error> {
+        let Some(gm) = self.mats.get(&m.offset) else { return Err(Error::Unsupported("matrix not on the GPU".into())) };
+        let (rows, cols) = (m.rows, m.cols);
+        let s = &self.stream;
+        s.memcpy_htod(&qa.q[..cols], &mut self.xq.slice_mut(0..cols)).map_err(gerr)?;
+        s.memcpy_htod(&qa.d[..cols / 32], &mut self.xd.slice_mut(0..cols / 32)).map_err(gerr)?;
+        let cfg = |r: usize| LaunchConfig { grid_dim: ((r as u32).div_ceil(8), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+        let (c, add) = (cols as i32, 0i32);
+        match gm {
+            GMat::Q8 { qs, ds, .. } => {
+                let r = rows as i32;
+                unsafe { s.launch_builder(&self.matvec).arg(qs).arg(ds).arg(&self.xq).arg(&self.xd).arg(&mut self.y).arg(&r).arg(&c).arg(&add).launch(cfg(rows)) }.map_err(gerr)?;
+            }
+            GMat::K { parts, .. } => {
+                let mut r0 = 0;
+                for p in parts {
+                    let mut yv = self.y.slice_mut(r0..r0 + p.rows);
+                    let r = p.rows as i32;
+                    unsafe { s.launch_builder(&self.matvec_k).arg(&p.w).arg(&p.dtype).arg(&p.bb).arg(&self.xq).arg(&self.xd).arg(&mut yv).arg(&r).arg(&c).arg(&add).launch(cfg(p.rows)) }.map_err(gerr)?;
+                    r0 += p.rows;
+                }
+            }
+        }
+        s.memcpy_dtoh(&self.y.slice(0..rows), &mut out[..rows]).map_err(gerr)?;
+        s.synchronize().map_err(gerr)?;
+        self.calls += 1;
+        Ok(())
     }
 }

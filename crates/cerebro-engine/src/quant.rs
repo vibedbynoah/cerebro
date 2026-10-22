@@ -669,6 +669,141 @@ unsafe fn dot_q8_0_q8_avx2(row: &[u8], a: &QAct) -> f32 {
     _mm_cvtss_f32(s)
 }
 
+/// IQ4_NL row (32-value blocks: f16 scale, 16 bytes of 4-bit indices into a fixed table of 16 int8
+/// values) times the per-32 int8 activations. Unsloth Dynamic files use IQ4_NL for expert down
+/// projections and large lookup tables.
+pub fn dot_iq4nl_q8(row: &[u8], a: &QAct) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 support was checked at run time just above.
+            return unsafe { dot_iq4nl_q8_avx2(row, a) };
+        }
+    }
+    let mut s = 0.0;
+    for (bi, d) in a.d.iter().enumerate() {
+        let b = &row[bi * 18..bi * 18 + 18];
+        let mut acc = 0i32;
+        for j in 0..16 {
+            acc += crate::iq_tables::KVALUES_IQ4NL[(b[2 + j] & 0xf) as usize] as i32 * a.q[bi * 32 + j] as i32;
+            acc += crate::iq_tables::KVALUES_IQ4NL[(b[2 + j] >> 4) as usize] as i32 * a.q[bi * 32 + j + 16] as i32;
+        }
+        s += rd16(b, 0) * d * acc as f32;
+    }
+    s
+}
+
+/// The 16 table values come out of one byte shuffle per nibble half; the rest is the Q8_0 kernel.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_iq4nl_q8_avx2(row: &[u8], a: &QAct) -> f32 {
+    use std::arch::x86_64::*;
+    let values = _mm_loadu_si128(crate::iq_tables::KVALUES_IQ4NL.as_ptr() as *const __m128i);
+    let m4 = _mm_set1_epi8(0x0f);
+    let ones = _mm256_set1_epi16(1);
+    let mut acc = _mm256_setzero_ps();
+    for (bi, d) in a.d.iter().enumerate() {
+        let b = row.as_ptr().add(bi * 18);
+        let wd = f16_to_f32(u16::from_le_bytes([*b, *b.add(1)]));
+        let q4 = _mm_loadu_si128(b.add(2) as *const __m128i);
+        let lo = _mm_shuffle_epi8(values, _mm_and_si128(q4, m4));
+        let hi = _mm_shuffle_epi8(values, _mm_and_si128(_mm_srli_epi16(q4, 4), m4));
+        let w = _mm256_set_m128i(hi, lo);
+        let x = _mm256_loadu_si256(a.q.as_ptr().add(bi * 32) as *const __m256i);
+        let aw = _mm256_sign_epi8(w, w);
+        let sx = _mm256_sign_epi8(x, w);
+        let p32 = _mm256_madd_epi16(_mm256_maddubs_epi16(aw, sx), ones);
+        acc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(p32), _mm256_set1_ps(wd * d), acc);
+    }
+    let hi = _mm256_extractf128_ps(acc, 1);
+    let s = _mm_add_ps(hi, _mm256_castps256_ps128(acc));
+    let s = _mm_add_ps(s, _mm_movehl_ps(s, s));
+    let s = _mm_add_ss(s, _mm_shuffle_ps(s, s, 1));
+    _mm_cvtss_f32(s)
+}
+
+/// IQ2_S row (256-value blocks: f16 scale, 32 grid-index low bytes, 32 sign bytes, 8 bytes of index
+/// high bits, 8 bytes of two 4-bit sub-scales) times the per-256 int8 activations (`a.kq`). Each
+/// 8-value group is a row of a 1024-entry grid of unsigned magnitudes with its own sign byte;
+/// a 16-value half-block's weight is d * (2s + 1) / 8. None when the activations have no per-256
+/// form (length not a multiple of 256).
+pub fn dot_iq2s_k8(row: &[u8], a: &QAct) -> Option<f32> {
+    if a.kq.is_empty() {
+        return None;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 support was checked at run time just above.
+            return Some(unsafe { dot_iq2s_k8_avx2(row, a) });
+        }
+    }
+    let mut s = 0.0;
+    for (bi, kd) in a.kd.iter().enumerate() {
+        let b = &row[bi * 82..bi * 82 + 82];
+        let mut acc = 0i32;
+        for ib in 0..8 {
+            let sc = b[74 + ib];
+            for l in 0..4 {
+                let idx = b[2 + 4 * ib + l] as usize | (((b[66 + ib] as usize) << (8 - 2 * l)) & 0x300);
+                let g = crate::iq_tables::IQ2S_GRID[idx].to_le_bytes();
+                let sg = b[34 + 4 * ib + l];
+                let mut part = 0i32;
+                for j in 0..8 {
+                    let v = g[j] as i32 * if sg >> j & 1 == 1 { -1 } else { 1 };
+                    part += v * a.kq[bi * 256 + ib * 32 + l * 8 + j] as i32;
+                }
+                let scale = if l < 2 { sc & 0xf } else { sc >> 4 } as i32;
+                acc += part * (2 * scale + 1);
+            }
+        }
+        s += rd16(b, 0) * kd * acc as f32 * 0.125;
+    }
+    Some(s)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_iq2s_k8_avx2(row: &[u8], a: &QAct) -> f32 {
+    use std::arch::x86_64::*;
+    // Byte i of a lane takes sign byte (lane * 2 + i / 8); then bit (i % 8) of it.
+    let spread = _mm256_set_epi64x(0x0303030303030303, 0x0202020202020202, 0x0101010101010101, 0x0000000000000000);
+    let bits = _mm256_set1_epi64x(0x8040201008040201u64 as i64);
+    let one8 = _mm256_set1_epi8(1);
+    let mut accf = 0f32;
+    for (bi, kd) in a.kd.iter().enumerate() {
+        let b = row.as_ptr().add(bi * 82);
+        let d = f16_to_f32(u16::from_le_bytes([*b, *b.add(1)]));
+        let qs = b.add(2);
+        let sgn = b.add(34);
+        let qh = b.add(66);
+        let sc = b.add(74);
+        let mut acc = _mm256_setzero_si256();
+        for ib in 0..8 {
+            let h = *qh.add(ib) as usize;
+            let g = |l: usize| crate::iq_tables::IQ2S_GRID[*qs.add(4 * ib + l) as usize | ((h << (8 - 2 * l)) & 0x300)] as i64;
+            let w = _mm256_set_epi64x(g(3), g(2), g(1), g(0));
+            // The four sign bytes, each spread over its eight values: 0xff where the bit is set.
+            let s4 = std::ptr::read_unaligned(sgn.add(4 * ib) as *const u32);
+            let sv = _mm256_shuffle_epi8(_mm256_set1_epi32(s4 as i32), spread);
+            let neg = _mm256_cmpeq_epi8(_mm256_and_si256(sv, bits), bits);
+            let x = _mm256_loadu_si256(a.kq.as_ptr().add(bi * 256 + ib * 32) as *const __m256i);
+            // Weights are unsigned magnitudes: put the signs on the activations.
+            let sx = _mm256_sign_epi8(x, _mm256_or_si256(neg, one8));
+            let p16 = _mm256_maddubs_epi16(w, sx);
+            let s = *sc.add(ib);
+            let scales = _mm256_set_m128i(_mm_set1_epi16(2 * (s >> 4) as i16 + 1), _mm_set1_epi16(2 * (s & 0xf) as i16 + 1));
+            acc = _mm256_add_epi32(acc, _mm256_madd_epi16(p16, scales));
+        }
+        let hi = _mm256_extracti128_si256(acc, 1);
+        let s = _mm_add_epi32(hi, _mm256_castsi256_si128(acc));
+        let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b01_00_11_10));
+        let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b10_11_00_01));
+        accf += d * kd * _mm_cvtsi128_si32(s) as f32 * 0.125;
+    }
+    accf
+}
+
 /// Q8_0 row times four tokens' activations at once: each weight block is loaded and sign-split once
 /// and reused for the four tokens (batched prefill). Same per-token result as `dot_q8_0_q8`.
 pub fn dot_q8_0_q8_x4(row: &[u8], a: [&QAct; 4]) -> [f32; 4] {
@@ -1738,5 +1873,53 @@ mod tests {
         dequant_row(DType::Q8_0, &row, &mut deq);
         let want: f32 = deq.iter().zip(&x).map(|(a, b)| a * b).sum();
         assert!((dot_row(DType::Q8_0, &row, &x) - want).abs() < 1e-4);
+    }
+}
+
+#[cfg(test)]
+mod iq_tests {
+    use super::*;
+
+    fn rand_bytes(n: usize, seed: u64) -> Vec<u8> {
+        let mut x = seed;
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 24) as u8
+            })
+            .collect()
+    }
+
+    fn acts(n: usize) -> (Vec<f32>, QAct) {
+        let x: Vec<f32> = (0..n).map(|i| ((i as f32) * 0.37).sin() * 2.0 + 0.1).collect();
+        let mut qa = QAct::new(n);
+        qa.quantize(&x);
+        (x, qa)
+    }
+
+    fn close(got: f32, want: f32) {
+        assert!((got - want).abs() <= want.abs() * 0.03 + 0.05, "{got} vs {want}");
+    }
+
+    #[test]
+    fn iq4nl_integer_dot_tracks_the_float_dot() {
+        let mut row = rand_bytes(18 * 16, 7);
+        for b in 0..16 {
+            row[b * 18..b * 18 + 2].copy_from_slice(&0x2c00u16.to_le_bytes());
+        }
+        let (x, qa) = acts(512);
+        close(dot_iq4nl_q8(&row, &qa), dot_row(DType::IQ4NL, &row, &x));
+    }
+
+    #[test]
+    fn iq2s_integer_dot_tracks_the_float_dot() {
+        let mut row = rand_bytes(82 * 4, 11);
+        for b in 0..4 {
+            row[b * 82..b * 82 + 2].copy_from_slice(&0x2400u16.to_le_bytes());
+        }
+        let (x, qa) = acts(1024);
+        close(dot_iq2s_k8(&row, &qa).unwrap(), dot_row(DType::IQ2S, &row, &x));
     }
 }
