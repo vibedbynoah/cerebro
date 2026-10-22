@@ -126,6 +126,70 @@
   font-size: var(--text-title);
 }
 
+/* Chat and Arena are two views of the same column. The strip sits after the title, and each tab is
+   a plain button with aria-pressed (not a tab widget), so focus order stays simple. */
+.chat-tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-1);
+}
+
+.chat-tabs__tab {
+  min-height: 28px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: var(--text-small);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+}
+
+.chat-tabs__tab[aria-pressed="true"] {
+  background: var(--color-surface-3);
+  box-shadow: var(--shadow-1);
+  color: var(--color-text-primary);
+}
+
+.chat-tabs__tab:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+@media (hover: hover) {
+  .chat-tabs__tab:hover {
+    color: var(--color-text-primary);
+  }
+}
+
+/* The two views share the column's rows. `display: contents` keeps the thread and composer as the
+   grid children when Chat is showing; `hidden` removes the other view entirely. */
+.chat-view {
+  display: contents;
+}
+
+.chat-view[hidden] {
+  display: none;
+}
+
+/* Arena takes the whole window: no conversation list, no side panel. */
+.screen.chat[data-view="arena"] {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.screen.chat[data-view="arena"] .chat-list {
+  display: none;
+}
+
+.chat-main[data-view="arena"] {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
 .chat-head__model select {
   min-height: 32px;
   max-width: 260px;

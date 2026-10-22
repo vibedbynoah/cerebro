@@ -22,6 +22,28 @@ export function saveText(name: string, mime: string, text: string): boolean {
   }
 }
 
+/**
+ * Hands the user a data: URL to save (the PNG report card). Same path as `saveText`: straight
+ * from memory to the browser's download, never to a server. `name` must already be a safe file
+ * name (lib/bench-report.ts reportFilename builds one).
+ */
+export function saveDataUrl(name: string, dataUrl: string): boolean {
+  try {
+    if (!/^data:image\/png;base64,/.test(dataUrl)) return false;
+    const a = document.createElement("a");
+    a.href = dataUrl;
+    a.download = name;
+    a.rel = "noopener";
+    a.hidden = true;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Copies text; falls back to a hidden selection where the async clipboard is unavailable. */
 export async function copyText(text: string): Promise<boolean> {
   try {

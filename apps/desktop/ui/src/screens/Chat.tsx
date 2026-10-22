@@ -42,6 +42,8 @@ import { DEFAULT_SAMPLER, LEDGER_FILES, type ChatTools, type ChatTurn, type Ledg
 import { useService } from "../service/context";
 import type { CloudProvider, LibraryModel } from "../service/types";
 import { HighlightQuery } from "../components/ChatSearch";
+import { hrefForMonitorTab } from "../lib/routes";
+import { Arena } from "./chat/Arena";
 import { Composer } from "./chat/Composer";
 import { LiveDock } from "./chat/LiveDock";
 import { loadPresets, removePreset, savePreset } from "../lib/chat/presets";
@@ -141,6 +143,7 @@ export function Chat(): JSX.Element {
     window.addEventListener("keydown", onKey);
     onCleanup(() => window.removeEventListener("keydown", onKey));
   });
+  const [view, setView] = createSignal<"chat" | "arena">("chat");
   const [live, setLive] = createSignal<{ tps: number; ttft: number } | null>(null);
   const [draft, setDraft] = createSignal<{ text: string; at: number } | null>(null);
   const [listQuery, setListQuery] = createSignal("");
@@ -190,12 +193,14 @@ export function Chat(): JSX.Element {
 
   /** The Speed <-> Accuracy slider: every setting it covers, then a notice saying what changed. */
   let modeNotice: ReturnType<typeof setTimeout> | undefined;
-  const pickMode = (m: Mode) => {
+  /** `announce`: say what the level does in a toast (the live panel says it in place instead). */
+  const pickMode = (m: Mode, announce = true) => {
     const next = applyMode(m, prefs(), sampler());
     setPrefs(next.prefs);
     setSampler(next.sampler);
     // Dragging across levels shows only the one it stops on.
     clearTimeout(modeNotice);
+    if (!announce) return;
     modeNotice = setTimeout(() => {
       const p = MODE_PRESETS[m];
       notify(`${p.label}`, `${p.summary} ${p.changes.join(". ")}.`, "info");
@@ -440,6 +445,23 @@ export function Chat(): JSX.Element {
     }
   };
 
+  /**
+   * A local command ("/bench") runs here, on this computer, and is never sent to the model. The
+   * Benchmark lab is a view on the Monitor screen, so the hash says which one to open.
+   */
+  const runCommand = (name: string) => {
+    if (name === "bench") {
+      location.hash = hrefForMonitorTab("benchmark");
+      notify("Benchmark lab", "Choose a model and run the benchmark on this computer.", "info");
+      return;
+    }
+    if (name === "arena") {
+      abort?.abort();
+      setView("arena");
+      notify("Arena", "Pick two models and ask them the same question.", "info");
+    }
+  };
+
   const send = (text: string, atts: Attachment[]) => {
     const cid = ensureConversation();
     const conv = state.list.find((c) => c.id === cid)!;
@@ -646,6 +668,9 @@ export function Chat(): JSX.Element {
         return setHelpOpen(true);
       case "voice":
         return setVoice(true);
+      case "bench":
+      case "arena":
+        return runCommand(name);
       case "prompts":
         return setPanel("prompts");
     }
@@ -816,7 +841,7 @@ export function Chat(): JSX.Element {
   const panelLabel = () => (panel() === "memory" ? "Memory" : panel() === "prompt" ? "System prompt" : "Prompt library");
 
   return (
-    <div class="screen chat" data-panel={panel() === "none" ? "closed" : "open"}>
+    <div class="screen chat" data-panel={view() === "chat" && panel() !== "none" ? "open" : "closed"} data-view={view()}>
       <aside class="chat-list" aria-label="Conversations">
         <button class="btn btn--primary chat-list__new" type="button" onClick={newChat} data-press>
           <Icon name="plus" size={16} />
@@ -946,9 +971,28 @@ export function Chat(): JSX.Element {
         </Show>
       </aside>
 
-      <section class="chat-main" aria-label="Chat">
+      <section class="chat-main" aria-label={view() === "arena" ? "Arena" : "Chat"} data-view={view()}>
         <header class="chat-head">
-          <h1 class="chat-head__title">Chat</h1>
+          <h1 class="chat-head__title">{view() === "chat" ? "Chat" : "Arena"}</h1>
+          <div class="chat-tabs" role="group" aria-label="Chat view">
+            <button class="chat-tabs__tab" type="button" aria-pressed={view() === "chat"} onClick={() => setView("chat")} data-testid="chat-tab">
+              Chat
+            </button>
+            <button
+              class="chat-tabs__tab"
+              type="button"
+              aria-pressed={view() === "arena"}
+              onClick={() => {
+                // A reply belongs to the conversation view; leaving it stops it rather than
+                // streaming unseen behind the Arena.
+                abort?.abort();
+                setView("arena");
+              }}
+              data-testid="arena-tab"
+            >
+              Arena
+            </button>
+          </div>
           <label class="chat-head__model">
             <span class="sr-only">Model</span>
             <select value={modelId()} onChange={(e) => setModelId(e.currentTarget.value)} aria-label="Model">
@@ -998,6 +1042,7 @@ export function Chat(): JSX.Element {
           </button>
         </header>
 
+        <div class="chat-view" hidden={view() !== "chat"}>
         <div class="chat-thread" ref={thread} role="log" aria-live="polite" aria-relevant="additions">
           <Show when={current()?.messages.length} fallback={<Empty onPick={(t) => send(t, [])} />}>
             {/* The transcript's own heading: replies' Markdown headings (h3, h4) nest under it. */}
@@ -1078,9 +1123,14 @@ export function Chat(): JSX.Element {
           onOpenPrompts={() => setPanel("prompts")}
           draft={draft()}
         />
+        </div>
+
+        <div class="chat-view" hidden={view() !== "arena"}>
+          <Arena models={models()} active={view() === "arena"} />
+        </div>
       </section>
 
-      <Show when={panel() !== "none"}>
+      <Show when={view() === "chat" && panel() !== "none"}>
         <aside
           class="chat-side card"
           classList={{ "chat-side--dock": panel() === "dock" }}
@@ -1105,7 +1155,7 @@ export function Chat(): JSX.Element {
           <Show when={panel() === "dock"}>
             <LiveDock
               mode={modeOf(prefs(), sampler())}
-              onMode={pickMode}
+              onMode={(m) => pickMode(m, false)}
               sampler={sampler()}
               setSampler={setSampler}
               thinking={prefs().effort !== "low" && prefs().source !== "none"}

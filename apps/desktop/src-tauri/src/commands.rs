@@ -107,6 +107,9 @@ fn find_model(engine: &Engine, id: &str) -> Result<LibraryModel, String> {
 #[tauri::command]
 pub async fn model_load(engine: State<'_, Engine>, stt: SttState<'_>, id: String, context: Option<u32>, gpu_layers: Option<u32>) -> Result<serde_json::Value, String> {
     let model = find_model(&engine, &id)?;
+    if model.kind != "stt" && engine.activity() == "benchmark" {
+        return Err("The Benchmark lab is measuring this computer. Wait for it to finish, or stop it there.".to_owned());
+    }
     // A speech model loads into its own engine beside the chat model (stt.rs).
     if model.kind == "stt" {
         let s = std::sync::Arc::clone(stt.inner());
@@ -509,6 +512,9 @@ pub async fn chat_send(engine: State<'_, Engine>, hub: TuneHubState<'_>, request
     if hub.running() {
         return Err("A tune is measuring the model on the Tune screen. Wait for it to finish, or cancel it there.".to_owned());
     }
+    if engine.activity() == "benchmark" {
+        return Err("The Benchmark lab is measuring this computer. Wait for it to finish, or stop it there.".to_owned());
+    }
     let sink: crate::engine::ChatSink = std::sync::Arc::new(move |e| {
         let _ = on_event.send(e);
     });
@@ -636,6 +642,72 @@ pub fn tune_machine_last<R: Runtime>(app: tauri::AppHandle<R>) -> serde_json::Va
 fn machine_tune_file<R: Runtime>(app: &tauri::AppHandle<R>) -> Option<std::path::PathBuf> {
     use tauri::Manager;
     app.path().app_config_dir().ok().map(|d| d.join("machine-tune.json"))
+}
+
+// ---- Benchmark lab (bench.rs). A run loads the model it needs (or reuses it when already loaded
+// at a large enough window), streams every finished point, and is kept in bench-history.json. ----
+
+fn bench_history_file<R: Runtime>(app: &tauri::AppHandle<R>) -> Option<std::path::PathBuf> {
+    use tauri::Manager;
+    app.path().app_config_dir().ok().map(|d| d.join("bench-history.json"))
+}
+
+/// Adds `run` to the front of the saved history, replacing a run with the same id, at most
+/// `bench::MAX_HISTORY` entries. A write failure leaves the screen's run intact.
+fn save_bench_run<R: Runtime>(app: &tauri::AppHandle<R>, run: &crate::bench::BenchRun) {
+    let Some(path) = bench_history_file(app) else { return };
+    let mut history: Vec<crate::bench::BenchRun> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    history.retain(|r| r.id != run.id);
+    history.insert(0, run.clone());
+    history.truncate(crate::bench::MAX_HISTORY);
+    let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
+    if let Ok(bytes) = serde_json::to_vec_pretty(&history) {
+        let _ = std::fs::write(path, bytes);
+    }
+}
+
+/// Runs the Benchmark lab on one library model, streaming the progress through `on_event`.
+/// `placement` says where the model runs: "auto" (the placement it is loaded with), "gpu" (every
+/// layer on the graphics card), "split" (half on the card) or "cpu" (the processor only).
+/// Stopping uses `bench_stop`, which sets the same switch as Chat's stop button.
+#[tauri::command]
+pub async fn bench_run<R: Runtime>(app: tauri::AppHandle<R>, engine: State<'_, Engine>, hub: TuneHubState<'_>, model_id: String, placement: Option<String>, on_event: Channel<crate::bench::BenchEvent>) -> Result<crate::bench::BenchRun, String> {
+    let model = find_model(&engine, &model_id)?;
+    if model.kind != "text" && model.kind != "vision" {
+        return Err("Only text and vision models can be benchmarked.".to_owned());
+    }
+    if !model.supported {
+        return Err(format!("Cerebro Engine does not run the {} architecture yet.", model.arch_name));
+    }
+    let placement = placement.unwrap_or_else(|| "auto".to_owned());
+    if !crate::bench::PLACEMENTS.contains(&placement.as_str()) {
+        return Err("That placement is not one of the Benchmark lab's.".to_owned());
+    }
+    if hub.running() {
+        return Err("A tune is measuring the model on the Tune screen. Wait for it to finish, or cancel it there.".to_owned());
+    }
+    if engine.activity() != "idle" {
+        return Err("The engine is busy with another request. Wait for it to finish, then run the benchmark.".to_owned());
+    }
+    let eng = engine.inner().handle();
+    let sink: crate::bench::BenchSink = std::sync::Arc::new(move |event| {
+        let _ = on_event.send(event);
+    });
+    let run = tauri::async_runtime::spawn_blocking(move || eng.bench(model, placement, sink)).await.map_err(|_| "The benchmark failed.".to_owned())??;
+    save_bench_run(&app, &run);
+    Ok(run)
+}
+
+/// Every saved benchmark run, newest first. Empty before the first run.
+#[tauri::command]
+pub fn bench_history<R: Runtime>(app: tauri::AppHandle<R>) -> Vec<crate::bench::BenchRun> {
+    bench_history_file(&app).and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+/// Stops the benchmark after the step it is in: finished points and questions are kept.
+#[tauri::command]
+pub fn bench_stop(engine: State<'_, Engine>) {
+    engine.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// How much the saved-chat folder holds ("Keep long chats ready"): cache files and their total size.

@@ -1,14 +1,16 @@
 import "../../styles/monitor.css";
-import { createEffect, createSignal, createUniqueId, For, on, onCleanup, Show, type JSX } from "solid-js";
+import { createEffect, createSignal, createUniqueId, For, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { Icon } from "../../components/icons";
 import { IllustrativeFlag, ScreenHeader, Section } from "../../components/Screen";
 import { saveText } from "../../lib/download";
 import { exportFilename, exportPayload, HISTORY_RANGES, isHistoryRange, rangeDef, seriesRows, toCsv, totalsLine } from "../../lib/monitor";
+import { hrefForMonitorTab, monitorTabFromHash, type MonitorTab } from "../../lib/routes";
 import { readPref, writePref } from "../../lib/storage";
 import { notify } from "../../lib/toast";
 import { useService } from "../../service/context";
 import { useMetrics } from "../../service/metrics";
 import type { HistoryRange, MetricsSeries } from "../../service/monitor-types";
+import { BenchmarkLab } from "./BenchmarkLab";
 import { Breakdown } from "./Breakdown";
 import { ActiveAlerts, AlertsCard, CacheCard, MetricGrid, ModelCard, StateCard } from "./cards";
 import { Inspector } from "./Inspector";
@@ -28,6 +30,19 @@ export function MonitorScreen(): JSX.Element {
   const [range, setRange] = createSignal<HistoryRange>(isHistoryRange(stored) ? stored : "1m");
   const [long, setLong] = createSignal<MetricsSeries | null>(null);
   const [selected, setSelected] = createSignal<string | null>(null);
+  const [tab, setTab] = createSignal<MonitorTab>(monitorTabFromHash(window.location.hash));
+
+  // The hash names the view ("#/monitor?tab=benchmark"), so a link or the /bench command can open
+  // the lab directly. The tabs keep the hash in step, so the address always says what is open.
+  const [hash, setHash] = createSignal(window.location.hash);
+  const onHash = () => setHash(window.location.hash);
+  onMount(() => window.addEventListener("hashchange", onHash));
+  onCleanup(() => window.removeEventListener("hashchange", onHash));
+  createEffect(() => setTab(monitorTabFromHash(hash())));
+  const pickTab = (next: MonitorTab) => {
+    setTab(next);
+    history.replaceState(history.state, "", hrefForMonitorTab(next));
+  };
 
   // Longer ranges: fetched when chosen, then again each time a new bucket closes (at most every 5 s).
   createEffect(
@@ -98,8 +113,20 @@ export function MonitorScreen(): JSX.Element {
   );
 
   return (
-    <div class="screen monitor">
-      <ScreenHeader route="monitor" actions={actions} />
+    <div class="screen monitor" data-tab={tab()}>
+      <ScreenHeader route="monitor" actions={<Show when={tab() === "live"}>{actions}</Show>} />
+      <fieldset class="segmented screen-tabs">
+        <legend class="sr-only">Monitor view</legend>
+        <label class="segmented__option">
+          <input type="radio" name={`${id}-tab`} value="live" checked={tab() === "live"} onChange={() => pickTab("live")} data-testid="monitor-live-tab" />
+          Live
+        </label>
+        <label class="segmented__option">
+          <input type="radio" name={`${id}-tab`} value="benchmark" checked={tab() === "benchmark"} onChange={() => pickTab("benchmark")} data-testid="monitor-benchmark-tab" />
+          Benchmark lab
+        </label>
+      </fieldset>
+      <Show when={tab() === "live"} fallback={<BenchmarkLab />}>
       <Show
         when={feed.snapshot()}
         fallback={
@@ -162,6 +189,7 @@ export function MonitorScreen(): JSX.Element {
             </Section>
           </>
         )}
+      </Show>
       </Show>
     </div>
   );

@@ -61,4 +61,5 @@ __pycache__/
 /apps/desktop/test-results/
 /apps/desktop/playwright-report/
 /apps/desktop/review/shots/
+/apps/desktop/review/sweep/
 /apps/desktop/src-tauri/gen/

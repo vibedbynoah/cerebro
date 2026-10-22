@@ -124,6 +124,7 @@ export function LiveDock(props: {
             <For each={MODES}>{(m) => <option value={m} />}</For>
           </datalist>
         </label>
+        <Show when={props.mode}>{(m) => <p class="dock__note" data-testid="dock-mode-summary">{MODE_PRESETS[m()].summary}</p>}</Show>
         <label class="dock__field">
           <span>
             Temperature <strong class="mono">{props.sampler.temperature.toFixed(2)}</strong>

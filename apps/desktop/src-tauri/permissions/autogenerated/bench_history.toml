@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-bench-history"
+description = "Enables the bench_history command without any pre-configured scope."
+commands.allow = ["bench_history"]
+
+[[permission]]
+identifier = "deny-bench-history"
+description = "Denies the bench_history command without any pre-configured scope."
+commands.deny = ["bench_history"]

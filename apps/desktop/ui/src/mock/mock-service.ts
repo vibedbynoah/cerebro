@@ -44,6 +44,8 @@ import { estimateFit } from "../lib/fit";
 import { isHistoryRange } from "../lib/monitor";
 import type { MetricsSeries, MetricsSnapshot, RequestDetail } from "../service/monitor-types";
 import { createMonitorSim, type MonitorScenario, type SimModel } from "./monitor";
+import { createMockBench } from "./bench";
+import type { BenchRun } from "../service/bench-types";
 
 export interface MockServiceOptions {
   /** HUD sample interval, ms. Default 1000. */
@@ -81,6 +83,8 @@ export interface MockServiceOptions {
   failMetrics?: boolean;
   /** Chat playback speed multiplier (tests use 20). */
   chatSpeed?: number;
+  /** Benchmark playback speed (tests use 100; 1 is a few seconds). */
+  benchSpeed?: number;
   /** Orchestrate playback speed multiplier (tests use 1: the steps are visible). */
   orchestrateSpeed?: number;
   /** Milliseconds per simulated training step (tests use small values). */
@@ -108,6 +112,7 @@ const MOCK_FAILURES: Readonly<Record<string, MockServiceOptions>> = {
   "monitor-multi-gpu": { multiGpu: true },
   "fail-metrics": { failMetrics: true },
   "fast-chat": { chatSpeed: 20 },
+  "fast-bench": { benchSpeed: 100 },
   // Orchestrate at real speed: fast enough to test, slow enough to watch each role start.
   orchestrate: { orchestrateSpeed: 1 },
   online: { network: "online" },
@@ -309,6 +314,7 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
   const copies = new Map<string, GgufCopy>();
   let groups: DuplicateGroup[] = mockDuplicates();
   const tune = createTunePlayer({ speed: options.tuneSpeed ?? 1, hold: options.tuneHold, fail: options.failTune });
+  const bench = createMockBench({ models: library, hardware: () => MOCK_HARDWARE, speed: options.benchSpeed ?? 8, ...(options.now ? { now: options.now } : {}) });
   // Tuning for this machine (Turbo): replays the recorded run kept in machine-tune.ts.
   const machineTune = createMachineTunePlayer();
   let lastTuneOutcome: MachineTuneOutcome | null = null;
@@ -873,6 +879,13 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
     cancelTune: (runId) => later(0, () => tune.cancel(runId)),
 
     resumeTune: (runId) => later(0, () => tune.resume(runId)),
+
+    benchRun: (modelId, placement, onEvent, signal): Promise<BenchRun> => bench.run(modelId, placement, onEvent, signal),
+    benchHistory: () => bench.history(),
+    benchStop: () => {
+      bench.stop();
+      return Promise.resolve();
+    },
 
     getMetrics: (): Promise<MetricsSnapshot> =>
       options.failMetrics ? Promise.reject(new Error("Mock: engine not answering")) : later(0, () => monitor.snapshot(servedModel())),

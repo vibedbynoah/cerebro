@@ -204,6 +204,16 @@ describe("isolation hook", () => {
     no("mcp_config_save", { config: { mcpServers: { web: { url: "https://example.com/mcp", headers: { A: 1 } } } } });
     no("mcp_config_save", { config: { mcpServers: { web: { ...web, command: "npx" } } } });
     no("mcp_config_save", { config: { mcpServers: { web: { disabled: false } } } });
+    // A benchmark: the model, where it runs, and the channel the progress comes on.
+    const bench = (extra: object) => ({ modelId: "m1", onEvent: "__CHANNEL__:1", ...extra });
+    ok("bench_run", bench({ placement: "auto" }));
+    ok("bench_run", bench({ placement: "gpu" }));
+    ok("bench_run", bench({ placement: "split" }));
+    ok("bench_run", bench({ placement: "cpu" }));
+    ok("bench_run", bench({}));
+    no("bench_run", bench({ placement: "elsewhere" }));
+    no("bench_run", bench({ modelId: "../x" }));
+    no("bench_run", bench({ extra: 1 }));
   });
 
   it("refuses every other command, and any argument smuggled into an allowed one", () => {

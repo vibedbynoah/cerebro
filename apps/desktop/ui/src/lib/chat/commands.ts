@@ -34,6 +34,8 @@ export const COMMANDS: readonly CommandDef[] = [
   { name: "memories", args: "", description: "Open what Cerebro remembers about you.", aliases: ["forget"] },
   { name: "stats", args: "", description: "This chat's speed and token totals." },
   { name: "prompts", args: "", description: "Open your saved prompts.", aliases: ["prompt"] },
+  { name: "bench", args: "", description: "Open the Benchmark lab: measure a model on this computer." },
+  { name: "arena", args: "", description: "Compare answers from two or more models side by side." },
   { name: "help", args: "", description: "List every command." },
 ];
 

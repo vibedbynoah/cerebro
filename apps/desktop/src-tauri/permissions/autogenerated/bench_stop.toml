@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-bench-stop"
+description = "Enables the bench_stop command without any pre-configured scope."
+commands.allow = ["bench_stop"]
+
+[[permission]]
+identifier = "deny-bench-stop"
+description = "Denies the bench_stop command without any pre-configured scope."
+commands.deny = ["bench_stop"]

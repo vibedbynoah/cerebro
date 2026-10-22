@@ -37,6 +37,8 @@ const ALLOWED = new Set([
   "switches_list",
   "switches_reset",
   "tune_machine_last",
+  "bench_history",
+  "bench_stop",
   "mcp_config_get",
   "mcp_status",
   "remote_get",
@@ -104,6 +106,8 @@ function isCloudProvider(v) {
     (v.hasKey === undefined || typeof v.hasKey === "boolean")
   );
 }
+/** Where a benchmark puts the model: absent, or one of the lab's four choices. @param {unknown} v */
+const isPlacement = (v) => v === undefined || v === null || ["auto", "gpu", "split", "cpu"].includes(/** @type {string} */ (v));
 
 /** A duplicate group: the file's SHA-256 as lowercase hex (disk_scan's group id). @param {unknown} v */
 const isGroupId = (v) => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
@@ -325,6 +329,7 @@ const WITH_ARGS = {
   mcp_call: (p) => isPlain(p) && hasOnlyKeys(p, ["server", "tool", "arguments"]) && isServerName(p.server) && typeof p.tool === "string" && p.tool.length > 0 && p.tool.length <= 128 && (p.arguments === null || isPlain(p.arguments)),
   chat_send: (p) => isPlain(p) && hasOnlyKeys(p, ["request", "onEvent"]) && isChatRequest(p.request) && isChannel(p.onEvent),
   tune_machine_start: (p) => isPlain(p) && hasOnlyKeys(p, ["onEvent"]) && isChannel(p.onEvent),
+  bench_run: (p) => isPlain(p) && hasOnlyKeys(p, ["modelId", "onEvent"], ["placement"]) && isModelId(p.modelId) && isPlacement(p.placement) && isChannel(p.onEvent),
   metrics_history: (p) => isPlain(p) && hasOnlyKeys(p, ["range"]) && ["1m", "15m", "1h", "24h"].includes(/** @type {string} */ (p.range)),
   request_detail: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && typeof p.id === "string" && p.id.length > 0 && p.id.length <= 64,
 };

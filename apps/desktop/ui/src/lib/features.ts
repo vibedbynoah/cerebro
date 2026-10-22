@@ -8,7 +8,7 @@ import type { RouteId } from "./routes";
  * guide shows once more.
  */
 
-export const GUIDE_VERSION = "2026-10-21";
+export const GUIDE_VERSION = "2026-10-22";
 
 export interface Feature {
   title: string;
@@ -33,6 +33,7 @@ export const FEATURE_GROUPS: readonly FeatureGroup[] = [
       { title: "Cluster: one model, several computers", text: "Share a computer with a pairing code, then run a model across your computers over Wi-Fi, Ethernet or a USB network cable. The reply is the same as on one machine.", icon: "link", route: "cluster", isNew: true },
       { title: "Tune for this machine", text: "Measure the fastest settings for a model on your hardware and keep them.", icon: "tune", route: "tune" },
       { title: "Monitor", text: "Speed, memory, temperature and every request, live.", icon: "activity", route: "monitor" },
+      { title: "Benchmark lab", text: "Measure a model on this computer: prompt reading and writing speed at three lengths, first-token time, memory and twenty exact questions, with history and a report card. /bench opens it.", icon: "tune", route: "monitor", isNew: true },
     ],
   },
   {
@@ -40,6 +41,7 @@ export const FEATURE_GROUPS: readonly FeatureGroup[] = [
     features: [
       { title: "Speed or accuracy, one slider", text: "From a one-line prompt with greedy decoding on the graphics card, to long thinking with review passes, to Orchestrate. Moving it tells you what changed.", icon: "bolt", route: "chat", isNew: true },
       { title: "/ commands", text: "Type / in a message for 19 commands: switch model, change speed, make an image, read aloud, export, and more. They run here and never reach the model.", icon: "code", route: "chat", isNew: true },
+      { title: "Arena", text: "One question, two to four models side by side, names hidden until you vote; your votes build a leaderboard per kind of task. /arena opens it.", icon: "chat", route: "chat", isNew: true },
       { title: "Settings per model", text: "Save the current settings for a model from the live panel; they come back whenever you pick that model.", icon: "sliders", route: "chat", isNew: true },
       { title: "Live panel", text: "Speed, context, graphics memory, temperature and power beside the chat, with the settings you change most. Ctrl . opens it.", icon: "activity", route: "chat", isNew: true },
       { title: "Cloud models with your own keys", text: "Add models you already pay for elsewhere. Keys stay in the Windows Credential Manager, and the chat says clearly when it goes to the cloud.", icon: "online", route: "settings", isNew: true },
