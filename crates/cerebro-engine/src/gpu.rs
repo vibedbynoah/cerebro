@@ -113,6 +113,8 @@ struct Funcs {
     matmul_b: CudaFunction,
     /// Tensor-core prefill matmul (sm_80+); None on older GPUs or with CEREBRO_NO_MMA set.
     matmul_mma: Option<CudaFunction>,
+    /// The same GEMM with 128 x 64 blocks, for big matrices and long prompts.
+    matmul_mma_big: Option<CudaFunction>,
     /// Tensor-core flash attention for prefill, head size 128 (sm_80+).
     attn_mma: Option<CudaFunction>,
     silu_b: CudaFunction,
@@ -512,12 +514,13 @@ impl GpuState {
         let lf = |n: &str| module.load_function(n).map_err(gerr);
         let cc8 = ctx.compute_capability().map_err(gerr)?.0 >= 8;
         let (mm_on, at_on) = (cc8 && switches::enabled(switches::GPU_MMA_MATMUL), cc8 && switches::enabled(switches::GPU_MMA_ATTENTION));
-        let (matmul_mma, attn_mma, attn_mma256) = if mm_on || at_on {
+        let (matmul_mma, attn_mma, attn_mma256, matmul_mma_big) = if mm_on || at_on {
             let m = ctx.load_module(Ptx::from_src(PTX_MMA)).map_err(gerr)?;
             let f = |on: bool, n: &str| if on { m.load_function(n).map(Some).map_err(gerr) } else { Ok(None) };
-            (f(mm_on, "matmul_q8_mma")?, f(at_on, "attn_prefill_mma")?, f(at_on, "attn_prefill_mma256")?)
+            let big = if std::env::var_os("CEREBRO_NO_BIG_GEMM").is_some() { None } else { f(mm_on, "matmul_q8_mma_big")? };
+            (f(mm_on, "matmul_q8_mma")?, f(at_on, "attn_prefill_mma")?, f(at_on, "attn_prefill_mma256")?, big)
         } else {
-            (None, None, None)
+            (None, None, None, None)
         };
         let f = Funcs {
             attn_mma256,
@@ -528,6 +531,7 @@ impl GpuState {
             unpack_qgate: lf("unpack_qgate")?,
             gate_mul: lf("gate_mul")?,
             matmul_mma,
+            matmul_mma_big,
             attn_mma,
             matvec: lf("matvec_q8")?,
             rmsnorm_quant: lf("rmsnorm_quant")?,
@@ -1847,7 +1851,11 @@ impl GpuState {
                 lap(0, t_conv)?;
                 let t_mm = std::time::Instant::now();
                 let (rows_i, cols_i, add_i) = (rows as i32, *cols as i32, add as i32);
-                let cfg = LaunchConfig { grid_dim: ((t as u32).div_ceil(64), (rows as u32).div_ceil(64), 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
+                let (k, bm) = match &f.matmul_mma_big {
+                    Some(b) if rows >= 1024 && t >= 128 => (b, 128u32),
+                    _ => (k, 64u32),
+                };
+                let cfg = LaunchConfig { grid_dim: ((t as u32).div_ceil(64), (rows as u32).div_ceil(bm), 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
                 unsafe { s.launch_builder(k).arg(&*qs).arg(&*ds).arg(xq).arg(xd).arg(y).arg(&rows_i).arg(&cols_i).arg(&ti).arg(&add_i).launch(cfg) }.map_err(gerr)?;
                 lap(1, t_mm)?;
                 return Ok(());
@@ -1869,7 +1877,11 @@ impl GpuState {
             let (rows, cols, add) = (mrows as i32, mcols as i32, add as i32);
             match &f.matmul_mma {
                 Some(k) if t >= MMA_MIN_T => {
-                    let cfg = LaunchConfig { grid_dim: ((t as u32).div_ceil(64), (mrows as u32).div_ceil(64), 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
+                    let (k, bm) = match &f.matmul_mma_big {
+                        Some(b) if mrows >= 1024 && t >= 128 => (b, 128u32),
+                        _ => (k, 64u32),
+                    };
+                    let cfg = LaunchConfig { grid_dim: ((t as u32).div_ceil(64), (mrows as u32).div_ceil(bm), 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
                     unsafe { s.launch_builder(k).arg(qs).arg(ds).arg(xq).arg(xd).arg(y).arg(&rows).arg(&cols).arg(&ti).arg(&add).launch(cfg) }.map_err(gerr)?;
                 }
                 _ => unsafe { s.launch_builder(&f.matmul_b).arg(qs).arg(ds).arg(xq).arg(xd).arg(y).arg(&rows).arg(&cols).arg(&ti).arg(&add).launch(rows_cfg(mrows)) }.map_err(gerr).map(|_| ())?,
