@@ -21,6 +21,8 @@ import type {
   GgufCopy,
   GpuInfo,
   HardwareProfile,
+  HubFile,
+  HubRepo,
   KvStoreUsage,
   LibraryModel,
   LiveStats,
@@ -248,6 +250,93 @@ function simModelFor(m: LibraryModel, loadedParams: LoadParams | null, vramGiB: 
   };
 }
 const IMAGE_TYPE = /^image\/(png|jpeg|webp|gif)$/;
+
+/**
+ * The Hub's example repositories and their GGUF files, for the browser preview. Illustrative data
+ * like the rest of the preview, but shaped like the real thing: publishers from Cerebro's checked
+ * list and one from nobody, dynamic quants from Unsloth, and a model split into two parts that
+ * downloads as one file.
+ */
+const MOCK_HUB_REPOS: readonly HubRepo[] = [
+  { id: "unsloth/Qwen3.5-4B-GGUF", author: "unsloth", downloads: 412000, likes: 930, updated: "2026-09-30T10:00:00Z", license: "apache-2.0", tags: ["gguf", "text-generation", "image-text-to-text"] },
+  { id: "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF", author: "unsloth", downloads: 268000, likes: 610, updated: "2026-09-12T10:00:00Z", license: "apache-2.0", tags: ["gguf", "text-generation"] },
+  { id: "google/gemma-4-E4B-it-GGUF", author: "google", downloads: 190000, likes: 455, updated: "2026-08-20T10:00:00Z", license: "gemma", tags: ["gguf", "image-text-to-text"] },
+  { id: "ggml-org/Qwen3.8-27B-GGUF", author: "ggml-org", downloads: 154000, likes: 380, updated: "2026-10-02T10:00:00Z", license: "apache-2.0", tags: ["gguf", "text-generation"] },
+  { id: "meta-llama/Llama-3.1-8B-Instruct-GGUF", author: "meta-llama", downloads: 1200000, likes: 2100, updated: "2025-11-02T10:00:00Z", license: "llama3.1", tags: ["gguf", "text-generation"] },
+  { id: "ggml-org/Qwen3-0.6B-GGUF", author: "ggml-org", downloads: 98000, likes: 220, updated: "2026-05-01T10:00:00Z", license: "apache-2.0", tags: ["gguf"] },
+  { id: "Qwen/Qwen3-ASR-0.6B-GGUF", author: "Qwen", downloads: 64000, likes: 150, updated: "2026-09-25T10:00:00Z", license: "apache-2.0", tags: ["gguf", "automatic-speech-recognition"] },
+  { id: "Qwen/Qwen3-TTS-1.7B-GGUF", author: "Qwen", downloads: 51000, likes: 120, updated: "2026-09-18T10:00:00Z", license: "apache-2.0", tags: ["gguf", "text-to-speech"] },
+  { id: "example-org/Mystery-Model-7B-GGUF", author: "example-org", downloads: 1200, likes: 4, updated: "2026-10-18T10:00:00Z", license: null, tags: ["gguf", "text-generation"] },
+];
+
+/** One example file: its path in the repository, its size in GiB and its quant label. */
+interface MockHubFile {
+  path: string;
+  sizeGiB: number;
+  quant: string;
+  /** How many parts the file is split into (1 for an ordinary file). */
+  parts?: number;
+}
+
+const MOCK_HUB_FILES: Readonly<Record<string, readonly MockHubFile[]>> = {
+  "unsloth/Qwen3.5-4B-GGUF": [
+    { path: "Qwen3.5-4B-UD-Q4_K_XL.gguf", sizeGiB: 2.73, quant: "UD-Q4_K_XL" },
+    { path: "Qwen3.5-4B-Q4_K_M.gguf", sizeGiB: 2.6, quant: "Q4_K_M" },
+    { path: "Qwen3.5-4B-Q8_0.gguf", sizeGiB: 4.94, quant: "Q8_0" },
+  ],
+  "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF": [
+    { path: "Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL-00001-of-00002.gguf", sizeGiB: 18.2, quant: "UD-Q4_K_XL", parts: 2 },
+    { path: "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf", sizeGiB: 17.3, quant: "Q4_K_M" },
+    { path: "Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf", sizeGiB: 32.9, quant: "Q8_0" },
+  ],
+  "google/gemma-4-E4B-it-GGUF": [
+    { path: "gemma-4-E4B-it-UD-Q4_K_XL.gguf", sizeGiB: 4.85, quant: "UD-Q4_K_XL" },
+    { path: "gemma-4-E4B-it-Q4_K_M.gguf", sizeGiB: 4.6, quant: "Q4_K_M" },
+    { path: "gemma-4-E4B-it-Q8_0.gguf", sizeGiB: 8.74, quant: "Q8_0" },
+  ],
+  "ggml-org/Qwen3.8-27B-GGUF": [
+    { path: "Qwen3.8-27B-UD-Q4_K_XL.gguf", sizeGiB: 16.2, quant: "UD-Q4_K_XL" },
+    { path: "Qwen3.8-27B-Q4_K_M.gguf", sizeGiB: 15.4, quant: "Q4_K_M" },
+    { path: "Qwen3.8-27B-Q8_0.gguf", sizeGiB: 29.3, quant: "Q8_0" },
+  ],
+  "meta-llama/Llama-3.1-8B-Instruct-GGUF": [
+    { path: "Llama-3.1-8B-Instruct-UD-Q4_K_XL.gguf", sizeGiB: 4.85, quant: "UD-Q4_K_XL" },
+    { path: "Llama-3.1-8B-Instruct-Q4_K_M.gguf", sizeGiB: 4.6, quant: "Q4_K_M" },
+    { path: "Llama-3.1-8B-Instruct-Q8_0.gguf", sizeGiB: 8.74, quant: "Q8_0" },
+  ],
+  "ggml-org/Qwen3-0.6B-GGUF": [
+    { path: "Qwen3-0.6B-Q4_K_M.gguf", sizeGiB: 0.5, quant: "Q4_K_M" },
+    { path: "Qwen3-0.6B-Q8_0.gguf", sizeGiB: 0.95, quant: "Q8_0" },
+  ],
+  "Qwen/Qwen3-ASR-0.6B-GGUF": [{ path: "Qwen3-ASR-0.6B-Q8_0.gguf", sizeGiB: 0.71, quant: "Q8_0" }],
+  "Qwen/Qwen3-TTS-1.7B-GGUF": [{ path: "Qwen3-TTS-1.7B-Q8_0.gguf", sizeGiB: 1.99, quant: "Q8_0" }],
+  "example-org/Mystery-Model-7B-GGUF": [
+    { path: "Mystery-Model-7B-Q4_K_M.gguf", sizeGiB: 4.1, quant: "Q4_K_M" },
+    { path: "Mystery-Model-7B-Q2_K.gguf", sizeGiB: 2.6, quant: "Q2_K" },
+  ],
+};
+
+/** The parts of a split model: "-00001-of-00002" and its brothers. */
+function hubParts(path: string, parts: number): string[] {
+  if (parts <= 1) return [path];
+  const stem = path.replace(/-0000\d-of-\d{5}\.gguf$/, "");
+  return Array.from({ length: parts }, (_, i) => `${stem}-${String(i + 1).padStart(5, "0")}-of-${String(parts).padStart(5, "0")}.gguf`);
+}
+
+/** The example files of one repository, as the Hub shows them: smallest first. */
+function mockHubFiles(repo: string): HubFile[] {
+  const spec = MOCK_HUB_FILES[repo] ?? [];
+  return spec
+    .map((f) => ({
+      path: f.path,
+      size: Math.round(f.sizeGiB * 2 ** 30),
+      parts: hubParts(f.path, f.parts ?? 1),
+      quant: f.quant,
+      downloaded: false,
+    }))
+    .sort((a, b) => a.size - b.size);
+}
+
 
 /**
  * In-memory CerebroService for web mode and tests. All data is illustrative (see fixtures.ts).
@@ -715,28 +804,17 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
     // files, a GGUF header per file, and a download that progresses over about two seconds.
     hubSearch: (q) =>
       later(250, () => {
-        const all = [
-          { id: "example-org/Qwen3.5-4B-GGUF", author: "example-org", downloads: 412000, likes: 930, updated: "2026-09-30T10:00:00Z", license: "apache-2.0", tags: ["gguf", "text-generation", "image-text-to-text"] },
-          { id: "example-org/Qwen3-Coder-30B-A3B-Instruct-GGUF", author: "example-org", downloads: 268000, likes: 610, updated: "2026-09-12T10:00:00Z", license: "apache-2.0", tags: ["gguf", "text-generation"] },
-          { id: "example-org/gemma-4-E4B-it-GGUF", author: "example-org", downloads: 190000, likes: 455, updated: "2026-08-20T10:00:00Z", license: "gemma", tags: ["gguf", "image-text-to-text"] },
-          { id: "example-org/Llama-3.1-8B-Instruct-GGUF", author: "example-org", downloads: 1200000, likes: 2100, updated: "2025-11-02T10:00:00Z", license: "llama3.1", tags: ["gguf", "text-generation"] },
-          { id: "example-org/Qwen3-0.6B-GGUF", author: "example-org", downloads: 98000, likes: 220, updated: "2026-05-01T10:00:00Z", license: "apache-2.0", tags: ["gguf"] },
-        ];
-        const words = q.toLowerCase().replace(/gguf/g, "").split(/\s+/).filter(Boolean);
-        const hits = all.filter((r) => words.every((w) => r.id.toLowerCase().includes(w.replace(/\s/g, ""))));
-        return hits.length ? hits : all.slice(0, 3);
+        const words = q.toLowerCase().replace(/gguf/g, " ").split(/\s+/).filter(Boolean);
+        const hits = MOCK_HUB_REPOS.filter((r) => words.every((w) => r.id.toLowerCase().includes(w)));
+        return [...hits].sort((a, b) => b.downloads - a.downloads);
       }),
     hubFiles: (repo) =>
-      later(200, () => {
-        const base = repo.split("/").pop()!.replace(/-GGUF$/, "");
-        const gib = /30B/.test(base) ? 17.3 : /4B|E4B/.test(base) ? 2.6 : /8B/.test(base) ? 4.6 : 0.5;
-        return [
-          { path: `${base}-Q4_K_M.gguf`, size: Math.round(gib * 2 ** 30), parts: [`${base}-Q4_K_M.gguf`], quant: "Q4_K_M", downloaded: hubDone.has(`${repo}/${base}-Q4_K_M.gguf`) },
-          { path: `${base}-Q8_0.gguf`, size: Math.round(gib * 1.9 * 2 ** 30), parts: [`${base}-Q8_0.gguf`], quant: "Q8_0", downloaded: hubDone.has(`${repo}/${base}-Q8_0.gguf`) },
-        ];
+      later(200, () => mockHubFiles(repo).map((f) => ({ ...f, downloaded: hubDone.has(`${repo}/${f.path}`) }))),
+    hubFileMeta: (repo, file) =>
+      later(60, () => {
+        const f = (MOCK_HUB_FILES[repo] ?? []).find((x) => x.path === file);
+        return { size: Math.round((f?.sizeGiB ?? 2.6) * 2 ** 30), architecture: "qwen3", layers: 36, kvHeads: 8, headDim: 128, embedding: 2560, experts: null, activeExperts: null, contextMax: 40960, attentionLayers: 36, quant: f?.quant ?? "Q4_K_M" };
       }),
-    hubFileMeta: (_repo, file) =>
-      later(60, () => ({ size: /Q8/.test(file) ? 4.9 * 2 ** 30 : 2.6 * 2 ** 30, architecture: "qwen3", layers: 36, kvHeads: 8, headDim: 128, embedding: 2560, experts: null, activeExperts: null, contextMax: 40960, attentionLayers: 36, quant: /Q8/.test(file) ? "Q8_0" : "Q4_K_M" })),
     hubDownload: (repo, file, onEvent) =>
       new Promise((resolve) => {
         let done = 0;

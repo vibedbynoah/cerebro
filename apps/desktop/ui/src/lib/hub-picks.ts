@@ -17,6 +17,8 @@ export interface HubPick {
   params: string;
   abilities: readonly Ability[];
   blurb: string;
+  /** The account on Hugging Face that publishes the original weights of this model family. */
+  publisher: string;
 }
 
 export interface HubCategory {
@@ -35,14 +37,14 @@ export const HUB_CATEGORIES: readonly HubCategory[] = [
 ];
 
 export const HUB_PICKS: readonly HubPick[] = [
-  { title: "Qwen3.5 4B", family: "qwen", query: "Qwen3.5 4B GGUF", sizeGiB: 2.6, params: "4B", abilities: ["chat", "reasoning", "tools", "vision"], blurb: "A strong all-rounder that fits almost any graphics card." },
-  { title: "Qwen3 Coder 30B A3B", family: "qwen", query: "Qwen3 Coder 30B A3B GGUF", sizeGiB: 17.3, params: "30B (3B active)", abilities: ["code", "tools"], blurb: "Fast for its size: only 3B parameters work on each word." },
-  { title: "Gemma 4 E4B", family: "gemma", query: "gemma-4-E4B-it GGUF", sizeGiB: 4.6, params: "8B (4B effective)", abilities: ["chat", "vision"], blurb: "Quick, friendly answers and image understanding." },
-  { title: "Qwen3.8 27B", family: "qwen", query: "Qwen3.8 27B GGUF", sizeGiB: 15.4, params: "27B", abilities: ["chat", "reasoning", "code", "tools"], blurb: "For bigger cards, or split between the card and the processor." },
-  { title: "Llama 3.1 8B", family: "llama", query: "Llama-3.1-8B-Instruct GGUF", sizeGiB: 4.6, params: "8B", abilities: ["chat", "tools"], blurb: "A widely used general model with a large community." },
-  { title: "Qwen3 0.6B", family: "qwen", query: "Qwen3-0.6B GGUF", sizeGiB: 0.5, params: "0.6B", abilities: ["chat", "small"], blurb: "Tiny and very fast: good for quick tasks and older machines." },
-  { title: "Qwen3 ASR 0.6B", family: "qwen", query: "Qwen3-ASR GGUF", sizeGiB: 0.6, params: "0.6B", abilities: ["speech"], blurb: "Speech to text for push-to-talk in Chat." },
-  { title: "Qwen3 TTS 1.7B", family: "qwen", query: "Qwen3-TTS GGUF", sizeGiB: 1.9, params: "1.7B", abilities: ["speech"], blurb: "Reads replies aloud in a natural voice." },
+  { title: "Qwen3.5 4B", family: "qwen", query: "Qwen3.5 4B GGUF", sizeGiB: 2.6, params: "4B", abilities: ["chat", "reasoning", "tools", "vision"], blurb: "A strong all-rounder that fits almost any graphics card.", publisher: "Qwen" },
+  { title: "Qwen3 Coder 30B A3B", family: "qwen", query: "Qwen3 Coder 30B A3B GGUF", sizeGiB: 17.3, params: "30B (3B active)", abilities: ["code", "tools"], blurb: "Fast for its size: only 3B parameters work on each word.", publisher: "Qwen" },
+  { title: "Gemma 4 E4B", family: "gemma", query: "gemma-4-E4B-it GGUF", sizeGiB: 4.6, params: "8B (4B effective)", abilities: ["chat", "vision"], blurb: "Quick, friendly answers and image understanding.", publisher: "google" },
+  { title: "Qwen3.8 27B", family: "qwen", query: "Qwen3.8 27B GGUF", sizeGiB: 15.4, params: "27B", abilities: ["chat", "reasoning", "code", "tools"], blurb: "For bigger cards, or split between the card and the processor.", publisher: "Qwen" },
+  { title: "Llama 3.1 8B", family: "llama", query: "Llama-3.1-8B-Instruct GGUF", sizeGiB: 4.6, params: "8B", abilities: ["chat", "tools"], blurb: "A widely used general model with a large community.", publisher: "meta-llama" },
+  { title: "Qwen3 0.6B", family: "qwen", query: "Qwen3-0.6B GGUF", sizeGiB: 0.5, params: "0.6B", abilities: ["chat", "small"], blurb: "Tiny and very fast: good for quick tasks and older machines.", publisher: "Qwen" },
+  { title: "Qwen3 ASR 0.6B", family: "qwen", query: "Qwen3-ASR GGUF", sizeGiB: 0.6, params: "0.6B", abilities: ["speech"], blurb: "Speech to text for push-to-talk in Chat.", publisher: "Qwen" },
+  { title: "Qwen3 TTS 1.7B", family: "qwen", query: "Qwen3-TTS GGUF", sizeGiB: 1.9, params: "1.7B", abilities: ["speech"], blurb: "Reads replies aloud in a natural voice.", publisher: "Qwen" },
 ];
 
 export const ABILITY_LABELS: Readonly<Record<Ability, string>> = {

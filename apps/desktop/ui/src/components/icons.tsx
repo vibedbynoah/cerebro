@@ -319,6 +319,14 @@ const GLYPHS = {
       <path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H14a2 2 0 0 0-2 2v13a2 2 0 0 1 2-2h4.5a1.5 1.5 0 0 0 1.5-1.5Z" />
     </>
   ),
+  /** A seal of approval: a round medal with a check and two ribbon tails. */
+  verified: () => (
+    <>
+      <circle cx="12" cy="9" r="5.5" />
+      <path d="m9.4 9.1 1.9 1.9 3.4-3.6" />
+      <path d="M8.6 13.4 7.2 19.8 12 17.4l4.8 2.4-1.4-6.4" />
+    </>
+  ),
 } satisfies Record<string, () => JSX.Element>;
 
 export type IconName = keyof typeof GLYPHS;

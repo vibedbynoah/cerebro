@@ -149,8 +149,43 @@ fn id_of(path: &Path) -> String {
     format!("m{h:016x}")
 }
 
+/// The parts of a split model: the file name without its "-00001-of-00003" tail, and how many parts
+/// it has. None for a file that is not one part of a split model.
+fn split_parts(path: &Path) -> Option<(String, u64)> {
+    let name = path.file_name()?.to_str()?;
+    let stem = name.strip_suffix(".gguf").or_else(|| name.strip_suffix(".GGUF"))?;
+    let (head, count) = stem.rsplit_once("-of-")?;
+    if count.len() != 5 || !count.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let (prefix, index) = head.rsplit_once('-')?;
+    if index.len() != 5 || !index.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((prefix.to_owned(), count.parse().ok()?))
+}
+
+/// The size of a model file on disk. A split model is one model in the library, so all its parts
+/// are added up: the number shown is what the model really takes on the drive.
+fn file_size(path: &Path) -> u64 {
+    let own = std::fs::metadata(path).map_or(0, |m| m.len());
+    let Some((prefix, count)) = split_parts(path) else { return own };
+    let Some(dir) = path.parent() else { return own };
+    let Ok(entries) = std::fs::read_dir(dir) else { return own };
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p == path {
+            total += own;
+        } else if split_parts(&p).is_some_and(|(pre, n)| pre == prefix && n == count) {
+            total += entry.metadata().map_or(0, |m| m.len());
+        }
+    }
+    total
+}
+
 fn describe(path: &Path, source: &'static str) -> Option<LibraryModel> {
-    let size = std::fs::metadata(path).ok()?.len();
+    let size = file_size(path);
     let g = Gguf::open(path).ok()?;
     let arch = g.str("general.architecture").unwrap_or("unknown").to_owned();
     let k = |s: &str| format!("{arch}.{s}");
@@ -2017,6 +2052,38 @@ mod spill_tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "the whole result is on disk");
         assert_eq!(spill_or_truncate("short", 1000, Some(&dir), "t2"), "short");
         assert!(spill_or_truncate(&text, 1000, None, "t3").contains("[... truncated"), "no folder: cut instead");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod split_model_tests {
+    use super::{file_size, split_parts};
+
+    /// A split model is one model in the library, and its size is the size of all its parts.
+    #[test]
+    fn a_split_model_counts_every_part() {
+        let dir = std::env::temp_dir().join(format!("cerebro-split-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("Model-00001-of-00003.gguf");
+        let b = dir.join("Model-00002-of-00003.gguf");
+        let c = dir.join("Model-00003-of-00003.gguf");
+        let other = dir.join("Model-00001-of-00002.gguf");
+        let plain = dir.join("plain.gguf");
+        std::fs::write(&a, vec![0u8; 10]).unwrap();
+        std::fs::write(&b, vec![0u8; 20]).unwrap();
+        std::fs::write(&c, vec![0u8; 30]).unwrap();
+        std::fs::write(&other, vec![0u8; 40]).unwrap();
+        std::fs::write(&plain, vec![0u8; 50]).unwrap();
+        // Every part of the same model reports the same total.
+        assert_eq!(file_size(&a), 60);
+        assert_eq!(file_size(&b), 60);
+        assert_eq!(file_size(&c), 60);
+        // A different split, and a file that is not split, are counted on their own.
+        assert_eq!(file_size(&other), 40);
+        assert_eq!(file_size(&plain), 50);
+        assert_eq!(split_parts(&a), Some(("Model".to_owned(), 3)));
+        assert_eq!(split_parts(&plain), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
