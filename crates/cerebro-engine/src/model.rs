@@ -146,6 +146,9 @@ pub struct Model {
     inv_freq: Vec<f32>,
     /// Q8_0 matrices re-laid for the processor (`quant::repack_q8_0_x8`), by file offset.
     packs: std::sync::RwLock<std::collections::HashMap<usize, Arc<Vec<u8>>>>,
+    /// The drive tier (stream.rs): each layer's unit, and the output head's, when streamed.
+    stream_of: Vec<Option<usize>>,
+    stream_out: Option<usize>,
 }
 
 fn vec_f32(g: &Gguf, name: &str) -> Result<Vec<f32>, Error> {
@@ -271,7 +274,87 @@ impl Model {
         let output = g.tensors.get("output.weight").map(Mat::of).unwrap_or_else(|| Mat::of(embed_t));
         let rd = cfg.rope_dim;
         let inv_freq = (0..rd / 2).map(|i| 1.0 / cfg.rope_base.powf(2.0 * i as f32 / rd as f32)).collect();
-        Ok(Self { path: path.to_path_buf(), embed: Mat::of(embed_t), out_norm: vec_f32(&g, "output_norm.weight")?, layers, output, inv_freq, cfg, gguf: g, packs: Default::default() })
+        let mut m = Self { path: path.to_path_buf(), embed: Mat::of(embed_t), out_norm: vec_f32(&g, "output_norm.weight")?, layers, output, inv_freq, cfg, gguf: g, packs: Default::default(), stream_of: Vec::new(), stream_out: None };
+        let n = crate::switches::get(crate::switches::STREAM_LAYERS).max(0) as usize;
+        if n > 0 {
+            m.stream_from_drive(n);
+        }
+        Ok(m)
+    }
+
+    /// Reads the last `n` layers (and the output head too when `n` covers every layer) from the
+    /// drive on every pass instead of keeping them in RAM (stream.rs). Not for mixtures of experts,
+    /// which already read only their active experts. Leaves everything in RAM when a layer's
+    /// tensors are not contiguous in the file or the file cannot be opened unbuffered.
+    fn stream_from_drive(&mut self, n: usize) {
+        let c = &self.cfg;
+        if c.n_expert > 0 || n == 0 {
+            return;
+        }
+        let g = self.gguf.clone();
+        let first = c.n_layer.saturating_sub(n);
+        let range_of = |pick: &dyn Fn(&str) -> bool| -> Option<(usize, usize)> {
+            let (mut lo, mut hi) = (usize::MAX, 0);
+            for t in g.tensors.values().filter(|t| pick(&t.name)) {
+                lo = lo.min(t.offset);
+                hi = hi.max(t.offset + t.size);
+            }
+            // Nothing else may lie inside: the whole range is served from the buffer.
+            (lo < hi && !g.tensors.values().any(|t| !pick(&t.name) && t.offset < hi && t.offset + t.size > lo)).then_some((lo, hi))
+        };
+        let mut units = Vec::new();
+        let mut of = vec![None; c.n_layer];
+        for (li, slot) in of.iter_mut().enumerate().skip(first) {
+            let p = format!("blk.{li}.");
+            let Some(r) = range_of(&|name: &str| name.starts_with(&p)) else {
+                eprintln!("drive tier off: layer {li}'s tensors are not contiguous in the file");
+                return;
+            };
+            *slot = Some(units.len());
+            units.push(r);
+        }
+        let mut out = None;
+        if first == 0 {
+            let name = if self.tied() { "token_embd.weight" } else { "output.weight" };
+            if let Some(r) = range_of(&|t: &str| t == name) {
+                out = Some(units.len());
+                units.push(r);
+            }
+        }
+        match g.set_stream(&self.path, &units) {
+            Ok(()) => {
+                self.stream_of = of;
+                self.stream_out = out;
+            }
+            Err(e) => eprintln!("drive tier off: {e}"),
+        }
+    }
+
+    /// Before the processor reads layer `li`: makes sure the drive tier has it.
+    #[inline]
+    fn stream_enter(&self, li: usize) {
+        if let (Some(Some(u)), Some(s)) = (self.stream_of.get(li), self.gguf.stream()) {
+            s.enter(*u);
+        }
+    }
+
+    #[inline]
+    fn stream_enter_output(&self) {
+        if let (Some(u), Some(s)) = (self.stream_out, self.gguf.stream()) {
+            s.enter(u);
+        }
+    }
+
+    /// Layers read from the drive on every pass (0 when the drive tier is off).
+    pub fn streamed_layers(&self) -> usize {
+        self.stream_of.iter().filter(|u| u.is_some()).count()
+    }
+
+    fn streamed(&self, m: &Mat) -> bool {
+        self.gguf.stream().is_some_and(|_| {
+            let li = self.layers.iter().position(|l| [&l.q, &l.k, &l.v, &l.o].iter().any(|x| x.offset == m.offset) || matches!(&l.ffn, Ffn::Dense { gate, up, down } if [gate, up, down].iter().any(|x| x.offset == m.offset)));
+            li.is_some_and(|li| self.stream_of[li].is_some()) || (self.stream_out.is_some() && m.offset == self.output.offset)
+        })
     }
 
     pub fn gguf(&self) -> &Gguf {
@@ -296,7 +379,7 @@ impl Model {
         mats.push(&self.output);
         let todo: Vec<&Mat> = {
             let have = self.packs.read().unwrap_or_else(|e| e.into_inner());
-            mats.into_iter().filter(|m| packable(m) && !have.contains_key(&m.offset)).collect()
+            mats.into_iter().filter(|m| packable(m) && !have.contains_key(&m.offset) && !self.streamed(m)).collect()
         };
         use rayon::prelude::*;
         let made: Vec<(usize, Arc<Vec<u8>>)> = todo
@@ -1506,6 +1589,7 @@ impl Session {
             }
         };
         for (li, l) in m.layers.iter().enumerate().skip(from) {
+            m.stream_enter(li);
             let mut tp = Instant::now();
             let mut lap = |k: usize, pp: &mut [f64; 7]| {
                 let n = Instant::now();
@@ -1780,6 +1864,7 @@ impl Session {
         let scale = 1.0 / (hd as f32).sqrt();
         let cs: Vec<(f32, f32)> = m.rope_cs(self.rope_pos(pos));
         for (li, l) in m.layers.iter().enumerate().take(to).skip(from) {
+            m.stream_enter(li);
             rmsnorm(&self.x, &l.attn_norm, c.eps, &mut self.h);
             self.qa_dim.quantize(&self.h);
             if let Some(d) = &l.delta {
@@ -1938,6 +2023,7 @@ impl Session {
         rmsnorm_inplace(&mut self.x, &m.out_norm, m.cfg.eps);
         self.hidden.copy_from_slice(&self.x);
         self.qa_dim.quantize(&self.x);
+        m.stream_enter_output();
         m.matvec(&m.output, &self.x, &self.qa_dim, &mut self.logits);
         self.prof[6] += to.elapsed().as_secs_f64();
     }

@@ -84,4 +84,16 @@ fn main() {
     println!("output tokens {:?}", out);
     println!("{}{}", prompt, tok.decode(&out));
     eprintln!("prefill {:.1} tok/s, decode {:.1} tok/s", ids.len() as f64 / prefill, n as f64 / decode);
+    if let Some(st) = model.gguf().stream() {
+        let x = st.stats();
+        eprintln!(
+            "drive tier: {} layers, {:.2} GB read ({:.2} GB/s while reading), waited {:.2} s, {} read errors, {} MB of buffers",
+            model.streamed_layers(),
+            x.bytes_read as f64 / 1e9,
+            x.bytes_read as f64 / 1e9 / x.read_s.max(1e-9),
+            x.wait_s,
+            x.errors,
+            st.buffer_bytes() >> 20
+        );
+    }
 }

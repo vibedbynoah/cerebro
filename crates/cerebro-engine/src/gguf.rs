@@ -98,6 +98,8 @@ pub struct Gguf {
     pub meta: HashMap<String, Value>,
     pub tensors: HashMap<String, TensorInfo>,
     pub alignment: usize,
+    /// Layers read from the drive on every pass (stream.rs), when switched on.
+    stream: std::sync::OnceLock<crate::stream::Stream>,
 }
 
 struct Reader<'a> {
@@ -235,7 +237,7 @@ impl Gguf {
             }
             tensors.insert(name.clone(), TensorInfo { name, dims, dtype, offset, size });
         }
-        Ok(Self { mmap, version, meta, tensors, alignment })
+        Ok(Self { mmap, version, meta, tensors, alignment, stream: Default::default() })
     }
 
     pub fn bytes(&self, t: &TensorInfo) -> &[u8] {
@@ -311,7 +313,24 @@ impl Gguf {
     }
 
     pub fn bytes_at(&self, offset: usize, len: usize) -> &[u8] {
+        if let Some(b) = self.stream.get().and_then(|s| s.lookup(offset, len)) {
+            return b;
+        }
         &self.mmap[offset..offset + len]
+    }
+
+    /// Serves these file ranges from the drive on every pass (stream.rs) and drops them from RAM.
+    /// Once per file.
+    pub fn set_stream(&self, path: &Path, units: &[(usize, usize)]) -> std::io::Result<()> {
+        let s = crate::stream::Stream::new(path, self.mmap.len(), units)?;
+        for &(lo, hi) in units {
+            self.release(lo, hi - lo);
+        }
+        self.stream.set(s).map_err(|_| std::io::Error::other("the drive tier is already set"))
+    }
+
+    pub fn stream(&self) -> Option<&crate::stream::Stream> {
+        self.stream.get()
     }
 
     pub fn tensor(&self, name: &str) -> Result<&TensorInfo, Error> {

@@ -25,6 +25,7 @@ pub mod pool;
 pub mod quant;
 mod quant_more;
 pub mod sample;
+pub mod stream;
 pub mod switches;
 pub mod telemetry;
 pub mod tokenizer;

@@ -106,6 +106,7 @@ pub const PORTABLE_GPU: &str = "portable_gpu";
 pub const CPU_REPACK: &str = "cpu_repack";
 pub const CPU_PIN: &str = "cpu_pin";
 pub const PORTABLE_INTEGRATED: &str = "portable_integrated";
+pub const STREAM_LAYERS: &str = "stream_layers";
 
 fn registry() -> &'static [Switch] {
     static R: OnceLock<Vec<Switch>> = OnceLock::new();
@@ -265,6 +266,18 @@ fn registry() -> &'static [Switch] {
                 beginner: "How much of a model too big for your graphics card runs on it; the rest runs on the processor. Automatic puts as much there as fits.",
                 advanced: "Dense models larger than free VRAM split by layer: the first N on the GPU in their own K-quant format, the rest and the output head on the CPU, one activation copy each way per token. 0 = as many as fit (600 MB margin). Larger values are clamped to what fits.",
                 env: "CEREBRO_GPU_LAYERS",
+                default: zero,
+            },
+            Switch {
+                id: STREAM_LAYERS,
+                name: "Layers read from the drive",
+                group: "Placement",
+                kind: Kind::Number { min: 0, max: 1024, zero_auto: false, unit: "layers" },
+                channel: Channel::Beta,
+                applies: Applies::Reload,
+                beginner: "Reads the last layers of a model from your drive as it writes, instead of keeping them in memory. Slower, but runs models bigger than your memory and leaves memory free for other apps.",
+                advanced: "The last N processor layers (and the output head when N covers every layer) are read with unbuffered I/O on every pass, 8 parallel 2 MB requests, double-buffered so the next layer is read while this one computes; RAM use is two layers. Dense and recurrent models; mixtures of experts read only their active experts already. 0 = off.",
+                env: "CEREBRO_STREAM_LAYERS",
                 default: zero,
             },
             Switch {

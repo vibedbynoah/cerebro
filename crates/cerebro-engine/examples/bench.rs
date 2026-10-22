@@ -73,6 +73,8 @@ fn main() {
     let out_path = PathBuf::from(arg(&a, "--out").unwrap_or_else(|| "bench.jsonl".into()));
     let machine = arg(&a, "--machine").unwrap_or_else(|| "unknown".into());
     let commit = arg(&a, "--commit").unwrap_or_default();
+    // A name for the placement being measured (GPU only, CPU + drive, ...).
+    let label = arg(&a, "--label").unwrap_or_default();
     let reps: usize = arg(&a, "--reps").and_then(|v| v.parse().ok()).unwrap_or(5);
     let decode: usize = arg(&a, "--decode").and_then(|v| v.parse().ok()).unwrap_or(256);
     let lengths: Vec<usize> = arg(&a, "--lengths").unwrap_or_else(|| "32,512,2048".into()).split(',').filter_map(|v| v.parse().ok()).collect();
@@ -132,7 +134,19 @@ fn main() {
             let cache = sess.gpu.as_ref().and_then(|g| g.expert_cache());
             #[cfg(not(feature = "cuda"))]
             let cache: Option<(usize, usize, f64)> = None;
+            #[cfg(feature = "cuda")]
+            let gpu_layers = sess.gpu.as_ref().map(|g| g.gpu_layers()).unwrap_or(0);
+            #[cfg(not(feature = "cuda"))]
+            let gpu_layers = 0usize;
+            let drive = model.gguf().stream().map(|s| s.stats());
             let line = serde_json::json!({
+                "label": label,
+                "gpu_layers": gpu_layers,
+                "drive_layers": model.streamed_layers(),
+                "total_layers": model.cfg.n_layer,
+                "drive_gb_read": drive.map(|d| d.bytes_read as f64 / 1e9),
+                "drive_wait_s": drive.map(|d| d.wait_s),
+                "drive_errors": drive.map(|d| d.errors),
                 "commit": commit,
                 "machine": machine,
                 "model": model_path.file_name().unwrap().to_string_lossy(),
