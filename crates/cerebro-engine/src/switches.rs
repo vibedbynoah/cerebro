@@ -109,6 +109,7 @@ pub const PORTABLE_INTEGRATED: &str = "portable_integrated";
 pub const STREAM_LAYERS: &str = "stream_layers";
 pub const DRIVE_TIER: &str = "drive_tier";
 pub const EXPERT_RAM_CACHE: &str = "expert_ram_cache";
+pub const SPLIT_STREAM: &str = "split_stream";
 pub const LLAMA_SPLITS: &str = "llama_splits";
 
 fn registry() -> &'static [Switch] {
@@ -293,6 +294,18 @@ fn registry() -> &'static [Switch] {
                 beginner: "Two cases where llama.cpp is measured faster than Cerebro's engine today: a model too big for an NVIDIA card (split between the card and the processor), and AMD or Intel graphics, including graphics built into the processor. Cerebro uses llama.cpp for those. The first time it downloads the official release (about 650 MB for NVIDIA, 35 MB for other cards).",
                 advanced: "Split plans on NVIDIA run the CUDA build with the planner's GPU layer count; with no NVIDIA card, a graphics card the portable backend would use runs the Vulkan build (all layers it holds). The app starts llama-server on 127.0.0.1 and streams over its OpenAI-compatible API; downloads are checked against the SHA-256 GitHub publishes. Measured on an i9-12900H: split prompt reading 0.05-0.12x and Iris Xe prompt reading 0.05-0.14x of llama.cpp. Off: Cerebro's engine runs everything.",
                 env: "CEREBRO_NO_LLAMA_SPLITS",
+                default: on,
+            },
+            Switch {
+                id: SPLIT_STREAM,
+                name: "Read prompts on the graphics card for split models",
+                group: "Placement",
+                kind: Kind::Toggle,
+                channel: Channel::Beta,
+                applies: Applies::Live,
+                beginner: "When a model is split between your graphics card and processor, Cerebro sends the processor's share of the model to the card, one layer at a time, while it reads your prompt. Long prompts are read many times faster.",
+                advanced: "Split prefill: after the GPU's resident layers, each CPU layer's weights are copied to a GPU slot (native K-quants, or Q8_0 split on the GPU), its KV rows for earlier positions uploaded, the batched layer kernel run, and the new KV rows copied back to the processor's cache. Plain dense attention layers only; others fall back to the processor. Off: the processor runs its layers.",
+                env: "CEREBRO_NO_SPLIT_STREAM",
                 default: on,
             },
             Switch {

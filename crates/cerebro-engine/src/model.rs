@@ -1640,8 +1640,27 @@ impl Session {
             // The CPU's batched path covers plain dense layers; hybrids go token by token.
             let batched = m.cfg.ssm.is_none() && !m.cfg.attn_gate;
             let dim = m.cfg.dim;
-            for c in prompt[common..].chunks(crate::gpu::GpuState::SPLIT_CHUNK) {
+            // Every layer on the GPU, the processor's streamed through it (gpu.rs prefill_streamed).
+            let mut streamed = batched && crate::switches::enabled(crate::switches::SPLIT_STREAM) && crate::gpu::GpuState::can_stream(m, from);
+            let n_chunks = prompt[common..].len().div_ceil(crate::gpu::GpuState::SPLIT_CHUNK);
+            for (ci, c) in prompt[common..].chunks(crate::gpu::GpuState::SPLIT_CHUNK).enumerate() {
                 let pos = self.tokens.len();
+                if streamed {
+                    match self.gpu.as_mut().expect("gpu").prefill_streamed(m, c, pos, from, &mut self.k, &mut self.v, &mut self.x) {
+                        Ok(()) => {
+                            self.tokens.extend_from_slice(c);
+                            self.progress.set(self.tokens.len());
+                            if ci + 1 == n_chunks {
+                                self.head(m);
+                            }
+                            continue;
+                        }
+                        Err(e) => {
+                            eprintln!("streamed split prefill failed, the processor runs its layers: {e}");
+                            streamed = false;
+                        }
+                    }
+                }
                 self.gpu.as_mut().expect("gpu").prefill_split(m, c, pos, &mut xs)?;
                 if batched {
                     self.step_batch_from(m, c, Some(std::mem::take(&mut xs)), from);
