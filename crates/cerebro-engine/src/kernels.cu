@@ -754,6 +754,13 @@ extern "C" __global__ void k_to_q8(const unsigned char* __restrict__ w, int dtyp
 
 // GGUF Q8_0 rows (34-byte blocks: f16 scale, 32 int8) -> the int8 + f32-scale layout the prompt
 // GEMM reads. One thread per block.
+// Q6_K blocks (210 bytes) widened to the GPU's aligned 224-byte stride, one byte per thread.
+extern "C" __global__ void q6k_widen(const unsigned char* __restrict__ src, unsigned char* __restrict__ dst, long long n) {
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    dst[(i / 210) * 224 + i % 210] = src[i];
+}
+
 extern "C" __global__ void q80_split(const unsigned char* __restrict__ w, int nblocks,
                                      signed char* __restrict__ qs, float* __restrict__ ds) {
     long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;

@@ -1651,7 +1651,11 @@ impl Session {
                             self.tokens.extend_from_slice(c);
                             self.progress.set(self.tokens.len());
                             if ci + 1 == n_chunks {
+                                let th = Instant::now();
                                 self.head(m);
+                                if std::env::var_os("CEREBRO_PIPE_LOG").is_some() {
+                                    eprintln!("pipe: head {:.1} ms", th.elapsed().as_secs_f64() * 1e3);
+                                }
                             }
                             continue;
                         }

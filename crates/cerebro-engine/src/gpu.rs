@@ -21,7 +21,7 @@ use crate::switches;
 use std::sync::Arc;
 
 use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
-use cudarc::driver::{CudaContext, CudaFunction, CudaGraph, CudaSlice, CudaStream, LaunchConfig, PinnedHostSlice, PushKernelArg};
+use cudarc::driver::{CudaContext, CudaEvent, CudaFunction, CudaGraph, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PinnedHostSlice, PushKernelArg};
 use cudarc::nvrtc::Ptx;
 
 use crate::gguf::Gguf;
@@ -91,6 +91,8 @@ struct GDelta {
 struct Funcs {
     /// Q8_0 blocks into int8 values and f32 scales (streamed split layers).
     q80_split: CudaFunction,
+    /// Q6_K blocks to the GPU's 224-byte stride (streamed split layers read straight from the file).
+    q6k_widen: CudaFunction,
     /// Tensor-core flash prefill attention for head size 256 (None below sm_80 or switched off).
     attn_mma256: Option<CudaFunction>,
     delta_conv: CudaFunction,
@@ -452,16 +454,140 @@ pub struct GpuState {
     spec: Option<CudaSlice<f32>>,
     /// Split models: the activation after the last GPU layer, copied for the CPU.
     host_x: Option<PinnedHostSlice<f32>>,
-    /// Split models: the slot the processor's layers stream through for prompt batches (made on
-    /// first use; see `prefill_streamed`).
-    streamed: Option<GLayer>,
-    /// Q8_0 bytes on their way to the slot.
-    stream_raw: Option<CudaSlice<u8>>,
+    /// Split models: what the processor's layers stream through for prompt batches (made on first
+    /// use; see `prefill_streamed`).
+    pipe: Option<Pipe>,
+}
+
+/// Split prefill: the processor's layers pass through two GPU slots. The host copies a layer into
+/// a pinned buffer and a copy stream sends it to one slot while the other slot's layer computes.
+struct Pipe {
+    slots: [Option<GLayer>; 2],
+    /// Q8_0 bytes per slot, split into int8 and scales on the compute stream.
+    raw: [Option<CudaSlice<u8>>; 2],
+    /// (group, byte offset in `raw`, first row in the group, rows, cols) per Q8_0 matrix in a slot.
+    splits: [Vec<(usize, usize, usize, usize, usize)>; 2],
+    /// Three host buffers, so filling layer j+2 never waits for layer j's upload.
+    host: [Option<PinnedHostSlice<u8>>; 3],
+    copy: Arc<CudaStream>,
+    /// Per streamed layer of the chunk: its upload is done (its host buffer is free, its compute
+    /// may start).
+    copied: Vec<Option<CudaEvent>>,
+    /// The slot's layer is done computing (the slot may be overwritten).
+    freed: [Option<CudaEvent>; 2],
+    /// The new KV rows of every streamed layer, back on the host (layers x 2 x tokens x kvd).
+    kv_back: Option<PinnedHostSlice<u16>>,
+    /// The processor layers' weights in the model file's memory, page-locked for the GPU to read
+    /// directly (no host copy): page-aligned ranges registered, or None when that failed.
+    direct: Option<Vec<usize>>,
+    /// Q6_K bytes as stored, widened on the GPU (direct mode).
+    raw6: [Option<CudaSlice<u8>>; 2],
+}
+
+impl Drop for Pipe {
+    fn drop(&mut self) {
+        for &p in self.direct.iter().flatten() {
+            // SAFETY: pointers registered by `register_direct`, unregistered once.
+            unsafe { cudarc::driver::sys::cuMemHostUnregister(p as *mut std::ffi::c_void) };
+        }
+    }
+}
+
+/// Page-locks the file memory of layers `from..` so the GPU copies it directly. None (with nothing
+/// left registered) when the driver refuses; CEREBRO_NO_DIRECT_STREAM skips it.
+fn register_direct(model: &Model, from: usize) -> Option<Vec<usize>> {
+    if std::env::var_os("CEREBRO_NO_DIRECT_STREAM").is_some() {
+        return None;
+    }
+    let g = model.gguf();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for l in &model.layers()[from..] {
+        let Ffn::Dense { gate, up, down } = &l.ffn else { return None };
+        for m in [&l.q, &l.k, &l.v, &l.o, gate, up, down] {
+            let b = g.bytes_at(m.offset, m.rows * m.row_bytes);
+            let a = b.as_ptr() as usize;
+            spans.push((a & !4095, (a + b.len() + 4095) & !4095));
+        }
+    }
+    spans.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (a, b) in spans {
+        match merged.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => merged.push((a, b)),
+        }
+    }
+    let t0 = std::time::Instant::now();
+    let mut done = Vec::new();
+    for &(a, b) in &merged {
+        // SAFETY: a mapped, readable range of the model file, unregistered in Pipe::drop.
+        let r = unsafe { cudarc::driver::sys::cuMemHostRegister_v2(a as *mut std::ffi::c_void, b - a, cudarc::driver::sys::CU_MEMHOSTREGISTER_READ_ONLY) };
+        if r != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+            eprintln!("split prefill: the GPU cannot read the model file's memory directly ({r:?}); copying it instead");
+            for &p in &done {
+                unsafe { cudarc::driver::sys::cuMemHostUnregister(p as *mut std::ffi::c_void) };
+            }
+            return None;
+        }
+        done.push(a);
+    }
+    if std::env::var_os("CEREBRO_PIPE_LOG").is_some() {
+        eprintln!("pipe: {} ranges, {:.2} GB page-locked in {:.0} ms", merged.len(), merged.iter().map(|(a, b)| b - a).sum::<usize>() as f64 / 1e9, t0.elapsed().as_secs_f64() * 1e3);
+    }
+    Some(done)
+}
+
+/// Copies `jobs` (source bytes, destination offset, whether to widen Q6_K blocks to the GPU's
+/// 224-byte layout) into `dst` on several threads.
+fn fill_host(dst: &mut [u8], jobs: &[(&[u8], usize, bool)]) {
+    const PIECE: usize = 4 << 20;
+    // Pieces of whole Q6_K blocks (210 bytes in, 224 out) or plain bytes.
+    let mut pieces = Vec::new();
+    for (ji, &(src, _, q6)) in jobs.iter().enumerate() {
+        let step = if q6 { PIECE / 210 * 210 } else { PIECE };
+        let mut a = 0;
+        while a < src.len() {
+            let b = (a + step).min(src.len());
+            pieces.push((ji, a, b));
+            a = b;
+        }
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let base = dst.as_mut_ptr() as usize;
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8);
+    std::thread::scope(|sc| {
+        for _ in 0..threads {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(&(ji, a, b)) = pieces.get(i) else { break };
+                let (src, off, q6) = jobs[ji];
+                // SAFETY: pieces write disjoint ranges of `dst`, which outlives the scope.
+                unsafe {
+                    let d = (base + off) as *mut u8;
+                    if q6 {
+                        for (k, blk) in src[a..b].chunks_exact(210).enumerate() {
+                            std::ptr::copy_nonoverlapping(blk.as_ptr(), d.add((a / 210 + k) * 224), 210);
+                        }
+                    } else {
+                        std::ptr::copy_nonoverlapping(src[a..b].as_ptr(), d.add(a), b - a);
+                    }
+                }
+            });
+        }
+    });
+}
+
+/// Bytes of `m` in the GPU's layout.
+fn gpu_len(m: &Mat) -> usize {
+    let n = m.rows * m.row_bytes;
+    if m.dtype == DType::Q6K { n / 210 * 224 } else { n }
 }
 
 /// The processor's layers of a split, streamed through the GPU for one prompt chunk: layers
 /// `from..` read their weights from `model` and their f16 KV rows from `k`/`v`.
 struct StreamIn<'a> {
+    /// Pinned buffers and slots for this chunk, taken from the state for its duration.
+    pipe: Option<Pipe>,
     from: usize,
     k: &'a mut [Vec<u16>],
     v: &'a mut [Vec<u16>],
@@ -571,6 +697,7 @@ impl GpuState {
             kmatmul: lf("kmatmul")?,
             k_to_q8: lf("k_to_q8")?,
             q80_split: lf("q80_split")?,
+            q6k_widen: lf("q6k_widen")?,
             router_b: lf("router_topk_batch")?,
             scatter_add: lf("scatter_add")?,
             add_inplace: lf("add_inplace")?,
@@ -780,8 +907,7 @@ impl GpuState {
             spec,
             // SAFETY: a plain host buffer, read only after the stream is synchronized.
             host_x: if split { Some(unsafe { ctx_pin.alloc_pinned::<f32>(c.dim) }.map_err(gerr)?) } else { None },
-            streamed: None,
-            stream_raw: None,
+            pipe: None,
         })
     }
 
@@ -799,70 +925,83 @@ impl GpuState {
             })
     }
 
-    /// Fills slot matrix `dst` with `mats` stacked by rows: K-quants copied as they are (the batched
-    /// matmul converts them), Q8_0 split into int8 values and scales on the GPU.
-    fn fill_mat(s: &Arc<CudaStream>, f: &Funcs, g: &Gguf, raw: &mut Option<CudaSlice<u8>>, dst: &mut Option<GMat>, mats: &[&Mat]) -> Result<(), Error> {
-        let cols = mats[0].cols;
-        if mats[0].dtype == DType::Q8_0 {
-            let rows: usize = mats.iter().map(|m| m.rows).sum();
-            if !matches!(dst, Some(GMat::Q8 { qs, .. }) if qs.len() >= rows * cols) {
-                *dst = Some(GMat::Q8 { qs: s.alloc_zeros::<i8>(rows * cols).map_err(gerr)?, ds: s.alloc_zeros::<f32>(rows * cols / 32).map_err(gerr)?, rows, cols });
-            }
-            let Some(GMat::Q8 { qs, ds, rows: dr, cols: dc }) = dst.as_mut() else { unreachable!() };
-            (*dr, *dc) = (rows, cols);
-            let mut r0 = 0;
-            for m in mats {
-                let bytes = g.bytes_at(m.offset, m.rows * m.row_bytes);
-                if raw.as_ref().is_none_or(|r| r.len() < bytes.len()) {
-                    *raw = Some(s.alloc_zeros::<u8>(bytes.len()).map_err(gerr)?);
-                }
-                let rw = raw.as_mut().expect("made above");
-                s.memcpy_htod(bytes, &mut rw.slice_mut(0..bytes.len())).map_err(gerr)?;
-                let nb = (m.rows * cols / 32) as i32;
-                let mut qv = qs.slice_mut(r0 * cols..(r0 + m.rows) * cols);
-                let mut dv = ds.slice_mut(r0 * cols / 32..(r0 + m.rows) * cols / 32);
-                let cfg = LaunchConfig { grid_dim: ((nb as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
-                unsafe { s.launch_builder(&f.q80_split).arg(&*rw).arg(&nb).arg(&mut qv).arg(&mut dv).launch(cfg) }.map_err(gerr)?;
-                r0 += m.rows;
-            }
-            return Ok(());
-        }
-        if !matches!(dst, Some(GMat::K { parts, .. }) if parts.len() == mats.len()) {
-            *dst = Some(GMat::K { parts: Vec::new(), cols });
-        }
-        let Some(GMat::K { parts, cols: dc }) = dst.as_mut() else { unreachable!() };
-        *dc = cols;
-        for (i, m) in mats.iter().enumerate() {
-            let (bb, dtype) = gpu_block(m.dtype).expect("can_stream checked the format");
-            let src = g.bytes_at(m.offset, m.rows * m.row_bytes);
-            let bytes: std::borrow::Cow<'_, [u8]> = if m.dtype == DType::Q6K { std::borrow::Cow::Owned(to_gpu_layout(m.dtype, src)) } else { std::borrow::Cow::Borrowed(src) };
-            if parts.len() <= i || parts[i].w.len() < bytes.len() {
-                let w = s.alloc_zeros::<u8>(bytes.len()).map_err(gerr)?;
-                let p = KPart { w, dtype, bb: bb as i32, rows: m.rows };
-                if parts.len() <= i {
-                    parts.push(p);
-                } else {
-                    parts[i] = p;
-                }
-            }
-            let p = &mut parts[i];
-            (p.dtype, p.bb, p.rows) = (dtype, bb as i32, m.rows);
-            s.memcpy_htod(&bytes[..], &mut p.w.slice_mut(0..bytes.len())).map_err(gerr)?;
-        }
-        Ok(())
-    }
-
-    /// Loads processor layer `li` into the streaming slot `slot` (made on first use), with its KV
-    /// rows before `pos0`.
+    /// Sends processor layer `li` (with its KV rows before `pos0`) to slot `si`: the host fills the
+    /// slot's pinned buffer once its last upload is done, and the copy stream uploads it once the
+    /// slot's last layer is done computing.
     #[allow(clippy::too_many_arguments)]
-    fn stream_in_parts(s: &Arc<CudaStream>, f: &Funcs, sh: &Shape, max_ctx: usize, model: &Model, li: usize, pos0: usize, k: &[u16], v: &[u16], raw: &mut Option<CudaSlice<u8>>, slot: &mut Option<GLayer>) -> Result<(), Error> {
+    fn pipe_issue(p: &mut Pipe, ctx: &Arc<CudaContext>, f: &Funcs, sh: &Shape, max_ctx: usize, model: &Model, li: usize, j: usize, pos0: usize, k: &[u16], v: &[u16]) -> Result<(), Error> {
+        let (si, hb) = (j % 2, j % 3);
+        let direct = p.direct.is_some();
         let g = model.gguf();
         let l = &model.layers()[li];
         let Ffn::Dense { gate, up, down } = &l.ffn else { return Err(Error::Unsupported("streamed MoE layer".into())) };
+        let groups: [&[&Mat]; 4] = [&[&l.q, &l.k, &l.v], &[&l.o], &[gate, up], &[down]];
         let kvd = sh.n_kv * sh.hd;
-        if slot.is_none() {
-            let z = |n: usize| s.alloc_zeros::<f32>(n.max(1)).map_err(gerr);
-            *slot = Some(GLayer {
+        let nkv = pos0 * kvd;
+        let as_bytes = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
+        let norms: Vec<Vec<u8>> = [Some(&l.attn_norm[..]), Some(&l.ffn_norm[..]), l.q_norm.as_deref(), l.k_norm.as_deref()].iter().map(|n| n.map(as_bytes).unwrap_or_default()).collect();
+        // Host layout: every matrix, then the norms, then the earlier K and V rows.
+        let mut jobs: Vec<(&[u8], usize, bool)> = Vec::new();
+        let mut off = 0usize;
+        let mut mat_off = Vec::new();
+        for grp in &groups {
+            for m in grp.iter() {
+                mat_off.push(off);
+                if !direct {
+                    jobs.push((g.bytes_at(m.offset, m.rows * m.row_bytes), off, m.dtype == DType::Q6K));
+                    off += gpu_len(m).next_multiple_of(256);
+                }
+            }
+        }
+        let norm_off: Vec<usize> = norms
+            .iter()
+            .map(|n| {
+                let o = off;
+                off += n.len().next_multiple_of(256);
+                o
+            })
+            .collect();
+        for (i, n) in norms.iter().enumerate() {
+            if !n.is_empty() {
+                jobs.push((&n[..], norm_off[i], false));
+            }
+        }
+        // SAFETY: f16 bits viewed as bytes.
+        let kb = unsafe { std::slice::from_raw_parts(k.as_ptr() as *const u8, nkv * 2) };
+        let vb = unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, nkv * 2) };
+        let (k_off, v_off) = (off, off + (nkv * 2).next_multiple_of(256));
+        if nkv > 0 {
+            jobs.push((kb, k_off, false));
+            jobs.push((vb, v_off, false));
+        }
+        let total = v_off + (nkv * 2).next_multiple_of(256);
+        let tw = std::time::Instant::now();
+        if let Some(e) = j.checked_sub(3).and_then(|i| p.copied.get(i)).and_then(|e| e.as_ref()) {
+            e.synchronize().map_err(gerr)?;
+        }
+        let waited = tw.elapsed().as_secs_f64();
+        if p.host[hb].as_ref().is_none_or(|h| h.len() < total) {
+            p.host[hb] = None;
+            // SAFETY: page-locked host memory, written here and read by the copy stream.
+            p.host[hb] = Some(unsafe { ctx.alloc_pinned::<u8>(total + (64 << 20)) }.map_err(gerr)?);
+        }
+        let host = p.host[hb].as_mut().expect("made above").as_mut_slice().map_err(gerr)?;
+        let tf = std::time::Instant::now();
+        // Measuring aid: CEREBRO_PIPE_SKIP=fill|copy leaves out that stage after the first layers
+        // (wrong results; for timing the rest of the pipeline only).
+        let skip = std::env::var("CEREBRO_PIPE_SKIP").ok().filter(|_| j >= 3);
+        if skip.is_none() {
+            fill_host(host, &jobs);
+        }
+        if std::env::var_os("CEREBRO_PIPE_LOG").is_some() {
+            let s = tf.elapsed().as_secs_f64();
+            eprintln!("pipe: layer {li} slot {si}: waited {:.1} ms, filled {:.0} MB in {:.1} ms ({:.1} GB/s)", waited * 1e3, total as f64 / 1e6, s * 1e3, total as f64 / s / 1e9);
+        }
+        let c = p.copy.clone();
+        // The slot's buffers, made or grown on the copy stream (ordered before the uploads).
+        let z = |n: usize| c.alloc_zeros::<f32>(n.max(1)).map_err(gerr);
+        if p.slots[si].is_none() {
+            p.slots[si] = Some(GLayer {
                 attn_norm: z(l.attn_norm.len())?,
                 qkv: GMat::K { parts: Vec::new(), cols: 0 },
                 o: GMat::K { parts: Vec::new(), cols: 0 },
@@ -872,32 +1011,131 @@ impl GpuState {
                 gu: None,
                 down: None,
                 router: None,
-                kc: s.alloc_zeros::<u16>(max_ctx * kvd).map_err(gerr)?,
-                vc: s.alloc_zeros::<u16>(max_ctx * kvd).map_err(gerr)?,
+                kc: c.alloc_zeros::<u16>(max_ctx * kvd).map_err(gerr)?,
+                vc: c.alloc_zeros::<u16>(max_ctx * kvd).map_err(gerr)?,
                 delta: None,
             });
         }
-        let sl = slot.as_mut().expect("made above");
-        let empty = || GMat::K { parts: Vec::new(), cols: 0 };
-        let (mut qkv, mut o, mut gu, mut dn) = (Some(std::mem::replace(&mut sl.qkv, empty())), Some(std::mem::replace(&mut sl.o, empty())), sl.gu.take(), sl.down.take());
-        Self::fill_mat(s, f, g, raw, &mut qkv, &[&l.q, &l.k, &l.v])?;
-        Self::fill_mat(s, f, g, raw, &mut o, &[&l.o])?;
-        Self::fill_mat(s, f, g, raw, &mut gu, &[gate, up])?;
-        Self::fill_mat(s, f, g, raw, &mut dn, &[down])?;
-        (sl.qkv, sl.o, sl.gu, sl.down) = (qkv.expect("filled"), o.expect("filled"), gu, dn);
-        s.memcpy_htod(&l.attn_norm, &mut sl.attn_norm).map_err(gerr)?;
-        s.memcpy_htod(&l.ffn_norm, &mut sl.ffn_norm).map_err(gerr)?;
-        if let (Some(src), Some(d)) = (l.q_norm.as_deref(), sl.q_norm.as_mut()) {
-            s.memcpy_htod(src, d).map_err(gerr)?;
+        if let Some(e) = p.freed[si].take() {
+            c.wait(&e).map_err(gerr)?;
         }
-        if let (Some(src), Some(d)) = (l.k_norm.as_deref(), sl.k_norm.as_mut()) {
-            s.memcpy_htod(src, d).map_err(gerr)?;
+        let host = p.host[hb].as_ref().expect("made above").as_slice().map_err(gerr)?;
+        let cs = c.cu_stream();
+        // SAFETY: async copies from page-locked memory that stays untouched until `copied` fires.
+        let no_copy = skip.as_deref() == Some("copy");
+        let up = |dst: u64, a: usize, n: usize| if no_copy { Ok(()) } else { unsafe { cudarc::driver::result::memcpy_htod_async(dst, &host[a..a + n], cs) }.map_err(gerr) };
+        // SAFETY: async copies from the page-locked model file memory (register_direct).
+        let up_file = |dst: u64, src: &[u8]| if no_copy { Ok(()) } else { unsafe { cudarc::driver::result::memcpy_htod_async(dst, src, cs) }.map_err(gerr) };
+        let q6_max = groups.iter().flat_map(|g| g.iter()).filter(|m| m.dtype == DType::Q6K).map(|m| m.rows * m.row_bytes).max().unwrap_or(0);
+        if direct && q6_max > 0 && p.raw6[si].as_ref().is_none_or(|r| r.len() < q6_max) {
+            p.raw6[si] = Some(c.alloc_zeros::<u8>(q6_max).map_err(gerr)?);
         }
-        if pos0 > 0 {
-            let n = pos0 * kvd;
-            s.memcpy_htod(&k[..n], &mut sl.kc.slice_mut(0..n)).map_err(gerr)?;
-            s.memcpy_htod(&v[..n], &mut sl.vc.slice_mut(0..n)).map_err(gerr)?;
+        let sl = p.slots[si].as_mut().expect("made above");
+        p.splits[si].clear();
+        let q8_bytes: usize = groups.iter().flat_map(|g| g.iter()).filter(|m| m.dtype == DType::Q8_0).map(|m| m.rows * m.row_bytes).sum();
+        if q8_bytes > 0 && p.raw[si].as_ref().is_none_or(|r| r.len() < q8_bytes) {
+            p.raw[si] = Some(c.alloc_zeros::<u8>(q8_bytes).map_err(gerr)?);
         }
+        let mut raw_off = 0usize;
+        let mut mi = 0usize;
+        for (gi, grp) in groups.iter().enumerate() {
+            let slot_mat: &mut Option<GMat> = match gi {
+                0 => &mut None,
+                1 => &mut None,
+                2 => &mut sl.gu,
+                _ => &mut sl.down,
+            };
+            // qkv and o are not Options in GLayer: go through a temporary.
+            let mut tmp = match gi {
+                0 => Some(std::mem::replace(&mut sl.qkv, GMat::K { parts: Vec::new(), cols: 0 })),
+                1 => Some(std::mem::replace(&mut sl.o, GMat::K { parts: Vec::new(), cols: 0 })),
+                _ => slot_mat.take(),
+            };
+            let cols = grp[0].cols;
+            if grp[0].dtype == DType::Q8_0 {
+                let rows: usize = grp.iter().map(|m| m.rows).sum();
+                if !matches!(&tmp, Some(GMat::Q8 { qs, .. }) if qs.len() >= rows * cols) {
+                    tmp = Some(GMat::Q8 { qs: c.alloc_zeros::<i8>(rows * cols).map_err(gerr)?, ds: c.alloc_zeros::<f32>(rows * cols / 32).map_err(gerr)?, rows, cols });
+                }
+                if let Some(GMat::Q8 { rows: r, cols: cc, .. }) = tmp.as_mut() {
+                    (*r, *cc) = (rows, cols);
+                }
+                let raw = p.raw[si].as_ref().expect("made above");
+                let mut r0 = 0;
+                for m in grp.iter() {
+                    let n = m.rows * m.row_bytes;
+                    if direct {
+                        up_file(raw.device_ptr(&c).0 + raw_off as u64, g.bytes_at(m.offset, n))?;
+                    } else {
+                        up(raw.device_ptr(&c).0 + raw_off as u64, mat_off[mi], n)?;
+                    }
+                    p.splits[si].push((gi, raw_off, r0, m.rows, cols));
+                    raw_off += n;
+                    r0 += m.rows;
+                    mi += 1;
+                }
+            } else {
+                if !matches!(&tmp, Some(GMat::K { .. })) {
+                    tmp = Some(GMat::K { parts: Vec::new(), cols });
+                }
+                let Some(GMat::K { parts, cols: dc }) = tmp.as_mut() else { unreachable!() };
+                *dc = cols;
+                for (i, m) in grp.iter().enumerate() {
+                    let (bb, dtype) = gpu_block(m.dtype).expect("can_stream checked the format");
+                    let n = gpu_len(m);
+                    if parts.len() <= i || parts[i].w.len() < n {
+                        let part = KPart { w: c.alloc_zeros::<u8>(n).map_err(gerr)?, dtype, bb: bb as i32, rows: m.rows };
+                        if parts.len() <= i {
+                            parts.push(part);
+                        } else {
+                            parts[i] = part;
+                        }
+                    }
+                    let pt = &mut parts[i];
+                    (pt.dtype, pt.bb, pt.rows) = (dtype, bb as i32, m.rows);
+                    if !direct {
+                        up(pt.w.device_ptr(&c).0, mat_off[mi], n)?;
+                    } else if m.dtype == DType::Q6K {
+                        let src = g.bytes_at(m.offset, m.rows * m.row_bytes);
+                        let r6 = p.raw6[si].as_ref().expect("made above");
+                        up_file(r6.device_ptr(&c).0, src)?;
+                        let nb = src.len() as i64;
+                        let cfg = LaunchConfig { grid_dim: ((nb as u64).div_ceil(256) as u32, 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+                        if !no_copy {
+                            unsafe { c.launch_builder(&f.q6k_widen).arg(r6).arg(&mut pt.w).arg(&nb).launch(cfg) }.map_err(gerr)?;
+                        }
+                    } else {
+                        up_file(pt.w.device_ptr(&c).0, g.bytes_at(m.offset, n))?;
+                    }
+                    mi += 1;
+                }
+            }
+            match gi {
+                0 => sl.qkv = tmp.expect("set above"),
+                1 => sl.o = tmp.expect("set above"),
+                2 => sl.gu = tmp,
+                _ => sl.down = tmp,
+            }
+        }
+        let fl = |x: &CudaSlice<f32>| x.device_ptr(&c).0;
+        up(fl(&sl.attn_norm), norm_off[0], norms[0].len())?;
+        up(fl(&sl.ffn_norm), norm_off[1], norms[1].len())?;
+        if let Some(qn) = sl.q_norm.as_ref() {
+            up(fl(qn), norm_off[2], norms[2].len())?;
+        }
+        if let Some(kn) = sl.k_norm.as_ref() {
+            up(fl(kn), norm_off[3], norms[3].len())?;
+        }
+        if nkv > 0 {
+            up(sl.kc.device_ptr(&c).0, k_off, nkv * 2)?;
+            up(sl.vc.device_ptr(&c).0, v_off, nkv * 2)?;
+        }
+        if p.copied.len() <= j {
+            p.copied.resize_with(j + 1, || None);
+        }
+        p.copied[j] = Some(c.record_event(None).map_err(gerr)?);
+        // WDDM batches submissions: push the copies to the GPU now.
+        unsafe { cudarc::driver::sys::cuStreamQuery(cs) };
         Ok(())
     }
 
@@ -909,7 +1147,19 @@ impl GpuState {
         if t == 0 || t > CHUNK || pos0 + t > self.max_ctx || from != self.layers.len() {
             return Err(Error::Request("prefill outside the context".into()));
         }
-        self.prefill_chunk_streamed(model, toks, pos0, Some(StreamIn { from, k, v }))?;
+        if self.pipe.is_none() {
+            let copy = self.stream.context().new_stream().map_err(gerr)?;
+            self.pipe = Some(Pipe { slots: [None, None], raw: [None, None], splits: [Vec::new(), Vec::new()], host: [None, None, None], copy, copied: Vec::new(), freed: [None, None], kv_back: None, direct: register_direct(model, from), raw6: [None, None] });
+        }
+        let pipe = self.pipe.take();
+        let mut sin = StreamIn { pipe, from, k, v };
+        let t0 = std::time::Instant::now();
+        let r = self.prefill_chunk_streamed(model, toks, pos0, Some(&mut sin));
+        self.pipe = sin.pipe.take();
+        r?;
+        if std::env::var_os("CEREBRO_PIPE_LOG").is_some() {
+            eprintln!("pipe: chunk of {t} at {pos0}: {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
+        }
         let d = self.sh.dim;
         self.stream.memcpy_dtoh(&self.b.x.slice((t - 1) * d..t * d), last).map_err(gerr)?;
         Ok(())
@@ -1915,7 +2165,7 @@ impl GpuState {
         self.prefill_chunk_with(model, toks, pos0, out, None)
     }
 
-    fn prefill_chunk_streamed(&mut self, model: &Model, toks: &[u32], pos0: usize, sin: Option<StreamIn<'_>>) -> Result<u32, Error> {
+    fn prefill_chunk_streamed(&mut self, model: &Model, toks: &[u32], pos0: usize, sin: Option<&mut StreamIn<'_>>) -> Result<u32, Error> {
         self.prefill_chunk_full(model, toks, pos0, None, None, sin)
     }
 
@@ -1924,7 +2174,7 @@ impl GpuState {
         self.prefill_chunk_full(model, toks, pos0, out, all, None)
     }
 
-    fn prefill_chunk_full(&mut self, model: &Model, toks: &[u32], pos0: usize, out: Option<&mut [f32]>, all: Option<&mut Vec<f32>>, mut sin: Option<StreamIn<'_>>) -> Result<u32, Error> {
+    fn prefill_chunk_full(&mut self, model: &Model, toks: &[u32], pos0: usize, out: Option<&mut [f32]>, all: Option<&mut Vec<f32>>, mut sin: Option<&mut StreamIn<'_>>) -> Result<u32, Error> {
         let t = toks.len();
         let sh = &self.sh;
         let s = &self.stream;
@@ -2048,17 +2298,54 @@ impl GpuState {
         let n_res = self.layers.len().min(stop);
         let n_streamed = sin.as_ref().map_or(0, |si| model.layers().len() - si.from);
         let kvd = sh.n_kv * sh.hd;
+        let ctx = self.stream.context().clone();
+        let max_ctx = self.max_ctx;
+        let issue = |sin: &mut Option<&mut StreamIn<'_>>, j: usize| -> Result<(), Error> {
+            let si = sin.as_mut().expect("streamed layers");
+            let li = si.from + j;
+            let p = si.pipe.as_mut().expect("pipe");
+            Self::pipe_issue(p, &ctx, f, sh, max_ctx, model, li, j, pos0, &si.k[li], &si.v[li])
+        };
+        if n_streamed > 0 {
+            let back = n_streamed * 2 * t * kvd;
+            let p = sin.as_mut().expect("streamed layers").pipe.as_mut().expect("pipe");
+            p.copied.clear();
+            if p.kv_back.as_ref().is_none_or(|h| h.len() < back) {
+                p.kv_back = None;
+                // SAFETY: page-locked host memory written by the GPU and read after a synchronize.
+                p.kv_back = Some(unsafe { ctx.alloc_pinned_with_flags::<u16>(back, 0) }.map_err(gerr)?);
+            }
+            if n_res == 0 {
+                for j in 0..n_streamed.min(2) {
+                    issue(&mut sin, j)?;
+                }
+            }
+        }
         for idx in 0..n_res + n_streamed {
             let l: &mut GLayer = if idx < n_res {
                 &mut self.layers[idx]
             } else {
-                let si = sin.as_mut().expect("streamed layers");
-                let li = si.from + idx - n_res;
-                // The slot is reused layer after layer: the stream orders each upload after the
-                // previous layer's kernels.
-                let (sraw, sslot) = (&mut self.stream_raw, &mut self.streamed);
-                Self::stream_in_parts(s, f, sh, self.max_ctx, model, li, pos0, &si.k[li], &si.v[li], sraw, sslot)?;
-                self.streamed.as_mut().expect("filled")
+                let j = idx - n_res;
+                let p = sin.as_mut().expect("streamed layers").pipe.as_mut().expect("pipe");
+                s.wait(p.copied[j].as_ref().expect("issued")).map_err(gerr)?;
+                let sl = p.slots[j % 2].as_mut().expect("issued");
+                for &(gi, raw_off, r0, rows, cols) in &p.splits[j % 2] {
+                    let raw = p.raw[j % 2].as_ref().expect("issued");
+                    let m = match gi {
+                        0 => &mut sl.qkv,
+                        1 => &mut sl.o,
+                        2 => sl.gu.as_mut().expect("issued"),
+                        _ => sl.down.as_mut().expect("issued"),
+                    };
+                    let GMat::Q8 { qs, ds, .. } = m else { unreachable!() };
+                    let nb = (rows * cols / 32) as i32;
+                    let rv = raw.slice(raw_off..raw_off + rows * cols / 32 * 34);
+                    let mut qv = qs.slice_mut(r0 * cols..(r0 + rows) * cols);
+                    let mut dv = ds.slice_mut(r0 * cols / 32..(r0 + rows) * cols / 32);
+                    let cfg = LaunchConfig { grid_dim: ((nb as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+                    unsafe { s.launch_builder(&f.q80_split).arg(&rv).arg(&nb).arg(&mut qv).arg(&mut dv).launch(cfg) }.map_err(gerr)?;
+                }
+                sl
             };
             unsafe { s.launch_builder(&f.norm_b).arg(&b.x).arg(&l.attn_norm).arg(&mut b.xq).arg(&mut b.xd).arg(&dim).arg(&eps).arg(&null_f).launch(norm_cfg) }.map_err(gerr)?;
             if let Some(dl) = l.delta.as_mut() {
@@ -2109,12 +2396,40 @@ impl GpuState {
             unsafe { s.launch_builder(&f.silu_b).arg(&b.gu).arg(&mut b.xq).arg(&mut b.xd).arg(&ffn).arg(&ti).launch(LaunchConfig { grid_dim: (n.div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
             mm(l.down.as_ref().expect("dense layer"), &b.xq, &b.xd, &mut b.x, true)?;
             if idx >= n_res {
-                // The new KV rows back to the processor's cache.
-                let si = sin.as_mut().expect("streamed layers");
-                let li = si.from + idx - n_res;
+                // The new KV rows to the pinned host rows (copied to the processor's cache at the end).
+                let j = idx - n_res;
+                let n = t * kvd;
+                let (kp, vp) = (l.kc.device_ptr(s).0 + (pos0 * kvd * 2) as u64, l.vc.device_ptr(s).0 + (pos0 * kvd * 2) as u64);
+                let p = sin.as_mut().expect("streamed layers").pipe.as_mut().expect("pipe");
+                let back = p.kv_back.as_mut().expect("made above").as_mut_slice().map_err(gerr)?;
+                // SAFETY: async copies into page-locked memory read only after the stream synchronizes.
+                unsafe {
+                    cudarc::driver::result::memcpy_dtoh_async(&mut back[2 * j * n..(2 * j + 1) * n], kp, s.cu_stream()).map_err(gerr)?;
+                    cudarc::driver::result::memcpy_dtoh_async(&mut back[(2 * j + 1) * n..(2 * j + 2) * n], vp, s.cu_stream()).map_err(gerr)?;
+                }
+                p.freed[j % 2] = Some(s.record_event(None).map_err(gerr)?);
+                // Push this layer's kernels to the GPU before the host fills the next upload.
+                unsafe { cudarc::driver::sys::cuStreamQuery(s.cu_stream()) };
+                if j + 2 < n_streamed {
+                    issue(&mut sin, j + 2)?;
+                }
+            } else if idx == 0 && n_streamed > 0 {
+                // The first two processor layers upload while the GPU works through its own.
+                for j in 0..n_streamed.min(2) {
+                    issue(&mut sin, j)?;
+                }
+            }
+        }
+        if n_streamed > 0 {
+            s.synchronize().map_err(gerr)?;
+            let si = sin.as_mut().expect("streamed layers");
+            let back = si.pipe.as_mut().expect("pipe").kv_back.as_ref().expect("made above").as_slice().map_err(gerr)?;
+            let n = t * kvd;
+            for j in 0..n_streamed {
+                let li = si.from + j;
                 let (a, z) = (pos0 * kvd, (pos0 + t) * kvd);
-                s.memcpy_dtoh(&l.kc.slice(a..z), &mut si.k[li][a..z]).map_err(gerr)?;
-                s.memcpy_dtoh(&l.vc.slice(a..z), &mut si.v[li][a..z]).map_err(gerr)?;
+                si.k[li][a..z].copy_from_slice(&back[2 * j * n..(2 * j + 1) * n]);
+                si.v[li][a..z].copy_from_slice(&back[(2 * j + 1) * n..(2 * j + 2) * n]);
             }
         }
         let Some(output) = &self.output else {
