@@ -1155,6 +1155,9 @@ fn save_profile(l: &Loaded) {
     if let Some(g) = l.session.gpu.as_ref() {
         g.save_expert_profile();
     }
+    {
+        l.model.save_expert_profile();
+    }
 }
 
 /// What run_chat needs to run tools: the MCP host (if any), the approvals waiting for the user, and
