@@ -43,6 +43,7 @@ const COMMANDS: &[&str] = &[
     "tts_stop",
     "mic_level",
     "stt_transcribe",
+    "stt_transcribe_file",
     "model_describe_image",
     "tune_subscribe",
     "tune_cancel",

@@ -20,19 +20,31 @@ export interface Doc {
   addedAt: number;
   /** The file was longer than MAX_CHARS; only the start is searchable. */
   truncated?: boolean;
+  /** One optional folder, null for none. */
+  folder: string | null;
+  /** Tags, like a chat's: what the file is about. */
+  tags: string[];
+  /** The collections this file is in (collection ids, lib/collections.ts). */
+  collections: string[];
 }
 
 export const DOCS_KEY = "cerebro-documents";
-/** Formats read as plain text. PDF and Word need a parser this build does not have, so they are refused. */
+/** Formats read as plain text. */
 const TEXT_FILES = /\.(txt|text|md|markdown|csv|tsv|json|jsonl|xml|ya?ml|toml|ini|cfg|log|html?|rs|ts|tsx|js|jsx|mjs|py|c|cc|cpp|h|hpp|java|kt|go|cs|rb|php|sh|ps1|bat|sql|css|scss)$/i;
+/** Formats the converters turn into clean text (lib/convert). */
+const CONVERTED_FILES = /\.(pdf|docx)$/i;
 export const MAX_CHARS = 200_000;
 /** Everything stored together stays well under the browser's ~5 MB local-storage budget. */
 export const MAX_TOTAL_CHARS = 2_000_000;
 export const PASSAGE_CHARS = 800;
 
+/** True when Cerebro can turn this file into clean text (plain text, or a converted format). */
+export function canIndex(name: string): boolean {
+  return TEXT_FILES.test(name) || CONVERTED_FILES.test(name);
+}
+
 export function checkFile(name: string, bytes: number): string | null {
-  if (/\.(pdf|docx?|odt|rtf|pptx?|xlsx?)$/i.test(name)) return "PDF and Office files cannot be read yet. Save the file as text or Markdown and add that.";
-  if (!TEXT_FILES.test(name)) return "Supported: text, Markdown, HTML, CSV, JSON, XML, YAML, logs and code files.";
+  if (!canIndex(name)) return "Supported: text, Markdown, HTML, CSV, JSON, PDF, Word (.docx) and code files.";
   if (!(bytes > 0) || bytes > 20 * 1024 * 1024) return "Files must be under 20 MB.";
   return null;
 }
@@ -68,10 +80,31 @@ export function passages(text: string): string[] {
 }
 
 /** Builds a stored document from a file's real text. */
-export function makeDoc(id: string, name: string, type: string, bytes: number, raw: string, addedAt: number): Doc {
+export function makeDoc(
+  id: string,
+  name: string,
+  type: string,
+  bytes: number,
+  raw: string,
+  addedAt: number,
+  extra?: { folder?: string | null; tags?: readonly string[]; collections?: readonly string[] },
+): Doc {
   const truncated = raw.length > MAX_CHARS;
   const text = truncated ? raw.slice(0, MAX_CHARS) : raw;
-  return { id, name: name.slice(0, 260), type: type.slice(0, 100), bytes, chunks: passages(text).length, progress: 1, text, addedAt, truncated };
+  return {
+    id,
+    name: name.slice(0, 260),
+    type: type.slice(0, 100),
+    bytes,
+    chunks: passages(text).length,
+    progress: 1,
+    text,
+    addedAt,
+    truncated,
+    folder: extra?.folder ? extra.folder.slice(0, 60) : null,
+    tags: [...new Set((extra?.tags ?? []).map((t) => t.trim().slice(0, 30)).filter(Boolean))].slice(0, 8),
+    collections: [...new Set((extra?.collections ?? []).map((c) => c.slice(0, 64)).filter(Boolean))].slice(0, 12),
+  };
 }
 
 /** Example files for the browser preview only; the desktop app starts with the user's own. */
@@ -85,6 +118,9 @@ export const SAMPLE_DOCS: readonly Doc[] = [
     progress: 1,
     addedAt: 0,
     text: "Remote work is allowed up to three days a week with manager approval. Expense claims must be filed within 30 days with a receipt. Annual leave is 25 days plus public holidays. Laptops are replaced every three years.",
+    folder: null,
+    tags: [],
+    collections: [],
   },
   {
     id: "d-pricing",
@@ -95,6 +131,9 @@ export const SAMPLE_DOCS: readonly Doc[] = [
     progress: 1,
     addedAt: 0,
     text: "The starter plan is 19 euros a month for up to three seats. Annual billing gives two months free. Enterprise pricing is per seat with a minimum of 50 seats and includes on-premise deployment.",
+    folder: null,
+    tags: [],
+    collections: [],
   },
   {
     id: "d-runbook",
@@ -105,6 +144,9 @@ export const SAMPLE_DOCS: readonly Doc[] = [
     progress: 1,
     addedAt: 0,
     text: "To restart the inference server, stop the service, clear the cache folder and start it again. If the GPU runs out of memory, lower the context length or offload more expert layers to the processor.",
+    folder: null,
+    tags: [],
+    collections: [],
   },
 ];
 
@@ -119,7 +161,10 @@ export function parseDocs(raw: string | null, samples = !__DESKTOP__): Doc[] {
         const d = x as Record<string, unknown>;
         if (typeof d.id !== "string" || typeof d.name !== "string" || d.name.length > 260 || typeof d.text !== "string" || d.text.length > MAX_CHARS) return [];
         const n = (k: string) => (typeof d[k] === "number" && Number.isFinite(d[k]) && (d[k] as number) >= 0 ? (d[k] as number) : 0);
-        return [{ id: d.id, name: d.name, type: typeof d.type === "string" ? d.type.slice(0, 100) : "", bytes: n("bytes"), chunks: passages(d.text).length, progress: 1, text: d.text, addedAt: n("addedAt"), truncated: d.truncated === true }];
+        const folder = typeof d.folder === "string" && d.folder.trim() ? d.folder.trim().slice(0, 60) : null;
+        const tags = Array.isArray(d.tags) ? d.tags.flatMap((t) => (typeof t === "string" && t.trim() ? [t.trim().slice(0, 30)] : [])).slice(0, 8) : [];
+        const collections = Array.isArray(d.collections) ? d.collections.flatMap((c) => (typeof c === "string" && c.trim() ? [c.trim().slice(0, 64)] : [])).slice(0, 12) : [];
+        return [{ id: d.id, name: d.name, type: typeof d.type === "string" ? d.type.slice(0, 100) : "", bytes: n("bytes"), chunks: passages(d.text).length, progress: 1, text: d.text, addedAt: n("addedAt"), truncated: d.truncated === true, folder, tags, collections }];
       })
       .slice(0, 1000);
   } catch {
@@ -153,10 +198,10 @@ export function terms(q: string): string[] {
   return [...new Set(q.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((t) => t.length > 1 && !STOP.has(t)))].slice(0, 12);
 }
 
-const words = (s: string): string[] => s.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+export const words = (s: string): string[] => s.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
 
 /** A word matches a query term when it starts with it, so "backups" finds "backup" and "run" finds "runs". */
-const matches = (word: string, term: string): boolean => word.startsWith(term) || (term.length > 3 && term.startsWith(word) && word.length >= term.length - 1);
+export const matches = (word: string, term: string): boolean => word.startsWith(term) || (term.length > 3 && term.startsWith(word) && word.length >= term.length - 1);
 
 /**
  * BM25 (k1 1.2, b 0.75) over every passage of every document; one hit per document, its best passage,

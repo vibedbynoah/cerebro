@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-stt-transcribe-file"
+description = "Enables the stt_transcribe_file command without any pre-configured scope."
+commands.allow = ["stt_transcribe_file"]
+
+[[permission]]
+identifier = "deny-stt-transcribe-file"
+description = "Denies the stt_transcribe_file command without any pre-configured scope."
+commands.deny = ["stt_transcribe_file"]

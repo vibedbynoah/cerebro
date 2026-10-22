@@ -1,137 +1,109 @@
 import "../styles/documents.css";
-import { createMemo, createSignal, For, Show, type JSX } from "solid-js";
+import { createEffect, createSignal, For, Show, type JSX } from "solid-js";
 import { Icon } from "../components/icons";
-import { IllustrativeFlag, ScreenHeader, Section } from "../components/Screen";
-import { Term } from "../components/Term";
-import { checkFile, loadDocs, makeDoc, MAX_CHARS, MAX_TOTAL_CHARS, saveDocs, search, totalChars, type Doc } from "../lib/documents";
-import { newId } from "../lib/chat/store";
-import { notify } from "../lib/toast";
+import { IllustrativeFlag, ScreenHeader } from "../components/Screen";
+import { loadCollections, saveCollections, type Collection } from "../lib/collections";
+import { loadDocs, saveDocs, type Doc } from "../lib/documents";
+import { DocumentsSearch } from "./documents/Search";
+import { DocumentsFiles } from "./documents/Files";
+import { DocumentsConvert } from "./documents/Convert";
+import { DocumentsTools } from "./documents/Tools";
 
-const size = (b: number) => (b >= 1_000_000 ? `${(b / 1_000_000).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1000))} KB`);
+type TabId = "search" | "files" | "convert" | "tools";
+
+const TABS: readonly { id: TabId; label: string }[] = [
+  { id: "search", label: "Search" },
+  { id: "files", label: "Files" },
+  { id: "convert", label: "Convert" },
+  { id: "tools", label: "Quick tools" },
+];
 
 /**
- * Documents: search your own files on this machine. Drop text files to index them (read, split into
- * passages, ranked by BM25 keyword search, lib/documents.ts); search shows the passage that answers.
- * Nothing is uploaded.
+ * Documents: your own files on this computer. Search them, group them in collections, convert them
+ * to Markdown or plain text, and run the quick tools on them. Nothing is uploaded; the screen opens
+ * on search, the simplest thing to do with it.
  */
 export function Documents(): JSX.Element {
+  const [tab, setTab] = createSignal<TabId>("search");
   const [docs, setDocsS] = createSignal<Doc[]>(loadDocs());
-  const [query, setQuery] = createSignal("");
-  const [over, setOver] = createSignal(false);
+  const [collections, setCollectionsS] = createSignal<Collection[]>(loadCollections());
+  // The passage a chat answer used, opened from the source chip.
+  const [opened, setOpened] = createSignal<{ docId: string; index: number } | null>(null);
+
   const setDocs = (d: Doc[]) => {
     setDocsS(d);
     saveDocs(d);
   };
-
-  const add = async (files: FileList | File[]) => {
-    for (const f of Array.from(files).slice(0, 50)) {
-      const err = checkFile(f.name, f.size);
-      if (err) {
-        notify(`${f.name} not added`, err, "warning");
-        continue;
-      }
-      let raw: string;
-      try {
-        raw = await f.text();
-      } catch {
-        notify(`${f.name} not added`, "The file could not be read.", "error");
-        continue;
-      }
-      if (raw.includes("\u0000")) {
-        notify(`${f.name} not added`, "That is not a text file.", "warning");
-        continue;
-      }
-      const doc = makeDoc(newId(), f.name, f.type, f.size, raw, Date.now());
-      if (totalChars(docs()) + doc.text.length > MAX_TOTAL_CHARS) {
-        notify(`${f.name} not added`, "The index is full. Remove a file to make room.", "warning");
-        continue;
-      }
-      setDocs([doc, ...docs()]);
-      notify(
-        "Indexed",
-        `${doc.name}: ${doc.chunks} passage${doc.chunks === 1 ? "" : "s"}, searchable now.${doc.truncated ? ` Only the first ${MAX_CHARS.toLocaleString()} characters are searchable.` : ""}`,
-        doc.truncated ? "warning" : "success",
-      );
-    }
+  const setCollections = (list: Collection[]) => {
+    setCollectionsS(list);
+    saveCollections(list);
   };
-  const remove = (id: string) => setDocs(docs().filter((d) => d.id !== id));
-  const hits = createMemo(() => search(docs(), query()));
-  const ready = () => docs().filter((d) => d.progress >= 1);
+
+  createEffect(() => {
+    const hash = window.location.hash;
+    const at = hash.indexOf("?");
+    if (at < 0) return;
+    const params = new URLSearchParams(hash.slice(at + 1));
+    const docId = params.get("doc");
+    if (!docId) return;
+    const index = Number(params.get("p") ?? "0");
+    setOpened({ docId, index: Number.isFinite(index) && index >= 0 ? index : 0 });
+    setTab("search");
+  });
 
   return (
     <div class="screen documents">
       <ScreenHeader route="documents" actions={__DESKTOP__ ? undefined : <IllustrativeFlag />} />
-      <label
-        class="doc-drop"
-        data-over={over()}
-        onDragOver={(e) => (e.preventDefault(), setOver(true))}
-        onDragLeave={() => setOver(false)}
-        onDrop={(e) => {
-          e.preventDefault();
-          setOver(false);
-          if (e.dataTransfer?.files) void add(e.dataTransfer.files);
-        }}
-      >
-        <Icon name="upload" size={22} />
-        <span class="doc-drop__title">Drop files to make them searchable</span>
-        <span class="hint">Text, Markdown, HTML, CSV, JSON, logs and code. Indexed on this computer; nothing is uploaded.</span>
-        <input class="sr-only" type="file" multiple onChange={(e) => e.currentTarget.files && void add(e.currentTarget.files)} />
-      </label>
 
-      <Section id="doc-search" title="Search" description={<>Ask a question; the passages that share its words come back with their file. Keyword search for now; search by meaning (<Term k="rag" />) comes with the embedding engine.</>}>
-        <input class="doc-search" type="search" placeholder="How many days of annual leave?" aria-label="Search documents" value={query()} onInput={(e) => setQuery(e.currentTarget.value)} />
-        <Show when={query().trim()}>
-          <ol class="doc-hits" role="list" aria-live="polite">
-            <For each={hits()} fallback={<li class="hint">Nothing in {ready().length} indexed file{ready().length === 1 ? "" : "s"} matches.</li>}>
-              {(h) => (
-                <li class="doc-hit card">
-                  <div class="doc-hit__head">
-                    <Icon name="documents" size={16} />
-                    <span class="doc-hit__name">{h.doc.name}</span>
-                    <span class="mono hint">
-                      {h.matched} of {h.of} words
-                    </span>
-                  </div>
-                  <p class="doc-hit__text">
-                    <For each={h.parts}>{(p) => (p.hit ? <mark>{p.v}</mark> : p.v)}</For>
-                  </p>
-                </li>
-              )}
-            </For>
-          </ol>
-        </Show>
-      </Section>
+      <div class="doc-tabs" role="tablist" aria-label="Documents">
+        <For each={TABS}>
+          {(t) => (
+            <button
+              type="button"
+              role="tab"
+              id={`doc-tab-${t.id}`}
+              class="doc-tab"
+              aria-selected={tab() === t.id}
+              aria-controls={`doc-panel-${t.id}`}
+              tabindex={tab() === t.id ? 0 : -1}
+              onClick={() => setTab(t.id)}
+              onKeyDown={(e) => {
+                if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+                e.preventDefault();
+                const at = TABS.findIndex((x) => x.id === tab());
+                const next = TABS[(at + (e.key === "ArrowRight" ? 1 : TABS.length - 1)) % TABS.length]!;
+                setTab(next.id);
+                document.getElementById(`doc-tab-${next.id}`)?.focus();
+              }}
+            >
+              {t.label}
+            </button>
+          )}
+        </For>
+      </div>
 
-      <Section id="doc-list" title={`Indexed files (${ready().length})`}>
-        <ul class="doc-list" role="list">
-          <For each={docs()} fallback={<li class="hint">No files yet.</li>}>
-            {(d) => (
-              <li class="doc-row" data-doc={d.id}>
-                <Icon name="documents" size={16} />
-                <span class="doc-row__name">{d.name}</span>
-                <span class="hint mono">
-                  {size(d.bytes)} · {d.chunks} passages
-                </span>
-                <Show
-                  when={d.progress >= 1}
-                  fallback={
-                    <span class="doc-progress" role="progressbar" aria-label={`Indexing ${d.name}`} aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.round(d.progress * 100)}>
-                      <span style={{ transform: `scaleX(${d.progress})` }} />
-                    </span>
-                  }
-                >
-                  <span class="chip" data-tone="on">
-                    Ready
-                  </span>
-                </Show>
-                <button type="button" class="doc-x" aria-label={`Remove ${d.name}`} onClick={() => remove(d.id)}>
-                  <Icon name="trash" size={14} />
-                </button>
-              </li>
-            )}
-          </For>
-        </ul>
-      </Section>
+      <For each={TABS}>
+        {(t) => (
+          <div class="doc-panel" role="tabpanel" id={`doc-panel-${t.id}`} aria-labelledby={`doc-tab-${t.id}`} hidden={tab() !== t.id}>
+            <Show when={t.id === "search"}>
+              <DocumentsSearch docs={docs()} opened={opened()} />
+            </Show>
+            <Show when={t.id === "files"}>
+              <DocumentsFiles docs={docs()} setDocs={setDocs} collections={collections()} setCollections={setCollections} />
+            </Show>
+            <Show when={t.id === "convert"}>
+              <DocumentsConvert />
+            </Show>
+            <Show when={t.id === "tools"}>
+              <DocumentsTools />
+            </Show>
+          </div>
+        )}
+      </For>
+
+      <p class="hint doc-note">
+        <Icon name="lock" size={14} /> Everything on this screen happens on this computer. Nothing is uploaded.
+      </p>
     </div>
   );
 }

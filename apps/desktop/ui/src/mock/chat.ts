@@ -50,8 +50,45 @@ A useful rule: *more graphics memory beats a faster graphics card* for this kind
 
 const THINKING = "The user wants the practical answer. Check what limits speed here: memory for the context, where the experts sit, and whether the quantisation fits. Verify the numbers before answering.";
 
+/**
+ * The quick tools (lib/quick-tools.ts) ask for one job each. The preview answers with an example
+ * result, so the flow can be seen and tested; the desktop app really asks the model.
+ */
+function quickToolReply(req: ChatRequest): string | null {
+  const m = /Cerebro quick tool:\s*([a-z]+)/i.exec(req.systemPrompt);
+  if (!m) return null;
+  const tool = m[1]!.toLowerCase();
+  const last = [...req.turns].reverse().find((t) => t.role === "user")?.text.trim() ?? "";
+  const names = (/Fields:\s*([^\n]*)/.exec(last)?.[1] ?? "")
+    .split(",")
+    .map((f) => f.trim())
+    .filter(Boolean);
+  switch (tool) {
+    case "extract":
+      return JSON.stringify(names.length ? names.map((name) => ({ [name]: "example value" })) : [{ note: "example value" }], null, 2);
+    case "summarise":
+      return "Summary (example): the text makes one main point, and makes it in three sentences.";
+    case "translate":
+      return "Translation (example): Hola. Este es el texto traducido, tal como se pidió.";
+    case "rewrite":
+      return "Rewritten (example): the same text, shorter and plainer.";
+    case "explain":
+      return "The code (example) reads the file once and prints its first line.";
+    case "compare":
+      return "They agree (example): both texts describe the same release.\n\nThey differ (example): the second text adds the date.";
+    case "notes":
+      return "## Summary (example)\nThe team agreed three things.\n\n## Decisions (example)\n- The release moves to Friday.\n\n## Actions (example)\n- Someone writes the notes.";
+    case "describe":
+      return "The picture (example) shows a desk with a laptop and a cup of tea.";
+    default:
+      return null;
+  }
+}
+
 function pick(req: ChatRequest): { text: string; image?: { prompt: string } } {
   const last = [...req.turns].reverse().find((t) => t.role === "user")?.text.trim() ?? "";
+  const tool = quickToolReply(req);
+  if (tool) return { text: tool };
   if (last.startsWith("/echo ")) return { text: last.slice(6) };
   if (last.startsWith("/imagine ")) {
     const prompt = last.slice(9).trim().slice(0, 400);

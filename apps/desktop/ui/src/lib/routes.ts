@@ -58,7 +58,7 @@ export const ROUTES: readonly RouteDef[] = [
       : "Generate and edit images with local models.",
     keywords: "picture generate diffusion",
   },
-  { id: "documents", label: "Documents", icon: "documents", group: "Create", summary: "Search your own files on this machine; matching passages come back with their file.", keywords: "rag search files knowledge pdf" },
+  { id: "documents", label: "Documents", icon: "documents", group: "Create", summary: "Search your own files on this computer, group them in collections, convert them and run the quick tools.", keywords: "rag search files knowledge pdf collections convert quick tools" },
   { id: "train", label: "Train", icon: "chip", group: "Create", summary: "Fine-tune a model on your own examples and add it to your library.", keywords: "fine-tune finetune lora qlora dataset training adapter" },
   { id: "tools", label: "Tools", icon: "tools", group: "Extend", summary: "Actions a model may take, each behind your permission.", keywords: "functions actions agent" },
   {

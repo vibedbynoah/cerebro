@@ -1,6 +1,7 @@
 import { LEDGER_FILES, type ChatStats, type LedgerFileName, type ToolActivity } from "../../service/chat-types";
 import { readPref, writePref } from "../storage";
 import type { Effort, Memory, ReasoningSource, Verbosity } from "./prompt";
+import type { Source } from "../rag";
 
 /**
  * Conversations and memories, kept on this machine in local storage. Everything read back is
@@ -49,6 +50,8 @@ export interface ChatMessage {
   source: ReasoningSource;
   streaming: boolean;
   error: string | null;
+  /** The passages of the user's documents this reply used, as chips under the reply. */
+  sources: Source[];
 }
 
 /** One message in a conversation's tree. The message id is also the node id. */
@@ -139,6 +142,22 @@ function parseLedger(v: unknown): LedgerState | null {
   return { dir: str(x.dir, 1000), step, files };
 }
 
+function parseSources(v: unknown): Source[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .flatMap((raw): Source[] => {
+      if (!raw || typeof raw !== "object") return [];
+      const s = raw as Record<string, unknown>;
+      const n = num(s.n);
+      const docId = str(s.docId, 64);
+      const docName = str(s.docName, 260);
+      const text = str(s.text, 4000);
+      if (!docId || !docName || text === null || n < 1) return [];
+      return [{ n, docId, docName, text, index: num(s.index) }];
+    })
+    .slice(0, 20);
+}
+
 function parseMessage(v: unknown): ChatMessage | null {
   if (!v || typeof v !== "object") return null;
   const m = v as Record<string, unknown>;
@@ -189,6 +208,7 @@ function parseMessage(v: unknown): ChatMessage | null {
     effort: oneOf(m.effort, ["low", "medium", "high", "xhigh", "max"] as const, "medium"),
     verbosity: oneOf(m.verbosity, ["brief", "normal", "detailed"] as const, "brief"),
     source: oneOf(m.source, ["native", "prompts", "both", "none"] as const, "native"),
+    sources: parseSources(m.sources),
     // A reply that was streaming when the app closed is finished as stopped.
     streaming: false,
     error: str(m.error, 500),

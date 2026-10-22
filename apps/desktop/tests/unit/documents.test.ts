@@ -20,10 +20,13 @@ describe("documents index", () => {
   });
 
   it("refuses formats it cannot read, with the reason", () => {
-    expect(checkFile("report.pdf", 100)).toMatch(/PDF and Office/);
     expect(checkFile("tool.exe", 100)).toMatch(/Supported/);
     expect(checkFile("notes.md", 100)).toBeNull();
     expect(checkFile("empty.txt", 0)).toMatch(/under 20 MB/);
+    // PDF and Word are converted now, so they are accepted.
+    expect(checkFile("report.pdf", 100)).toBeNull();
+    expect(checkFile("plan.docx", 100)).toBeNull();
+    expect(checkFile("slides.pptx", 100)).toMatch(/Supported/);
   });
 
   it("ranks the passage that answers first, across files, matching word forms", () => {

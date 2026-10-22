@@ -255,8 +255,41 @@ pub async fn stt_transcribe(engine: State<'_, Engine>, mic: MicState<'_>, stt: S
     tauri::async_runtime::spawn_blocking(move || s.transcribe(&model, &samples)).await.map_err(|_| "Transcription failed.".to_owned())?
 }
 
-type TtsState<'a> = State<'a, std::sync::Arc<crate::tts::Tts>>;
-type PlayerState<'a> = State<'a, std::sync::Arc<crate::tts::Player>>;
+/// The bytes of an audio file, from the base64 the window sends. A file that is too large, or not
+/// base64 at all, is refused with a plain sentence.
+fn audio_bytes(data: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    if data.len() > 40_000_000 {
+        return Err("That audio file is too large. Keep it under 30 MB.".to_owned());
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(data.trim())
+        .map_err(|_| "That audio file could not be read.".to_owned())
+}
+
+/// Transcribes an audio file (WAV) with `model_id`, or the speech model in use (the loaded one,
+/// else the first in the library). The bytes arrive base64-encoded, so a recording can be turned
+/// into notes without writing it to disk first.
+#[tauri::command]
+pub async fn stt_transcribe_file(engine: State<'_, Engine>, stt: SttState<'_>, data: String, model_id: Option<String>) -> Result<String, String> {
+    let model = match model_id {
+        Some(id) => find_model(&engine, &id)?,
+        None => {
+            let library = engine.library.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            crate::stt::default_model(&stt, &library).ok_or("No speech-to-text model is in the library. Download one (for example Qwen3-ASR) from Model Hub.")?
+        }
+    };
+    if model.kind != "stt" {
+        return Err("That model does not transcribe speech.".to_owned());
+    }
+    let bytes = audio_bytes(&data)?;
+    let (samples, rate) = cerebro_engine::audio::read_wav(&bytes).map_err(|e| format!("That audio file could not be read: {e}"))?;
+    let samples = cerebro_engine::audio::resample(&samples, rate, cerebro_engine::audio::SAMPLE_RATE);
+    let s = std::sync::Arc::clone(stt.inner());
+    tauri::async_runtime::spawn_blocking(move || s.transcribe(&model, &samples)).await.map_err(|_| "Transcription failed.".to_owned())?
+}
+
+type TtsState<'a> = State<'a, std::sync::Arc<crate::tts::Tts>>;type PlayerState<'a> = State<'a, std::sync::Arc<crate::tts::Player>>;
 
 /// The speech-synthesis model `model_id`, or the one in use (loaded, else the first in the library).
 fn tts_model(engine: &Engine, tts: &crate::tts::Tts, model_id: Option<String>) -> Result<LibraryModel, String> {
@@ -1599,6 +1632,24 @@ pub fn local_api_rotate_key(api: LocalApiState<'_>) -> Result<serde_json::Value,
 
 pub fn local_api_file<R: Runtime>(app: &tauri::AppHandle<R>) -> Option<std::path::PathBuf> {
     app.path().app_config_dir().ok().map(|d| d.join("local-api.json"))
+}
+
+#[cfg(test)]
+mod audio_tests {
+    use super::audio_bytes;
+
+    #[test]
+    fn the_audio_bytes_are_read_from_base64() {
+        assert_eq!(audio_bytes("aGk=").expect("base64"), b"hi");
+        assert_eq!(audio_bytes(" aGk= ").expect("base64 with spaces around it"), b"hi");
+        assert!(audio_bytes("!!!").is_err());
+    }
+
+    #[test]
+    fn a_file_that_is_too_large_is_refused() {
+        let big = "A".repeat(40_000_001);
+        assert!(audio_bytes(&big).is_err());
+    }
 }
 
 #[cfg(test)]

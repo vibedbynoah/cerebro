@@ -1134,5 +1134,11 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
     chatToolAnswer: (id, answer) => chatEngine.answer(id, answer),
 
     transcribe: (seconds) => chatEngine.transcribe(seconds),
+    // The preview cannot run a speech model: it returns an example transcript, and the screen says
+    // the data is illustrative.
+    transcribeAudio: (audio) =>
+      Promise.resolve(
+        `The weekly sync agreed three things: the search release on Friday, the new pricing page, and who owns the support rota. (Example transcript for ${audio.name}; the desktop app transcribes the real file.)`,
+      ),
   };
 }
