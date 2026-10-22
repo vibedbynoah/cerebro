@@ -6,7 +6,7 @@ import { StatusPill } from "./components/StatusPill";
 import { StatusBar } from "./components/StatusBar";
 import { TitleBar } from "./components/TitleBar";
 import { Toasts } from "./components/Toasts";
-import { FeatureGuide, guideDue } from "./components/FeatureGuide";
+import { guideDue } from "./lib/guide";
 import { prefersReducedMotion } from "@design/motion";
 import { createRouter } from "./lib/router";
 import { chatSearchOpen, setChatJump, setChatSearchOpen } from "./lib/chat/navigation";
@@ -29,6 +29,7 @@ import { Home } from "./screens/Home";
 const named = <K extends string>(load: () => Promise<Record<K, (p: never) => JSX.Element>>, key: K) =>
   lazy(() => load().then((m) => ({ default: m[key] as (p: any) => JSX.Element })));
 const About = named(() => import("./screens/About"), "About");
+const FeatureGuide = named(() => import("./components/FeatureGuide"), "FeatureGuide");
 const Models = named(() => import("./screens/Models"), "Models");
 const Chat = named(() => import("./screens/Chat"), "Chat");
 const Documents = named(() => import("./screens/Documents"), "Documents");
@@ -293,14 +294,17 @@ function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Eleme
         <p class="sr-only" role="status" aria-live="polite">
           {announce()}
         </p>
-        <FeatureGuide
-          open={guideOpen()}
-          onClose={() => setGuideOpen(false)}
-          onOpen={(r) => {
-            focusMainNext = true;
-            router.navigate(r);
-          }}
-        />
+        {/* Loaded the first time it opens: the first screen does not wait for the feature list. */}
+        <Show when={guideOpen()}>
+          <FeatureGuide
+            open={guideOpen()}
+            onClose={() => setGuideOpen(false)}
+            onOpen={(r: RouteId) => {
+              focusMainNext = true;
+              router.navigate(r);
+            }}
+          />
+        </Show>
         <CommandPalette
           open={paletteOpen()}
           onOpenChange={setPaletteOpen}

@@ -9,7 +9,7 @@ import { COMMANDS } from "./chat/commands";
  * guide shows once more.
  */
 
-export const GUIDE_VERSION = "2026-10-22";
+export { GUIDE_SEEN_KEY, GUIDE_VERSION } from "./guide";
 
 export interface Feature {
   title: string;
@@ -76,4 +76,3 @@ export const FEATURE_GROUPS: readonly FeatureGroup[] = [
   },
 ];
 
-export const GUIDE_SEEN_KEY = "cerebro-guide-seen";

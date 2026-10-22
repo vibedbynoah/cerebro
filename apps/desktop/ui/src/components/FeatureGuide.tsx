@@ -2,19 +2,11 @@ import "../styles/guide.css";
 import { Dialog } from "@ark-ui/solid/dialog";
 import { For, Show, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
-import { FEATURE_GROUPS, GUIDE_SEEN_KEY, GUIDE_VERSION } from "../lib/features";
+import { FEATURE_GROUPS } from "../lib/features";
+import { markGuideSeen } from "../lib/guide";
 import type { RouteId } from "../lib/routes";
-import { readPref, writePref } from "../lib/storage";
 import { Icon } from "./icons";
 
-/** Whether the guide should open on its own: never seen, or the feature list changed since. */
-export function guideDue(): boolean {
-  return readPref(GUIDE_SEEN_KEY) !== GUIDE_VERSION;
-}
-
-export function markGuideSeen(): void {
-  writePref(GUIDE_SEEN_KEY, GUIDE_VERSION);
-}
 
 /**
  * "What Cerebro does": every feature in this build, grouped, each with a way to open its screen.
