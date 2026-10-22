@@ -1641,12 +1641,12 @@ impl Session {
             let batched = m.cfg.ssm.is_none() && !m.cfg.attn_gate;
             let dim = m.cfg.dim;
             // Every layer on the GPU, the processor's streamed through it (gpu.rs prefill_streamed).
-            let mut streamed = batched && crate::switches::enabled(crate::switches::SPLIT_STREAM) && crate::gpu::GpuState::can_stream(m, from);
+            let mut streamed = crate::switches::enabled(crate::switches::SPLIT_STREAM) && crate::gpu::GpuState::can_stream(m, from);
             let n_chunks = prompt[common..].len().div_ceil(crate::gpu::GpuState::SPLIT_CHUNK);
             for (ci, c) in prompt[common..].chunks(crate::gpu::GpuState::SPLIT_CHUNK).enumerate() {
                 let pos = self.tokens.len();
                 if streamed {
-                    match self.gpu.as_mut().expect("gpu").prefill_streamed(m, c, pos, from, &mut self.k, &mut self.v, &mut self.x) {
+                    match self.gpu.as_mut().expect("gpu").prefill_streamed(m, c, pos, from, &mut self.k, &mut self.v, &mut self.conv_hist, &mut self.ssm_state, &mut self.x) {
                         Ok(()) => {
                             self.tokens.extend_from_slice(c);
                             self.progress.set(self.tokens.len());

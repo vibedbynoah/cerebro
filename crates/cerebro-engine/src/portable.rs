@@ -260,6 +260,119 @@ fn main(@builtin(workgroup_id) g: vec3<u32>, @builtin(local_invocation_id) l: ve
 }
 "#;
 
+/// Prompt reading as a tiled matrix product: a workgroup of 128 threads computes 64 rows x 32
+/// tokens, staging 32-value slices of the weights (dequantised to f32) and of the activations in
+/// workgroup memory, each thread 4 rows x 4 tokens. Every weight is read once per 32 tokens, where
+/// the matvec kernels read it once per TB. WLOAD fills `ws` for one slice (int8 or Q4_K below).
+const GEMM: &str = r#"
+struct P { rows: u32, cols: u32, add: u32, off: u32, out_stride: u32, in_stride: u32, fixed: u32, _a: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(2) var<storage, read> w: array<u32>;
+@group(0) @binding(3) var<storage, read> s: array<f32>;
+@group(0) @binding(4) var<storage, read> x: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> o: array<f32>;
+// BN tokens as 8 groups of 4; a thread computes TR rows x 4 tokens, so BM = WG / 8 * TR rows.
+const BN: u32 = 32u;
+const BM: u32 = WG / 8u * TR;
+// 32 values per slice as 8 vec4s, rows padded to 9 so neighbouring threads hit different banks.
+const KV: u32 = 8u;
+const LS: u32 = 9u;
+var<workgroup> ws: array<vec4<f32>, BM * LS>;
+var<workgroup> xt: array<vec4<f32>, BN * LS>;
+fn unpack(q: u32) -> vec4<f32> {
+    let i = i32(q);
+    return vec4<f32>(f32(extractBits(i, 0u, 8u)), f32(extractBits(i, 8u, 8u)), f32(extractBits(i, 16u, 8u)), f32(extractBits(i, 24u, 8u)));
+}
+fn sb(bw: u32, k: u32) -> u32 { return (w[bw + 1u + k / 4u] >> (8u * (k % 4u))) & 0xFFu; }
+WLOAD
+@compute @workgroup_size(WG)
+fn main(@builtin(workgroup_id) g: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
+    let r0 = (g.x + g.y * 65535u) * BM;
+    let t0 = g.z * BN;
+    let nt = st.n;
+    let tid = l.x;
+    let tr = (tid % (WG / 8u)) * TR;
+    let tt = (tid / (WG / 8u)) * 4u;
+    var acc: array<vec4<f32>, TR>;
+    for (var i = 0u; i < TR; i++) { acc[i] = vec4<f32>(0.0); }
+    let xs = p.in_stride / 4u;
+    for (var k0 = 0u; k0 < p.cols; k0 += 32u) {
+        for (var idx = tid; idx < BM * KV; idx += WG) {
+            let r = idx / KV;
+            let c = idx % KV;
+            let gr = r0 + r;
+            var v = vec4<f32>(0.0);
+            if (gr < p.rows) { v = wload(gr, k0, c); }
+            ws[r * LS + c] = v;
+        }
+        for (var idx = tid; idx < BN * KV; idx += WG) {
+            let t = idx / KV;
+            let c = idx % KV;
+            var v = vec4<f32>(0.0);
+            if (t0 + t < nt) { v = x[(t0 + t) * xs + k0 / 4u + c]; }
+            xt[t * LS + c] = v;
+        }
+        workgroupBarrier();
+        for (var c = 0u; c < KV; c++) {
+            let b0 = xt[tt * LS + c];
+            let b1 = xt[(tt + 1u) * LS + c];
+            let b2 = xt[(tt + 2u) * LS + c];
+            let b3 = xt[(tt + 3u) * LS + c];
+            for (var i = 0u; i < TR; i++) {
+                let a = ws[(tr + i) * LS + c];
+                acc[i] += vec4<f32>(dot(a, b0), dot(a, b1), dot(a, b2), dot(a, b3));
+            }
+        }
+        workgroupBarrier();
+    }
+    for (var i = 0u; i < TR; i++) {
+        let r = r0 + tr + i;
+        if (r < p.rows) {
+            for (var j = 0u; j < 4u; j++) {
+                let t = t0 + tt + j;
+                if (t < nt) {
+                    let oi = t * p.out_stride + p.off + r;
+                    if (p.add == 1u) { o[oi] += acc[i][j]; } else { o[oi] = acc[i][j]; }
+                }
+            }
+        }
+    }
+}
+"#;
+
+/// GEMM's weight loader for the int8 layout: four weights of row `gr` at value k0 + 4c, scaled.
+const WLOAD_I8: &str = r#"
+fn wload(gr: u32, k0: u32, c: u32) -> vec4<f32> {
+    let wi = gr * (p.cols / 4u) + k0 / 4u + c;
+    return unpack(w[wi]) * s[wi / 8u];
+}
+"#;
+
+/// GEMM's weight loader for Q4_K blocks: values k0 + 4c..+3 of row `gr`, i.e. the low or high
+/// nibbles (sub-block 2j or 2j+1) of four bytes of the 64-value group j.
+const WLOAD_Q4K: &str = r#"
+fn wload(gr: u32, k0: u32, c: u32) -> vec4<f32> {
+    let nb = p.cols / 256u;
+    let bw = gr * nb * 36u + (k0 / 256u) * 36u;
+    let j = (k0 % 256u) / 64u;
+    let half = (k0 % 64u) / 32u;
+    let is = 2u * j + half;
+    var sc = 0u;
+    var mn = 0u;
+    if (is < 4u) {
+        sc = sb(bw, is) & 63u;
+        mn = sb(bw, is + 4u) & 63u;
+    } else {
+        sc = (sb(bw, is + 4u) & 15u) | ((sb(bw, is - 4u) >> 6u) << 4u);
+        mn = (sb(bw, is + 4u) >> 4u) | ((sb(bw, is) >> 6u) << 4u);
+    }
+    let dd = unpack2x16float(w[bw]);
+    let q = w[bw + 4u + j * 8u + c] >> (4u * half);
+    let v = vec4<f32>(f32(q & 15u), f32((q >> 8u) & 15u), f32((q >> 16u) & 15u), f32((q >> 24u) & 15u));
+    return dd.x * f32(sc) * v - vec4<f32>(dd.y * f32(mn));
+}
+"#;
+
 /// Q4_K, two rows per workgroup of 64 threads: a thread takes a whole 64-weight group (32
 /// contiguous bytes of nibbles, its two scales decoded once) and keeps its eight words in registers
 /// across tokens. More bytes in flight per thread than MATVEC_Q4K; `load` times both.
@@ -838,6 +951,9 @@ pub struct PortableState {
     /// The Q4_K kernels chosen at load, likewise.
     qk1: (usize, u32),
     qk8: (usize, u32),
+    /// The tiled GEMM that reads prompts, when one was checked against the matvec kernels and
+    /// faster at load: (pipeline, rows per workgroup), for the int8 and Q4_K layouts.
+    gemm: [Option<(usize, u32)>; 2],
     /// What the load-time timing chose, in words.
     pub kernels: String,
     dim: usize,
@@ -879,6 +995,13 @@ const MV_VARIANTS: [(&str, &str, u32, usize); 6] = [
 ];
 /// Pipelines from index MV0 on are the MV_VARIANTS, in order.
 const MV0: usize = 15;
+/// Then the tiled prompt products (GEMM): (label, threads, rows per thread), int8 then Q4_K.
+const GEMM_VARIANTS: [(&str, u32, u32); 2] = [("4 rows x 4 tokens per thread", 128, 4), ("8 rows x 4 tokens per thread", 64, 8)];
+const P_GEMM0: usize = MV0 + MV_VARIANTS.len();
+/// Tokens per GEMM workgroup (BN in the shader) and the fewest tokens for which the GEMM replaces
+/// the matvec kernels.
+const GEMM_BN: u32 = 32;
+const GEMM_MIN: usize = 12;
 const TB: usize = 8;
 /// A submission should take about this long: Windows resets a GPU driver whose work runs past two
 /// seconds, and an integrated GPU shares itself with the desktop, which must stay responsive.
@@ -1116,6 +1239,11 @@ impl PortableState {
             let src = if family == "quad" { format!("const TB: u32 = {tb}u;{STEP}{MATVEC}") } else { format!("const TB: u32 = {tb}u; const WG: u32 = {wg}u;{STEP}{MATVEC_ROW}") };
             pipes.push(pipe(src, P_MATVEC, label));
         }
+        for wl in [WLOAD_I8, WLOAD_Q4K] {
+            for (label, wg, tr) in GEMM_VARIANTS {
+                pipes.push(pipe(format!("const WG: u32 = {wg}u; const TR: u32 = {tr}u;{STEP}{}", GEMM.replace("WLOAD", wl)), P_MATVEC, label));
+            }
+        }
         trace("pipelines");
         let bind = |li: usize, bufs: &[&wgpu::Buffer]| {
             let entries: Vec<wgpu::BindGroupEntry> = bufs.iter().enumerate().map(|(i, b)| wgpu::BindGroupEntry { binding: i as u32, resource: b.as_entire_binding() }).collect();
@@ -1348,12 +1476,102 @@ impl PortableState {
             qk8 = (P_Q4K + i, Q4K_VARIANTS[i].1);
         }
         let _ = &mut mv1;
+        // The tiled GEMM for prompts: on the largest matrix of each layout, same result as the
+        // chosen prompt kernel (within 1e-3 of the largest output) and faster over a full chunk.
+        let mut gemm: [Option<(usize, u32)>; 2] = [None, None];
+        if std::env::var_os("CEREBRO_PORTABLE_NO_GEMM").is_none() && chunk >= GEMM_MIN {
+            for (gi, want_q4k) in [(0usize, false), (1, true)] {
+                let probe = layer_calls
+                    .iter()
+                    .flatten()
+                    .filter(|c| matches!(c.dims, Dims::Rows { q4k, .. } if q4k == want_q4k) && matches!(c.io, Some((_, _, false))))
+                    .max_by_key(|c| if let Dims::Rows { rows, .. } = c.dims { rows } else { 0 });
+                let Some(Call { bind: bindg, dims: Dims::Rows { rows, .. }, io: Some((input, output, _)), .. }) = probe else { continue };
+                let rows = *rows;
+                let nt = chunk;
+                let (mvp, per, tb) = if want_q4k { (qk8.0, qk8.1, Q4K_VARIANTS[qk8.0 - P_Q4K].2) } else { (mv8.0, mv8.1, MV_VARIANTS[mv8.0 - MV0].3) };
+                let run = |pipe: usize, gemm_bm: Option<u32>, times: usize| -> Result<f64, Error> {
+                    let (wg, z) = match gemm_bm { Some(bm) => (rows.div_ceil(bm), (nt as u32).div_ceil(GEMM_BN)), None => (rows.div_ceil(per), (nt as u32).div_ceil(tb as u32)) };
+                    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                    {
+                        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
+                        pass.set_pipeline(&pipes[pipe]);
+                        pass.set_bind_group(0, bindg, &[]);
+                        for _ in 0..times {
+                            pass.dispatch_workgroups(wg.min(65535), wg.div_ceil(65535), z);
+                        }
+                    }
+                    let t0 = std::time::Instant::now();
+                    let idx = queue.submit([enc.finish()]);
+                    device.poll(wgpu::PollType::Wait { submission_index: Some(idx), timeout: None }).map_err(perr)?;
+                    Ok(t0.elapsed().as_secs_f64())
+                };
+                let staging = device.create_buffer(&wgpu::BufferDescriptor { label: Some("gemm check"), size: output.size(), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+                let read_out = || -> Result<Vec<f32>, Error> {
+                    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                    enc.copy_buffer_to_buffer(output, 0, &staging, 0, output.size());
+                    queue.submit([enc.finish()]);
+                    let slice = staging.slice(..);
+                    slice.map_async(wgpu::MapMode::Read, |_| {});
+                    device.poll(wgpu::PollType::wait_indefinitely()).map_err(perr)?;
+                    let v = slice.get_mapped_range().map_err(perr)?.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+                    staging.unmap();
+                    Ok(v)
+                };
+                let n_in = (input.size() / 4) as usize;
+                let mut seed = 0x1234_5679u32;
+                let vals: Vec<u8> = (0..n_in)
+                    .flat_map(|_| {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 17;
+                        seed ^= seed << 5;
+                        ((seed >> 8) as f32 / (1u32 << 23) as f32 - 1.0).to_le_bytes()
+                    })
+                    .collect();
+                queue.write_buffer(&step, 0, &Self::step_record(m, 0, nt));
+                queue.write_buffer(input, 0, &vals);
+                run(mvp, None, 1)?;
+                let a = read_out()?;
+                let used = (nt * rows as usize).min(a.len());
+                let scale = a.iter().take(used).fold(0f32, |m, v| m.max(v.abs())).max(1e-6);
+                let mut tm = f64::MAX;
+                for _ in 0..2 {
+                    tm = tm.min(run(mvp, None, 10)? / 10.0);
+                }
+                let kind = if want_q4k { "Q4_K" } else { "int8" };
+                let mut best = tm;
+                for (vi, (label, wgs, tr)) in GEMM_VARIANTS.iter().enumerate() {
+                    let gp = P_GEMM0 + gi * GEMM_VARIANTS.len() + vi;
+                    let bm = wgs / 8 * tr;
+                    queue.write_buffer(input, 0, &vals);
+                    run(gp, Some(bm), 1)?;
+                    let b = read_out()?;
+                    if !a.iter().zip(&b).take(used).all(|(x, y)| (x - y).abs() <= 1e-3 * scale) {
+                        trace(&format!("gemm {kind} {label} disagrees with the matvec kernel: not used"));
+                        continue;
+                    }
+                    let mut tg = f64::MAX;
+                    for _ in 0..2 {
+                        tg = tg.min(run(gp, Some(bm), 10)? / 10.0);
+                    }
+                    trace(&format!("gemm {kind} {label}, {nt} tokens: {:.1} us against {:.1} us", tg * 1e6, tm * 1e6));
+                    if tg < best {
+                        best = tg;
+                        gemm[gi] = Some((gp, bm));
+                    }
+                }
+                if let Some((gp, _)) = gemm[gi] {
+                    let label = GEMM_VARIANTS[(gp - P_GEMM0) % GEMM_VARIANTS.len()].0;
+                    words.push(format!("tiled GEMM {label} for {kind} prompts ({:.1}x)", tm / best));
+                }
+            }
+        }
         words.push(if per_head { "attention one head per workgroup".into() } else { "attention in 256-position spans".into() });
         if ai.backend == wgpu::Backend::Dx12 {
             words.push(if fxc { "shaders compiled by FXC".into() } else { "shaders compiled by DXC".into() });
         }
         let kernels = words.join(", ");
-        Ok(Self { device, error, queue, info, max_ctx, chunk, x, step, logits, readback, readback_x, pipes, layer_calls, head_calls, pass_tokens: 4.min(chunk), pass_layers: n_layer, mv1, mv8, qk1, qk8, kernels, dim, vocab: c.vocab, bytes })
+        Ok(Self { device, error, queue, info, max_ctx, chunk, x, step, logits, readback, readback_x, pipes, layer_calls, head_calls, pass_tokens: 4.min(chunk), pass_layers: n_layer, mv1, mv8, qk1, qk8, gemm, kernels, dim, vocab: c.vocab, bytes })
     }
 
     /// Where the model went, for the app (the same shape as the CUDA planner's): every layer on this
@@ -1423,6 +1641,11 @@ impl PortableState {
                 Dims::Heads(h) => (call.pipe, (h, ntu, 1)),
                 Dims::Elems(n) => (call.pipe, ((ntu * n).div_ceil(256), 1, 1)),
                 Dims::Spans(h) => (call.pipe, (h, spans, ntu)),
+                Dims::Rows { rows, fixed: false, q4k } if nt >= GEMM_MIN && self.gemm[q4k as usize].is_some() => {
+                    let (gp, bm) = self.gemm[q4k as usize].expect("checked");
+                    let wg = rows.div_ceil(bm);
+                    (gp, (wg.min(65535), wg.div_ceil(65535), ntu.div_ceil(GEMM_BN)))
+                }
                 Dims::Rows { rows, fixed, q4k: true } => {
                     let ((pipe, per), z) = if fixed || nt == 1 { (self.qk1, 1) } else { (self.qk8, ntu.div_ceil(Q4K_VARIANTS[self.qk8.0 - P_Q4K].2 as u32)) };
                     let wg = rows.div_ceil(per);
@@ -1434,6 +1657,15 @@ impl PortableState {
                     (pipe, (wg.min(65535), wg.div_ceil(65535), z))
                 }
             };
+            // Measuring aid: CEREBRO_PORTABLE_SKIP=attn|mat leaves those dispatches out (wrong
+            // results; for timing the rest only).
+            if let Ok(skip) = std::env::var("CEREBRO_PORTABLE_SKIP") {
+                let attn = matches!(pipe, P_ATTN | P_ATTN_HEAD | P_COMB);
+                let mat = matches!(call.dims, Dims::Rows { .. });
+                if (skip == "attn" && attn) || (skip == "mat" && mat) {
+                    continue;
+                }
+            }
             pass.set_pipeline(&self.pipes[pipe]);
             pass.set_bind_group(0, &call.bind, &[]);
             pass.dispatch_workgroups(d.0, d.1, d.2);
@@ -1529,7 +1761,7 @@ impl PortableState {
                     } else {
                         self.pass_layers = ((pl as f64 * PASS_SECONDS / secs) as usize).max(1);
                     }
-                } else if secs < PASS_SECONDS / 4.0 && pl == self.pass_layers && nt == self.pass_tokens.min(toks.len() - i) {
+                } else if secs < PASS_SECONDS / 2.0 && pl == self.pass_layers && nt == self.pass_tokens.min(toks.len() - i) {
                     if self.pass_layers < n_layer {
                         self.pass_layers = (self.pass_layers * 2).min(n_layer);
                     } else if nt == self.pass_tokens {

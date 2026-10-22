@@ -32,7 +32,7 @@ fn main() {
             std::thread::sleep(std::time::Duration::from_secs(r));
         }
     }
-    s.prof = [0.0; 7];
+    s.prof = [0.0; 10];
     let tf = std::time::Instant::now();
     s.feed(&m, &ids).expect("feed");
     let feed = tf.elapsed().as_secs_f64();
@@ -47,7 +47,7 @@ fn main() {
     if let Some(r) = std::env::var("PROF_REST").ok().and_then(|v| v.parse::<u64>().ok()) {
         std::thread::sleep(std::time::Duration::from_secs(r));
     }
-    s.prof = [0.0; 7];
+    s.prof = [0.0; 10];
     let mut t = argmax(&s.logits);
     let t0 = std::time::Instant::now();
     for _ in 0..n {
