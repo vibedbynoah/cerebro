@@ -32,7 +32,8 @@ try {
   let browser;
   for (let i = 0; i < 60 && !browser; i++) {
     await sleep(500);
-    browser = await chromium.connectOverCDP("http://127.0.0.1:9334").catch(() => undefined);
+    // 9333: the e2e build's own port (lib.rs); 9334: the variable above, for builds without it.
+    for (const port of [9333, 9334]) browser ??= await chromium.connectOverCDP(`http://127.0.0.1:${port}`).catch(() => undefined);
   }
   if (!browser) throw new Error("the app did not open a debugging port");
   const page = browser.contexts()[0].pages().find((p) => !p.url().includes("isolation")) ?? browser.contexts()[0].pages()[0];
