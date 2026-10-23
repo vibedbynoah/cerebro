@@ -1025,7 +1025,10 @@ impl Model {
         let (cols, rows, rb) = (m.cols, m.rows, m.row_bytes);
         assert!(out.len() >= qas.len() * rows && xs.len() >= qas.len() * cols);
         let pool = crate::pool::global();
-        let div = std::env::var("CEREBRO_BATCH_DIV").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(4);
+        // Thirty-two pieces per thread: on a hybrid processor the efficiency cores take fewer of them
+        // (Qwen3-8B Q4_K_M, 20 threads, 512 tokens: 4 per thread 52.8, 16 58.0, 32 59.3 tok/s).
+        // CEREBRO_BATCH_DIV overrides it for measuring.
+        let div = std::env::var("CEREBRO_BATCH_DIV").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(32);
         let chunk = (rows / (pool.threads() * div)).clamp(8, 256).next_multiple_of(8);
         let o = SyncPtr(out.as_mut_ptr());
         let pack = self.pack(m);

@@ -74,11 +74,14 @@ fn zero() -> i64 {
     0
 }
 fn threads_default() -> i64 {
-    // Hybrid processors: the performance cores' threads (pinned there; see CPU_PIN). Otherwise
-    // every logical CPU but four, leaving room for the OS, the GPU driver and the UI.
+    // Hybrid processors: every logical CPU, each thread pinned to its core class (pool.rs
+    // apply_pinning), with work in small pieces so the efficiency cores never hold up the end.
+    // i9-12900H, 512-token prompt, 12 against 20 threads: Qwen3-0.6B Q8_0 613 -> 671, Qwen3-8B
+    // Q4_K_M 45 -> 58 tok/s. Otherwise every logical CPU but four, leaving room for the OS, the
+    // GPU driver and the UI.
     let c = crate::hw::cores();
     if c.hybrid() {
-        return c.performance_logical as i64;
+        return c.logical as i64;
     }
     std::thread::available_parallelism().map_or(4, |n| n.get()).saturating_sub(4).max(1) as i64
 }
