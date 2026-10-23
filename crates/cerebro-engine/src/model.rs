@@ -1025,7 +1025,8 @@ impl Model {
         let (cols, rows, rb) = (m.cols, m.rows, m.row_bytes);
         assert!(out.len() >= qas.len() * rows && xs.len() >= qas.len() * cols);
         let pool = crate::pool::global();
-        let chunk = (rows / (pool.threads() * 4)).clamp(8, 256).next_multiple_of(8);
+        let div = std::env::var("CEREBRO_BATCH_DIV").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(4);
+        let chunk = (rows / (pool.threads() * div)).clamp(8, 256).next_multiple_of(8);
         let o = SyncPtr(out.as_mut_ptr());
         let pack = self.pack(m);
         pool.run(rows.div_ceil(chunk), &|i| {
@@ -1147,6 +1148,17 @@ const ATT_SPAN: usize = 256;
 const CPU_CHUNK: usize = 32;
 
 /// A raw output pointer shared by parallel work items that write disjoint elements.
+/// A raw pointer work items share, each writing only its own elements.
+struct Raw<T>(*mut T);
+// SAFETY: callers guarantee every element is written by at most one item.
+unsafe impl<T> Sync for Raw<T> {}
+unsafe impl<T> Send for Raw<T> {}
+impl<T> Raw<T> {
+    fn at(&self, i: usize) -> *mut T {
+        self.0.wrapping_add(i)
+    }
+}
+
 struct SyncPtr(*mut f32);
 // SAFETY: callers guarantee every element is written by at most one item.
 unsafe impl Sync for SyncPtr {}
@@ -2028,11 +2040,16 @@ impl Session {
             }
         }
         let cs: Vec<Vec<(f32, f32)>> = (0..nt).map(|t| m.rope_cs(self.rope_pos(pos0 + t))).collect();
+        // Per-token steps run on the pool (they were serial: about a tenth of a 512-token prompt on
+        // Qwen3-0.6B).
         let norm_quant = |x: &[f32], w: &[f32], h: &mut [f32], qa: &mut [QAct]| {
-            for t in 0..nt {
-                rmsnorm(&x[t * dim..(t + 1) * dim], w, c.eps, &mut h[t * dim..(t + 1) * dim]);
-                qa[t].quantize(&h[t * dim..(t + 1) * dim]);
-            }
+            let (hp, qp) = (Raw(h.as_mut_ptr()), Raw(qa.as_mut_ptr()));
+            crate::pool::global().run(nt, &|t| {
+                // SAFETY: token t owns its row of h and its QAct.
+                let (ht, qt) = unsafe { (std::slice::from_raw_parts_mut(hp.at(t * dim), dim), &mut *qp.at(t)) };
+                rmsnorm(&x[t * dim..(t + 1) * dim], w, c.eps, ht);
+                qt.quantize(ht);
+            });
         };
         for (li, l) in m.layers.iter().enumerate().skip(from) {
             m.stream_enter(li);
@@ -2047,61 +2064,80 @@ impl Session {
             m.matmul_batch(&l.q, &h, &qa_dim, &mut q);
             m.matmul_batch(&l.k, &h, &qa_dim, &mut kb);
             m.matmul_batch(&l.v, &h, &qa_dim, &mut vb);
-            for t in 0..nt {
-                for hh in 0..c.n_head {
-                    let qh = &mut q[t * qd + hh * hd..t * qd + (hh + 1) * hd];
-                    if let Some(w) = &l.q_norm {
-                        rmsnorm_inplace(qh, w, c.eps);
+            {
+                let (qp, kp, kcp, vcp) = (Raw(q.as_mut_ptr()), Raw(kb.as_mut_ptr()), Raw(self.k[li].as_mut_ptr()), Raw(self.v[li].as_mut_ptr()));
+                let vbr = &vb;
+                let cs = &cs;
+                crate::pool::global().run(nt, &|t| {
+                    // SAFETY: token t owns its rows of q and kb and its KV slots.
+                    let (qt, kt) = unsafe { (std::slice::from_raw_parts_mut(qp.at(t * qd), qd), std::slice::from_raw_parts_mut(kp.at(t * kvd), kvd)) };
+                    for hh in 0..c.n_head {
+                        let qh = &mut qt[hh * hd..(hh + 1) * hd];
+                        if let Some(w) = &l.q_norm {
+                            rmsnorm_inplace(qh, w, c.eps);
+                        }
+                        rope(qh, &cs[t]);
                     }
-                    rope(qh, &cs[t]);
-                }
-                for kh in 0..c.n_kv {
-                    let kk = &mut kb[t * kvd + kh * hd..t * kvd + (kh + 1) * hd];
-                    if let Some(w) = &l.k_norm {
-                        rmsnorm_inplace(kk, w, c.eps);
+                    for kh in 0..c.n_kv {
+                        let kk = &mut kt[kh * hd..(kh + 1) * hd];
+                        if let Some(w) = &l.k_norm {
+                            rmsnorm_inplace(kk, w, c.eps);
+                        }
+                        rope(kk, &cs[t]);
                     }
-                    rope(kk, &cs[t]);
-                }
-                let p = pos0 + t;
-                crate::quant::store_f16(&mut self.k[li][p * kvd..(p + 1) * kvd], &kb[t * kvd..(t + 1) * kvd]);
-                crate::quant::store_f16(&mut self.v[li][p * kvd..(p + 1) * kvd], &vb[t * kvd..(t + 1) * kvd]);
+                    let p = pos0 + t;
+                    // SAFETY: slot p belongs to token t alone.
+                    let (kd, vd) = unsafe { (std::slice::from_raw_parts_mut(kcp.at(p * kvd), kvd), std::slice::from_raw_parts_mut(vcp.at(p * kvd), kvd)) };
+                    crate::quant::store_f16(kd, kt);
+                    crate::quant::store_f16(vd, &vbr[t * kvd..(t + 1) * kvd]);
+                });
             }
             lap(0, &mut pp);
-            // Causal attention, one work item per (token, query head).
+            // Causal attention, one work item per (KV head, block of ATT_BLOCK tokens): the item reads
+            // one head's keys and values for every query of its group and block, so they stay in the
+            // core's cache (items cycling through every head re-read them from memory).
+            const ATT_BLOCK: usize = 16;
             let (kc, vc, qr) = (&self.k[li], &self.v[li], &q);
             let out = SyncPtr(att.as_mut_ptr());
-            crate::pool::global().run(nt * c.n_head, &|item| {
-                let (t, hh) = (item / c.n_head, item % c.n_head);
-                let kvh = hh / group;
-                let len = pos0 + t + 1;
-                let qv = &qr[t * qd + hh * hd..t * qd + (hh + 1) * hd];
-                thread_local!(static SC: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) });
-                SC.with(|sc| {
-                    let mut sc = sc.borrow_mut();
-                    sc.resize(len, 0.0);
-                    crate::quant::scores_f16(qv, &kc[kvh * hd..], kvd, &mut sc[..len]);
-                    let mut mx = f32::NEG_INFINITY;
-                    for v in sc.iter_mut() {
-                        *v *= scale;
-                        mx = mx.max(*v);
+            let blocks = nt.div_ceil(ATT_BLOCK);
+            crate::pool::global().run(c.n_kv * blocks, &|item| {
+                let (kvh, blk) = (item / blocks, item % blocks);
+                for t in blk * ATT_BLOCK..((blk + 1) * ATT_BLOCK).min(nt) {
+                    for hh in kvh * group..(kvh + 1) * group {
+                        let len = pos0 + t + 1;
+                        let qv = &qr[t * qd + hh * hd..t * qd + (hh + 1) * hd];
+                        thread_local!(static SC: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) });
+                        SC.with(|sc| {
+                            let mut sc = sc.borrow_mut();
+                            sc.resize(len, 0.0);
+                            crate::quant::scores_f16(qv, &kc[kvh * hd..], kvd, &mut sc[..len]);
+                            let mut mx = f32::NEG_INFINITY;
+                            for v in sc.iter_mut() {
+                                *v *= scale;
+                                mx = mx.max(*v);
+                            }
+                            let mut sum = 0.0;
+                            for v in sc.iter_mut() {
+                                *v = crate::quant::exp_fast(*v - mx);
+                                sum += *v;
+                            }
+                            // SAFETY: (t, hh) owns this head slice of att.
+                            let o = unsafe { std::slice::from_raw_parts_mut(out.at(t * qd + hh * hd), hd) };
+                            o.fill(0.0);
+                            crate::quant::weighted_f16(&sc[..len], &vc[kvh * hd..], kvd, o);
+                            // Normalise last, in the same order as `step`, so both paths give identical results.
+                            for v in o.iter_mut() {
+                                *v /= sum;
+                            }
+                        });
                     }
-                    let mut sum = 0.0;
-                    for v in sc.iter_mut() {
-                        *v = crate::quant::exp_fast(*v - mx);
-                        sum += *v;
-                    }
-                    // SAFETY: (t, hh) owns this head slice of att.
-                    let o = unsafe { std::slice::from_raw_parts_mut(out.at(t * qd + hh * hd), hd) };
-                    o.fill(0.0);
-                    crate::quant::weighted_f16(&sc[..len], &vc[kvh * hd..], kvd, o);
-                    // Normalise last, in the same order as `step`, so both paths give identical results.
-                    for v in o.iter_mut() {
-                        *v /= sum;
-                    }
-                });
+                }
             });
-            for t in 0..nt {
-                qa_att[t].quantize(&att[t * qd..(t + 1) * qd]);
+            {
+                let qp = Raw(qa_att.as_mut_ptr());
+                let attr = &att;
+                // SAFETY: token t owns its QAct.
+                crate::pool::global().run(nt, &|t| unsafe { (*qp.at(t)).quantize(&attr[t * qd..(t + 1) * qd]) });
             }
             lap(2, &mut pp);
             m.matmul_batch(&l.o, &att, &qa_att, &mut tmp);
@@ -2113,12 +2149,17 @@ impl Session {
             let Ffn::Dense { gate, up, down } = &l.ffn else { unreachable!("step_batch needs a dense model") };
             m.matmul_batch(gate, &h, &qa_dim, &mut gt);
             m.matmul_batch(up, &h, &qa_dim, &mut ut);
-            for i in 0..nt * ffn {
-                let g = gt[i];
-                gt[i] = g / (1.0 + crate::quant::exp_fast(-g)) * ut[i];
-            }
-            for t in 0..nt {
-                qa_ffn[t].quantize(&gt[t * ffn..(t + 1) * ffn]);
+            {
+                let (gp, qp) = (Raw(gt.as_mut_ptr()), Raw(qa_ffn.as_mut_ptr()));
+                let utr = &ut;
+                crate::pool::global().run(nt, &|t| {
+                    // SAFETY: token t owns its row of gt and its QAct.
+                    let gr = unsafe { std::slice::from_raw_parts_mut(gp.at(t * ffn), ffn) };
+                    for (g, u) in gr.iter_mut().zip(&utr[t * ffn..(t + 1) * ffn]) {
+                        *g = *g / (1.0 + crate::quant::exp_fast(-*g)) * u;
+                    }
+                    unsafe { (*qp.at(t)).quantize(gr) };
+                });
             }
             m.matmul_batch(down, &gt, &qa_ffn, &mut tmp);
             lap(5, &mut pp);

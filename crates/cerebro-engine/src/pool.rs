@@ -39,6 +39,10 @@ struct Shared {
     /// with it so each thread re-applies it once.
     mask: AtomicUsize,
     mask_gen: AtomicUsize,
+    /// With more threads than the performance cores have: threads numbered `pcount` and up go to
+    /// this mask (the efficiency cores) and the rest to `mask`; 0 when unused.
+    emask: AtomicUsize,
+    pcount: AtomicUsize,
 }
 
 // SAFETY: the job pointer is only used by workers counted in `active`, and `run` waits for `active`
@@ -85,6 +89,8 @@ impl Pool {
             limit: AtomicUsize::new(threads.max(1)),
             mask: AtomicUsize::new(0),
             mask_gen: AtomicUsize::new(0),
+            emask: AtomicUsize::new(0),
+            pcount: AtomicUsize::new(0),
         });
         let handles = (0..workers)
             .map(|i| {
@@ -117,14 +123,27 @@ impl Pool {
     /// the threads to efficiency cores after a pause: reading a 512-token prompt measured 220 tok/s
     /// unpinned against 339 pinned (Qwen3-0.6B Q8_0, 12 threads, i9-12900H).
     pub fn apply_pinning(&self) {
-        // Only while every thread fits the performance cores (prompt reading): pinning each thread
-        // to its own core measured 13-16% slower writing at short contexts (Q8_0 64 -> 54, Q4_K_M
-        // 87 -> 76 tok/s), where every core's memory traffic helps.
-        let want = match crate::hw::performance_mask() {
-            Some(m) if crate::switches::enabled(crate::switches::CPU_PIN) && self.threads() <= m.count_ones() as usize => m as usize,
-            _ => 0,
+        // Every thread stays in its core class: the first ones on the performance cores, any beyond
+        // those on the efficiency cores. Unpinned, Windows moved threads onto efficiency cores and
+        // the whole job waited on them: Qwen3-0.6B Q8_0 on an i9-12900H, 12 threads, read 327
+        // pinned against 219 unpinned tok/s (write 53.8 against 45.1), and 14 unpinned threads
+        // were as slow (218 / 44.8).
+        let (want, ewant, pc) = match crate::hw::performance_mask() {
+            Some(m) if crate::switches::enabled(crate::switches::CPU_PIN) => {
+                let pc = m.count_ones() as usize;
+                let all = (1u64 << std::thread::available_parallelism().map_or(1, |n| n.get()).min(63)) - 1;
+                let e = all & !m;
+                if self.threads() <= pc || e == 0 {
+                    (m as usize, 0, pc)
+                } else {
+                    (m as usize, e as usize, pc)
+                }
+            }
+            _ => (0, 0, 0),
         };
-        if self.shared.mask.swap(want, Ordering::SeqCst) != want {
+        self.shared.pcount.store(pc, Ordering::SeqCst);
+        let changed = self.shared.mask.swap(want, Ordering::SeqCst) != want;
+        if self.shared.emask.swap(ewant, Ordering::SeqCst) != ewant || changed {
             self.shared.mask_gen.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -173,13 +192,15 @@ impl Pool {
 
 /// Applies the pool's current affinity to the calling thread when it changed since this thread last
 /// applied it.
-fn repin(sh: &Shared, _index: usize) {
+fn repin(sh: &Shared, index: usize) {
     thread_local!(static SEEN: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) });
     let g = sh.mask_gen.load(Ordering::Relaxed);
     SEEN.with(|s| {
         if s.get() != g {
             s.set(g);
-            crate::hw::pin_current_thread(sh.mask.load(Ordering::Relaxed) as u64);
+            let e = sh.emask.load(Ordering::Relaxed);
+            let m = if e != 0 && index >= sh.pcount.load(Ordering::Relaxed) { e } else { sh.mask.load(Ordering::Relaxed) };
+            crate::hw::pin_current_thread(m as u64);
         }
     });
 }
@@ -295,9 +316,11 @@ pub fn writing_threads() -> usize {
 /// The thread count for writing at position `pos`: automatic (switch 0) moves to the reading
 /// count, the performance cores, once the context is long.
 pub fn writing_threads_at(pos: usize) -> usize {
-    if crate::switches::get(crate::switches::CPU_DECODE_THREADS) == 0 && pos >= WRITE_ALL_CORES_BELOW {
-        return crate::switches::get(crate::switches::CPU_THREADS).max(1) as usize;
-    }
+    // Every core at every context since threads stay in their core class (apply_pinning): the
+    // matrix work streams weights, and attention already keeps to the reading threads. i9-12900H,
+    // writing after a 512-token prompt, 12 against 20 threads: Qwen3-0.6B Q8_0 54.7 -> 60.3,
+    // Qwen3-8B Q4_K_M 8.5 -> 9.9 tok/s.
+    let _ = pos;
     writing_threads()
 }
 
