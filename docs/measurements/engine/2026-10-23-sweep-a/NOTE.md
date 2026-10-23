@@ -1,0 +1,1 @@
+Sweep A covers Qwen3-0.6B Q8_0 and Qwen3-8B Q4_K_M only. The 14B rows (moved to *-14b-overlapped.jsonl) ran while other tests used the same machine after the sweep was meant to be stopped, so they are not comparable.

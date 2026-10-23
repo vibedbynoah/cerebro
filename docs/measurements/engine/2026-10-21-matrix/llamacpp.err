@@ -1,0 +1,14 @@
+ggml_cuda_init: failed to initialize CUDA: no CUDA-capable device is detected
+load_backend: loaded CUDA backend from C:\Users\noahm\Projects\qwen-flash-next\llama.cpp-b10751\ggml-cuda.dll
+load_backend: loaded RPC backend from C:\Users\noahm\Projects\qwen-flash-next\llama.cpp-b10751\ggml-rpc.dll
+load_backend: loaded CPU backend from C:\Users\noahm\Projects\qwen-flash-next\llama.cpp-b10751\ggml-cpu-alderlake.dll
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 8191 MiB):
+  Device 0: NVIDIA GeForce RTX 3070 Ti Laptop GPU, compute capability 8.6, VMM: yes, VRAM: 8191 MiB
+load_backend: loaded CUDA backend from C:\Users\noahm\Projects\qwen-flash-next\llama.cpp-b10751\ggml-cuda.dll
+load_backend: loaded RPC backend from C:\Users\noahm\Projects\qwen-flash-next\llama.cpp-b10751\ggml-rpc.dll
+load_backend: loaded CPU backend from C:\Users\noahm\Projects\qwen-flash-next\llama.cpp-b10751\ggml-cpu-alderlake.dll
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 8191 MiB):
+  Device 0: NVIDIA GeForce RTX 3070 Ti Laptop GPU, compute capability 8.6, VMM: yes, VRAM: 8191 MiB
+load_backend: loaded CUDA backend from C:\Users\noahm\Projects\qwen-flash-next\llama.cpp-b10751\ggml-cuda.dll
+load_backend: loaded RPC backend from C:\Users\noahm\Projects\qwen-flash-next\llama.cpp-b10751\ggml-rpc.dll
+load_backend: loaded CPU backend from C:\Users\noahm\Projects\qwen-flash-next\llama.cpp-b10751\ggml-cpu-alderlake.dll

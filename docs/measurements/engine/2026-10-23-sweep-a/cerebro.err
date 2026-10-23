@@ -1,0 +1,5 @@
+
+thread 'main' (177312) panicked at crates\cerebro-engine\examples\bench.rs:133:52:
+portable session: Unsupported("portable GPU: Tried to wait using a submission index (41) that has not been returned by a successful submission (last successful submission: 40")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+drive tier: 9 of 20 layers (1.7 GiB) read from the drive on every pass; 3.0 GiB of RAM available

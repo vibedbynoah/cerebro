@@ -1,0 +1,6 @@
+engine: unit tests	FAIL	0s	engine:_unit_tests.log
+engine: build tools	FAIL	1s	engine:_build_tools.log
+ui: type check	pass	19s	ui:_type_check.log
+ui: unit tests	pass	114s	ui:_unit_tests.log
+ui: build	pass	9s	ui:_build.log
+app: rust tests	FAIL	1s	app:_rust_tests.log
