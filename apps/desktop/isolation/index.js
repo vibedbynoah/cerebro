@@ -308,6 +308,7 @@ const WITH_ARGS = {
   hub_download: (p) => isPlain(p) && hasOnlyKeys(p, ["repo", "file", "parts", "total", "onEvent"]) && isRepo(p.repo) && isGguf(p.file) && Array.isArray(p.parts) && p.parts.length > 0 && p.parts.length <= 64 && p.parts.every(isGguf) && Number.isSafeInteger(p.total) && isChannel(p.onEvent),
   hub_cancel: (p) => isPlain(p) && hasOnlyKeys(p, ["repo", "file"]) && isRepo(p.repo) && isGguf(p.file),
   switch_set: (p) => isPlain(p) && hasOnlyKeys(p, ["id", "value"]) && typeof p.id === "string" && /^[a-z0-9_]{1,48}$/.test(p.id) && Number.isSafeInteger(p.value),
+  network_offline_set: (p) => isPlain(p) && hasOnlyKeys(p, ["on"]) && typeof p.on === "boolean",
   mcp_config_save: (p) => isPlain(p) && hasOnlyKeys(p, ["config"]) && isMcpConfig(p.config),
   mcp_restart: (p) => isPlain(p) && hasOnlyKeys(p, ["name"]) && isServerName(p.name),
   remote_set_password: (p) => isPlain(p) && hasOnlyKeys(p, ["password"]) && typeof p.password === "string" && p.password.length >= 8 && p.password.length <= 1024,

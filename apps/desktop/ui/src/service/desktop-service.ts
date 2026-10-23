@@ -120,6 +120,7 @@ export function createDesktopService(local: CerebroService): CerebroService {
     getNetwork: (): Promise<NetworkState> => Promise.resolve(navigator.onLine ? "online" : "offline"),
     getSettings: () => local.getSettings(),
     updateSetting: (key, value) => local.updateSetting(key, value),
+    setOffline: (on) => invoke<void>("network_offline_set", { on }),
     kvStoreUsage: () => invoke<KvStoreUsage>("kv_store_usage"),
     kvStoreClear: () => invoke<KvStoreUsage>("kv_store_clear"),
 

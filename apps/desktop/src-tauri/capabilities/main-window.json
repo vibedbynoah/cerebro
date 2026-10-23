@@ -69,6 +69,7 @@
     "allow-hw-detect",
     "allow-switches-list",
     "allow-switch-set",
+    "allow-network-offline-set",
     "allow-switches-reset",
     "allow-tune-machine-start",
     "allow-tune-machine-last",

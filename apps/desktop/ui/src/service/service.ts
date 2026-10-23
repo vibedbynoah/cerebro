@@ -69,6 +69,8 @@ export interface CerebroService {
   getNetwork(): Promise<NetworkState>;
   getSettings(): Promise<Settings>;
   updateSetting<K extends SettingKey>(key: K, value: Settings[K]): Promise<Settings>;
+  /** Tells the engine whether Offline mode is on (no download starts while it is). */
+  setOffline(on: boolean): Promise<void>;
   /** What the saved-chat folder holds ("Keep long chats ready"). */
   kvStoreUsage(): Promise<KvStoreUsage>;
   /** Deletes every saved chat cache; resolves with what was removed. */

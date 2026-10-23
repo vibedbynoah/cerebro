@@ -66,6 +66,7 @@ const COMMANDS: &[&str] = &[
     "hub_cancel",
     "switches_list",
     "switch_set",
+    "network_offline_set",
     "switches_reset",
     "tune_machine_start",
     "tune_machine_last",

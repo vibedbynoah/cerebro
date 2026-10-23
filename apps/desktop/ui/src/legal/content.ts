@@ -234,7 +234,7 @@ const LICENSES: LegalDoc = {
         {
           kind: "license",
           name: "llama.cpp and ggml",
-          detail: "Cerebro Engine follows tensor layouts, GGUF file formats and kernel arrangements from these projects. Cerebro does not include or run the llama.cpp program.",
+          detail: "Cerebro Engine follows tensor layouts, GGUF file formats and kernel arrangements from these projects. Cerebro does not ship the llama.cpp program; when you leave “Use llama.cpp where it is faster” on, the app downloads the official llama.cpp release (MIT License) the first time a model needs it and runs it on this computer only.",
           license: "MIT",
           text: ggmlText,
         },

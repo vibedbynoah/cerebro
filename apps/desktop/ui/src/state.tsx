@@ -1,4 +1,4 @@
-import { createContext, createSignal, onMount, useContext, type Accessor, type JSX } from "solid-js";
+import { createContext, createEffect, createSignal, onMount, useContext, type Accessor, type JSX } from "solid-js";
 import { useService } from "./service/context";
 import type { NetworkState, SettingKey, Settings } from "./service/types";
 import { notify } from "./lib/toast";
@@ -35,6 +35,12 @@ export function AppStateProvider(props: { children: JSX.Element }): JSX.Element 
       .getNetwork()
       .then(setNetwork)
       .catch(() => setNetwork("offline"));
+  });
+
+  // The engine follows Offline mode (it blocks the llama.cpp download while it is on).
+  createEffect(() => {
+    const on = settings()?.offlineMode;
+    if (on !== undefined) void service.setOffline(on).catch(() => undefined);
   });
 
   const state: AppState = {

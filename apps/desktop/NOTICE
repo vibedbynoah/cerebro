@@ -24,7 +24,14 @@ loading kernels) follows tensor layouts, GGUF file formats and kernel
 arrangements from llama.cpp and ggml (https://github.com/ggml-org/llama.cpp),
 Copyright (c) 2023-2026 The ggml authors, licensed under the MIT License. The
 full text is in apps/desktop/licenses/ggml-MIT.txt and on the app's Licenses
-page. Cerebro does not include or run the llama.cpp program.
+page.
+
+llama.cpp itself (https://github.com/ggml-org/llama.cpp), Copyright (c) 2023-2026
+The ggml authors, licensed under the MIT License, is not shipped with Cerebro.
+When the setting "Use llama.cpp where it is faster" is on, the app downloads the
+official llama.cpp release from GitHub the first time a model needs it (checked
+against the SHA-256 published for it, never in Offline mode) and runs its
+llama-server on this computer only (127.0.0.1).
 
 Third-party packages
 --------------------

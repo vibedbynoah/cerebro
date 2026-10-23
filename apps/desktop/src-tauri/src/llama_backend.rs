@@ -11,6 +11,7 @@
 //! download; the model then runs on Cerebro's engine.
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -67,6 +68,19 @@ fn folder(build: Build) -> Option<PathBuf> {
     Some(PathBuf::from(local).join("Cerebro").join("llama.cpp").join(format!("{TAG}-{}", build.name())))
 }
 
+/// Offline mode, as the app's setting says (`network_offline_set`): no download starts while it is on.
+static OFFLINE: AtomicBool = AtomicBool::new(false);
+
+/// Follows the app's Offline mode setting.
+pub fn set_offline(on: bool) {
+    OFFLINE.store(on, Ordering::SeqCst);
+}
+
+/// Whether Offline mode is on.
+pub fn offline() -> bool {
+    OFFLINE.load(Ordering::SeqCst)
+}
+
 /// The folder holding `llama-server.exe`, when it is there.
 pub fn installed(build: Build) -> Option<PathBuf> {
     if let Some(d) = std::env::var_os("CEREBRO_LLAMA_DIR").map(PathBuf::from).filter(|d| d.join("llama-server.exe").is_file()) {
@@ -76,17 +90,28 @@ pub fn installed(build: Build) -> Option<PathBuf> {
 }
 
 /// Downloads and unpacks the release (see the module notes). `progress(done, total)` as it goes.
-pub fn install(build: Build, mut progress: impl FnMut(u64, u64)) -> Result<PathBuf, String> {
+/// Refused in Offline mode; a copy already installed is used either way.
+pub fn install(build: Build, progress: impl FnMut(u64, u64)) -> Result<PathBuf, String> {
     if let Some(d) = installed(build) {
         return Ok(d);
     }
+    if offline() {
+        return Err("Offline mode is on, so llama.cpp was not downloaded.".to_owned());
+    }
     let dir = folder(build).ok_or("There is no local app data folder.")?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
-    let total = build.download_bytes();
+    install_from(&format!("https://github.com/ggml-org/llama.cpp/releases/download/{TAG}"), build.files(), &dir, progress)?;
+    installed(build).ok_or_else(|| "The llama.cpp files did not contain llama-server.exe.".to_owned())
+}
+
+/// Downloads `files` (name, SHA-256, bytes) from `base` into `dir`, checks each and unpacks it.
+/// A file that does not match its checksum is deleted and nothing of it is unpacked.
+fn install_from(base: &str, files: &[(&str, &str, u64)], dir: &Path, mut progress: impl FnMut(u64, u64)) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
+    let total: u64 = files.iter().map(|f| f.2).sum();
     let client = reqwest::blocking::Client::builder().timeout(None).build().map_err(|e| e.to_string())?;
     let mut done = 0u64;
-    for &(name, sha, size) in build.files() {
-        let url = format!("https://github.com/ggml-org/llama.cpp/releases/download/{TAG}/{name}");
+    for &(name, sha, size) in files {
+        let url = format!("{base}/{name}");
         let part = dir.join(format!("{name}.part"));
         let mut r = client.get(&url).send().map_err(|e| format!("Could not download {name}: {e}"))?;
         if !r.status().is_success() {
@@ -114,7 +139,7 @@ pub fn install(build: Build, mut progress: impl FnMut(u64, u64)) -> Result<PathB
         }
         // Windows' own tar reads zip files.
         let mut tar = Command::new(r"C:\Windows\System32\tar.exe");
-        tar.args(["-xf"]).arg(&part).arg("-C").arg(&dir).stdout(Stdio::null()).stderr(Stdio::piped());
+        tar.args(["-xf"]).arg(&part).arg("-C").arg(dir).stdout(Stdio::null()).stderr(Stdio::piped());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -127,7 +152,7 @@ pub fn install(build: Build, mut progress: impl FnMut(u64, u64)) -> Result<PathB
         }
         done += size;
     }
-    installed(build).ok_or_else(|| "The llama.cpp files did not contain llama-server.exe.".to_owned())
+    Ok(())
 }
 
 /// A running `llama-server` with one model loaded.
@@ -254,6 +279,84 @@ pub fn reply(server: &Server, req: &ChatRequest, events: &ChatSink) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serves `body` for every request on a free local port; returns the base address.
+    fn serve(body: Vec<u8>) -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for s in l.incoming() {
+                let Ok(mut s) = s else { break };
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = s.write_all(head.as_bytes());
+                let _ = s.write_all(&body);
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// A zip holding one file `llama-server.exe`, made with Windows' tar, and its SHA-256.
+    fn test_zip(dir: &Path) -> (Vec<u8>, String) {
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("llama-server.exe"), b"not a real program").unwrap();
+        let zip = dir.join("t.zip");
+        let ok = Command::new(r"C:\Windows\System32\tar.exe").arg("-a").arg("-cf").arg(&zip).arg("-C").arg(&src).arg("llama-server.exe").status().unwrap().success();
+        assert!(ok, "tar could not make the test zip");
+        let bytes = std::fs::read(&zip).unwrap();
+        let hex: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+        (bytes, hex)
+    }
+
+    fn temp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("cerebro-llama-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_checked_download_is_unpacked_with_progress() {
+        let work = temp("ok");
+        let (zip, sha) = test_zip(&work);
+        let base = serve(zip.clone());
+        let dest = work.join("dest");
+        let mut last = (0, 0);
+        install_from(&base, &[("t.zip", &sha, zip.len() as u64)], &dest, |d, t| last = (d, t)).unwrap();
+        assert!(dest.join("llama-server.exe").is_file());
+        assert!(!dest.join("t.zip.part").exists());
+        assert_eq!(last, (zip.len() as u64, zip.len() as u64));
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_checksum_mismatch_installs_nothing() {
+        let work = temp("bad");
+        let (zip, _) = test_zip(&work);
+        let base = serve(zip.clone());
+        let dest = work.join("dest");
+        let wrong = "0".repeat(64);
+        let e = install_from(&base, &[("t.zip", &wrong, zip.len() as u64)], &dest, |_, _| {}).unwrap_err();
+        assert!(e.contains("checksum"), "{e}");
+        assert!(!dest.join("llama-server.exe").exists());
+        assert!(!dest.join("t.zip.part").exists());
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn offline_mode_refuses_a_download() {
+        set_offline(true);
+        // CEREBRO_LLAMA_DIR could point at an installed copy; this test needs none.
+        if installed(Build::Vulkan).is_none() {
+            let e = install(Build::Vulkan, |_, _| {}).unwrap_err();
+            assert!(e.contains("Offline"), "{e}");
+        }
+        set_offline(false);
+    }
 
     #[test]
     fn builds_list_the_published_files_and_sizes() {

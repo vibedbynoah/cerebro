@@ -583,6 +583,7 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
     getNetwork: () => Promise.resolve(network),
 
     getSettings: () => Promise.resolve({ ...settings }),
+    setOffline: () => Promise.resolve(),
 
     updateSetting(key, value) {
       // Same checks the Rust side will make: a known key and a boolean value, nothing else.

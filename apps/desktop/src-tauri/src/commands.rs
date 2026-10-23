@@ -1054,6 +1054,12 @@ pub fn switches_list() -> Vec<cerebro_engine::switches::State> {
     cerebro_engine::switches::catalogue()
 }
 
+/// Follows the app's Offline mode setting (the llama.cpp download respects it).
+#[tauri::command]
+pub fn network_offline_set(on: bool) {
+    crate::llama_backend::set_offline(on);
+}
+
 /// Sets one switch and saves the user's choices; returns the stored (clamped) value.
 #[tauri::command]
 pub fn switch_set<R: Runtime>(app: tauri::AppHandle<R>, id: String, value: i64) -> Result<i64, String> {

@@ -114,6 +114,7 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::hub_cancel,
             commands::switches_list,
             commands::switch_set,
+            commands::network_offline_set,
             commands::switches_reset,
             commands::tune_machine_start,
             commands::tune_machine_last,
