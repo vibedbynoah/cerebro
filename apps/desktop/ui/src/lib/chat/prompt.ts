@@ -177,9 +177,12 @@ export interface ChatPrefs {
   rounds: number;
   /** Plan mode: investigate read-only, then present a plan for approval before changing anything. */
   planMode: boolean;
+  /** The model may call tools (built-ins and MCP servers). Off by default: their descriptions add
+   *  thousands of tokens to every system prompt, which slows small models and confuses them. */
+  toolsOn: boolean;
 }
 
-export const DEFAULT_PREFS: ChatPrefs = { effort: "medium", verbosity: "brief", source: "native", addInstructions: true, base: DEFAULT_BASE_PROMPT, memoryOn: true, orchestrate: false, workers: 3, rounds: 3, planMode: false };
+export const DEFAULT_PREFS: ChatPrefs = { effort: "medium", verbosity: "brief", source: "native", addInstructions: true, base: DEFAULT_BASE_PROMPT, memoryOn: true, orchestrate: false, workers: 3, rounds: 3, planMode: false, toolsOn: false };
 
 const isOneOf = <T extends string>(list: readonly T[], v: unknown): v is T => typeof v === "string" && (list as readonly string[]).includes(v);
 
@@ -206,6 +209,7 @@ export function parsePrefs(raw: string | null): ChatPrefs {
     workers: inRange(v.workers, 1, 6, DEFAULT_PREFS.workers),
     rounds: inRange(v.rounds, 1, 8, DEFAULT_PREFS.rounds),
     planMode: typeof v.planMode === "boolean" ? v.planMode : DEFAULT_PREFS.planMode,
+    toolsOn: typeof v.toolsOn === "boolean" ? v.toolsOn : DEFAULT_PREFS.toolsOn,
   };
 }
 

@@ -1,12 +1,13 @@
 import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
-import { expect, settle, test } from "./fixtures";
+import { expect, settle, test, enableTools } from "./fixtures";
 
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"];
 
 async function ask(page: Page): Promise<void> {
   await page.goto("/?mock=fast-chat#/chat");
   await expect(page.locator(".chat-head__model select option").first()).toBeAttached();
+  await enableTools(page);
   const box = page.getByRole("textbox", { name: "Message" });
   await box.fill("What files are in my projects folder?");
   await box.press("Enter");

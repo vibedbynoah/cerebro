@@ -104,7 +104,24 @@ export async function scrollThrough(page: Page): Promise<void> {
 }
 
 /** Opens Chat's "Fine-tune" disclosure, which holds the finer composer controls. */
+/** Shows Chat's Settings tab in the side panel (the slider and Fine-tune live there). */
+export async function openSettings(page: Page): Promise<void> {
+  const tab = page.getByRole("button", { name: "Chat settings", exact: true });
+  if (!(await tab.isVisible().catch(() => false)) || (await tab.getAttribute("aria-pressed")) !== "true") {
+    if (!(await tab.isVisible().catch(() => false))) await page.getByTestId("panel-toggle").click();
+    if ((await tab.getAttribute("aria-pressed")) !== "true") await tab.click();
+  }
+  await expect(page.getByTestId("speed-mode")).toBeVisible();
+}
+
+/** Turns on "Let the model use tools" (off by default) in Chat's Settings tab. */
+export async function enableTools(page: Page): Promise<void> {
+  await openFineTune(page);
+  await page.getByTestId("tools-on").check();
+}
+
 export async function openFineTune(page: Page): Promise<void> {
+  await openSettings(page);
   const more = page.locator("details.composer__more");
   if (!(await more.evaluate((d) => (d as HTMLDetailsElement).open))) {
     await page.locator(".composer__more > summary").click();

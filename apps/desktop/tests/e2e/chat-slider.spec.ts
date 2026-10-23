@@ -1,6 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
-import { expect, openFineTune, settle, test } from "./fixtures";
+import { expect, openFineTune, openSettings, settle, test } from "./fixtures";
 
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"];
 
@@ -31,6 +31,7 @@ test.describe("the Speed <-> Accuracy slider", () => {
     await page.getByRole("button", { name: "System prompt" }).click();
     await expect(page.locator("#base-prompt")).toHaveValue("Answer directly and briefly. No preamble, no restating the question.");
 
+    await openSettings(page);
     await slider(page).fill("5");
     await expect(level(page)).toHaveText("Maximum");
     await expect(page.locator(".composer__check").filter({ hasText: "Orchestrate" }).locator("input")).toBeChecked();
@@ -60,14 +61,15 @@ test.describe("the Speed <-> Accuracy slider", () => {
 
   test("Fine-tune remembers whether it was open", async ({ page }) => {
     await openChat(page);
+    // Open by default in the side panel, where there is room.
     const more = page.locator("details.composer__more");
-    await expect(more).toHaveJSProperty("open", false);
-    await openFineTune(page);
-    await page.reload();
-    await expect(page.locator("details.composer__more")).toHaveJSProperty("open", true);
+    await expect(more).toHaveJSProperty("open", true);
     await page.locator(".composer__more > summary").click();
     await page.reload();
     await expect(page.locator("details.composer__more")).toHaveJSProperty("open", false);
+    await openFineTune(page);
+    await page.reload();
+    await expect(page.locator("details.composer__more")).toHaveJSProperty("open", true);
   });
 
   test("is accessible", async ({ page }) => {

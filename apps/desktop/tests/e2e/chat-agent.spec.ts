@@ -1,12 +1,13 @@
 import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
-import { expect, openFineTune, settle, test } from "./fixtures";
+import { expect, openFineTune, settle, test, enableTools } from "./fixtures";
 
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"];
 
 async function send(page: Page, text: string, plan = false): Promise<void> {
   await page.goto("/?mock=fast-chat#/chat");
   await expect(page.locator(".chat-head__model select option").first()).toBeAttached();
+  await enableTools(page);
   // Plan first is a saved preference: set it either way.
   await openFineTune(page);
   await page.getByRole("checkbox", { name: "Plan first" }).setChecked(plan);

@@ -50,7 +50,7 @@ import type { CloudProvider, LibraryModel } from "../service/types";
 import { HighlightQuery } from "../components/ChatSearch";
 import { hrefForMonitorTab } from "../lib/routes";
 import { Arena } from "./chat/Arena";
-import { Composer } from "./chat/Composer";
+import { ChatSettings, Composer } from "./chat/Composer";
 import { LiveDock } from "./chat/LiveDock";
 import { loadPresets, removePreset, savePreset } from "../lib/chat/presets";
 import { VoiceMode } from "./chat/VoiceMode";
@@ -130,10 +130,14 @@ export function Chat(): JSX.Element {
   const [prompts, setPromptsSignal] = createSignal<SavedPrompt[]>(loadPrompts());
   // The side panel: memory, the system prompt, or the live dock (remembered while it is the dock).
   const DOCK_KEY = "cerebro-chat-dock";
-  const [panel, setPanelSignal] = createSignal<"none" | "memory" | "prompt" | "prompts" | "dock">(readPref(DOCK_KEY) === "open" ? "dock" : "none");
-  const setPanel = (p: "none" | "memory" | "prompt" | "prompts" | "dock") => {
+  const PANEL_KEY = "cerebro-chat-panel";
+  type PanelId = "none" | "settings" | "memory" | "prompt" | "prompts" | "dock";
+  // Open on Settings unless the person closed the panel; the live dock is remembered as before.
+  const [panel, setPanelSignal] = createSignal<PanelId>(readPref(DOCK_KEY) === "open" ? "dock" : readPref(PANEL_KEY) === "closed" ? "none" : "settings");
+  const setPanel = (p: PanelId) => {
     setPanelSignal(p);
     writePref(DOCK_KEY, p === "dock" ? "open" : null);
+    writePref(PANEL_KEY, p === "none" ? "closed" : null);
   };
   const [dockWidth, setDockWidth] = createSignal(Math.min(520, Math.max(280, Number(readPref("cerebro-chat-dock-width")) || 340)));
   const startResize = (e: PointerEvent) => {
@@ -470,7 +474,9 @@ export function Chat(): JSX.Element {
       return;
     }
     if (!cm && !(await ensureLoaded())) return;
-    const tools = cm ? null : await toolsForRequest();
+    // Tools only when the person turned them on (or plans, which needs them): otherwise the system
+    // prompt stays short.
+    const tools = cm || !(prefs().toolsOn || prefs().planMode) ? null : await toolsForRequest();
     const req = built();
     const p = prefs();
     const path = branchPath(treeOf(conv));
@@ -1002,12 +1008,12 @@ export function Chat(): JSX.Element {
     ),
   );
 
-  const panelLabel = () => (panel() === "memory" ? "Memory" : panel() === "prompt" ? "System prompt" : "Prompt library");
+  const panelLabel = () => (panel() === "settings" ? "Chat settings" : panel() === "memory" ? "Memory" : panel() === "prompt" ? "System prompt" : "Prompt library");
 
   return (
     <div class="screen chat" data-panel={view() === "chat" && panel() !== "none" ? "open" : "closed"} data-view={view()}>
       <aside class="chat-list" aria-label="Conversations">
-        <button class="btn btn--primary chat-list__new" type="button" onClick={newChat} data-press>
+        <button class="btn btn--tertiary chat-list__new" type="button" onClick={newChat} data-press>
           <Icon name="plus" size={16} />
           <span class="btn__label">New chat</span>
         </button>
@@ -1033,6 +1039,10 @@ export function Chat(): JSX.Element {
           when={listQuery().trim()}
           fallback={
             <>
+              <details class="chat-list__filtermenu">
+                <summary class="chat-list__filtersummary">
+                  <Icon name="sliders" size={13} /> Filter
+                </summary>
               <div class="chat-list__filters">
                 <label class="chat-list__filter">
                   <span class="sr-only">Folder</span>
@@ -1054,6 +1064,7 @@ export function Chat(): JSX.Element {
                   <span>Archived</span>
                 </label>
               </div>
+              </details>
               <datalist id="chat-folder-options">
                 <For each={folderNames()}>{(f) => <option value={f} />}</For>
               </datalist>
@@ -1137,7 +1148,7 @@ export function Chat(): JSX.Element {
 
       <section class="chat-main" aria-label={view() === "arena" ? "Arena" : "Chat"} data-view={view()}>
         <header class="chat-head">
-          <h1 class="chat-head__title">{view() === "chat" ? "Chat" : "Arena"}</h1>
+          <h1 class="chat-head__title sr-only">{view() === "chat" ? "Chat" : "Arena"}</h1>
           <div class="chat-tabs" role="group" aria-label="Chat view">
             <button class="chat-tabs__tab" type="button" aria-pressed={view() === "chat"} onClick={() => setView("chat")} data-testid="chat-tab">
               Chat
@@ -1191,18 +1202,19 @@ export function Chat(): JSX.Element {
           <Show when={!__DESKTOP__}>
             <IllustrativeFlag />
           </Show>
-          <SamplerMenu sampler={sampler()} onChange={setSampler} />
-          <button class="icon-btn" type="button" aria-label="Prompt library" aria-pressed={panel() === "prompts"} onClick={() => setPanel(panel() === "prompts" ? "none" : "prompts")}>
-            <Icon name="book" size={18} />
-          </button>
-          <button class="icon-btn" type="button" aria-label="Memory" aria-pressed={panel() === "memory"} onClick={() => setPanel(panel() === "memory" ? "none" : "memory")}>
-            <Icon name="memory" size={18} />
-          </button>
           <button class="icon-btn" type="button" aria-label="Voice mode" title="Voice mode: talk hands-free" onClick={() => setVoice(true)}>
             <Icon name="mic" size={18} />
           </button>
-          <button class="icon-btn" type="button" aria-label="Live panel (Ctrl .)" title="Live panel (Ctrl .)" aria-pressed={panel() === "dock"} onClick={() => setPanel(panel() === "dock" ? "none" : "dock")}>
-            <Icon name="activity" size={18} />
+          <button
+            class="icon-btn"
+            type="button"
+            aria-label="Chat settings and side panel"
+            title="Settings, live figures, prompts and memory"
+            aria-pressed={panel() !== "none"}
+            onClick={() => setPanel(panel() === "none" ? "settings" : "none")}
+            data-testid="panel-toggle"
+          >
+            <Icon name="sliders" size={18} />
           </button>
         </header>
 
@@ -1318,11 +1330,44 @@ export function Chat(): JSX.Element {
             }} />
           </Show>
           <div class="chat-side__head">
-            <h2>{panel() === "dock" ? "Live panel" : panelLabel()}</h2>
+            <div class="chat-side__tabs" role="group" aria-label="Side panel">
+              <For each={[["settings", "Settings", "Chat settings"], ["dock", "Live", "Live panel (Ctrl .)"], ["prompts", "Prompts", "Prompt library"], ["memory", "Memory", "Memory"]] as const}>
+                {([id, label, name]) => (
+                  <button class="chat-side__tab" type="button" aria-label={name} aria-pressed={panel() === id || (id === "prompts" && panel() === "prompt")} onClick={() => setPanel(panel() === id ? "none" : id)} data-testid={`side-tab-${id}`}>
+                    {label}
+                  </button>
+                )}
+              </For>
+            </div>
             <button class="icon-btn" type="button" aria-label="Close panel" onClick={() => setPanel("none")}>
               <Icon name="close" size={16} />
             </button>
           </div>
+          <h2 class="chat-side__title">{panel() === "dock" ? "Live panel" : panelLabel()}</h2>
+          <Show when={panel() === "settings"}>
+            <div class="chat-side__body">
+              <ChatSettings
+                levels={levels}
+                mode={modeOf(prefs(), sampler())}
+                onMode={pickMode}
+                prefs={prefs()}
+                setPrefs={setPrefs}
+                notes={built().notes}
+                onOpenPrompt={() => setPanel("prompt")}
+                onOpenPrompts={() => setPanel("prompts")}
+                docsOn={docsPrefs().on}
+                onDocs={(on) => setDocsPrefs({ on })}
+                docsScopes={docsScopes()}
+                docsScope={docsPrefs().scope}
+                onDocsScope={(scope) => setDocsPrefs({ scope })}
+                docsNote={docsNote()}
+              />
+              <div class="chat-settings__sampler">
+                <h3 class="chat-settings__label">Sampling</h3>
+                <SamplerMenu sampler={sampler()} onChange={setSampler} inline />
+              </div>
+            </div>
+          </Show>
           <Show when={panel() === "dock"}>
             <LiveDock
               mode={modeOf(prefs(), sampler())}
@@ -1352,7 +1397,7 @@ export function Chat(): JSX.Element {
               }}
             />
           </Show>
-          <Show when={panel() !== "dock"}>          <Show
+          <Show when={panel() !== "dock" && panel() !== "settings"}>          <Show
             when={panel() === "memory"}
             fallback={
               <Show
@@ -1397,7 +1442,8 @@ function Empty(props: { onPick: (t: string) => void }): JSX.Element {
   const ideas = ["Why is my 30B model slower than the 8B?", "Write a Python function that counts lines in a huge file", "/imagine a lighthouse at dusk, oil painting"];
   return (
     <div class="chat-empty">
-      <h2>Ask anything. The model runs here.</h2>
+      <h2>What can I help with?</h2>
+      <p class="chat-empty__sub">Everything runs on this computer.</p>
       <ul role="list">
         <For each={ideas}>
           {(t) => (
@@ -1413,7 +1459,7 @@ function Empty(props: { onPick: (t: string) => void }): JSX.Element {
   );
 }
 
-function SamplerMenu(props: { sampler: Sampler; onChange: (s: Sampler) => void }): JSX.Element {
+function SamplerMenu(props: { sampler: Sampler; onChange: (s: Sampler) => void; inline?: boolean }): JSX.Element {
   const field = (k: keyof Sampler, label: string, min: number, max: number, step: number) => (
     <label class="sampler__field">
       <span>{label}</span>
@@ -1430,6 +1476,25 @@ function SamplerMenu(props: { sampler: Sampler; onChange: (s: Sampler) => void }
       />
     </label>
   );
+  const reset = (
+    <button class="btn btn--tertiary btn--sm" type="button" onClick={() => props.onChange({ ...DEFAULT_SAMPLER })}>
+      Reset
+    </button>
+  );
+  if (props.inline) {
+    // In the side panel: the fields themselves, two to a row.
+    return (
+      <div class="sampler sampler--inline" aria-label="Sampler settings" role="group">
+        {field("temperature", "Temperature", 0, 2, 0.05)}
+        {field("topP", "Top P", 0, 1, 0.01)}
+        {field("minP", "Min P", 0, 1, 0.01)}
+        {field("topK", "Top K", 0, 200, 1)}
+        {field("repeatPenalty", "Repeat penalty", 1, 2, 0.01)}
+        {field("maxTokens", "Max tokens", 16, 32768, 16)}
+        {reset}
+      </div>
+    );
+  }
   return (
     <details class="sampler">
       <summary class="icon-btn" aria-label="Sampler settings">

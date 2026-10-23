@@ -1503,8 +1503,8 @@
   }
 }
 
-/* A side panel needs the room: below 1440 px the conversation list steps aside while it is open. */
-@media (max-width: 1440px) {
+/* A side panel needs the room: below 1280 px the conversation list steps aside while it is open. */
+@media (max-width: 1279px) {
   .screen.chat[data-panel="open"] {
     grid-template-columns: minmax(0, 1fr) auto;
   }
@@ -1913,4 +1913,324 @@
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+/* ---- Clean conversation layout (2026-10-23): one centred column, quiet chrome; settings, live
+   figures, prompts and memory live in the side panel. Later rules override the ones above. ---- */
+
+.screen.chat {
+  grid-template-columns: 232px minmax(0, 1fr) auto;
+}
+
+.chat-list {
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-2);
+  background: var(--color-surface-1);
+}
+
+.chat-list__new {
+  justify-content: flex-start;
+  width: 100%;
+}
+
+.chat-list__filtermenu {
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+}
+
+.chat-list__filtersummary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  list-style: none;
+}
+
+.chat-list__filtersummary::-webkit-details-marker {
+  display: none;
+}
+
+.chat-list__filtersummary:hover {
+  color: var(--color-text-primary);
+}
+
+.chat-list__filtermenu[open] .chat-list__filters {
+  margin-top: var(--space-2);
+}
+
+.chat-head {
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 0;
+}
+
+.chat-head__model select {
+  border-color: transparent;
+  background: transparent;
+  font-size: var(--text-body);
+  font-weight: var(--weight-semibold, 600);
+  cursor: pointer;
+}
+
+.chat-head__model select:hover,
+.chat-head__model select:focus-visible {
+  background: var(--color-surface-2);
+}
+
+.chat-head__model {
+  order: -1;
+}
+
+.chat-tabs {
+  border: 0;
+  background: transparent;
+}
+
+.chat-thread {
+  padding: var(--space-6) var(--space-5) var(--space-4);
+}
+
+.chat-thread > * {
+  max-width: 768px;
+}
+
+.msg--user .msg__text {
+  max-width: 70%;
+  padding: var(--space-2) var(--space-4);
+  border-radius: 20px;
+  background: var(--color-surface-2);
+}
+
+.msg--bot {
+  font-size: var(--text-body);
+  line-height: 1.7;
+}
+
+.msg__meta-row {
+  font-size: var(--text-small);
+  color: var(--color-text-muted);
+}
+
+.composer {
+  padding: 0 var(--space-5) var(--space-4);
+  border-top: 0;
+}
+
+.composer > * {
+  max-width: 768px;
+}
+
+.composer__row {
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: 26px;
+  background: var(--color-surface-2);
+  box-shadow: var(--shadow-1);
+}
+
+.composer__row:focus-within {
+  border-color: var(--color-border-strong);
+}
+
+.composer__input,
+.composer__input:focus,
+.composer__input:focus-visible {
+  outline: none;
+  box-shadow: none;
+  border: 0;
+}
+
+.composer__send {
+  border-radius: 50%;
+}
+
+.chat-empty {
+  gap: var(--space-3);
+  padding-top: 18vh;
+}
+
+.chat-empty h2 {
+  font-size: var(--text-title);
+  font-weight: var(--weight-semibold, 600);
+}
+
+.chat-empty__sub {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-small);
+}
+
+.chat-empty ul {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.chat-empty__idea {
+  width: auto;
+  padding: var(--space-2) var(--space-3);
+  border-radius: 999px;
+  font-size: var(--text-small);
+}
+
+/* The side panel: tabs at the top, its body scrolls. */
+.chat-side {
+  width: 340px;
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border: 0;
+  border-left: 1px solid var(--color-border);
+  border-radius: 0;
+  box-shadow: none;
+  background: var(--color-surface-1);
+}
+
+.chat-side__head {
+  gap: var(--space-2);
+}
+
+.chat-side__tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-2);
+}
+
+.chat-side__tab {
+  min-height: 26px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: var(--text-small);
+  cursor: pointer;
+}
+
+.chat-side__tab[aria-pressed="true"] {
+  background: var(--color-surface-3);
+  color: var(--color-text-primary);
+  box-shadow: var(--shadow-1);
+}
+
+.chat-side__tab:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.chat-side__body {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.chat-settings .composer__mode {
+  margin-top: 0;
+}
+
+.chat-settings .composer__mode input[type="range"] {
+  max-width: none;
+}
+
+.chat-settings .composer__controls {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.chat-settings__label {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-small);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+}
+
+.screen.chat {
+  grid-template-columns: 220px minmax(0, 1fr) auto;
+}
+
+.chat-side {
+  width: 320px;
+}
+
+/* The message box draws focus on its rounded frame (`.composer__row:focus-within`), not as a second
+   ring inside it: the global focus ring reads this variable. */
+.composer__input {
+  --focus-ring: 0 0 #0000;
+}
+
+.composer__row:focus-within {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 1px var(--color-accent);
+}
+
+.chat-list__item {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.msg__more {
+  justify-self: start;
+  margin-top: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  font-size: var(--text-small);
+}
+
+.sampler--inline {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2) var(--space-3);
+}
+
+.sampler--inline .sampler__field {
+  display: grid;
+  gap: var(--space-1);
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.sampler--inline .btn {
+  justify-self: start;
+}
+
+.chat-settings .composer__controls .btn {
+  justify-content: flex-start;
+}
+
+.msg__more {
+  flex-basis: auto;
+  width: max-content;
+}
+
+.sampler--inline .sampler__field {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.sampler--inline .sampler__field input {
+  width: 100%;
+}
+
+.sampler--inline .sampler__field {
+  min-width: 0;
+}
+
+.sampler--inline .sampler__field input {
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+.chat-side__title {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-small);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-muted);
+  text-transform: none;
 }

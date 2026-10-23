@@ -1,4 +1,4 @@
-import { expect, test } from "./fixtures";
+import { expect, openSettings, test } from "./fixtures";
 
 test("a model's saved settings come back when it is picked again", async ({ page }) => {
   await page.goto("/#/chat");
@@ -9,16 +9,22 @@ test("a model's saved settings come back when it is picked again", async ({ page
   await page.getByRole("button", { name: /^Live panel/ }).click();
   const dock = page.getByTestId("live-dock");
   await dock.getByRole("slider", { name: /Speed or accuracy/ }).fill("1");
+  await openSettings(page);
   await expect(page.getByTestId("speed-mode")).toHaveText("Fastest");
+  await page.getByRole("button", { name: /^Live panel/ }).click();
   await dock.getByRole("button", { name: "Save as this model's settings" }).click();
   await expect(dock.getByRole("button", { name: "Forget them" })).toBeVisible();
   // Another model, other settings.
   await select.selectOption(second!);
   await dock.getByRole("slider", { name: /Speed or accuracy/ }).fill("4");
+  await openSettings(page);
   await expect(page.getByTestId("speed-mode")).toHaveText("Accurate");
+  await page.getByRole("button", { name: /^Live panel/ }).click();
   // Back to the first: its settings return.
   await select.selectOption(first!);
+  await openSettings(page);
   await expect(page.getByTestId("speed-mode")).toHaveText("Fastest");
+  await page.getByRole("button", { name: /^Live panel/ }).click();
   await dock.getByRole("button", { name: "Forget them" }).click();
   await expect(dock.getByRole("button", { name: "Forget them" })).toHaveCount(0);
 });

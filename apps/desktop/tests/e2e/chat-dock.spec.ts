@@ -1,6 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
-import { expect, settle, test } from "./fixtures";
+import { expect, settle, test, openSettings } from "./fixtures";
 
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"];
 
@@ -31,10 +31,15 @@ test.describe("the live panel in Chat", () => {
     await page.getByRole("button", { name: /^Live panel/ }).click();
     const speed = dock(page).getByRole("slider", { name: /Speed or accuracy/ });
     await speed.fill("1");
-    await expect(page.getByTestId("speed-mode")).toHaveText("Fastest");
     await expect(dock(page).getByRole("checkbox", { name: "Think before answering" })).not.toBeChecked();
+    // The Settings tab shows the same level.
+    await openSettings(page);
+    await expect(page.getByTestId("speed-mode")).toHaveText("Fastest");
+    await page.getByRole("button", { name: /^Live panel/ }).click();
     await dock(page).getByRole("checkbox", { name: "Think before answering" }).check();
+    await openSettings(page);
     await expect(page.getByTestId("speed-mode")).toHaveText("Custom");
+    await page.getByRole("button", { name: /^Live panel/ }).click();
     await dock(page).getByRole("button", { name: "System prompt" }).click();
     await expect(page.locator("#base-prompt")).toBeVisible();
   });

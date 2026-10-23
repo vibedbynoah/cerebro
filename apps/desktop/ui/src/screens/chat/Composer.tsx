@@ -383,6 +383,29 @@ export function Composer(props: {
           {error()}
         </p>
       </Show>
+    </div>
+  );
+}
+
+/** The Speed <-> Accuracy slider and Fine-tune: Chat's settings, shown in its side panel. */
+export function ChatSettings(props: {
+  levels: Readonly<Record<Effort, EffortLevel>>;
+  mode: Mode | null;
+  onMode: (m: Mode) => void;
+  prefs: ChatPrefs;
+  setPrefs: (p: Partial<ChatPrefs>) => void;
+  notes: string[];
+  onOpenPrompt: () => void;
+  onOpenPrompts: () => void;
+  docsOn: boolean;
+  onDocs: (on: boolean) => void;
+  docsScopes: { key: string; label: string }[];
+  docsScope: string;
+  onDocsScope: (key: string) => void;
+  docsNote: string;
+}): JSX.Element {
+  return (
+    <div class="chat-settings">
       <div class="composer__mode">
         <label for="speed-mode" class="composer__mode-end">Speed</label>
         <input
@@ -410,7 +433,7 @@ export function Composer(props: {
       <p class="composer__hint composer__hint--mode" id="mode-note">
         {props.mode ? MODE_PRESETS[props.mode].summary : "Custom: you changed one of the settings in Fine-tune by hand. Move the slider to pick a level again."}
       </p>
-      <details class="composer__more" open={readPref(FINE_TUNE_KEY) === "open"} on:toggle={(e) => writePref(FINE_TUNE_KEY, e.currentTarget.open ? "open" : "closed")}>
+      <details class="composer__more" open={readPref(FINE_TUNE_KEY) !== "closed"} on:toggle={(e) => writePref(FINE_TUNE_KEY, e.currentTarget.open ? "open" : "closed")}>
         <summary class="composer__more-summary">
           <Icon name="sliders" size={15} />
           <span class="composer__more-title">Fine-tune</span>
@@ -452,6 +475,10 @@ export function Composer(props: {
             <label class="composer__check">
               <input type="checkbox" checked={!props.prefs.addInstructions} onChange={(e) => props.setPrefs({ addInstructions: !e.currentTarget.checked })} />
               <span>No added prompt</span>
+            </label>
+            <label class="composer__check" title="Lets the model read files, search and call your MCP tools. Their descriptions make every prompt longer, which slows small models.">
+              <input type="checkbox" checked={props.prefs.toolsOn} onChange={(e) => props.setPrefs({ toolsOn: e.currentTarget.checked })} data-testid="tools-on" />
+              <span>Let the model use tools</span>
             </label>
             <label class="composer__check" title="The model looks around without changing anything, then shows you a plan to approve.">
               <input type="checkbox" checked={props.prefs.planMode} onChange={(e) => props.setPrefs({ planMode: e.currentTarget.checked })} />
@@ -523,9 +550,6 @@ export function Composer(props: {
           </Show>
         </div>
       </details>
-      <p class="composer__hint composer__hint--keys">
-        <kbd>Enter</kbd> sends, <kbd>Shift</kbd>+<kbd>Enter</kbd> new line, <kbd>Esc</kbd> stops.
-      </p>
     </div>
   );
 }

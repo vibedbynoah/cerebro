@@ -159,6 +159,8 @@ test.describe("chat organization", () => {
     await alpha.getByLabel("Tags, separated by commas").press("Tab");
     await alpha.locator("summary").click();
 
+    // The filters sit behind "Filter" in the list.
+    await page.locator(".chat-list__filtersummary").click();
     const folderFilter = page.getByRole("combobox", { name: "Filter by folder" });
     await folderFilter.selectOption("Work");
     await expect(items).toHaveCount(1);
