@@ -110,6 +110,7 @@ pub const STREAM_LAYERS: &str = "stream_layers";
 pub const DRIVE_TIER: &str = "drive_tier";
 pub const EXPERT_RAM_CACHE: &str = "expert_ram_cache";
 pub const SPLIT_STREAM: &str = "split_stream";
+pub const SPLIT_HEAD: &str = "split_head";
 pub const LLAMA_SPLITS: &str = "llama_splits";
 
 fn registry() -> &'static [Switch] {
@@ -294,6 +295,18 @@ fn registry() -> &'static [Switch] {
                 beginner: "Two cases where llama.cpp is measured faster than Cerebro's engine today: a model too big for an NVIDIA card (split between the card and the processor), and AMD or Intel graphics, including graphics built into the processor. Cerebro uses llama.cpp for those. The first time it downloads the official release (about 650 MB for NVIDIA, 35 MB for other cards).",
                 advanced: "Split plans on NVIDIA run the CUDA build with the planner's GPU layer count; with no NVIDIA card, a graphics card the portable backend would use runs the Vulkan build (all layers it holds). The app starts llama-server on 127.0.0.1 and streams over its OpenAI-compatible API; downloads are checked against the SHA-256 GitHub publishes. Measured on an i9-12900H: split prompt reading 0.05-0.12x and Iris Xe prompt reading 0.05-0.14x of llama.cpp. Off: Cerebro's engine runs everything.",
                 env: "CEREBRO_NO_LLAMA_SPLITS",
+                default: on,
+            },
+            Switch {
+                id: SPLIT_HEAD,
+                name: "Vocabulary layer on the graphics card for split models",
+                group: "Placement",
+                kind: Kind::Toggle,
+                channel: Channel::Beta,
+                applies: Applies::Reload,
+                beginner: "When a model is split between your graphics card and processor, its last layer (the one that scores every word) goes on the card. It is read once per word written, so the processor has that much less to read and writes faster.",
+                advanced: "Split plans reserve VRAM for the output matrix before fitting layers; each decode step uploads the residual after the CPU's layers, runs the final norm and the head on the GPU and copies the logits back. Not for hyper-connection models. Off: the head stays on the processor and the card holds one or two more layers.",
+                env: "CEREBRO_NO_SPLIT_HEAD",
                 default: on,
             },
             Switch {

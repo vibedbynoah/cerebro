@@ -454,6 +454,8 @@ pub struct GpuState {
     spec: Option<CudaSlice<f32>>,
     /// Split models: the activation after the last GPU layer, copied for the CPU.
     host_x: Option<PinnedHostSlice<f32>>,
+    /// Split models: the output head, run after the processor's layers (`head_split`).
+    split_head: Option<GMat>,
     /// Split models: what the processor's layers stream through for prompt batches (made on first
     /// use; see `prefill_streamed`).
     pipe: Option<Pipe>,
@@ -806,6 +808,7 @@ impl GpuState {
             });
         }
         let output = if split { None } else { Some(up(&[model.output_mat()])?) };
+        let split_head = if split && split_head_on(model) { Some(up(&[model.output_mat()])?) } else { None };
         // Tied embeddings reuse the output matrix on the GPU; otherwise upload the table too. In the
         // native layout the row is looked up on the CPU and uploaded (the table stays out of VRAM).
         let host_embed = native.then(|| vec![0f32; c.dim]);
@@ -885,6 +888,7 @@ impl GpuState {
         Ok(Self {
             out_norm: stream.clone_htod(model.out_norm()).map_err(gerr)?,
             output,
+            split_head,
             embed,
             host_embed,
             x: z(c.dim)?,
@@ -926,6 +930,24 @@ impl GpuState {
             host_x: if split { Some(unsafe { ctx_pin.alloc_pinned::<f32>(c.dim) }.map_err(gerr)?) } else { None },
             pipe: None,
         })
+    }
+
+    /// Split models with the head on the GPU: the final norm and the head over `x` (the residual after
+    /// the processor's layers) into `logits`. Ok(false) when the head stays on the processor.
+    pub fn head_split(&mut self, x: &[f32], logits: &mut [f32]) -> Result<bool, Error> {
+        let Some(head) = self.split_head.as_ref() else { return Ok(false) };
+        let s = &self.stream;
+        let f = &self.f;
+        s.memcpy_htod(x, &mut self.x).map_err(gerr)?;
+        let (dim, eps) = (self.sh.dim as i32, self.sh.eps);
+        let null_f: u64 = 0;
+        let one = LaunchConfig { grid_dim: (1, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
+        let mut lb = s.launch_builder(&f.rmsnorm_quant);
+        lb.arg(&self.x).arg(&self.out_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f);
+        unsafe { lb.arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
+        Self::matvec(s, f, head, &self.xq, &self.xd, &mut self.logits, false)?;
+        s.memcpy_dtoh(&self.logits, &mut logits[..self.sh.vocab]).map_err(gerr)?;
+        Ok(true)
     }
 
     /// Whether `prefill_streamed` can run this model's processor layers (`from..`): attention or
@@ -1307,6 +1329,12 @@ impl GpuState {
 /// Placement for `model` with `vram_free` bytes of GPU memory (0: none), the RAM available now and
 /// the model's drive. `force_layers` overrides the GPU layer count (None: the switch, else as many
 /// as fit). Models whose layers have no GPU kernels yet plan as processor-only.
+/// Whether a split of `model` puts its output head on the GPU (switch "split_head"; not for
+/// hyper-connection models, whose head mixes streams on the CPU).
+fn split_head_on(model: &Model) -> bool {
+    model.hc.is_none() && switches::enabled(switches::SPLIT_HEAD)
+}
+
 pub fn plan_for(model: &Model, max_ctx: usize, vram_free: u64, force_layers: Option<usize>) -> Result<crate::placement::Plan, Error> {
     {
         use crate::placement::{drive_of, plan_dense, plan_moe, LayerCost, Machine, ModelCost};
@@ -1345,7 +1373,7 @@ pub fn plan_for(model: &Model, max_ctx: usize, vram_free: u64, force_layers: Opt
             let per = file.saturating_sub(head) / c.n_layer.max(1) as u64;
             let kv_cpu = 2 * max_ctx as u64 * kvd * 4;
             let layers = (0..c.n_layer).map(|i| LayerCost { int8: per, native: per, kv_gpu: 0, kv_cpu: if model.layers()[i].delta.is_none() { kv_cpu } else { 0 }, native_ok: false }).collect();
-            let mut p = plan_dense(&ModelCost { layers, head_int8: head, head_native: head, scratch: 0, file }, &mach, None);
+            let mut p = plan_dense(&ModelCost { layers, head_int8: head, head_native: head, scratch: 0, split_head: 0, file }, &mach, None);
             if vram_free > 0 {
                 p.notes[0] = "This model's layer type does not run on the graphics card yet: everything runs on the processor.".to_owned();
             }
@@ -1377,7 +1405,8 @@ pub fn plan_for(model: &Model, max_ctx: usize, vram_free: u64, force_layers: Opt
         }
         // In the native layout the embeddings are looked up on the CPU: nothing extra on the GPU.
         let _ = &mut head_native;
-        let cost = ModelCost { layers, head_int8, head_native, scratch, file: model.gguf().len() as u64 };
+        let split_head = if split_head_on(model) { native_bytes(out).unwrap_or(int8_bytes(out)) } else { 0 };
+        let cost = ModelCost { layers, head_int8, head_native, scratch, split_head, file: model.gguf().len() as u64 };
         let force = force_layers.or(match crate::switches::get(crate::switches::GPU_LAYERS) {
             n if n > 0 => Some(n as usize),
             _ => None,

@@ -1652,7 +1652,7 @@ impl Session {
                             self.progress.set(self.tokens.len());
                             if ci + 1 == n_chunks {
                                 let th = Instant::now();
-                                self.head(m);
+                                self.split_head(m);
                                 if std::env::var_os("CEREBRO_PIPE_LOG").is_some() {
                                     eprintln!("pipe: head {:.1} ms", th.elapsed().as_secs_f64() * 1e3);
                                 }
@@ -2227,7 +2227,7 @@ impl Session {
                     panic!("GPU step failed: {e}");
                 }
                 self.layers_from(m, from, pos);
-                self.head(m);
+                self.split_head(m);
                 self.tokens.push(token);
                 return;
             }
@@ -2517,6 +2517,18 @@ impl Session {
     }
 
     /// The output head: final norm and logits.
+    /// The output head of a split: on the GPU when it holds the head (gpu.rs `head_split`), else here.
+    #[cfg(feature = "cuda")]
+    fn split_head(&mut self, m: &Model) {
+        let on_gpu = match self.gpu.as_mut() {
+            Some(g) => g.head_split(&self.x, &mut self.logits).unwrap_or_else(|e| panic!("GPU head failed: {e}")),
+            None => false,
+        };
+        if !on_gpu {
+            self.head(m);
+        }
+    }
+
     fn head(&mut self, m: &Model) {
         let to = Instant::now();
         match (m.hc.as_ref(), self.hcs.take()) {

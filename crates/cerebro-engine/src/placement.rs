@@ -101,6 +101,8 @@ pub struct ModelCost {
     pub head_native: u64,
     /// Scratch the GPU needs for decoding and batched prompt reading.
     pub scratch: u64,
+    /// VRAM the output head takes when a split puts it on the GPU (0: a split keeps it on the CPU).
+    pub split_head: u64,
     /// The whole file (the CPU maps all of it).
     pub file: u64,
 }
@@ -187,10 +189,10 @@ pub fn plan_dense(cost: &ModelCost, m: &Machine, force_gpu_layers: Option<usize>
     let all_native_ok = cost.layers.iter().all(|l| l.native_ok);
     let full_int8 = sum(&|l| l.int8 + l.kv_gpu, 0..n) + cost.head_int8 + cost.scratch;
     let full_native = sum(&|l| (if l.native_ok { l.native } else { l.int8 }) + l.kv_gpu, 0..n) + cost.head_native + cost.scratch;
-    // In a split the head runs on the CPU; the GPU holds layers, their KV and scratch.
+    // In a split the GPU holds layers, their KV and scratch, and the head when `split_head` says so.
     let layer_gpu = |l: &LayerCost| (if l.native_ok { l.native } else { l.int8 }) + l.kv_gpu;
     let fit_layers = {
-        let mut used = cost.scratch;
+        let mut used = cost.scratch + cost.split_head;
         let mut k = 0;
         for l in &cost.layers {
             if used + layer_gpu(l) > budget {
@@ -215,13 +217,14 @@ pub fn plan_dense(cost: &ModelCost, m: &Machine, force_gpu_layers: Option<usize>
     let vram_bytes = match layout {
         Layout::GpuInt8 => full_int8,
         Layout::GpuNative => full_native,
-        Layout::Split => sum(&layer_gpu, 0..gpu_layers) + cost.scratch,
+        Layout::Split => sum(&layer_gpu, 0..gpu_layers) + cost.scratch + cost.split_head,
         Layout::Cpu => 0,
     };
-    // What the CPU reads per token: its layers and, unless every layer is on the GPU, the head.
+    // What the CPU reads per token: its layers and, unless the GPU holds it, the head.
+    let head_on_gpu = layout == Layout::Split && cost.split_head > 0;
     let cpu_weights = match layout {
         Layout::GpuInt8 | Layout::GpuNative => 0,
-        _ => sum(&|l| l.native, gpu_layers..n) + cost.head_native,
+        _ => sum(&|l| l.native, gpu_layers..n) + if head_on_gpu { 0 } else { cost.head_native },
     };
     let cpu_kv = match layout {
         Layout::GpuInt8 | Layout::GpuNative => 0,
@@ -423,6 +426,7 @@ mod tests {
             head_int8: 1200 << 20,
             head_native: 640 << 20,
             scratch: 200 << 20,
+            split_head: 0,
             file: 16 * GB,
         }
     }
