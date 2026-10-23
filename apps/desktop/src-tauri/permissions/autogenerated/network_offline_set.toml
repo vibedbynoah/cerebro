@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-network-offline-set"
+description = "Enables the network_offline_set command without any pre-configured scope."
+commands.allow = ["network_offline_set"]
+
+[[permission]]
+identifier = "deny-network-offline-set"
+description = "Denies the network_offline_set command without any pre-configured scope."
+commands.deny = ["network_offline_set"]
