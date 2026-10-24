@@ -637,10 +637,271 @@ __device__ __forceinline__ int4 shr4(int4 a, int s) {
 __device__ __forceinline__ int4 or4(int4 a, int4 b) { return make_int4(a.x | b.x, a.y | b.y, a.z | b.z, a.w | b.w); }
 __device__ __forceinline__ int4 shl4(int4 a, int s) { return make_int4(a.x << s, a.y << s, a.z << s, a.w << s); }
 
+// ---- i-quants and Q2_K kept in their own format (models whose int8 copy would not fit) ----------
+//
+// GGUF type codes: Q2_K 10, IQ2_XXS 16, IQ3_XXS 18, IQ1_S 19, IQ4_NL 20 (32-value blocks, taken eight
+// at a time as one 144-byte group), IQ3_S 21, IQ2_S 22, IQ4_XS 23, IQ1_M 29. Each 256-value group has
+// 8 units of 32 values; iq_vals writes unit u's values (block scale included) as floats, following
+// src/quant_more.rs's decoder line for line. Decoding is the cheap part: these rows are read at
+// memory speed whichever way the products are formed.
+#include "iq_tables.cuh"
+
+__device__ __forceinline__ bool is_iq(int dtype) {
+    return dtype == 10 || dtype == 16 || dtype == 18 || dtype == 19 || dtype == 20 || dtype == 21 || dtype == 22 || dtype == 23 || dtype == 29;
+}
+__device__ __forceinline__ float h16(const unsigned char* p) {
+    return __half2float(__ushort_as_half((unsigned short)(p[0] | (p[1] << 8))));
+}
+__device__ __forceinline__ unsigned int u32at(const unsigned char* p) {
+    return (unsigned int)p[0] | ((unsigned int)p[1] << 8) | ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
+}
+__device__ __forceinline__ unsigned int u16at(const unsigned char* p) { return (unsigned int)p[0] | ((unsigned int)p[1] << 8); }
+__device__ __forceinline__ float gbyte(unsigned long long g, int j) { return (float)((g >> (8 * j)) & 0xff); }
+__device__ __forceinline__ float gsbyte(unsigned long long g, int j) { return (float)(signed char)((g >> (8 * j)) & 0xff); }
+__device__ __forceinline__ float sgn(unsigned int s, int j) { return (s >> j) & 1 ? -1.f : 1.f; }
+
+__device__ void iq_vals(int dtype, const unsigned char* b, int u, float* v) {
+    if (dtype == 20) {
+        const unsigned char* q = b + 18 * u;
+        float d = h16(q);
+        for (int j = 0; j < 16; ++j) {
+            v[j] = d * kvalues_iq4nl_d[q[2 + j] & 0xf];
+            v[j + 16] = d * kvalues_iq4nl_d[q[2 + j] >> 4];
+        }
+    } else if (dtype == 23) {
+        float d = h16(b);
+        unsigned int sh = u16at(b + 2);
+        int ls = ((b[4 + u / 2] >> (4 * (u % 2))) & 0xf) | (((sh >> (2 * u)) & 3) << 4);
+        float dl = d * (ls - 32);
+        const unsigned char* q = b + 8 + 16 * u;
+        for (int j = 0; j < 16; ++j) {
+            v[j] = dl * kvalues_iq4nl_d[q[j] & 0xf];
+            v[j + 16] = dl * kvalues_iq4nl_d[q[j] >> 4];
+        }
+    } else if (dtype == 16) {
+        float d = h16(b);
+        unsigned int a0 = u32at(b + 2 + 8 * u), a1 = u32at(b + 6 + 8 * u);
+        float db = d * (0.5f + (a1 >> 28)) * 0.25f;
+        for (int l = 0; l < 4; ++l) {
+            unsigned long long g = iq2xxs_grid_d[(a0 >> (8 * l)) & 0xff];
+            unsigned int sg = ksigns_iq2xs_d[(a1 >> (7 * l)) & 127];
+            for (int j = 0; j < 8; ++j) v[l * 8 + j] = db * gbyte(g, j) * sgn(sg, j);
+        }
+    } else if (dtype == 22) {
+        float d = h16(b);
+        int sc = b[74 + u];
+        unsigned int qh = b[66 + u];
+        for (int l = 0; l < 4; ++l) {
+            float db = d * (0.5f + (l < 2 ? (sc & 0xf) : (sc >> 4))) * 0.25f;
+            unsigned long long g = iq2s_grid_d[b[2 + 4 * u + l] | ((qh << (8 - 2 * l)) & 0x300)];
+            unsigned int sg = b[34 + 4 * u + l];
+            for (int j = 0; j < 8; ++j) v[l * 8 + j] = db * gbyte(g, j) * sgn(sg, j);
+        }
+    } else if (dtype == 18) {
+        float d = h16(b);
+        unsigned int aux = u32at(b + 66 + 4 * u);
+        float db = d * (0.5f + (aux >> 28)) * 0.5f;
+        for (int l = 0; l < 4; ++l) {
+            unsigned int sg = ksigns_iq2xs_d[(aux >> (7 * l)) & 127];
+            unsigned int g1 = iq3xxs_grid_d[b[2 + 8 * u + 2 * l]], g2 = iq3xxs_grid_d[b[2 + 8 * u + 2 * l + 1]];
+            for (int j = 0; j < 4; ++j) {
+                v[l * 8 + j] = db * (float)((g1 >> (8 * j)) & 0xff) * sgn(sg, j);
+                v[l * 8 + j + 4] = db * (float)((g2 >> (8 * j)) & 0xff) * sgn(sg, j + 4);
+            }
+        }
+    } else if (dtype == 21) {
+        float d = h16(b);
+        int sc = b[106 + u / 2];
+        float db = d * (1 + 2 * (u % 2 == 0 ? (sc & 0xf) : (sc >> 4)));
+        unsigned int hb = b[66 + u];
+        for (int l = 0; l < 4; ++l) {
+            unsigned int g1 = iq3s_grid_d[b[2 + 8 * u + 2 * l] | ((hb << (8 - 2 * l)) & 256)];
+            unsigned int g2 = iq3s_grid_d[b[2 + 8 * u + 2 * l + 1] | ((hb << (7 - 2 * l)) & 256)];
+            unsigned int sg = b[74 + 4 * u + l];
+            for (int j = 0; j < 4; ++j) {
+                v[l * 8 + j] = db * (float)((g1 >> (8 * j)) & 0xff) * sgn(sg, j);
+                v[l * 8 + j + 4] = db * (float)((g2 >> (8 * j)) & 0xff) * sgn(sg, j + 4);
+            }
+        }
+    } else if (dtype == 19) {
+        float d = h16(b);
+        unsigned int qh = u16at(b + 34 + 2 * u);
+        float dl = d * (2 * ((qh >> 12) & 7) + 1);
+        float delta = qh & 0x8000 ? -0.125f : 0.125f;
+        for (int l = 0; l < 4; ++l) {
+            unsigned long long g = iq1s_grid_d[b[2 + 4 * u + l] | (((qh >> (3 * l)) & 7) << 8)];
+            for (int j = 0; j < 8; ++j) v[l * 8 + j] = dl * (gsbyte(g, j) + delta);
+        }
+    } else if (dtype == 29) {
+        unsigned int sc0 = u16at(b + 48), sc1 = u16at(b + 50), sc2 = u16at(b + 52), sc3 = u16at(b + 54);
+        unsigned int dbits = (sc0 >> 12) | ((sc1 >> 8) & 0x00f0) | ((sc2 >> 4) & 0x0f00) | (sc3 & 0xf000);
+        float d = __half2float(__ushort_as_half((unsigned short)dbits));
+        unsigned int scs[4] = {sc0, sc1, sc2, sc3};
+        unsigned int sv = scs[u / 2] >> (6 * (u % 2));
+        float dl0 = d * (2 * (sv & 7) + 1), dl1 = d * (2 * ((sv >> 3) & 7) + 1);
+        const unsigned char* qs = b + 4 * u;
+        const unsigned char* qh = b + 32 + 2 * u;
+        int idx[4] = {qs[0] | ((qh[0] << 8) & 0x700), qs[1] | ((qh[0] << 4) & 0x700), qs[2] | ((qh[1] << 8) & 0x700), qs[3] | ((qh[1] << 4) & 0x700)};
+        float dl[4] = {qh[0] & 0x08 ? -0.125f : 0.125f, qh[0] & 0x80 ? -0.125f : 0.125f, qh[1] & 0x08 ? -0.125f : 0.125f, qh[1] & 0x80 ? -0.125f : 0.125f};
+        for (int l = 0; l < 4; ++l) {
+            unsigned long long g = iq1s_grid_d[idx[l]];
+            float sc = l < 2 ? dl0 : dl1;
+            for (int j = 0; j < 8; ++j) v[l * 8 + j] = sc * (gsbyte(g, j) + dl[l]);
+        }
+    } else {
+        // Q2_K: unit u = 32 values of half n = u / 4 at shift 2 * (u % 4); a scale and a minimum per 16.
+        float d = h16(b + 80), dmin = h16(b + 82);
+        int n = u >> 2, k = u & 3;
+        const unsigned char* q = b + 16 + 32 * n;
+        int c0 = b[8 * n + 2 * k], c1 = b[8 * n + 2 * k + 1];
+        for (int l = 0; l < 16; ++l) {
+            v[l] = d * (c0 & 0xf) * ((q[l] >> (2 * k)) & 3) - dmin * (c0 >> 4);
+            v[16 + l] = d * (c1 & 0xf) * ((q[16 + l] >> (2 * k)) & 3) - dmin * (c1 >> 4);
+        }
+    }
+}
+
+// The same units as integer dot products for decoding: signed int8 words built in registers, four
+// values per dp4a against the int8 activations, one float scale per unit (or per 16 values).
+// Four sign bits -> 0xff in the bytes whose bit is set.
+__device__ __forceinline__ int smask4(unsigned int s) { return (int)(((s & 15u) * 0x00204081u & 0x01010101u) * 0xffu); }
+// Four unsigned grid bytes with four sign bits applied.
+__device__ __forceinline__ int signed4(unsigned int g, unsigned int s) { int m = smask4(s); return __vsub4((int)g ^ m, m); }
+__device__ __forceinline__ int xw(const signed char* x, int k) { return *reinterpret_cast<const int*>(x + 4 * k); }
+// IQ4_NL / IQ4_XS: four nibbles (bytes 0-3 of q, low or high half) through the value table.
+__device__ __forceinline__ int nl4(unsigned int q, int hi) {
+    int sh = hi ? 4 : 0;
+    return (int)(unsigned char)kvalues_iq4nl_d[(q >> sh) & 15] | ((int)(unsigned char)kvalues_iq4nl_d[(q >> (sh + 8)) & 15] << 8)
+         | ((int)(unsigned char)kvalues_iq4nl_d[(q >> (sh + 16)) & 15] << 16) | ((int)(unsigned char)kvalues_iq4nl_d[(q >> (sh + 24)) & 15] << 24);
+}
+
+__device__ float iq_dot(int dtype, const unsigned char* b, int u, const signed char* xq, const float* xd) {
+    const signed char* x = xq + u * 32;
+    const int one = 0x01010101;
+    if (dtype == 20 || dtype == 23) {
+        const unsigned char* q;
+        float dl;
+        if (dtype == 20) {
+            q = b + 18 * u + 2;
+            dl = h16(b + 18 * u);
+        } else {
+            unsigned int sh = u16at(b + 2);
+            int ls = ((b[4 + u / 2] >> (4 * (u % 2))) & 0xf) | (((sh >> (2 * u)) & 3) << 4);
+            dl = h16(b) * (ls - 32);
+            q = b + 8 + 16 * u;
+        }
+        int acc = 0;
+        #pragma unroll
+        for (int k = 0; k < 4; ++k) {
+            unsigned int w = u32at(q + 4 * k);
+            acc = __dp4a(nl4(w, 0), xw(x, k), acc);
+            acc = __dp4a(nl4(w, 1), xw(x, 4 + k), acc);
+        }
+        return dl * acc * xd[u];
+    }
+    if (dtype == 16) {
+        unsigned int a0 = u32at(b + 2 + 8 * u), a1 = u32at(b + 6 + 8 * u);
+        int acc = 0;
+        #pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            unsigned long long g = iq2xxs_grid_d[(a0 >> (8 * l)) & 0xff];
+            unsigned int sg = ksigns_iq2xs_d[(a1 >> (7 * l)) & 127];
+            acc = __dp4a(signed4((unsigned int)g, sg), xw(x, 2 * l), acc);
+            acc = __dp4a(signed4((unsigned int)(g >> 32), sg >> 4), xw(x, 2 * l + 1), acc);
+        }
+        return h16(b) * (2 * (a1 >> 28) + 1) * 0.125f * acc * xd[u];
+    }
+    if (dtype == 22) {
+        int sc = b[74 + u];
+        unsigned int qh = b[66 + u];
+        int a01 = 0, a23 = 0;
+        #pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            unsigned long long g = iq2s_grid_d[b[2 + 4 * u + l] | ((qh << (8 - 2 * l)) & 0x300)];
+            unsigned int sg = b[34 + 4 * u + l];
+            int p = __dp4a(signed4((unsigned int)g, sg), xw(x, 2 * l), __dp4a(signed4((unsigned int)(g >> 32), sg >> 4), xw(x, 2 * l + 1), 0));
+            if (l < 2) a01 += p; else a23 += p;
+        }
+        return h16(b) * 0.125f * ((2 * (sc & 0xf) + 1) * a01 + (2 * (sc >> 4) + 1) * a23) * xd[u];
+    }
+    if (dtype == 18) {
+        unsigned int aux = u32at(b + 66 + 4 * u);
+        int acc = 0;
+        #pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            unsigned int sg = ksigns_iq2xs_d[(aux >> (7 * l)) & 127];
+            acc = __dp4a(signed4(iq3xxs_grid_d[b[2 + 8 * u + 2 * l]], sg), xw(x, 2 * l), acc);
+            acc = __dp4a(signed4(iq3xxs_grid_d[b[2 + 8 * u + 2 * l + 1]], sg >> 4), xw(x, 2 * l + 1), acc);
+        }
+        return h16(b) * (2 * (aux >> 28) + 1) * 0.25f * acc * xd[u];
+    }
+    if (dtype == 21) {
+        int sc = b[106 + u / 2];
+        unsigned int hb = b[66 + u];
+        int acc = 0;
+        #pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            unsigned int sg = b[74 + 4 * u + l];
+            acc = __dp4a(signed4(iq3s_grid_d[b[2 + 8 * u + 2 * l] | ((hb << (8 - 2 * l)) & 256)], sg), xw(x, 2 * l), acc);
+            acc = __dp4a(signed4(iq3s_grid_d[b[2 + 8 * u + 2 * l + 1] | ((hb << (7 - 2 * l)) & 256)], sg >> 4), xw(x, 2 * l + 1), acc);
+        }
+        return h16(b) * (1 + 2 * (u % 2 == 0 ? (sc & 0xf) : (sc >> 4))) * acc * xd[u];
+    }
+    if (dtype == 19) {
+        unsigned int qh = u16at(b + 34 + 2 * u);
+        int acc = 0, sx = 0;
+        #pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            unsigned long long g = iq1s_grid_d[b[2 + 4 * u + l] | (((qh >> (3 * l)) & 7) << 8)];
+            acc = __dp4a((int)(unsigned int)g, xw(x, 2 * l), acc);
+            acc = __dp4a((int)(unsigned int)(g >> 32), xw(x, 2 * l + 1), acc);
+            sx = __dp4a(xw(x, 2 * l), one, __dp4a(xw(x, 2 * l + 1), one, sx));
+        }
+        float delta = qh & 0x8000 ? -0.125f : 0.125f;
+        return h16(b) * (2 * ((qh >> 12) & 7) + 1) * (acc + delta * sx) * xd[u];
+    }
+    if (dtype == 29) {
+        unsigned int sc0 = u16at(b + 48), sc1 = u16at(b + 50), sc2 = u16at(b + 52), sc3 = u16at(b + 54);
+        unsigned int dbits = (sc0 >> 12) | ((sc1 >> 8) & 0x00f0) | ((sc2 >> 4) & 0x0f00) | (sc3 & 0xf000);
+        float d = __half2float(__ushort_as_half((unsigned short)dbits));
+        unsigned int scs[4] = {sc0, sc1, sc2, sc3};
+        unsigned int sv = scs[u / 2] >> (6 * (u % 2));
+        const unsigned char* qs = b + 4 * u;
+        const unsigned char* qh = b + 32 + 2 * u;
+        int idx[4] = {qs[0] | ((qh[0] << 8) & 0x700), qs[1] | ((qh[0] << 4) & 0x700), qs[2] | ((qh[1] << 8) & 0x700), qs[3] | ((qh[1] << 4) & 0x700)};
+        bool neg[4] = {(qh[0] & 0x08) != 0, (qh[0] & 0x80) != 0, (qh[1] & 0x08) != 0, (qh[1] & 0x80) != 0};
+        float part[2] = {0.f, 0.f};
+        #pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            unsigned long long g = iq1s_grid_d[idx[l]];
+            int a = __dp4a((int)(unsigned int)g, xw(x, 2 * l), __dp4a((int)(unsigned int)(g >> 32), xw(x, 2 * l + 1), 0));
+            int sx = __dp4a(xw(x, 2 * l), one, __dp4a(xw(x, 2 * l + 1), one, 0));
+            part[l >> 1] += a + (neg[l] ? -0.125f : 0.125f) * sx;
+        }
+        return d * ((2 * (sv & 7) + 1) * part[0] + (2 * ((sv >> 3) & 7) + 1) * part[1]) * xd[u];
+    }
+    // Q2_K
+    int n = u >> 2, k = u & 3;
+    const unsigned char* q = b + 16 + 32 * n;
+    int c0 = b[8 * n + 2 * k], c1 = b[8 * n + 2 * k + 1];
+    int a0 = 0, a1 = 0, s0 = 0, s1 = 0;
+    #pragma unroll
+    for (int w = 0; w < 4; ++w) {
+        int v0 = (int)((u32at(q + 4 * w) >> (2 * k)) & 0x03030303u);
+        int v1 = (int)((u32at(q + 16 + 4 * w) >> (2 * k)) & 0x03030303u);
+        a0 = __dp4a(v0, xw(x, w), a0);
+        a1 = __dp4a(v1, xw(x, 4 + w), a1);
+        s0 = __dp4a(xw(x, w), one, s0);
+        s1 = __dp4a(xw(x, 4 + w), one, s1);
+    }
+    return (h16(b + 80) * ((c0 & 0xf) * a0 + (c1 & 0xf) * a1) - h16(b + 82) * ((c0 >> 4) * s0 + (c1 >> 4) * s1)) * xd[u];
+}
+
 // Unit u of a block: Q4_K/Q5_K have 8 (j = u/2 picks the 32-byte qs chunk, half = u%2 its 16 bytes;
 // low nibbles belong to sub-block 2j, high to 2j+1); Q6_K has 16 (half n, group g, 16-value part hh).
 __device__ __forceinline__ float unit_dot(int dtype, const unsigned char* blk, int u,
                                           const signed char* xq, const float* xd) {
+    if (is_iq(dtype)) return iq_dot(dtype, blk, u, xq, xd);
     if (dtype == 12 || dtype == 13) {
         int j = u >> 1, half = u & 1, sb0 = 2 * j, sb1 = sb0 + 1;
         float d = __half2float(*reinterpret_cast<const __half*>(blk));
@@ -692,7 +953,9 @@ extern "C" __global__ void k_to_q8(const unsigned char* __restrict__ w, int dtyp
     int b = sb >> 3, j = sb & 7;
     const unsigned char* blk = w + ((size_t)row * (cols >> 8) + b) * bb;
     float v[32];
-    if (dtype == 12 || dtype == 13) {
+    if (is_iq(dtype)) {
+        iq_vals(dtype, blk, j, v);
+    } else if (dtype == 12 || dtype == 13) {
         float d = __half2float(*reinterpret_cast<const __half*>(blk));
         float dmin = __half2float(*reinterpret_cast<const __half*>(blk + 2));
         int sc, m;

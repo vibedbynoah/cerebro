@@ -143,6 +143,16 @@ fn gpu_block(dt: DType) -> Option<(usize, i32)> {
         DType::Q4K => Some((144, 12)),
         DType::Q5K => Some((176, 13)),
         DType::Q6K => Some((224, 14)),
+        // i-quants and Q2_K as stored (kernels.cu iq_vals); IQ4_NL's 18-byte blocks eight at a time.
+        DType::Q2K => Some((84, 10)),
+        DType::IQ2XXS => Some((66, 16)),
+        DType::IQ3XXS => Some((98, 18)),
+        DType::IQ1S => Some((50, 19)),
+        DType::IQ4NL => Some((144, 20)),
+        DType::IQ3S => Some((110, 21)),
+        DType::IQ2S => Some((82, 22)),
+        DType::IQ4XS => Some((136, 23)),
+        DType::IQ1M => Some((56, 29)),
         _ => None,
     }
 }
@@ -2691,6 +2701,92 @@ mod tests {
         let exp = ((h >> 10) & 0x1f) as i32;
         let man = (h & 0x3ff) as f64;
         sign * if exp == 0 { man * 2f64.powi(-24) } else { (1.0 + man / 1024.0) * 2f64.powi(exp - 15) }
+    }
+
+    /// k_to_q8 decodes every format kept native on the GPU (i-quants, Q2_K) like the CPU's reference
+    /// decoder: random blocks with sane scales, int8 output dequantised and compared value by value.
+    #[test]
+    fn native_formats_decode_like_the_reference() {
+        let Ok(ctx) = CudaContext::new(0) else { return eprintln!("no CUDA device; skipped") };
+        let stream = ctx.default_stream();
+        let module = ctx.load_module(Ptx::from_src(PTX)).unwrap();
+        let f = module.load_function("k_to_q8").unwrap();
+        let (rows, cols) = (4usize, 512usize);
+        let mut seed = 0x9E3779B97F4A7C15u64;
+        let mut byte = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 24) as u8
+        };
+        // (format, bytes per 256 on the GPU, bytes per file block, file block values, f16 scale offsets)
+        let cases: [(DType, &[usize]); 9] = [
+            (DType::Q2K, &[80, 82]),
+            (DType::IQ2XXS, &[0]),
+            (DType::IQ3XXS, &[0]),
+            (DType::IQ1S, &[0]),
+            (DType::IQ4NL, &[0]),
+            (DType::IQ3S, &[0]),
+            (DType::IQ2S, &[0]),
+            (DType::IQ4XS, &[0]),
+            (DType::IQ1M, &[]),
+        ];
+        for (dt, scales) in cases {
+            let (bb, code) = gpu_block(dt).unwrap();
+            let (fbb, fbe) = (dt.block_bytes(), dt.block_elems());
+            let mut w: Vec<u8> = (0..rows * cols / fbe * fbb).map(|_| byte()).collect();
+            for blk in w.chunks_exact_mut(fbb) {
+                for &o in scales {
+                    blk[o..o + 2].copy_from_slice(&0x2400u16.to_le_bytes());
+                }
+                if dt == DType::IQ1M {
+                    for (o, nib) in [(48usize, 0u8), (50, 0), (52, 4), (54, 2)] {
+                        blk[o + 1] = (blk[o + 1] & 0x0f) | (nib << 4);
+                    }
+                }
+            }
+            let mut want = vec![0f32; cols];
+            let mut got_all = Vec::new();
+            let dw = stream.clone_htod(&w).unwrap();
+            let mut qs = stream.alloc_zeros::<i8>(rows * cols).unwrap();
+            let mut ds = stream.alloc_zeros::<f32>(rows * cols / 32).unwrap();
+            let (code_i, bb_i, r_i, c_i) = (code, bb as i32, rows as i32, cols as i32);
+            let cfg = LaunchConfig { grid_dim: (((rows * cols / 32) as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+            unsafe { stream.launch_builder(&f).arg(&dw).arg(&code_i).arg(&bb_i).arg(&r_i).arg(&c_i).arg(&mut qs).arg(&mut ds).launch(cfg) }.unwrap();
+            let q = stream.clone_dtoh(&qs).unwrap();
+            let d = stream.clone_dtoh(&ds).unwrap();
+            let row_bytes = cols / fbe * fbb;
+            for r in 0..rows {
+                crate::quant::dequant_row(dt, &w[r * row_bytes..(r + 1) * row_bytes], &mut want);
+                let amax = want.iter().fold(0f32, |m, v| m.max(v.abs())).max(1e-6);
+                let got: Vec<f32> = (0..cols).map(|i| q[r * cols + i] as f32 * d[(r * cols + i) / 32]).collect();
+                let bad = want.iter().zip(&got).position(|(a, b)| (a - b).abs() > amax / 60.0);
+                assert!(bad.is_none(), "{dt:?} row {r}: value {} is {} on the GPU, {} on the CPU", bad.unwrap(), got[bad.unwrap()], want[bad.unwrap()]);
+                got_all.push(got);
+            }
+            let _ = got_all;
+            // The decode kernel (kmatmul, one token) against the reference: dequantised rows times
+            // the same int8 activations.
+            let km = module.load_function("kmatmul").unwrap();
+            let xs: Vec<i8> = (0..cols).map(|_| byte() as i8).collect();
+            let xd: Vec<f32> = (0..cols / 32).map(|i| 0.01 + 0.001 * i as f32).collect();
+            let (dxq, dxd) = (stream.clone_htod(&xs).unwrap(), stream.clone_htod(&xd).unwrap());
+            let mut y = stream.alloc_zeros::<f32>(rows).unwrap();
+            let null_i = stream.alloc_zeros::<i32>(1).unwrap();
+            let (one, ys, add) = (1i32, rows as i32, 0i32);
+            let null_ptr: Option<&CudaSlice<i32>> = None;
+            let _ = null_ptr;
+            let cfg = LaunchConfig { grid_dim: ((rows as u32).div_ceil(8), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+            unsafe { stream.launch_builder(&km).arg(&dw).arg(&code_i).arg(&bb_i).arg(&dxq).arg(&dxd).arg(&0u64).arg(&one).arg(&mut y).arg(&ys).arg(&r_i).arg(&c_i).arg(&add).launch(cfg) }.unwrap();
+            let _ = null_i;
+            let yv = stream.clone_dtoh(&y).unwrap();
+            for r in 0..rows {
+                crate::quant::dequant_row(dt, &w[r * row_bytes..(r + 1) * row_bytes], &mut want);
+                let exp: f32 = (0..cols).map(|i| want[i] * xs[i] as f32 * xd[i / 32]).sum();
+                let mag: f32 = (0..cols).map(|i| (want[i] * xs[i] as f32 * xd[i / 32]).abs()).sum::<f32>().max(1e-6);
+                assert!((yv[r] - exp).abs() <= 1e-3 * mag, "{dt:?} row {r}: decode dot {} on the GPU, {} reference", yv[r], exp);
+            }
+        }
     }
 
     /// The grouped decode kernel against an f64 reference and against attn_partial, on random
