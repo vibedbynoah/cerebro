@@ -155,8 +155,13 @@ pub struct Model {
     layers: Vec<Layer>,
     out_norm: Vec<f32>,
     output: Mat,
-    /// RoPE inverse frequencies, head_dim/2.
+    /// RoPE inverse frequencies, head_dim/2 (YaRN-adjusted when the context is extended).
     inv_freq: Vec<f32>,
+    /// YaRN's attention sharpening for an extended context: q and k are both scaled by it after
+    /// rotation (1 at the trained length).
+    rope_mscale: f32,
+    /// The context the model now runs at beyond its trained length, as (factor, original length).
+    pub ctx_extension: Option<(f32, usize)>,
     /// Q8_0 matrices re-laid for the processor (`quant::repack_q8_0_x8`), by file offset.
     packs: std::sync::RwLock<std::collections::HashMap<usize, Arc<Vec<u8>>>>,
     /// The drive tier (stream.rs): each layer's unit, and the output head's, once it is on.
@@ -333,7 +338,7 @@ impl Model {
         if cfg.n_expert > 0 {
             crate::activity::reset(cfg.n_layer, cfg.n_expert);
         }
-        let m = Self { path: path.to_path_buf(), embed: Mat::of(embed_t), out_norm, layers, output, inv_freq, cfg, gguf: g, packs: Default::default(), stream_map: Default::default(), hc, #[cfg(feature = "cuda")] offload: Default::default(), #[cfg(feature = "cuda")] batch_gpu: Default::default() };
+        let m = Self { path: path.to_path_buf(), embed: Mat::of(embed_t), out_norm, layers, output, inv_freq, cfg, gguf: g, packs: Default::default(), stream_map: Default::default(), hc, rope_mscale: 1.0, ctx_extension: None, #[cfg(feature = "cuda")] offload: Default::default(), #[cfg(feature = "cuda")] batch_gpu: Default::default() };
         let n = crate::switches::get(crate::switches::STREAM_LAYERS).max(0) as usize;
         if n > 0 {
             m.stream_from_drive(n);
@@ -622,6 +627,49 @@ impl Model {
         &self.inv_freq
     }
 
+    /// YaRN's scale on the rotated q and k (1 at the trained context).
+    pub fn rope_mscale(&self) -> f32 {
+        self.rope_mscale
+    }
+
+    /// Runs the model at `target` tokens of context beyond the length it was trained for, with YaRN
+    /// (Peng et al. 2023, as llama.cpp and Qwen's own long-context setting do it): the slow rotary
+    /// frequencies are interpolated by factor = target / trained so positions past the trained
+    /// length look like ones it has seen, the fast ones stay as they are (they only see nearby
+    /// tokens), a ramp blends the two, and attention is sharpened by 0.1 ln(factor) + 1 to undo
+    /// the flattening the interpolation causes. A target within the trained length restores the
+    /// model's own frequencies. Call before making a session. Returns the factor.
+    pub fn extend_context(&mut self, target: usize) -> f32 {
+        let c = &self.cfg;
+        let rd = c.rope_dim.max(2);
+        let base = c.rope_base;
+        let orig = c.ctx_train.max(1);
+        let plain: Vec<f32> = (0..rd / 2).map(|i| 1.0 / base.powf(2.0 * i as f32 / rd as f32)).collect();
+        if target <= orig {
+            self.inv_freq = plain;
+            self.rope_mscale = 1.0;
+            self.ctx_extension = None;
+            return 1.0;
+        }
+        let factor = target as f32 / orig as f32;
+        // The dimension whose wavelength completes `rot` turns over the trained length.
+        let corr = |rot: f32| rd as f32 * (orig as f32 / (rot * 2.0 * std::f32::consts::PI)).ln() / (2.0 * base.ln());
+        let low = corr(32.0).floor().max(0.0);
+        let high = corr(1.0).ceil().min(rd as f32 - 1.0);
+        self.inv_freq = plain
+            .iter()
+            .enumerate()
+            .map(|(j, &f)| {
+                // 1 keeps the trained frequency (fast dimensions), 0 interpolates fully (slow ones).
+                let keep = 1.0 - ((j as f32 - low) / (high - low).max(0.001)).clamp(0.0, 1.0);
+                f * ((1.0 - keep) / factor + keep)
+            })
+            .collect();
+        self.rope_mscale = 1.0 + 0.1 * factor.ln();
+        self.ctx_extension = Some((factor, orig));
+        factor
+    }
+
     /// The rotary (cos, sin) pairs for a token at position `p` = (time, height, width). With
     /// interleaved sections (Qwen3-VL style), frequency j follows the height position when
     /// j mod 3 == 1, the width position when j mod 3 == 2 (within each section's span) and the time
@@ -648,6 +696,7 @@ impl Model {
                     None => p[0],
                 };
                 let (sn, cs) = (pos as f32 * f).sin_cos();
+                let (sn, cs) = (sn * self.rope_mscale, cs * self.rope_mscale);
                 (cs, sn)
             })
             .collect()
@@ -1854,7 +1903,10 @@ impl Session {
         if m.hc.is_some() {
             return Err(Error::Unsupported("this model's layer types run on the processor for now".into()));
         }
-        let g = crate::gpu::GpuState::load_with(m, max_ctx, force_layers)?;
+        let mut g = crate::gpu::GpuState::load_with(m, max_ctx, force_layers)?;
+        if let Err(e) = g.prepare_graph(m) {
+            eprintln!("decode graph not prepared ahead: {e}");
+        }
         if g.is_split() {
             m.auto_drive_tier(g.gpu_layers(), max_ctx);
             m.prepare_cpu(g.gpu_layers());

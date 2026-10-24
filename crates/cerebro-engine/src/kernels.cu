@@ -113,7 +113,9 @@ __device__ __forceinline__ float rope_axis(int j, int sec, int pt, int ph, int p
 extern "C" __global__ void qkv_post(float* __restrict__ qkv, const float* __restrict__ qn, const float* __restrict__ kn,
                                     int has_norm, __half* __restrict__ kc, __half* __restrict__ vc,
                                     int n_head, int n_kv, int hd, const int* __restrict__ posp, float base, float eps, int rd,
-                                    const int* __restrict__ rtab, int sec) {
+                                    const int* __restrict__ rtab, int sec, const float* __restrict__ ftab, float msc) {
+    // ftab: the model's rotary frequencies (YaRN-adjusted for an extended context); msc: YaRN's
+    // scale on the rotated values (1 at the trained length).
     __shared__ float red[32];
     __shared__ float hv[256];
     int t = blockIdx.y;
@@ -141,11 +143,11 @@ extern "C" __global__ void qkv_post(float* __restrict__ qkv, const float* __rest
     }
     float ra = a, rb = b;
     if (rd == hd) {
-        float inv = powf(base, -2.f * i / hd);
+        float inv = ftab ? ftab[i] : powf(base, -2.f * i / hd);
         float sn, cs;
         sincosf(rope_axis(i, sec, pt, ph, pw) * inv, &sn, &cs);
-        ra = a * cs - b * sn;
-        rb = a * sn + b * cs;
+        ra = (a * cs - b * sn) * msc;
+        rb = (a * sn + b * cs) * msc;
     } else {
         // Partial rotation: pairs (i, i + rd/2) for i < rd/2 cross this thread's (i, i + half).
         // Every thread reaches the same barriers; only the first rd/2 rotate.
@@ -160,11 +162,11 @@ extern "C" __global__ void qkv_post(float* __restrict__ qkv, const float* __rest
         }
         __syncthreads();
         if (i < rh) {
-            float inv = powf(base, -2.f * i / rd);
+            float inv = ftab ? ftab[i] : powf(base, -2.f * i / rd);
             float sn, cs;
             sincosf(rope_axis(i, sec, pt, ph, pw) * inv, &sn, &cs);
-            hv[i] = x0 * cs - x1 * sn;
-            hv[i + rh] = x0 * sn + x1 * cs;
+            hv[i] = (x0 * cs - x1 * sn) * msc;
+            hv[i + rh] = (x0 * sn + x1 * cs) * msc;
         }
         __syncthreads();
         ra = hv[i];

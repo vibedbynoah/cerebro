@@ -401,6 +401,8 @@ struct Shape {
     delta: Option<DeltaShape>,
     /// Multi-axis rotary sections, one byte each (0 = plain RoPE); see `rope_axis` in kernels.cu.
     sec: i32,
+    /// YaRN's scale on rotated q and k (1 at the trained context; Model::extend_context).
+    msc: f32,
 }
 
 /// An image prompt being read on the GPU (`Session::feed_parts`): rotary (time, height, width)
@@ -480,6 +482,8 @@ pub struct GpuState {
     /// Logits of every position of a verify pass (SPEC_MAX x vocab); None where speculation
     /// does not apply (split, mixture of experts, recurrent layers).
     spec: Option<CudaSlice<f32>>,
+    /// The model's rotary frequencies (YaRN-adjusted when its context is extended).
+    rope: CudaSlice<f32>,
     /// Split models: the activation after the last GPU layer, copied for the CPU.
     host_x: Option<PinnedHostSlice<f32>>,
     /// Split models: the output head, run after the processor's layers (`head_split`).
@@ -964,8 +968,9 @@ impl GpuState {
         if let Some(m) = &moe {
             vram += m.owner.len() * m.slot_bytes;
         }
-        let sh = Shape { dim: c.dim, ffn: c.ffn, n_head: c.n_head, n_kv: c.n_kv, hd: c.head_dim, vocab: c.vocab, eps: c.eps, base: c.rope_base, rd: c.rope_dim, gate: c.attn_gate, delta: dsh, sec: c.rope_sections.map_or(0, |s| s.iter().enumerate().map(|(i, &v)| (v.min(255) as i32) << (8 * i)).fold(0, |a, b| a | b)) };
+        let sh = Shape { dim: c.dim, ffn: c.ffn, n_head: c.n_head, n_kv: c.n_kv, hd: c.head_dim, vocab: c.vocab, eps: c.eps, base: c.rope_base, rd: c.rope_dim, gate: c.attn_gate, delta: dsh, sec: c.rope_sections.map_or(0, |s| s.iter().enumerate().map(|(i, &v)| (v.min(255) as i32) << (8 * i)).fold(0, |a, b| a | b)), msc: model.rope_mscale() };
         let ctx_pin = ctx.clone();
+        let rope = stream.clone_htod(model.inv_freq()).map_err(gerr)?;
         let spec = if split || c.n_expert > 0 || c.ssm.is_some() { None } else { Some(z(SPEC_MAX * c.vocab)?) };
         Ok(Self {
             out_norm: stream.clone_htod(model.out_norm()).map_err(gerr)?,
@@ -1008,6 +1013,7 @@ impl GpuState {
             hidden: None,
             hidden_dev: None,
             spec,
+            rope,
             // SAFETY: a plain host buffer, read only after the stream is synchronized.
             host_x: if split { Some(unsafe { ctx_pin.alloc_pinned::<f32>(c.dim) }.map_err(gerr)?) } else { None },
             pipe: None,
@@ -1821,6 +1827,8 @@ impl GpuState {
                         .arg(&(sh.rd as i32))
                         .arg(&0u64)
                         .arg(&sh.sec)
+                        .arg(&self.rope)
+                        .arg(&sh.msc)
                         .launch(cfg)
                 }
                 .map_err(gerr)?;
@@ -1972,6 +1980,21 @@ impl GpuState {
         Self::matvec(s, f, output, &self.xq, &self.xd, &mut self.logits, false)?;
         let vocab = sh.vocab as i32;
         unsafe { s.launch_builder(&f.argmax).arg(&self.logits).arg(&vocab).arg(&mut self.next).arg(&mut self.tok).arg(&mut self.pos).launch(one) }.map_err(gerr)?;
+        Ok(())
+    }
+
+    /// Records the decode step's graph while the model loads, so the first reply does not pay for
+    /// it (about 0.1 s: a two-word answer showed 20 tok/s on a 260 tok/s model). The graph reads
+    /// the token and position from device memory, so it does not depend on where decoding starts.
+    pub fn prepare_graph(&mut self, model: &Model) -> Result<(), Error> {
+        if self.moe.is_some() || self.output.is_none() || self.graph.is_some() {
+            return Ok(());
+        }
+        self.stream.begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED).map_err(gerr)?;
+        let r = self.enqueue(model);
+        let g = self.stream.end_capture(CUgraphInstantiate_flags(0)).map_err(gerr)?;
+        r?;
+        self.graph = g;
         Ok(())
     }
 
@@ -2261,7 +2284,7 @@ impl GpuState {
                 } else {
                     lb.arg(&no_tab);
                 }
-                lb.arg(&sh.sec);
+                lb.arg(&sh.sec).arg(&self.rope).arg(&sh.msc);
                 unsafe { lb.launch(cfg) }
                 .map_err(gerr)?;
                 Self::attn_batch(s, f, sh, &b.qkv, &l.kc, &l.vc, &mut b.att, &b.pos0, t)?;
@@ -2691,7 +2714,7 @@ impl GpuState {
                 } else {
                     lb.arg(&no_tab);
                 }
-                lb.arg(&sh.sec);
+                lb.arg(&sh.sec).arg(&self.rope).arg(&sh.msc);
                 unsafe { lb.launch(cfg) }
                 .map_err(gerr)?;
             }

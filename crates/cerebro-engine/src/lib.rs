@@ -19,6 +19,7 @@ pub mod gpu;
 pub mod gtensor;
 pub mod hc;
 pub mod hw;
+pub mod longctx;
 mod iq_tables;
 pub mod model;
 pub mod placement;
