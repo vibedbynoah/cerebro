@@ -1225,6 +1225,10 @@ impl GpuState {
                     }
                     mi += 1;
                 }
+                // A slot that last held a DeltaNet layer (4 stacked matrices) keeps its fourth part
+                // when an attention layer (3) reuses it: drop what this layer does not have, or the
+                // product runs the stale part too and every later attention layer is wrong.
+                parts.truncate(grp.len());
             }
             match gi {
                 0 => sl.qkv = tmp.expect("set above"),
@@ -1274,12 +1278,6 @@ impl GpuState {
         if self.pipe.is_none() {
             let copy = self.stream.context().new_stream().map_err(gerr)?;
             self.pipe = Some(Pipe { slots: [None, None], raw: [None, None], splits: [Vec::new(), Vec::new()], host: [None, None, None], copy, copied: Vec::new(), freed: [None, None], kv_back: None, direct: register_direct(model, from), raw6: [None, None], gdelta: [None, None], rec_back: None });
-        }
-        // Streaming hybrid DeltaNet layers gives wrong output (Qwen3.8 27B split answered
-        // "festivity"; with the processor running its layers it is right): those models take the
-        // processor path until it is fixed.
-        if model.layers()[from..].iter().any(|l| l.delta.is_some()) && std::env::var_os("CEREBRO_HYBRID_STREAM").is_none() {
-            return Err(Error::Unsupported("streamed split prefill is not used for hybrid layers yet".into()));
         }
         let pipe = self.pipe.take();
         let mut sin = StreamIn { pipe, hist, state, from, k, v };

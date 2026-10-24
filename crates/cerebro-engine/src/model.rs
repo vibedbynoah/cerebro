@@ -1752,6 +1752,12 @@ impl Session {
         Ok(common)
     }
 
+    /// Debugging aid: copies of the processor-side caches (K and V per layer, DeltaNet history and
+    /// state per layer) for comparing two ways of reading the same prompt.
+    pub fn debug_caches(&self) -> (Vec<Vec<u16>>, Vec<Vec<u16>>, Vec<Vec<f32>>, Vec<Vec<f32>>) {
+        (self.k.clone(), self.v.clone(), self.conv_hist.clone(), self.ssm_state.clone())
+    }
+
     /// Whether every layer runs on this computer's processor (no GPU session, no workers).
     fn processor_only(&self) -> bool {
         #[cfg(feature = "cuda")]
