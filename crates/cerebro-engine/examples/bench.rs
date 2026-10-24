@@ -137,9 +137,11 @@ fn main() {
                 panic!("built without the portable backend")
             }
         } else if gpu {
+            // As the app does: the whole-GPU path, else the processor with GPU assist (architectures
+            // the whole-GPU path does not run yet, such as Flash-Next).
             #[cfg(feature = "cuda")]
             {
-                Session::new_gpu(&model, ctx).expect("gpu session")
+                Session::new_gpu(&model, ctx).or_else(|_| Session::new_assisted(&model, ctx)).expect("gpu session")
             }
             #[cfg(not(feature = "cuda"))]
             {
