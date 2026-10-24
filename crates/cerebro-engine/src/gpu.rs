@@ -1272,6 +1272,12 @@ impl GpuState {
             let copy = self.stream.context().new_stream().map_err(gerr)?;
             self.pipe = Some(Pipe { slots: [None, None], raw: [None, None], splits: [Vec::new(), Vec::new()], host: [None, None, None], copy, copied: Vec::new(), freed: [None, None], kv_back: None, direct: register_direct(model, from), raw6: [None, None], gdelta: [None, None], rec_back: None });
         }
+        // The copy path (no page-locked file memory) gives wrong output on hybrid DeltaNet layers
+        // (Qwen3.8 27B split answered "festivity"; with the processor running its layers it is
+        // right): those models take the processor path until it is fixed.
+        if self.pipe.as_ref().is_some_and(|p| p.direct.is_none()) && model.layers()[from..].iter().any(|l| l.delta.is_some()) {
+            return Err(Error::Unsupported("streamed split prefill needs page-locked memory for hybrid layers".into()));
+        }
         let pipe = self.pipe.take();
         let mut sin = StreamIn { pipe, hist, state, from, k, v };
         let t0 = std::time::Instant::now();
