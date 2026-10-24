@@ -543,10 +543,13 @@ fn register_direct(model: &Model, from: usize) -> Option<Vec<usize>> {
             _ => merged.push((a, b)),
         }
     }
-    // Page-locked memory cannot be paged out: only when it leaves the computer its reserve.
-    // Otherwise the layers are copied through the pinned slots instead (a little slower).
+    // Page-locked memory cannot be paged out. These are the model file's pages, which the load
+    // has already read into RAM, so locking them takes no new memory; it is refused only when the
+    // locked share could never fit beside the computer's reserve (then the layers are copied
+    // through the pinned slots instead).
     let locked: usize = merged.iter().map(|(a, b)| b - a).sum();
-    if locked > crate::gguf::prefetch_room() {
+    let total = crate::gguf::total_ram() as usize;
+    if total > 0 && locked > total.saturating_sub((4usize << 30).max(total / 6)) {
         eprintln!("split prefill: {:.1} GB of the processor's layers would not leave enough free memory page-locked; copying them instead", locked as f64 / 1e9);
         return None;
     }
@@ -1272,11 +1275,11 @@ impl GpuState {
             let copy = self.stream.context().new_stream().map_err(gerr)?;
             self.pipe = Some(Pipe { slots: [None, None], raw: [None, None], splits: [Vec::new(), Vec::new()], host: [None, None, None], copy, copied: Vec::new(), freed: [None, None], kv_back: None, direct: register_direct(model, from), raw6: [None, None], gdelta: [None, None], rec_back: None });
         }
-        // The copy path (no page-locked file memory) gives wrong output on hybrid DeltaNet layers
-        // (Qwen3.8 27B split answered "festivity"; with the processor running its layers it is
-        // right): those models take the processor path until it is fixed.
-        if self.pipe.as_ref().is_some_and(|p| p.direct.is_none()) && model.layers()[from..].iter().any(|l| l.delta.is_some()) {
-            return Err(Error::Unsupported("streamed split prefill needs page-locked memory for hybrid layers".into()));
+        // Streaming hybrid DeltaNet layers gives wrong output (Qwen3.8 27B split answered
+        // "festivity"; with the processor running its layers it is right): those models take the
+        // processor path until it is fixed.
+        if model.layers()[from..].iter().any(|l| l.delta.is_some()) && std::env::var_os("CEREBRO_HYBRID_STREAM").is_none() {
+            return Err(Error::Unsupported("streamed split prefill is not used for hybrid layers yet".into()));
         }
         let pipe = self.pipe.take();
         let mut sin = StreamIn { pipe, hist, state, from, k, v };
