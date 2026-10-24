@@ -21,7 +21,7 @@ test.describe("the Speed <-> Accuracy slider", () => {
     await slider(page).fill("1");
     await expect(level(page)).toHaveText("Fastest");
     await expect(page.locator("#mode-note")).toContainText("The quickest reply");
-    // The notice names what changed.
+    // The note under the slider names what changed.
     await expect(page.getByText("Greedy decoding", { exact: false }).first()).toBeVisible();
     // The fine controls are folded away by default, but the slider still set them.
     await openFineTune(page);

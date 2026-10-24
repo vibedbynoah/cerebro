@@ -34,6 +34,11 @@ import { useAppState } from "../state";
  * Qwen-Image, GGUF image models); live denoising preview; a gallery with favourites, prompt reuse
  * and export. In this build images are illustrative artwork drawn from the seed.
  */
+/** "12.4 steps/s" from a count and the measured seconds (empty when nothing was timed). */
+export function rate(count: number, seconds: number, unit: string): string {
+  return seconds > 0 ? `${(count / seconds).toFixed(count / seconds < 10 ? 2 : 1)} ${unit}/s` : "";
+}
+
 export function ImageStudio(): JSX.Element {
   if (__DESKTOP__) return <ImagesDesktop />;
   return <ImageStudioPreview />;
@@ -57,7 +62,8 @@ function ImagesDesktop(): JSX.Element {
   const [seedText, setSeedText] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
-  const [results, setResults] = createSignal<Array<GeneratedImage & { prompt: string }>>([]);
+  // `speed` is the measured rate shown under each result (steps or frames per second).
+  const [results, setResults] = createSignal<Array<GeneratedImage & { prompt: string; speed?: string }>>([]);
   const current = () => results()[0] ?? null;
   const seedValue = (): number | null => {
     const t = seedText().trim();
@@ -77,7 +83,7 @@ function ImagesDesktop(): JSX.Element {
     const p = prompt().trim();
     service
       .makeVideo({ modelId: m.id, prompt: p, endPrompt: endPrompt().trim() || null, size: Math.min(size(), 768), frames: frames(), fps: fps(), strength: motion(), seed: seedValue() })
-      .then((g) => setResults((r) => [{ ...g, prompt: endPrompt().trim() ? `${p} → ${endPrompt().trim()}` : p }, ...r].slice(0, 24)))
+      .then((g) => setResults((r) => [{ ...g, prompt: endPrompt().trim() ? `${p} → ${endPrompt().trim()}` : p, speed: rate(frames(), g.seconds, "frames") }, ...r].slice(0, 24)))
       .catch((e: unknown) => setError(e instanceof Error && e.message ? e.message : "The video could not be made."))
       .finally(() => setBusy(false));
   };
@@ -90,10 +96,11 @@ function ImagesDesktop(): JSX.Element {
     setBusy(true);
     setError(null);
     const p = instruction.trim();
+    const n = Math.max(2, steps());
     service
-      .editImage({ modelId: m.id, prompt: p, source, strength: strength(), size: size(), steps: Math.max(2, steps()), seed: seedValue() })
+      .editImage({ modelId: m.id, prompt: p, source, strength: strength(), size: size(), steps: n, seed: seedValue() })
       .then((g) => {
-        setResults((r) => [{ ...g, prompt: p }, ...r].slice(0, 24));
+        setResults((r) => [{ ...g, prompt: p, speed: rate(n, g.seconds, "steps") }, ...r].slice(0, 24));
         setFollowUp("");
       })
       .catch((e: unknown) => setError(e instanceof Error && e.message ? e.message : "The image could not be changed."))
@@ -119,9 +126,10 @@ function ImagesDesktop(): JSX.Element {
     setBusy(true);
     setError(null);
     const p = prompt().trim();
+    const n = steps();
     service
-      .generateImage({ modelId: m.id, prompt: p, size: size(), steps: steps(), seed: seedValue() })
-      .then((g) => setResults((r) => [{ ...g, prompt: p }, ...r].slice(0, 24)))
+      .generateImage({ modelId: m.id, prompt: p, size: size(), steps: n, seed: seedValue() })
+      .then((g) => setResults((r) => [{ ...g, prompt: p, speed: rate(n, g.seconds, "steps") }, ...r].slice(0, 24)))
       .catch((e: unknown) => setError(e instanceof Error && e.message ? e.message : "The image could not be made."))
       .finally(() => setBusy(false));
   };
@@ -251,6 +259,7 @@ function ImagesDesktop(): JSX.Element {
                     <span>{g().prompt}</span>
                     <span class="mono hint">
                       {g().width}×{g().height} · seed {g().seed} · {g().seconds.toFixed(1)} s
+                      <Show when={g().speed}> · {g().speed}</Show>
                     </span>
                   </figcaption>
                   <div class="img-result__actions">

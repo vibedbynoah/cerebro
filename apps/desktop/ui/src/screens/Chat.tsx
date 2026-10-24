@@ -44,7 +44,7 @@ import { Dialog } from "@ark-ui/solid/dialog";
 import { Portal } from "solid-js/web";
 import "../styles/guide.css";
 import { useAppState } from "../state";
-import { DEFAULT_SAMPLER, LEDGER_FILES, type ChatRequest, type ChatTools, type ChatTurn, type LedgerFileName, type Sampler, type ToolActivity } from "../service/chat-types";
+import { DEFAULT_SAMPLER, LEDGER_FILES, ranOn, type ChatRequest, type ChatTools, type ChatTurn, type LedgerFileName, type Sampler, type ToolActivity } from "../service/chat-types";
 import { useService } from "../service/context";
 import type { CloudProvider, LibraryModel } from "../service/types";
 import { HighlightQuery } from "../components/ChatSearch";
@@ -215,7 +215,8 @@ export function Chat(): JSX.Element {
 
   /** The Speed <-> Accuracy slider: every setting it covers, then a notice saying what changed. */
   let modeNotice: ReturnType<typeof setTimeout> | undefined;
-  /** `announce`: say what the level does in a toast (the live panel says it in place instead). */
+  /** `announce`: say what the level does in a toast (for /speed; the slider and the live panel say
+   * it in place, where it does not cover the reply). */
   const pickMode = (m: Mode, announce = true) => {
     const next = applyMode(m, prefs(), sampler());
     setPrefs(next.prefs);
@@ -424,6 +425,14 @@ export function Chat(): JSX.Element {
                 m.stats = e.stats;
                 m.streaming = false;
               });
+              // Where it ran, so the speed under the reply can be checked against the hardware.
+              void service
+                .listLoaded()
+                .then((list) => {
+                  const on = ranOn(list.find((l) => l.slot === "llm")?.placement);
+                  if (on) updateMsg(cid, mid, (m) => void (m.stats && (m.stats.ranOn = on)));
+                })
+                .catch(() => undefined);
               break;
             case "error":
               updateMsg(cid, mid, (m) => {
@@ -882,7 +891,7 @@ export function Chat(): JSX.Element {
     try {
       const g = await service.generateImage({ modelId: im.id, prompt, size: 512, steps: 1, seed: null });
       updateMsg(cid, mid, (m) => {
-        m.text = `Made with ${im.name} in ${g.seconds.toFixed(1)} s, seed ${g.seed}.`;
+        m.text = `Made with ${im.name} in ${g.seconds.toFixed(1)} s (${g.seconds > 0 ? (1 / g.seconds).toFixed(2) : "–"} steps/s, 512×512), seed ${g.seed}.`;
         m.attachments = [{ name: "image.png", type: "image/png", bytes: Math.round((g.dataUrl.length * 3) / 4), preview: g.dataUrl }];
         m.streaming = false;
       });
@@ -1287,7 +1296,7 @@ export function Chat(): JSX.Element {
         <Composer
           levels={levels}
           mode={modeOf(prefs(), sampler())}
-          onMode={pickMode}
+          onMode={(m) => pickMode(m, false)}
           prefs={prefs()}
           setPrefs={setPrefs}
           streaming={streaming()}
@@ -1352,7 +1361,7 @@ export function Chat(): JSX.Element {
                 thinkingSupported={supportsNativeReasoning(`${model()?.family ?? ""} ${model()?.name ?? ""}`)}
                 levels={levels}
                 mode={modeOf(prefs(), sampler())}
-                onMode={pickMode}
+                onMode={(m) => pickMode(m, false)}
                 prefs={prefs()}
                 setPrefs={setPrefs}
                 notes={built().notes}

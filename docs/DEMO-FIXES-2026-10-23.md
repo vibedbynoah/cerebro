@@ -105,8 +105,7 @@ checked in the real exe before it is ticked.
       llama.cpp 7.0 tok/s, prompts read one token at a time (about a minute to the first word).
 - [ ] Topic-aware expert cache: bookkeeping in engine topic.rs (tested); wiring into the VRAM/RAM
       caches and the Monitor, then measuring on 35B A3B and Flash-Next.
-- [ ] Hybrid split copy path (no page-locked memory) gives wrong output: fixed by falling back;
-      the copy path itself still needs the fix to get the faster prompt reading back.
+- [x] Hybrid split streaming gave wrong output: fixed (see the llama.cpp table).
 - [ ] A real text-to-video model (Wan-class) in the engine.
 - [ ] Models: drag to reorder and groups (loaded-first and pins are in).
 - [x] Train: a recommended value and plain explanation next to every setting (with a Use button).
@@ -116,10 +115,23 @@ checked in the real exe before it is ticked.
 Wins: 0.6B whole-card reading (22.5K vs 12.1K), 8B split reading and writing (1136 vs 947,
 16.7 vs 12.8), 27B Q4 split writing (4.03 vs 3.66), 27B IQ2_XXS reading (372 vs 38).
 Still losing:
-- [ ] 27B hybrid split prompt reading: 5 vs 273 tok/s. Streaming hybrid DeltaNet layers gives a
-      wrong context past about 20 tokens, so it is off (CEREBRO_HYBRID_STREAM=1 to work on it).
+- [x] 27B hybrid split prompt reading: 5 -> 331 vs 273 tok/s, writing 4.28 vs 3.66. Cause: a GPU
+      slot reused by an attention layer kept the fourth matrix of the DeltaNet layer before it.
 - [ ] 27B low-bit writing: IQ1_S 17 vs 28.6, IQ1_M 9.5 vs 26 (61/56 of 64 layers on the card;
       llama.cpp fits all 64).
 - [ ] Flash-Next: 2.4 vs 7.0 writing, 2.7 vs 5.2 reading (no whole-GPU path for qwen4exp).
 - [ ] 8B whole-card prompt reading: 1616 vs 2486.
 - [ ] Integrated GPU: reading 244 vs 928 (0.6B), writing 40 vs 45.6.
+
+## Added later 2026-10-24
+- [x] Measurements: a "Defaults" category (tools/eval/sweep.sh, verdict.py): Cerebro with its own
+      automatic placement against llama.cpp run with no flags; a llama.cpp run that fails to load
+      counts as 0 tok/s.
+- [x] Under every reply: tok/s, first-token time and now where it ran ("on the graphics card",
+      "graphics card 22/64 layers + processor", "processor + drive"). Pictures and videos show
+      seconds and steps/s or frames/s (Images screen and /imagine in chat).
+- [x] Placement counts the prompt-conversion buffer and leaves a 320 MB margin (was 600 MB), so
+      more layers fit; RAM reserve for read-ahead is max(2.5 GiB, 1/12 of RAM) (was 1/6).
+- [x] 0.6B in the app: 216-262 tok/s on the graphics card in every test (all 28 layers there).
+      At about 20 tok/s check where the line under the reply says it ran: a closed laptop lid holds
+      this card at about 30 W.

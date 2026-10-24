@@ -105,4 +105,16 @@ export interface ChatStats {
   /** Extra time the effort level added over a Low answer of the same length. */
   extraMs: number;
   stopped: boolean;
+  /** Where the reply was computed ("graphics card", "processor", a split), from the loaded model's placement. */
+  ranOn?: string;
+}
+
+/** Plain words for where a placement runs, for the line under a reply. */
+export function ranOn(p: { layout: string; gpuLayers: number; totalLayers: number; driveBytesPerToken?: number } | null | undefined): string | undefined {
+  if (!p) return undefined;
+  const drive = (p.driveBytesPerToken ?? 0) > 0 ? " + drive" : "";
+  if (p.layout === "gpu-int8" || p.layout === "gpu-native") return "graphics card";
+  if (p.layout === "split") return `graphics card ${p.gpuLayers}/${p.totalLayers} layers + processor${drive}`;
+  if (p.layout === "cpu") return `processor${drive}`;
+  return undefined;
 }

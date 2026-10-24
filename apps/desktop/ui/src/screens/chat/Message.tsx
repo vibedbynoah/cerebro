@@ -268,6 +268,7 @@ function AssistantMessage(props: {
                 · thinking <span class="mono">{s().thinkingTokens}</span> tokens, <span class="mono">+{ms(s().extraMs)}</span>
               </Show>
               <Show when={s().stopped}> · stopped</Show>
+              <Show when={s().ranOn}> · on the {s().ranOn}</Show>
             </span>
             <span class="msg__actions">
               <button class="icon-btn" type="button" onClick={copy} aria-label={copied() ? "Copied" : "Copy reply"}>

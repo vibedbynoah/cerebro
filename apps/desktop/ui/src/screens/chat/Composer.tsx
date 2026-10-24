@@ -433,7 +433,7 @@ export function ChatSettings(props: {
         </span>
       </div>
       <p class="composer__hint composer__hint--mode" id="mode-note">
-        {props.mode ? MODE_PRESETS[props.mode].summary : "Custom: you changed one of the settings in Fine-tune by hand. Move the slider to pick a level again."}
+        {props.mode ? `${MODE_PRESETS[props.mode].summary} ${MODE_PRESETS[props.mode].changes.join(". ")}.` : "Custom: you changed one of the settings in Fine-tune by hand. Move the slider to pick a level again."}
       </p>
       <details class="composer__more" open={readPref(FINE_TUNE_KEY) !== "closed"} on:toggle={(e) => writePref(FINE_TUNE_KEY, e.currentTarget.open ? "open" : "closed")}>
         <summary class="composer__more-summary">

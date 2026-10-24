@@ -203,7 +203,7 @@ function parseMessage(v: unknown): ChatMessage | null {
     attachments: atts.slice(0, 10),
     ledger: parseLedger(m.ledger),
     stats: s
-      ? { outputTokens: num(s.outputTokens), thinkingTokens: num(s.thinkingTokens), tokPerSec: num(s.tokPerSec), ttftMs: num(s.ttftMs), totalMs: num(s.totalMs), extraMs: num(s.extraMs), stopped: s.stopped === true }
+      ? { outputTokens: num(s.outputTokens), thinkingTokens: num(s.thinkingTokens), tokPerSec: num(s.tokPerSec), ttftMs: num(s.ttftMs), totalMs: num(s.totalMs), extraMs: num(s.extraMs), stopped: s.stopped === true, ...(typeof s.ranOn === "string" ? { ranOn: s.ranOn.slice(0, 80) } : {}) }
       : null,
     effort: oneOf(m.effort, ["low", "medium", "high", "xhigh", "max"] as const, "medium"),
     verbosity: oneOf(m.verbosity, ["brief", "normal", "detailed"] as const, "brief"),
