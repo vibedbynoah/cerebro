@@ -507,6 +507,7 @@ mod tests {
             architecture: "dense",
             size_gi_b: 0.0,
             context_max: 0,
+            context_extended: 0,
             tune: "untuned",
             provenance: "measured",
             kind: "text",

@@ -184,7 +184,7 @@ pub async fn placement_preview(engine: State<'_, Engine>, id: String, context: O
         } else {
             cerebro_engine::hw::gpus().first().map_or(0, |g| g.vram_free + held)
         };
-        let plan = cerebro_engine::gpu::plan_for(&m, ctx.min(m.cfg.ctx_train.max(512)), vram, force.filter(|&n| n > 0)).map_err(|e| e.to_string())?;
+        let plan = cerebro_engine::gpu::plan_for(&m, ctx.min((m.cfg.ctx_train * crate::engine::YARN_MAX).max(512)), vram, force.filter(|&n| n > 0)).map_err(|e| e.to_string())?;
         serde_json::to_value(plan).map_err(|e| e.to_string())
     })
     .await
@@ -1879,4 +1879,12 @@ mod history_tests {
 pub fn moe_activity() -> Option<serde_json::Value> {
     let s = cerebro_engine::activity::snapshot()?;
     Some(serde_json::json!({ "layers": s.layers, "experts": s.experts, "heat": s.heat, "last": s.last, "tokens": s.tokens }))
+}
+
+/// Does the loaded model still find what it reads at its full context? Hides a passcode at three
+/// depths of three long documents and asks for it (engine longctx.rs).
+#[tauri::command]
+pub async fn context_check(engine: State<'_, Engine>) -> Result<serde_json::Value, String> {
+    let eng = engine.inner().handle();
+    tauri::async_runtime::spawn_blocking(move || eng.context_check()).await.map_err(|_| "The check failed.".to_owned())?
 }

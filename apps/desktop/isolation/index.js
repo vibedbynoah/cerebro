@@ -280,6 +280,7 @@ const WITH_ARGS = {
     Number.isInteger(p.steps) &&
     (p.seed === undefined || p.seed === null || (Number.isInteger(p.seed) && /** @type {number} */ (p.seed) >= 0)),
   moe_activity: (p) => isPlain(p) && hasOnlyKeys(p, []),
+  context_check: (p) => isPlain(p) && hasOnlyKeys(p, []),
   image_video: (p) =>
     isPlain(p) &&
     hasOnlyKeys(p, ["modelId", "prompt", "size", "frames", "fps", "strength"], ["endPrompt", "seed"]) &&

@@ -46,6 +46,8 @@ export interface ModelSummary {
   architecture: "dense" | "moe";
   sizeGiB: number;
   contextMax: number;
+  /** The longest context Cerebro runs it at, stretched with YaRN past `contextMax` (desktop). */
+  contextExtended?: number;
   tune: TuneState;
   /** Decode tok/s on defaults and tuned, when a tune has finished. */
   defaultsTps: number | null;
@@ -600,6 +602,15 @@ export type TuneEvent = TuneEventBody & {
   /** Run clock, seconds since the run started (time spent cancelled does not count). */
   at: number;
 };
+
+/** The long-context check's outcome (engine longctx.rs). */
+export interface ContextCheckResult {
+  context: number;
+  trained: number;
+  /** YaRN stretch, 1 within the trained length. */
+  factor: number;
+  probes: Array<{ tokens: number; depth: number; found: boolean; reply: string; seconds: number }>;
+}
 
 /** A mixture-of-experts model's experts as they fire (engine activity.rs). */
 export interface MoeActivity {

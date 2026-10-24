@@ -28,6 +28,7 @@
     "allow-remote-tunnel-get",
     "allow-image-video",
     "allow-moe-activity",
+    "allow-context-check",
     "allow-hub-pipeline-files",
     "allow-hub-file-meta",
     "allow-hub-search",

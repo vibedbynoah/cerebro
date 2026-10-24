@@ -135,3 +135,23 @@ Still losing:
 - [x] 0.6B in the app: 216-262 tok/s on the graphics card in every test (all 28 layers there).
       At about 20 tok/s check where the line under the reply says it ran: a closed laptop lid holds
       this card at about 30 W.
+
+## Added 2026-10-24, evening
+- [x] Qwen3.5/3.6 MoE (DeltaNet + shared experts) on the graphics card: 35B A3B writes 4.4 -> ~40
+      tok/s in the app, first word 63 s -> 1.3 s. llama.cpp with no flags cannot place it; tuned
+      (-ncmoe 28) it still leads: 50.5 vs 44.5 writing, 396 vs 156 reading (bench).
+- [x] Prompt GEMM: 128x128 tiles, 64 MB conversion pieces; 27B IQ1_S fits all 64 layers (22.6 tok/s,
+      llama.cpp 28.6). 27B Q4 split garbage after the piece change: fixed (row size from format).
+- [x] Defaults measurement: 0.6B, 4B, 8B, 14B, 27B IQ1_S done; stopped at the 27B Q4 because
+      llama.cpp's own default run of it took 24 GB of RAM (results in the sweep folder).
+- [x] Reply speed: the decode graph is recorded at load (a short reply showed 20 tok/s on a 260
+      tok/s model), speed measured between pieces; where it ran is listed after it.
+- [x] Hub: cards across the page for results, Trending now, Most downloaded, Order, publisher
+      shortcuts, Open on Hugging Face; world-model repos (AgentWorld) are not offered for chat.
+- [x] MoE: experts-firing heatmap in the chat dock; the title bar logo's route follows the firing expert.
+- [x] Context expansion: up to 4x the trained length with YaRN (automatic past it), and a
+      Long-context check in the model drawer (passcode at start/middle/end of three documents).
+      0.6B at 49,152 (1.2x): 9 of 9 in the app. The other-GPU (Vulkan/DX12) path gets the YaRN
+      frequencies but not yet its attention sharpening.
+- [ ] Still behind tuned llama.cpp: 8B whole-card prompt reading (1.9K vs 2.4K), 27B IQ1_S writing,
+      35B A3B prompt reading, Flash-Next.

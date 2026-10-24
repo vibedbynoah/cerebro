@@ -228,7 +228,8 @@ export function tweakedFields(t: Tweaks): ReadonlySet<keyof LoadParams> {
  * The longest context a load may ask for: the file's trained maximum, or, with RoPE scaling
  * switched on, the stretched length (original context x factor). Never above the global cap.
  */
-export function contextCeiling(m: Pick<LibraryModel, "contextMax">, t: Pick<Tweaks, "rope">): number {
+export function contextCeiling(m: Pick<LibraryModel, "contextMax" | "contextExtended">, t: Pick<Tweaks, "rope">): number {
   const stretched = t.rope && t.rope.scaling !== "none" ? Math.round(t.rope.originalContext * t.rope.factor) : 0;
-  return Math.min(LIMITS.contextCap, Math.max(m.contextMax, stretched));
+  // The desktop engine stretches any model with YaRN past its trained length (contextExtended).
+  return Math.min(LIMITS.contextCap, Math.max(m.contextMax, stretched, m.contextExtended ?? 0));
 }

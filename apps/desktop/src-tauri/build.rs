@@ -70,6 +70,7 @@ const COMMANDS: &[&str] = &[
     "remote_tunnel_get",
     "image_video",
     "moe_activity",
+    "context_check",
     "hub_pipeline_files",
     "hub_file_meta",
     "hub_download",

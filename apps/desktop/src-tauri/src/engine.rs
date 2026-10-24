@@ -37,6 +37,8 @@ pub struct LibraryModel {
     pub architecture: &'static str,
     pub size_gi_b: f64,
     pub context_max: u64,
+    /// The longest context Cerebro runs it at: YARN_MAX times the trained length (YaRN past it).
+    pub context_extended: u64,
     pub tune: &'static str,
     pub provenance: &'static str,
     pub kind: &'static str,
@@ -332,6 +334,7 @@ fn describe(path: &Path, source: &'static str) -> Option<LibraryModel> {
         architecture: if experts.is_some() { "moe" } else { "dense" },
         size_gi_b: size as f64 / GIB,
         context_max: u("context_length").unwrap_or(0),
+        context_extended: u("context_length").unwrap_or(0) * YARN_MAX as u64,
         tune: if kept.is_some() { "tuned" } else { "untuned" },
         provenance: "measured",
         kind: match projector.as_ref().map(|p| p.kind) {
@@ -784,6 +787,8 @@ enum Job {
     /// Load with some layers on other computers (cluster.rs); the rest on this processor.
     LoadCluster { model: LibraryModel, ctx: usize, local_share: f64, workers: Vec<crate::cluster::WorkerChoice>, reply: Sender<Result<Vec<crate::cluster::LinkReport>, String>> },
     Unload { reply: Sender<()> },
+    /// The long-context check (engine longctx.rs) on the loaded model at its full context.
+    ContextCheck { reply: Sender<Result<serde_json::Value, String>> },
     Chat { req: ChatRequest, events: ChatSink, reply: Sender<()> },
     Tune { events: TuneSink, reply: Sender<Result<tune::Outcome, String>> },
     /// The Models screen's image test: one image, one question, on the loaded vision model.
@@ -987,6 +992,19 @@ impl Engine {
                             };
                             set(&st, |s| s.activity = "idle");
                             let _ = reply.send(msg);
+                        }
+                        Job::ContextCheck { reply } => {
+                            let r = match loaded.as_mut() {
+                                None => Err("Load a model first.".to_owned()),
+                                Some(l) if l.llama.is_some() => Err("The long-context check runs on Cerebro's engine; this model is running on the llama.cpp backend.".to_owned()),
+                                Some(l) => {
+                                    set(&st, |s| s.activity = "reading");
+                                    let r = context_check(l);
+                                    set(&st, |s| s.activity = "idle");
+                                    r
+                                }
+                            };
+                            let _ = reply.send(r);
                         }
                         Job::Unload { reply } => {
                             if let Some(l) = loaded.take() {
@@ -1229,6 +1247,13 @@ impl Engine {
         rx.recv().map_err(|_| "The engine stopped while loading.".to_owned())?
     }
 
+    /// Runs the long-context check on the loaded model (minutes at long contexts).
+    pub fn context_check(&self) -> Result<serde_json::Value, String> {
+        let (reply, rx) = channel();
+        self.send(Job::ContextCheck { reply })?;
+        rx.recv().map_err(|_| "The engine stopped during the check.".to_owned())?
+    }
+
     pub fn unload(&self) -> Result<(), String> {
         let (reply, rx) = channel();
         self.send(Job::Unload { reply })?;
@@ -1389,9 +1414,45 @@ fn load_cluster(m: &LibraryModel, ctx: usize, local_share: f64, workers: &[crate
     Ok((Loaded { model, session, tok, info: m.clone(), dialect, placement: None, gpu_layers: None, vision: None, llama: None, images: Default::default() }, links))
 }
 
+/// How far past its trained length a model's context may be stretched with YaRN (Qwen's own
+/// long-context setting uses 4).
+pub const YARN_MAX: usize = 4;
+
+/// The long-context check on a loaded model: a passcode hidden at the start, middle and end of
+/// documents a quarter, half and nine tenths of its context long (engine longctx.rs). The
+/// conversation cache is cleared afterwards.
+fn context_check(l: &mut Loaded) -> Result<serde_json::Value, String> {
+    let max = l.session.max_ctx;
+    let mut lengths: Vec<usize> = [max / 4, max / 2, max * 9 / 10].into_iter().filter(|&n| n >= 1024).collect();
+    lengths.dedup();
+    if lengths.is_empty() {
+        return Err("The context is too short to check (load it with at least 2,048 tokens).".to_owned());
+    }
+    let mut probes = Vec::new();
+    for (k, &n) in lengths.iter().enumerate() {
+        for (j, &d) in [0.1f32, 0.5, 0.9].iter().enumerate() {
+            let needle = cerebro_engine::longctx::build(&l.tok, n, d, (k * 3 + j) as u64 + 7);
+            let p = cerebro_engine::longctx::probe(&l.model, &mut l.session, &l.tok, &needle).map_err(|e| format!("The check failed: {e}"))?;
+            probes.push(serde_json::json!({ "tokens": p.tokens, "depth": p.depth, "found": p.found, "reply": p.reply.chars().take(120).collect::<String>(), "seconds": p.seconds }));
+        }
+    }
+    let _ = l.session.clear();
+    Ok(serde_json::json!({
+        "context": max,
+        "trained": l.model.cfg.ctx_train,
+        "factor": l.model.ctx_extension.map_or(1.0, |e| e.0),
+        "probes": probes,
+    }))
+}
+
 /// A loaded model from its weights and tokenizer: the session placed as `place` decides.
-fn assemble(model: Model, tok: Tokenizer, m: &LibraryModel, ctx: usize, gpu_layers: Option<usize>) -> Loaded {
-    let ctx = ctx.clamp(512, model.cfg.ctx_train.max(512));
+fn assemble(mut model: Model, tok: Tokenizer, m: &LibraryModel, ctx: usize, gpu_layers: Option<usize>) -> Loaded {
+    // Past the trained length the model runs stretched with YaRN (engine Model::extend_context).
+    let ctx = ctx.clamp(512, (model.cfg.ctx_train * YARN_MAX).max(512));
+    let factor = model.extend_context(ctx);
+    if factor > 1.0 {
+        eprintln!("context: {ctx} tokens, {factor:.2}x the trained {} with YaRN", model.cfg.ctx_train);
+    }
     let (session, placement) = place(&model, ctx, gpu_layers);
     let dialect = crate::toolcall::dialect_from_template(model.gguf().str("tokenizer.chat_template").unwrap_or(""));
     Loaded { model, session, tok, info: m.clone(), dialect, placement, gpu_layers, vision: None, llama: None, images: Default::default() }

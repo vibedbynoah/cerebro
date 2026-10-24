@@ -58,6 +58,7 @@ pub fn describe(dir: &Path, source: &'static str, id: String) -> Option<LibraryM
         architecture: "dense",
         size_gi_b: folder_size(dir) as f64 / (1u64 << 30) as f64,
         context_max: 0,
+        context_extended: 0,
         tune: "untuned",
         provenance: "measured",
         kind: "image",

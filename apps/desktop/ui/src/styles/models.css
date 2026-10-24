@@ -2741,3 +2741,13 @@
 .lib-pin.is-pinned {
   color: var(--color-accent);
 }
+
+/* Long-context check (Models drawer, Load tab). */
+.ctxcheck { display: grid; gap: var(--space-2); padding: var(--space-4); margin-bottom: var(--space-3); }
+.ctxcheck__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.ctxcheck__head h3 { margin: 0; font-size: var(--text-body); }
+.ctxcheck__verdict[data-ok="false"] strong { color: var(--color-warning); }
+.ctxcheck__table { width: 100%; border-collapse: collapse; font-size: var(--text-small, 0.875rem); }
+.ctxcheck__table th, .ctxcheck__table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--color-border); }
+.ctxcheck__table tr[data-found="false"] td { color: var(--color-warning); }
+.ctxcheck__reply { max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -123,6 +123,7 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::remote_tunnel_get,
             commands::image_video,
             commands::moe_activity,
+            commands::context_check,
             commands::hub_pipeline_files,
             commands::hub_file_meta,
             commands::hub_download,

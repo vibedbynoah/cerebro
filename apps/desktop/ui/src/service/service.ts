@@ -40,6 +40,7 @@ import type { EngineSwitch, LocalApiView, McpServerView, RemoteOptions, RemotePa
   HubRepo,
   HubSort,
   MoeActivity,
+  ContextCheckResult,
 } from "./types";
 
 import type { ChatEvent, ChatRequest } from "./chat-types";
@@ -284,6 +285,8 @@ export interface CerebroService {
   hubLatest?(author: string, query: string): Promise<HubRepo[]>;
   /** Which experts the loaded mixture-of-experts model is firing; null for a dense model. */
   moeActivity?(): Promise<MoeActivity | null>;
+  /** Runs the long-context check on the loaded model. */
+  contextCheck?(): Promise<ContextCheckResult>;
   /** Saves a picked dataset file into Cerebro's datasets folder; resolves with its path. */
   saveDataset?(name: string, text: string): Promise<string>;
   /** The files an image model needs (its diffusers folder), with their total size in bytes. */

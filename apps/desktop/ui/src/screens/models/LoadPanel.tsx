@@ -251,9 +251,11 @@ export function LoadPanel(props: {
             hint={
               tweaked("contextLength")
                 ? "Set by Tweak Studio"
-                : props.contextMax() > m().contextMax
-                  ? `Up to ${props.contextMax().toLocaleString("en-US")} tokens with RoPE scaling`
-                  : `Up to ${m().contextMax.toLocaleString("en-US")} tokens`
+                : props.effective().contextLength > m().contextMax
+                  ? `Past the trained ${m().contextMax.toLocaleString("en-US")} tokens: stretched with YaRN (${(props.effective().contextLength / m().contextMax).toFixed(1)}x). Run the long-context check after loading to see that it holds.`
+                  : props.contextMax() > m().contextMax
+                    ? `Trained for ${m().contextMax.toLocaleString("en-US")} tokens; up to ${props.contextMax().toLocaleString("en-US")} with YaRN`
+                    : `Up to ${m().contextMax.toLocaleString("en-US")} tokens`
             }
           >
             {(id, a11y) => (
