@@ -171,8 +171,9 @@ pub fn drive_layers(layers: &[u64], head: u64, gpu_layers: usize, ram_budget: u6
     cpu.len()
 }
 
-/// VRAM left free for the driver, CUDA graphs and fragmentation.
-pub const VRAM_MARGIN: u64 = 600 << 20;
+/// VRAM left free for the driver, CUDA graphs and fragmentation (the buffers a model needs are
+/// counted in its plan, including the prompt conversion scratch).
+pub const VRAM_MARGIN: u64 = 256 << 20;
 /// RAM left for the OS and the app.
 pub const RAM_MARGIN: u64 = 1536 << 20;
 
@@ -203,6 +204,13 @@ pub fn plan_dense(cost: &ModelCost, m: &Machine, force_gpu_layers: Option<usize>
         }
         k
     };
+    if std::env::var_os("CEREBRO_PLAN_DEBUG").is_some() {
+        let g = |b: u64| b as f64 / (1u64 << 30) as f64;
+        eprintln!(
+            "plan: budget {:.2} GiB, full int8 {:.2}, full native {:.2} (all native {all_native_ok}), layers native {:.2}, kv {:.2}, head int8 {:.2} native {:.2}, scratch {:.2}, split head {:.2}, fit {fit_layers}",
+            g(budget), g(full_int8), g(full_native), g(sum(&|l| if l.native_ok { l.native } else { l.int8 }, 0..n)), g(sum(&|l| l.kv_gpu, 0..n)), g(cost.head_int8), g(cost.head_native), g(cost.scratch), g(cost.split_head)
+        );
+    }
     let (layout, gpu_layers) = match force_gpu_layers {
         Some(k) if k < n => {
             let k = k.min(fit_layers);

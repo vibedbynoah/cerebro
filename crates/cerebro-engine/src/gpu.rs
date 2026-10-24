@@ -119,6 +119,8 @@ struct Funcs {
     matmul_mma: Option<CudaFunction>,
     /// The same GEMM with 128 x 64 blocks, for big matrices and long prompts.
     matmul_mma_big: Option<CudaFunction>,
+    /// 128 x 128 blocks of 8 warps, for the longest prompts (256+ tokens).
+    matmul_mma_x: Option<CudaFunction>,
     /// Tensor-core flash attention for prefill, head size 128 (sm_80+).
     attn_mma: Option<CudaFunction>,
     silu_b: CudaFunction,
@@ -678,6 +680,10 @@ fn repack(g: &Gguf, mats: &[&Mat]) -> (Vec<i8>, Vec<f32>, usize, usize) {
     (qs, ds, rows, cols)
 }
 
+/// Largest int8 copy of a native-format matrix made at once for a prompt (bytes, plus 1/8 for
+/// its scales): bigger stacks are converted and multiplied in pieces of rows.
+pub(crate) const K8_PIECE: usize = 64 << 20;
+
 impl GpuState {
     pub fn load(model: &Model, max_ctx: usize) -> Result<Self, Error> {
         Self::load_with(model, max_ctx, None)
@@ -694,13 +700,14 @@ impl GpuState {
         let lf = |n: &str| module.load_function(n).map_err(gerr);
         let cc8 = ctx.compute_capability().map_err(gerr)?.0 >= 8;
         let (mm_on, at_on) = (cc8 && switches::enabled(switches::GPU_MMA_MATMUL), cc8 && switches::enabled(switches::GPU_MMA_ATTENTION));
-        let (matmul_mma, attn_mma, attn_mma256, matmul_mma_big) = if mm_on || at_on {
+        let (matmul_mma, attn_mma, attn_mma256, matmul_mma_big, matmul_mma_x) = if mm_on || at_on {
             let m = ctx.load_module(Ptx::from_src(PTX_MMA)).map_err(gerr)?;
             let f = |on: bool, n: &str| if on { m.load_function(n).map(Some).map_err(gerr) } else { Ok(None) };
             let big = if std::env::var_os("CEREBRO_NO_BIG_GEMM").is_some() { None } else { f(mm_on, "matmul_q8_mma_big")? };
-            (f(mm_on, "matmul_q8_mma")?, f(at_on, "attn_prefill_mma")?, f(at_on, "attn_prefill_mma256")?, big)
+            let x = if std::env::var_os("CEREBRO_NO_X_GEMM").is_some() { None } else { f(mm_on, "matmul_q8_mma_x")? };
+            (f(mm_on, "matmul_q8_mma")?, f(at_on, "attn_prefill_mma")?, f(at_on, "attn_prefill_mma256")?, big, x)
         } else {
-            (None, None, None, None)
+            (None, None, None, None, None)
         };
         let f = Funcs {
             attn_mma256,
@@ -712,6 +719,7 @@ impl GpuState {
             gate_mul: lf("gate_mul")?,
             matmul_mma,
             matmul_mma_big,
+            matmul_mma_x,
             attn_mma,
             matvec: lf("matvec_q8")?,
             rmsnorm_quant: lf("rmsnorm_quant")?,
@@ -767,7 +775,12 @@ impl GpuState {
         let kvd = c.n_kv * c.head_dim;
         // Where everything goes (placement.rs). MoE models keep their K-quant weights native on
         // the GPU (about half the bytes of int8), leaving VRAM to the expert cache.
-        let (free, _) = ctx.mem_get_info().map_err(gerr)?;
+        let (free, total) = ctx.mem_get_info().map_err(gerr)?;
+        let extra = std::env::var("CEREBRO_VRAM_EXTRA_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0) << 20;
+        if std::env::var_os("CEREBRO_PLAN_DEBUG").is_some() {
+            eprintln!("vram: free {:.2} of {:.2} GiB after the context and kernels", free as f64 / (1u64 << 30) as f64, total as f64 / (1u64 << 30) as f64);
+        }
+        let free = free + extra;
         let plan = plan_for(model, max_ctx, free as u64, force_layers)?;
         if plan.layout == crate::placement::Layout::Cpu {
             return Err(Error::Unsupported(plan.notes.join(" ")));
@@ -1404,8 +1417,21 @@ pub fn plan_for(model: &Model, max_ctx: usize, vram_free: u64, force_layers: Opt
             return Ok(p);
         }
         let mut layers = Vec::with_capacity(c.n_layer);
+        // Prompts on native-format layers convert one stacked matrix at a time to int8 for the
+        // tensor cores (k_to_q8): the largest such stack is a real buffer, counted here rather than
+        // left to the safety margin.
+        let mut k8_scratch = 0u64;
         for l in model.layers() {
             let Ffn::Dense { gate, up, down } = &l.ffn else { return Err(Error::Unsupported("mixed dense and expert layers".into())) };
+            let stacks: Vec<Vec<&Mat>> = match &l.delta {
+                Some(d) => vec![vec![&d.qkv, &d.z, &d.alpha, &d.beta], vec![&d.out], vec![gate, up], vec![down]],
+                None => vec![vec![&l.q, &l.k, &l.v], vec![&l.o], vec![gate, up], vec![down]],
+            };
+            for st in &stacks {
+                if st.iter().all(|m| native_bytes(m).is_some()) {
+                    k8_scratch = k8_scratch.max(st.iter().map(|m| (m.rows * m.cols) as u64).sum::<u64>().min(K8_PIECE as u64) * 9 / 8);
+                }
+            }
             let mats: Vec<&Mat> = match &l.delta {
                 Some(d) => vec![&d.qkv, &d.z, &d.alpha, &d.beta, &d.out, gate, up, down],
                 None => vec![&l.q, &l.k, &l.v, &l.o, gate, up, down],
@@ -1430,7 +1456,7 @@ pub fn plan_for(model: &Model, max_ctx: usize, vram_free: u64, force_layers: Opt
         // In the native layout the embeddings are looked up on the CPU: nothing extra on the GPU.
         let _ = &mut head_native;
         let split_head = if split_head_on(model) { native_bytes(out).unwrap_or(int8_bytes(out)) } else { 0 };
-        let cost = ModelCost { layers, head_int8, head_native, scratch, split_head, file: model.gguf().len() as u64 };
+        let cost = ModelCost { layers, head_int8, head_native, scratch: scratch + k8_scratch, split_head, file: model.gguf().len() as u64 };
         let force = force_layers.or(match crate::switches::get(crate::switches::GPU_LAYERS) {
             n if n > 0 => Some(n as usize),
             _ => None,
@@ -2368,37 +2394,56 @@ impl GpuState {
         };
         let mm = |m: &GMat, xq: &CudaSlice<i8>, xd: &CudaSlice<f32>, y: &mut CudaSlice<f32>, add: bool| -> Result<(), Error> {
             if let (GMat::K { parts, cols }, Some(k), true) = (m, &f.matmul_mma, t >= MMA_MIN_T) {
+                // The stacked parts are converted to int8 and multiplied a piece of rows at a
+                // time, so the conversion buffer stays at K8_PIECE bytes however big the matrix.
                 let rows: usize = parts.iter().map(|p| p.rows).sum();
-                let n = rows * cols;
+                let piece = (K8_PIECE / cols / 128 * 128).max(128).min(rows);
+                let n = piece * cols;
                 let mut sc = k8.borrow_mut();
                 if sc.as_ref().is_none_or(|(q, _)| q.len() < n) {
                     *sc = Some((s.alloc_zeros::<i8>(n).map_err(gerr)?, s.alloc_zeros::<f32>(n / 32).map_err(gerr)?));
                 }
                 let (qs, ds) = sc.as_mut().expect("scratch");
-                if profiling {
-                    s.synchronize().map_err(gerr)?;
+                let (cols_i, add_i, ys) = (*cols as i32, add as i32, rows as i32);
+                let mut g0 = 0;
+                while g0 < rows {
+                    let g1 = (g0 + piece).min(rows);
+                    if profiling {
+                        s.synchronize().map_err(gerr)?;
+                    }
+                    let t_conv = std::time::Instant::now();
+                    // Rows g0..g1 of the stack, part by part.
+                    let (mut base, mut out) = (0, 0);
+                    for p in parts {
+                        let (lo, hi) = (g0.max(base), g1.min(base + p.rows));
+                        if lo < hi {
+                            let rb = p.w.len() / p.rows;
+                            let (r, c) = ((hi - lo) as i32, *cols as i32);
+                            let subs = ((hi - lo) * cols / 32) as u32;
+                            let cfg = LaunchConfig { grid_dim: (subs.div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+                            let w = p.w.slice((lo - base) * rb..(hi - base) * rb);
+                            let mut qv = qs.slice_mut(out * cols..(out + hi - lo) * cols);
+                            let mut dv = ds.slice_mut(out * cols / 32..(out + hi - lo) * cols / 32);
+                            unsafe { s.launch_builder(&f.k_to_q8).arg(&w).arg(&p.dtype).arg(&p.bb).arg(&r).arg(&c).arg(&mut qv).arg(&mut dv).launch(cfg) }.map_err(gerr)?;
+                            out += hi - lo;
+                        }
+                        base += p.rows;
+                    }
+                    lap(0, t_conv)?;
+                    let t_mm = std::time::Instant::now();
+                    let pr = g1 - g0;
+                    let rows_i = pr as i32;
+                    let (k, bm, bn, th) = match (&f.matmul_mma_x, &f.matmul_mma_big) {
+                        (Some(x), _) if pr >= 1024 && t >= 256 => (x, 128u32, 128u32, 256u32),
+                        (_, Some(b)) if pr >= 1024 && t >= 128 => (b, 128, 64, 128),
+                        _ => (k, 64, 64, 128),
+                    };
+                    let cfg = LaunchConfig { grid_dim: ((t as u32).div_ceil(bn), (pr as u32).div_ceil(bm), 1), block_dim: (th, 1, 1), shared_mem_bytes: 0 };
+                    let mut yv = y.slice_mut(g0..);
+                    unsafe { s.launch_builder(k).arg(&*qs).arg(&*ds).arg(xq).arg(xd).arg(&mut yv).arg(&rows_i).arg(&cols_i).arg(&ti).arg(&add_i).arg(&ys).launch(cfg) }.map_err(gerr)?;
+                    lap(1, t_mm)?;
+                    g0 = g1;
                 }
-                let t_conv = std::time::Instant::now();
-                let mut r0 = 0;
-                for p in parts {
-                    let (r, c) = (p.rows as i32, *cols as i32);
-                    let subs = (p.rows * cols / 32) as u32;
-                    let cfg = LaunchConfig { grid_dim: (subs.div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
-                    let mut qv = qs.slice_mut(r0 * cols..(r0 + p.rows) * cols);
-                    let mut dv = ds.slice_mut(r0 * cols / 32..(r0 + p.rows) * cols / 32);
-                    unsafe { s.launch_builder(&f.k_to_q8).arg(&p.w).arg(&p.dtype).arg(&p.bb).arg(&r).arg(&c).arg(&mut qv).arg(&mut dv).launch(cfg) }.map_err(gerr)?;
-                    r0 += p.rows;
-                }
-                lap(0, t_conv)?;
-                let t_mm = std::time::Instant::now();
-                let (rows_i, cols_i, add_i) = (rows as i32, *cols as i32, add as i32);
-                let (k, bm) = match &f.matmul_mma_big {
-                    Some(b) if rows >= 1024 && t >= 128 => (b, 128u32),
-                    _ => (k, 64u32),
-                };
-                let cfg = LaunchConfig { grid_dim: ((t as u32).div_ceil(64), (rows as u32).div_ceil(bm), 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
-                unsafe { s.launch_builder(k).arg(&*qs).arg(&*ds).arg(xq).arg(xd).arg(y).arg(&rows_i).arg(&cols_i).arg(&ti).arg(&add_i).launch(cfg) }.map_err(gerr)?;
-                lap(1, t_mm)?;
                 return Ok(());
             }
             if let GMat::K { parts, cols } = m {
@@ -2418,12 +2463,13 @@ impl GpuState {
             let (rows, cols, add) = (mrows as i32, mcols as i32, add as i32);
             match &f.matmul_mma {
                 Some(k) if t >= MMA_MIN_T => {
-                    let (k, bm) = match &f.matmul_mma_big {
-                        Some(b) if mrows >= 1024 && t >= 128 => (b, 128u32),
-                        _ => (k, 64u32),
+                    let (k, bm, bn, th) = match (&f.matmul_mma_x, &f.matmul_mma_big) {
+                        (Some(x), _) if mrows >= 1024 && t >= 256 => (x, 128u32, 128u32, 256u32),
+                        (_, Some(b)) if mrows >= 1024 && t >= 128 => (b, 128, 64, 128),
+                        _ => (k, 64, 64, 128),
                     };
-                    let cfg = LaunchConfig { grid_dim: ((t as u32).div_ceil(64), (mrows as u32).div_ceil(bm), 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
-                    unsafe { s.launch_builder(k).arg(qs).arg(ds).arg(xq).arg(xd).arg(y).arg(&rows).arg(&cols).arg(&ti).arg(&add).launch(cfg) }.map_err(gerr)?;
+                    let cfg = LaunchConfig { grid_dim: ((t as u32).div_ceil(bn), (mrows as u32).div_ceil(bm), 1), block_dim: (th, 1, 1), shared_mem_bytes: 0 };
+                    unsafe { s.launch_builder(k).arg(qs).arg(ds).arg(xq).arg(xd).arg(y).arg(&rows).arg(&cols).arg(&ti).arg(&add).arg(&rows).launch(cfg) }.map_err(gerr)?;
                 }
                 _ => unsafe { s.launch_builder(&f.matmul_b).arg(qs).arg(ds).arg(xq).arg(xd).arg(y).arg(&rows).arg(&cols).arg(&ti).arg(&add).launch(rows_cfg(mrows)) }.map_err(gerr).map(|_| ())?,
             }
