@@ -109,5 +109,5 @@ checked in the real exe before it is ticked.
       the copy path itself still needs the fix to get the faster prompt reading back.
 - [ ] A real text-to-video model (Wan-class) in the engine.
 - [ ] Models: drag to reorder and groups (loaded-first and pins are in).
-- [ ] Train: a recommended value and plain explanation next to every setting.
+- [x] Train: a recommended value and plain explanation next to every setting (with a Use button).
 - [ ] Remaining speed losses: iGPU prompt attention, 8B whole-card prompt reading, low-bit decode.

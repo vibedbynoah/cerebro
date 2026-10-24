@@ -212,3 +212,23 @@
   gap: var(--space-2);
   align-items: center;
 }
+
+/* "Use" beside a recommended value: inline, quiet. */
+.train-use {
+  padding: 0 var(--space-2);
+  min-height: 0;
+  vertical-align: baseline;
+}
+
+/* The explanation and recommended value under each setting, as a plain paragraph. */
+.train-why {
+  display: block;
+  margin: 0;
+  font-size: var(--text-small);
+  line-height: 1.45;
+  color: var(--color-text-muted);
+}
+
+.train-advanced .train-grid {
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+}

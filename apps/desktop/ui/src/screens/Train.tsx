@@ -1,5 +1,5 @@
 import "../styles/train.css";
-import { createMemo, createSignal, For, onMount, Show, type JSX } from "solid-js";
+import { createMemo, createResource, createSignal, For, onMount, Show, type JSX } from "solid-js";
 import { Icon } from "../components/icons";
 import { IllustrativeFlag, ScreenHeader, Section } from "../components/Screen";
 import { useService } from "../service/context";
@@ -29,6 +29,11 @@ const FORMATS: ReadonlyArray<{ id: TrainFormat; label: string }> = [
 
 export function Train(): JSX.Element {
   const service = useService();
+  // Recommendations from this machine's graphics memory (the trainer runs on the card).
+  const [trainHw] = createResource(() => service.detectHardware().catch(() => undefined));
+  const vram = () => trainHw()?.gpu?.vramTotalGiB ?? 8;
+  const recContext = () => (vram() >= 16 ? 4096 : 2048);
+  const recBatch = () => (vram() >= 16 ? 4 : 2);
   const [status, setStatus] = createSignal<TrainerStatus | null>(null);
   const [setupError, setSetupError] = createSignal<string | null>(null);
   const [datasetKind, setDatasetKind] = createSignal<"file" | "hf">(job().datasetHf ? "hf" : "file");
@@ -219,16 +224,16 @@ export function Train(): JSX.Element {
             </label>
           </div>
 
-          <details class="train-advanced">
+          <details class="train-advanced" open>
             <summary>More settings</summary>
             <div class="train-grid">
-              <NumField label="Epochs" value={job().epochs} step="0.1" err={err("epochs")} onInput={(v) => patch({ epochs: v })} />
-              <NumField label="Learning rate" value={job().lr} step="0.00001" err={err("lr")} onInput={(v) => patch({ lr: v })} />
-              <NumField label="LoRA rank" value={job().rank} err={err("rank")} onInput={(v) => patch({ rank: v })} />
-              <NumField label="LoRA alpha" value={job().alpha} err={err("alpha")} onInput={(v) => patch({ alpha: v })} />
-              <NumField label="Sequence length" value={job().maxSeqLen} err={err("maxSeqLen")} onInput={(v) => patch({ maxSeqLen: v })} />
-              <NumField label="Batch size" value={job().batch} err={err("batch")} onInput={(v) => patch({ batch: v })} />
-              <NumField label="Gradient accumulation" value={job().gradAccum} err={err("gradAccum")} onInput={(v) => patch({ gradAccum: v })} />
+              <NumField label="Epochs" value={job().epochs} step="0.1" err={err("epochs")} onInput={(v) => patch({ epochs: v })} rec={1} why="Passes over your examples. 1 to 3: more follows them more closely but can start repeating them word for word." />
+              <NumField label="Learning rate" value={job().lr} step="0.00001" err={err("lr")} onInput={(v) => patch({ lr: v })} rec={2e-4} why="How big each correction is. 0.0002 suits LoRA and QLoRA; try 0.00005 if the loss jumps around." />
+              <NumField label="LoRA rank" value={job().rank} err={err("rank")} onInput={(v) => patch({ rank: v })} rec={16} why="How much the adapter can learn. 16 for most datasets; 32 to 64 for large ones, at more memory." />
+              <NumField label="LoRA alpha" value={job().alpha} err={err("alpha")} onInput={(v) => patch({ alpha: v })} rec={job().rank} why="How strongly the adapter changes the model. Usually equal to the rank." />
+              <NumField label="Context (sequence length)" value={job().maxSeqLen} err={err("maxSeqLen")} onInput={(v) => patch({ maxSeqLen: v })} rec={recContext()} why="The longest example, in tokens. Longer examples are cut; a longer context uses more graphics memory." />
+              <NumField label="Batch size" value={job().batch} err={err("batch")} onInput={(v) => patch({ batch: v })} rec={recBatch()} why="Examples per step. Raise it when graphics memory allows; lower it if training runs out of memory." />
+              <NumField label="Gradient accumulation" value={job().gradAccum} err={err("gradAccum")} onInput={(v) => patch({ gradAccum: v })} rec={4} why="Steps added together before each update: batch size times this is the effective batch (8 by default)." />
             </div>
           </details>
 
@@ -340,7 +345,7 @@ export function Train(): JSX.Element {
                 {run().error}
               </p>
               <Show when={status()?.stderrTail.length}>
-                <details class="train-advanced">
+                <details class="train-advanced" open>
                   <summary>Details</summary>
                   <pre class="train-tail mono">{status()?.stderrTail.slice(-40).join("\n")}</pre>
                 </details>
@@ -353,7 +358,8 @@ export function Train(): JSX.Element {
   );
 }
 
-function NumField(props: { label: string; value: number; step?: string; err: string | undefined; onInput: (v: number) => void }): JSX.Element {
+/** A number setting with what it does and the value Cerebro recommends; the user decides. */
+function NumField(props: { label: string; value: number; step?: string; err: string | undefined; onInput: (v: number) => void; rec?: number; why?: string }): JSX.Element {
   return (
     <label class="train-field">
       <span>{props.label}</span>
@@ -366,6 +372,21 @@ function NumField(props: { label: string; value: number; step?: string; err: str
         onInput={(e) => props.onInput(e.currentTarget.value.trim() === "" ? Number.NaN : Number(e.currentTarget.value))}
       />
       <Show when={props.err}>{(m) => <span class="train-field__err">{m()}</span>}</Show>
+      <Show when={props.why}>
+        <span class="train-why">
+          {props.why}
+          <Show when={props.rec !== undefined}>
+            {" "}
+            Recommended: <span class="mono">{props.rec}</span>.
+            <Show when={props.rec !== props.value}>
+              {" "}
+              <button type="button" class="btn btn--tertiary btn--sm train-use" onClick={(e) => (e.preventDefault(), props.onInput(props.rec!))}>
+                Use
+              </button>
+            </Show>
+          </Show>
+        </span>
+      </Show>
     </label>
   );
 }
