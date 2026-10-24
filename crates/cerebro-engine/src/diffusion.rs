@@ -1115,6 +1115,70 @@ impl Diffusion {
         self.finish(lat, lh, &ctx, ids.len(), sched)
     }
 
+    /// A short animation: `frames` pictures where each grows out of the one before in latent
+    /// space (noised to `strength` and denoised again), so the scene moves and evolves instead of
+    /// jumping; the second half follows `end_prompt` when one is given, so the scene can morph.
+    /// Every frame is RGB, row by row, `size` x `size`, 0..255. `on_frame(i)` reports progress.
+    pub fn animate(&self, prompt: &str, end_prompt: Option<&str>, size: usize, frames: usize, strength: f32, seed: u64, mut on_frame: impl FnMut(usize)) -> Result<Vec<Vec<u8>>, Error> {
+        if size % 64 != 0 || size == 0 || frames == 0 {
+            return Err(Error::Request("the size must be a multiple of 64 and there must be at least one frame".into()));
+        }
+        let ids_a = self.tokenizer.encode(prompt);
+        let ctx_a = self.encode_text(&ids_a)?;
+        let end = end_prompt.filter(|p| !p.trim().is_empty()).map(|p| -> Result<_, Error> {
+            let ids = self.tokenizer.encode(p);
+            let ctx = self.encode_text(&ids)?;
+            Ok((ids.len(), ctx))
+        });
+        let end = end.transpose()?;
+        let lh = size / 8;
+        let mut rng = crate::tts::Rng::new(seed);
+        let mut normal = move || {
+            let (u1, u2) = (rng.next_f32().max(1e-7), rng.next_f32());
+            (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
+        };
+        // Frame 0 from noise in one step, like `generate`.
+        let first = euler_schedule(1);
+        let init = (first[0].1 * first[0].1 + 1.0).sqrt();
+        let mut lat: Vec<f32> = (0..lh * lh * 4).map(|_| normal() * init).collect();
+        lat = self.denoise(lat, lh, &ctx_a, ids_a.len(), &first)?;
+        let mut out = Vec::with_capacity(frames);
+        let strength = strength.clamp(0.05, 0.9);
+        let steps = 2usize;
+        let total = ((steps as f32 / strength).round() as usize).max(steps);
+        let full = euler_schedule(total);
+        let sched = &full[total - steps..];
+        for i in 0..frames {
+            if i > 0 {
+                let (ctx, nc) = match &end {
+                    Some((n, c)) if i * 2 >= frames => (c.as_slice(), *n),
+                    _ => (ctx_a.as_slice(), ids_a.len()),
+                };
+                let sigma = sched[0].1;
+                let noised: Vec<f32> = lat.iter().map(|v| v + sigma * normal()).collect();
+                lat = self.denoise(noised, lh, ctx, nc, sched)?;
+            }
+            let z: Vec<f32> = lat.iter().map(|v| v / self.scaling).collect();
+            let img = self.vae(&z, lh, lh)?;
+            out.push(img.iter().map(|v| (((v / 2.0 + 0.5).clamp(0.0, 1.0)) * 255.0).round() as u8).collect());
+            on_frame(i);
+        }
+        Ok(out)
+    }
+
+    /// Latents after the Euler steps of `sched` (pixel-major [h][w][4], scaled), not decoded.
+    fn denoise(&self, mut lat: Vec<f32>, lh: usize, ctx: &[f32], nc: usize, sched: &[(f32, f32)]) -> Result<Vec<f32>, Error> {
+        for i in 0..sched.len() - 1 {
+            let (t, sigma) = sched[i];
+            let scale = 1.0 / (sigma * sigma + 1.0).sqrt();
+            let input: Vec<f32> = lat.iter().map(|v| v * scale).collect();
+            let eps = self.unet(&input, lh, lh, t, ctx, nc)?;
+            let dt = sched[i + 1].1 - sigma;
+            lat.iter_mut().zip(&eps).for_each(|(x, e)| *x += e * dt);
+        }
+        Ok(lat)
+    }
+
     /// Denoises latents (pixel-major [h][w][4], already scaled) over `sched` and decodes them.
     pub fn finish(&self, mut lat: Vec<f32>, lh: usize, ctx: &[f32], nc: usize, sched: &[(f32, f32)]) -> Result<Vec<u8>, Error> {
         for i in 0..sched.len() - 1 {

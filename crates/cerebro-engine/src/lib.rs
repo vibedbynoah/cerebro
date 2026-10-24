@@ -31,6 +31,7 @@ pub mod stream;
 pub mod switches;
 pub mod telemetry;
 pub mod tokenizer;
+pub mod topic;
 pub mod tune;
 pub mod tts;
 pub mod vision;
