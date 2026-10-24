@@ -389,6 +389,8 @@ struct DeltaShape {
     nv: usize,
     dv: usize,
     kc: usize,
+    /// Qwen3-Next head grouping (model::Ssm::inter).
+    inter: bool,
 }
 
 impl DeltaShape {
@@ -833,6 +835,9 @@ impl GpuState {
         let n_gpu = if c.n_expert > 0 { c.n_layer } else { plan.gpu_layers };
         let split = n_gpu < c.n_layer;
         let mut up = |mats: &[&Mat]| -> Result<GMat, Error> {
+            // An empty matrix (Qwen3-Next's `beta`, fused into `alpha`) adds no rows.
+            let kept: Vec<&Mat> = mats.iter().copied().filter(|m| m.rows > 0).collect();
+            let mats = &kept[..];
             if native && mats.iter().all(|m| gpu_block(m.dtype).is_some() && m.cols % 256 == 0) {
                 let mut parts = Vec::with_capacity(mats.len());
                 for m in mats {
@@ -905,7 +910,7 @@ impl GpuState {
         let embed = if model.tied() || native { None } else { Some(up(&[model.embed_mat()])?) };
         let attn_layers = model.layers()[..n_gpu].iter().filter(|l| l.delta.is_none()).count();
         vram += attn_layers * 2 * max_ctx * kvd * 2;
-        let dsh = c.ssm.map(|ss| DeltaShape { nk: ss.nk, dk: ss.dk, nv: ss.nv, dv: ss.dv, kc: ss.conv });
+        let dsh = c.ssm.map(|ss| DeltaShape { nk: ss.nk, dk: ss.dk, nv: ss.nv, dv: ss.dv, kc: ss.conv, inter: ss.inter });
         if let Some(d) = dsh {
             vram += (n_gpu - attn_layers) * (d.nv * d.dk * d.dv + (d.kc - 1) * d.ch()) * 4;
         }
@@ -1399,7 +1404,8 @@ impl GpuState {
         unsafe { s.launch_builder(&f.delta_l2).arg(&mut *row).arg(&ld).arg(&nk).arg(&dk).arg(&qscale).launch(l2_cfg) }.map_err(gerr)?;
         let ldo = (d.nv * d.dv) as i32;
         let rule_cfg = LaunchConfig { grid_dim: (d.nv as u32, (d.dv / 32) as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: ((d.dk + 4) * 32 * 4) as u32 };
-        unsafe { s.launch_builder(&f.delta_rule).arg(&*row).arg(&ld).arg(&ch).arg(&nk).arg(&dk).arg(&nv).arg(&dv).arg(&dl.a).arg(&dl.dt_bias).arg(&mut dl.state).arg(&mut *out).arg(&ldo).arg(&ti).launch(rule_cfg) }.map_err(gerr)?;
+        let inter = d.inter as i32;
+        unsafe { s.launch_builder(&f.delta_rule).arg(&*row).arg(&ld).arg(&ch).arg(&nk).arg(&dk).arg(&nv).arg(&dv).arg(&dl.a).arg(&dl.dt_bias).arg(&mut dl.state).arg(&mut *out).arg(&ldo).arg(&ti).arg(&inter).launch(rule_cfg) }.map_err(gerr)?;
         let zoff = ch;
         let gn_cfg = LaunchConfig { grid_dim: (d.nv as u32, t as u32, 1), block_dim: (d.dv as u32, 1, 1), shared_mem_bytes: 0 };
         unsafe { s.launch_builder(&f.delta_gnorm).arg(&mut *out).arg(&ldo).arg(&*row).arg(&ld).arg(&zoff).arg(&dl.norm).arg(&dv).arg(&sh.eps).launch(gn_cfg) }.map_err(gerr)?;

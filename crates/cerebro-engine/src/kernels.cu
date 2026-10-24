@@ -1396,15 +1396,19 @@ extern "C" __global__ void delta_l2(float* __restrict__ row, int ld, int nk, int
 // head, each column's dk rows split over 4 thread groups; the slice stays in shared memory for all
 // T tokens and is written back at the end. Per token: S *= decay; kv = S^T k; S += k (beta (v - kv))^T;
 // o = S^T q. Value head h reads key head h % nk. Shared memory: (dk + 4) * 32 floats.
+// inter (Qwen3-Next): value head h reads key head h / (nv / nk), and beta / alpha sit in one fused
+// block grouped per key head ([beta x r | alpha x r] per group, r = nv / nk).
 extern "C" __global__ void delta_rule(const float* __restrict__ row, int ld, int ch, int nk, int dk, int nv, int dv,
                                       const float* __restrict__ a, const float* __restrict__ dtb,
-                                      float* __restrict__ state, float* __restrict__ out, int ldo, int T) {
+                                      float* __restrict__ state, float* __restrict__ out, int ldo, int T, int inter) {
     extern __shared__ float sm[];
     float* S = sm;
     float* part = sm + dk * 32;
     int h = blockIdx.x, tx = threadIdx.x & 31, ty = threadIdx.x >> 5;
     int j = blockIdx.y * 32 + tx;
-    int kh = h % nk;
+    int rf = nv / nk;
+    int kh = inter ? h / rf : h % nk;
+    int ia = inter ? (h / rf) * 2 * rf + rf + h % rf : h, ib = inter ? (h / rf) * 2 * rf + h % rf : nv + h;
     float* st = state + (size_t)h * dk * dv;
     for (int i = ty; i < dk; i += 4) S[i * 32 + tx] = st[(size_t)i * dv + j];
     __syncthreads();
@@ -1412,7 +1416,7 @@ extern "C" __global__ void delta_rule(const float* __restrict__ row, int ld, int
         const float* r = row + (size_t)t * ld;
         const float* q = r + kh * dk;
         const float* k = r + (nk + kh) * dk;
-        float al = r[ch + nv * dv + h], be = r[ch + nv * dv + nv + h];
+        float al = r[ch + nv * dv + ia], be = r[ch + nv * dv + ib];
         float x = al + dtb[h];
         float sp = x > 20.f ? x : log1pf(__expf(x));
         float decay = __expf(a[h] * sp);

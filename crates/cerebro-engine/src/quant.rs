@@ -27,6 +27,8 @@ pub enum DType {
     IQ1M,
     IQ4NL,
     IQ4XS,
+    /// OCP MXFP4: 32 E2M1 values with one E8M0 scale; 17 bytes (Qwen3-Coder-Next shared experts).
+    MXFP4,
     /// PrismML's 1-bit "Q1_0_g128" (Bonsai): a sign bit per weight (1 = +d, 0 = -d), one f16 scale
     /// per 128 weights; 18 bytes per block.
     Q1_0,
@@ -57,6 +59,7 @@ impl DType {
             22 => DType::IQ2S,
             23 => DType::IQ4XS,
             29 => DType::IQ1M,
+            39 => DType::MXFP4,
             41 => DType::Q1_0,
             _ => return None,
         })
@@ -64,7 +67,7 @@ impl DType {
     pub fn block_elems(self) -> usize {
         match self {
             DType::F32 | DType::F16 | DType::BF16 => 1,
-            DType::Q8_0 | DType::Q4_0 | DType::Q4_1 | DType::Q5_0 | DType::Q5_1 | DType::IQ4NL => 32,
+            DType::Q8_0 | DType::Q4_0 | DType::Q4_1 | DType::Q5_0 | DType::Q5_1 | DType::IQ4NL | DType::MXFP4 => 32,
             DType::Q1_0 => 128,
             _ => 256,
         }
@@ -93,6 +96,7 @@ impl DType {
             DType::IQ4NL => 18,
             DType::IQ4XS => 136,
             DType::Q1_0 => 18,
+            DType::MXFP4 => 17,
         }
     }
     pub fn row_bytes(self, cols: usize) -> usize {
@@ -217,6 +221,16 @@ pub fn dequant_block(t: DType, b: &[u8], out: &mut [f32]) {
                     o[l + 64] = d * (sc[is + 4] as i8) as f32 * q3 as f32;
                     o[l + 96] = d * (sc[is + 6] as i8) as f32 * q4 as f32;
                 }
+            }
+        }
+        DType::MXFP4 => {
+            // ggml: E8M0 scale halved (the value table holds 2 x E2M1), low nibbles first.
+            const KV: [f32; 16] = [0., 1., 2., 3., 4., 6., 8., 12., 0., -1., -2., -3., -4., -6., -8., -12.];
+            let e = b[0] as u32;
+            let d = f32::from_bits(if e < 2 { 0x0020_0000 << e } else { (e - 1) << 23 });
+            for j in 0..16 {
+                out[j] = KV[(b[1 + j] & 15) as usize] * d;
+                out[j + 16] = KV[(b[1 + j] >> 4) as usize] * d;
             }
         }
         DType::Q1_0 => {

@@ -57,6 +57,9 @@ pub struct Ssm {
     pub dk: usize,
     pub nv: usize,
     pub dv: usize,
+    /// Value head h reads key head h / (nv / nk) (Qwen3-Next) instead of h % nk (Qwen3.5/3.8),
+    /// and beta / alpha come from one fused projection grouped per key head.
+    pub inter: bool,
 }
 
 impl Ssm {
@@ -188,7 +191,7 @@ pub(crate) fn vec_f32(g: &Gguf, name: &str) -> Result<Vec<f32>, Error> {
 }
 
 /// The architectures this engine runs (`general.architecture`): the app lists models by it.
-pub const ARCHITECTURES: &[&str] = &["qwen3", "qwen3moe", "qwen2", "llama", "qwen35", "qwen35moe", "qwen3vl", "qwen3tts", "qwen4exp", "gemma4"];
+pub const ARCHITECTURES: &[&str] = &["qwen3", "qwen3moe", "qwen2", "llama", "qwen35", "qwen35moe", "qwen3next", "qwen3vl", "qwen3tts", "qwen4exp", "gemma4"];
 
 impl Model {
     /// Whether any attention or output matrix is Q8_0 (four-row dots only apply to those).
@@ -252,6 +255,7 @@ impl Model {
                     dk: g.u64(&k("ssm.state_size"))? as usize,
                     nv,
                     dv: g.u64(&k("ssm.inner_size"))? as usize / nv.max(1),
+                    inter: arch == "qwen3next",
                 })
             } else {
                 None
@@ -280,8 +284,10 @@ impl Model {
                     Some(Delta {
                         qkv: t("attn_qkv")?,
                         z: t("attn_gate")?,
-                        alpha: t("ssm_alpha")?,
-                        beta: t("ssm_beta")?,
+                        // Qwen3-Next fuses beta and alpha (ssm_ba, grouped per key head): it loads as
+                        // `alpha` with twice the rows and an empty `beta`.
+                        alpha: if g.tensors.contains_key(&format!("blk.{i}.ssm_ba.weight")) { t("ssm_ba")? } else { t("ssm_alpha")? },
+                        beta: if g.tensors.contains_key(&format!("blk.{i}.ssm_ba.weight")) { none.clone() } else { t("ssm_beta")? },
                         a: raw("ssm_a")?,
                         dt_bias: raw("ssm_dt.bias")?,
                         conv,
@@ -1626,7 +1632,7 @@ impl Session {
         // Only attention layers keep a KV cache; DeltaNet layers keep a fixed-size state instead.
         let mine = |i: usize| i >= from;
         let attn = |i: usize| m.layers[i].delta.is_none();
-        let ssm = c.ssm.unwrap_or(Ssm { conv: 1, nk: 0, dk: 0, nv: 0, dv: 0 });
+        let ssm = c.ssm.unwrap_or(Ssm { conv: 1, nk: 0, dk: 0, nv: 0, dv: 0, inter: false });
         Self {
             max_ctx,
             k: (0..c.n_layer).map(|i| if mine(i) && attn(i) { vec![0u16; max_ctx * kv] } else { Vec::new() }).collect(),
@@ -3114,11 +3120,26 @@ impl Session {
         let Some(ss) = c.ssm else { return };
         let (nk, dk, nv, dv, kc) = (ss.nk, ss.dk, ss.nv, ss.dv, ss.conv);
         let ch = ss.channels();
-        m.matvec_many(
+        let inter = ss.inter;
+        if inter {
+            // Fused [beta | alpha] per key head group: value head g * r + j has beta at
+            // g * 2r + j and alpha at g * 2r + r + j.
+            let mut ba = vec![0f32; 2 * nv];
+            m.matvec_many(&mut [(&d.qkv, &mut self.dmix[..]), (&d.z, &mut self.dz[..]), (&d.alpha, &mut ba[..])], &self.h, &self.qa_dim);
+            let r = nv / nk;
+            for g in 0..nk {
+                for j in 0..r {
+                    self.dbeta[g * r + j] = ba[g * 2 * r + j];
+                    self.dalpha[g * r + j] = ba[g * 2 * r + r + j];
+                }
+            }
+        } else {
+            m.matvec_many(
             &mut [(&d.qkv, &mut self.dmix[..]), (&d.z, &mut self.dz[..]), (&d.alpha, &mut self.dalpha[..]), (&d.beta, &mut self.dbeta[..])],
             &self.h,
             &self.qa_dim,
         );
+        }
         // Causal depthwise convolution over the last `kc` inputs, then SiLU. hist holds the kc-1
         // previous inputs, oldest first.
         let hist = &mut self.conv_hist[li];
@@ -3160,7 +3181,7 @@ impl Session {
             // With more value heads than key heads, value head h reads key head h % nk (the GGUF
             // orders value heads so the key heads tile). Verified on Qwen3.5-4B (32 value / 16 key
             // heads): identical greedy text to the reference over 48 tokens; h / ratio is garbage.
-            let kh = h % nk;
+            let kh = if inter { h / (nv / nk) } else { h % nk };
             let q = &mix[kh * dk..(kh + 1) * dk];
             let k = &mix[(nk + kh) * dk..(nk + kh + 1) * dk];
             let v = &mix[2 * nk * dk + h * dv..2 * nk * dk + (h + 1) * dv];
