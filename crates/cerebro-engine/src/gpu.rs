@@ -2417,7 +2417,8 @@ impl GpuState {
                     for p in parts {
                         let (lo, hi) = (g0.max(base), g1.min(base + p.rows));
                         if lo < hi {
-                            let rb = p.w.len() / p.rows;
+                            // Row size from the format (a streamed slot buffer is sized for the largest layer).
+                            let rb = (*cols >> 8) * p.bb as usize;
                             let (r, c) = ((hi - lo) as i32, *cols as i32);
                             let subs = ((hi - lo) * cols / 32) as u32;
                             let cfg = LaunchConfig { grid_dim: (subs.div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
