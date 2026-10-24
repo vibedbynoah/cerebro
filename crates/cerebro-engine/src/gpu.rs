@@ -140,6 +140,8 @@ struct Funcs {
     moe_silu: CudaFunction,
     moe_combine: CudaFunction,
     matvec_k: CudaFunction,
+    /// Q1_0 decode, four rows per warp.
+    matvec_q1: CudaFunction,
     kmatmul: CudaFunction,
     k_to_q8: CudaFunction,
     router_b: CudaFunction,
@@ -166,11 +168,23 @@ fn gpu_block(dt: DType) -> Option<(usize, i32)> {
         DType::IQ2S => Some((82, 22)),
         DType::IQ4XS => Some((136, 23)),
         DType::IQ1M => Some((56, 29)),
+        // Two 128-weight blocks per 256 on the GPU: [d0 d1 | 16 sign bytes | 16 sign bytes].
+        DType::Q1_0 => Some((36, 41)),
         _ => None,
     }
 }
 
 fn to_gpu_layout(dt: DType, src: &[u8]) -> Vec<u8> {
+    if dt == DType::Q1_0 {
+        let mut out = Vec::with_capacity(src.len());
+        for pair in src.chunks_exact(36) {
+            out.extend_from_slice(&pair[0..2]);
+            out.extend_from_slice(&pair[18..20]);
+            out.extend_from_slice(&pair[2..18]);
+            out.extend_from_slice(&pair[20..36]);
+        }
+        return out;
+    }
     if dt != DType::Q6K {
         return src.to_vec();
     }
@@ -769,6 +783,7 @@ impl GpuState {
             moe_silu: lf("moe_silu_quant")?,
             moe_combine: lf("moe_combine")?,
             matvec_k: lf("matvec_k")?,
+            matvec_q1: lf("matvec_q1")?,
             kmatmul: lf("kmatmul")?,
             k_to_q8: lf("k_to_q8")?,
             q80_split: lf("q80_split")?,
@@ -1763,7 +1778,12 @@ impl GpuState {
                 for p in parts {
                     let mut yv = y.slice_mut(r0..r0 + p.rows);
                     let r = p.rows as i32;
-                    unsafe { s.launch_builder(&f.matvec_k).arg(&p.w).arg(&p.dtype).arg(&p.bb).arg(xq).arg(xd).arg(&mut yv).arg(&r).arg(&c).arg(&addi).launch(cfg(p.rows)) }.map_err(gerr)?;
+                    if p.dtype == 41 {
+                        let q1 = LaunchConfig { grid_dim: ((p.rows as u32).div_ceil(32), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+                        unsafe { s.launch_builder(&f.matvec_q1).arg(&p.w).arg(xq).arg(xd).arg(&mut yv).arg(&r).arg(&c).arg(&addi).launch(q1) }.map_err(gerr)?;
+                    } else {
+                        unsafe { s.launch_builder(&f.matvec_k).arg(&p.w).arg(&p.dtype).arg(&p.bb).arg(xq).arg(xd).arg(&mut yv).arg(&r).arg(&c).arg(&addi).launch(cfg(p.rows)) }.map_err(gerr)?;
+                    }
                     r0 += p.rows;
                 }
             }

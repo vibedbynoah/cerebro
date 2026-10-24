@@ -649,7 +649,7 @@ __device__ __forceinline__ int4 shl4(int4 a, int s) { return make_int4(a.x << s,
 #include "iq_tables.cuh"
 
 __device__ __forceinline__ bool is_iq(int dtype) {
-    return dtype == 10 || dtype == 16 || dtype == 18 || dtype == 19 || dtype == 20 || dtype == 21 || dtype == 22 || dtype == 23 || dtype == 29;
+    return dtype == 10 || dtype == 16 || dtype == 18 || dtype == 19 || dtype == 20 || dtype == 21 || dtype == 22 || dtype == 23 || dtype == 29 || dtype == 41;
 }
 __device__ __forceinline__ float h16(const unsigned char* p) {
     return __half2float(__ushort_as_half((unsigned short)(p[0] | (p[1] << 8))));
@@ -663,6 +663,13 @@ __device__ __forceinline__ float gsbyte(unsigned long long g, int j) { return (f
 __device__ __forceinline__ float sgn(unsigned int s, int j) { return (s >> j) & 1 ? -1.f : 1.f; }
 
 __device__ void iq_vals(int dtype, const unsigned char* b, int u, float* v) {
+    if (dtype == 41) {
+        // Q1_0 as laid out on the GPU: [d0 d1 | 32 sign bytes], 32 weights per unit u.
+        float d = h16(b + 2 * (u >> 2));
+        unsigned int s = u32at(b + 4 + 4 * u);
+        for (int j = 0; j < 32; ++j) v[j] = (s >> j) & 1 ? d : -d;
+        return;
+    }
     if (dtype == 20) {
         const unsigned char* q = b + 18 * u;
         float d = h16(q);
@@ -780,6 +787,20 @@ __device__ __forceinline__ int nl4(unsigned int q, int hi) {
 __device__ float iq_dot(int dtype, const unsigned char* b, int u, const signed char* xq, const float* xd) {
     const signed char* x = xq + u * 32;
     const int one = 0x01010101;
+    if (dtype == 41) {
+        // Q1_0: sum(+-x) = 2 * sum(x where the bit is set) - sum(x).
+        unsigned int s = u32at(b + 4 + 4 * u);
+        int on = 0, all = 0;
+        #pragma unroll
+        for (int k = 0; k < 8; ++k) {
+            unsigned int nib = (s >> (4 * k)) & 0xf;
+            int m = (nib & 1 ? 0xff : 0) | (nib & 2 ? 0xff00 : 0) | (nib & 4 ? 0xff0000 : 0) | (nib & 8 ? 0xff000000 : 0);
+            int xv = xw(x, k);
+            on = __dp4a(xv & m, one, on);
+            all = __dp4a(xv, one, all);
+        }
+        return h16(b + 2 * (u >> 2)) * (float)(2 * on - all) * xd[u];
+    }
     if (dtype == 20 || dtype == 23) {
         const unsigned char* q;
         float dl;
@@ -1475,4 +1496,47 @@ extern "C" __global__ void shared_gate_add(float* __restrict__ x, const float* _
     }
     __syncthreads();
     for (int i = threadIdx.x; i < dim; i += blockDim.x) x[o + i] += gate * so[o + i];
+}
+
+// Decode matvec for Q1_0 weights (GPU layout: 256-weight blocks of [d0 d1 | 32 sign bytes]).
+// One-bit weights are 1/8 the bytes of the int8 activation, so re-reading the activation for every
+// row (one warp per row) made the kernel bound by activation traffic: here each warp computes four
+// rows from one load of each activation unit. A unit's signs become +-1 bytes arithmetically
+// (bits spread with a multiply, then 2b - 1) for one dp4a per four weights.
+#define Q1_ROWS 4
+extern "C" __global__ void matvec_q1(const unsigned char* __restrict__ w, const signed char* __restrict__ xq,
+                                     const float* __restrict__ xd, float* __restrict__ y, int rows, int cols, int add) {
+    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    int r0 = (blockIdx.x * (blockDim.x >> 5) + warp) * Q1_ROWS;
+    if (r0 >= rows) return;
+    int units = cols >> 5;
+    size_t rb = (size_t)(cols >> 8) * 36;
+    float sum[Q1_ROWS];
+    #pragma unroll
+    for (int r = 0; r < Q1_ROWS; ++r) sum[r] = 0.f;
+    for (int u = lane; u < units; u += 32) {
+        const int4* xp = reinterpret_cast<const int4*>(xq + (size_t)u * 32);
+        int4 xa = xp[0], xb = xp[1];
+        int xv[8] = {xa.x, xa.y, xa.z, xa.w, xb.x, xb.y, xb.z, xb.w};
+        float sx = xd[u];
+        int blk = u >> 3, uu = u & 7;
+        #pragma unroll
+        for (int r = 0; r < Q1_ROWS; ++r) {
+            if (r0 + r >= rows) break;
+            const unsigned char* b = w + (size_t)(r0 + r) * rb + (size_t)blk * 36;
+            unsigned int s = *reinterpret_cast<const unsigned int*>(b + 4 + 4 * uu);
+            int acc = 0;
+            #pragma unroll
+            for (int k = 0; k < 8; ++k) {
+                unsigned int bits = (((s >> (4 * k)) & 0xfu) * 0x00204081u) & 0x01010101u;
+                acc = __dp4a((int)__vsub4(bits << 1, 0x01010101u), xv[k], acc);
+            }
+            sum[r] += h16(b + 2 * (uu >> 2)) * sx * (float)acc;
+        }
+    }
+    #pragma unroll
+    for (int r = 0; r < Q1_ROWS; ++r) {
+        float v = warp_sum(sum[r]);
+        if (lane == 0 && r0 + r < rows) y[r0 + r] = add ? y[r0 + r] + v : v;
+    }
 }

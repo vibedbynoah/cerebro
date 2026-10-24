@@ -27,6 +27,9 @@ pub enum DType {
     IQ1M,
     IQ4NL,
     IQ4XS,
+    /// PrismML's 1-bit "Q1_0_g128" (Bonsai): a sign bit per weight (1 = +d, 0 = -d), one f16 scale
+    /// per 128 weights; 18 bytes per block.
+    Q1_0,
 }
 
 impl DType {
@@ -54,6 +57,7 @@ impl DType {
             22 => DType::IQ2S,
             23 => DType::IQ4XS,
             29 => DType::IQ1M,
+            41 => DType::Q1_0,
             _ => return None,
         })
     }
@@ -61,6 +65,7 @@ impl DType {
         match self {
             DType::F32 | DType::F16 | DType::BF16 => 1,
             DType::Q8_0 | DType::Q4_0 | DType::Q4_1 | DType::Q5_0 | DType::Q5_1 | DType::IQ4NL => 32,
+            DType::Q1_0 => 128,
             _ => 256,
         }
     }
@@ -87,6 +92,7 @@ impl DType {
             DType::IQ1M => 56,
             DType::IQ4NL => 18,
             DType::IQ4XS => 136,
+            DType::Q1_0 => 18,
         }
     }
     pub fn row_bytes(self, cols: usize) -> usize {
@@ -211,6 +217,12 @@ pub fn dequant_block(t: DType, b: &[u8], out: &mut [f32]) {
                     o[l + 64] = d * (sc[is + 4] as i8) as f32 * q3 as f32;
                     o[l + 96] = d * (sc[is + 6] as i8) as f32 * q4 as f32;
                 }
+            }
+        }
+        DType::Q1_0 => {
+            let d = rd16(b, 0);
+            for (j, o) in out.iter_mut().enumerate().take(128) {
+                *o = if (b[2 + j / 8] >> (j % 8)) & 1 != 0 { d } else { -d };
             }
         }
         _ => crate::quant_more::dequant_block(t, b, out),
@@ -2018,6 +2030,38 @@ unsafe fn dot_iq3s_k8_avx2(row: &[u8], a: &QAct) -> f32 {
     s
 }
 
+/// Q1_0 (18 bytes per 128): each int8 activation with the weight's sign, summed per 128 and scaled
+/// by the block's scale and the activation block's (two weight blocks per 256 activations).
+pub fn dot_q1_0_k8(row: &[u8], a: &QAct) -> Option<f32> {
+    avx2_or_none!(a, dot_q1_0_k8_avx2(row, a))
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_q1_0_k8_avx2(row: &[u8], a: &QAct) -> f32 {
+    use std::arch::x86_64::*;
+    let ones8 = _mm256_set1_epi8(1);
+    let ones16 = _mm256_set1_epi16(1);
+    let minus = _mm256_set1_epi8(-1);
+    let mut s = 0f32;
+    for (bi, kd) in a.kd.iter().enumerate() {
+        for half in 0..2 {
+            let b = row.as_ptr().add((2 * bi + half) * 18);
+            let d = f16_to_f32(u16::from_le_bytes([*b, *b.add(1)]));
+            let mut acc = _mm256_setzero_si256();
+            for q in 0..4 {
+                let bits = u32::from_le_bytes([*b.add(2 + 4 * q), *b.add(3 + 4 * q), *b.add(4 + 4 * q), *b.add(5 + 4 * q)]);
+                // +1 where the bit is set, -1 where it is not.
+                let w = _mm256_or_si256(_mm256_andnot_si256(sign_mask(bits), minus), ones8);
+                let x = _mm256_loadu_si256(a.kq.as_ptr().add(bi * 256 + half * 128 + q * 32) as *const __m256i);
+                acc = _mm256_add_epi32(acc, _mm256_madd_epi16(_mm256_maddubs_epi16(ones8, _mm256_sign_epi8(x, w)), ones16));
+            }
+            s += d * kd * hsum_epi32(acc) as f32;
+        }
+    }
+    s
+}
+
 /// IQ1_S (50 bytes per 256): grid values in {-1, 0, 1} plus an offset of +-1/8 per 32, a 3-bit
 /// scale per 32.
 pub fn dot_iq1s_k8(row: &[u8], a: &QAct) -> Option<f32> {
@@ -2212,6 +2256,15 @@ mod iq_tests {
             }
         }
         close(dot_iq1m_k8(&m, &qa).unwrap(), dot_row(DType::IQ1M, &m, &x));
+        // Q1_0: random signs and scales, 18 bytes per 128.
+        let mut q1 = vec![0u8; x.len() / 128 * 18];
+        for (i, blk) in q1.chunks_exact_mut(18).enumerate() {
+            blk[..2].copy_from_slice(&crate::quant::to_f16(0.01 + 0.001 * i as f32).to_le_bytes());
+            for (j, v) in blk[2..].iter_mut().enumerate() {
+                *v = ((i * 131 + j * 29) % 251) as u8;
+            }
+        }
+        close(dot_q1_0_k8(&q1, &qa).unwrap(), dot_row(DType::Q1_0, &q1, &x));
     }
 
 }

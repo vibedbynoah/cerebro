@@ -1174,6 +1174,7 @@ pub(crate) fn dot_any(dt: DType, row: &[u8], x: &[f32], qa: &QAct) -> f32 {
         DType::IQ3S => crate::quant::dot_iq3s_k8(row, qa).unwrap_or_else(|| dot_row(dt, row, x)),
         DType::IQ1S => crate::quant::dot_iq1s_k8(row, qa).unwrap_or_else(|| dot_row(dt, row, x)),
         DType::IQ1M => crate::quant::dot_iq1m_k8(row, qa).unwrap_or_else(|| dot_row(dt, row, x)),
+        DType::Q1_0 => crate::quant::dot_q1_0_k8(row, qa).unwrap_or_else(|| dot_row(dt, row, x)),
         DType::Q2K => crate::quant::dot_q2k_k8(row, qa).unwrap_or_else(|| dot_row(dt, row, x)),
         _ => dot_row(dt, row, x),
     }
