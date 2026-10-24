@@ -448,3 +448,9 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* Picture or short video: the first choice in the controls. */
+.img-mode {
+  justify-self: start;
+  margin-bottom: var(--space-2);
+}

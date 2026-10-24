@@ -1922,6 +1922,22 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
             }
         }
         emit(scanner.finish(), &mut out, &mut answer);
+        // A reply that thought but wrote no answer (seen on the owner's machine, not reproduced
+        // yet): answer in a second pass with thinking off, the path that always answers, so a
+        // thinking reply never ends empty. The log keeps what the model wrote, for the root cause.
+        if think && thinking_tokens > 0 && answer.trim().is_empty() && out.calls.is_empty() && out.bad.is_empty() && result.is_ok() && !cancel.load(Ordering::SeqCst) {
+            eprintln!("chat: thinking ({thinking_tokens} pieces) ended without an answer; answering with thinking off. Last output: {:?}", out.raw.chars().rev().take(200).collect::<String>().chars().rev().collect::<String>());
+            let plain = l.tok.encode(&cerebro_engine::chatml((!system.is_empty()).then_some(system.as_str()), &turns, false));
+            let again = generate(&l.model, &mut l.session, &l.tok, &plain, &cfg, |piece| {
+                answer.push_str(piece);
+                out.raw.push_str(piece);
+                events(ChatEvent::Token { text: piece.to_owned() });
+                !cancel.load(Ordering::SeqCst)
+            });
+            if let Ok(g) = &again {
+                out_tokens += g.output_tokens;
+            }
+        }
         match result {
             Ok(g) => {
                 if round == 0 {

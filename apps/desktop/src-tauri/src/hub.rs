@@ -143,6 +143,34 @@ pub fn search(query: &str) -> Result<Vec<HubRepo>, String> {
         .collect())
 }
 
+/// The newest GGUF repositories of `author` whose name matches `query`, newest first: how the Hub
+/// finds models released today (Unsloth and the model makers publish GGUFs on the day).
+pub fn latest(author: &str, query: &str) -> Result<Vec<HubRepo>, String> {
+    if author.is_empty() || author.len() > 96 || !author.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)) || query.len() > 120 {
+        return Err("Not a Hugging Face account name.".into());
+    }
+    let resp = client()?
+        .get(format!("{HF}/api/models?author={}&search={}&filter=gguf&sort=createdAt&direction=-1&limit=60", encode(author), encode(query.trim())))
+        .send()
+        .map_err(|_| "Hugging Face could not be reached. Check the connection.".to_owned())?;
+    if !resp.status().is_success() {
+        return Err(format!("Hugging Face answered {}.", resp.status().as_u16()));
+    }
+    let list: Vec<ApiModel> = resp.json().map_err(|_| "Hugging Face sent an unexpected answer.".to_owned())?;
+    Ok(list
+        .into_iter()
+        .map(|m| HubRepo {
+            author: m.id.split('/').next().unwrap_or_default().to_owned(),
+            license: m.tags.iter().find_map(|t| t.strip_prefix("license:").map(str::to_owned)),
+            id: m.id,
+            downloads: m.downloads,
+            likes: m.likes,
+            updated: m.last_modified,
+            tags: m.tags.into_iter().filter(|t| !t.contains(':')).take(12).collect(),
+        })
+        .collect())
+}
+
 /// One downloadable GGUF file (split models are listed once, with the total size).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

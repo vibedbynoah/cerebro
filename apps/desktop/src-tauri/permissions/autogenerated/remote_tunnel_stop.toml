@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remote-tunnel-stop"
+description = "Enables the remote_tunnel_stop command without any pre-configured scope."
+commands.allow = ["remote_tunnel_stop"]
+
+[[permission]]
+identifier = "deny-remote-tunnel-stop"
+description = "Denies the remote_tunnel_stop command without any pre-configured scope."
+commands.deny = ["remote_tunnel_stop"]

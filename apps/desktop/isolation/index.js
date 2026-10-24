@@ -279,6 +279,23 @@ const WITH_ARGS = {
     Number.isInteger(p.size) &&
     Number.isInteger(p.steps) &&
     (p.seed === undefined || p.seed === null || (Number.isInteger(p.seed) && /** @type {number} */ (p.seed) >= 0)),
+  image_video: (p) =>
+    isPlain(p) &&
+    hasOnlyKeys(p, ["modelId", "prompt", "size", "frames", "fps", "strength"], ["endPrompt", "seed"]) &&
+    isModelId(p.modelId) &&
+    typeof p.prompt === "string" &&
+    p.prompt.length > 0 &&
+    p.prompt.length <= 2000 &&
+    (p.endPrompt === undefined || p.endPrompt === null || (typeof p.endPrompt === "string" && p.endPrompt.length <= 2000)) &&
+    Number.isInteger(p.size) &&
+    Number.isInteger(p.frames) &&
+    Number.isInteger(p.fps) &&
+    typeof p.strength === "number" &&
+    (p.seed === undefined || p.seed === null || (Number.isInteger(p.seed) && /** @type {number} */ (p.seed) >= 0)),
+  remote_tunnel_start: (p) => isPlain(p) && hasOnlyKeys(p, []),
+  remote_tunnel_stop: (p) => isPlain(p) && hasOnlyKeys(p, []),
+  remote_tunnel_get: (p) => isPlain(p) && hasOnlyKeys(p, []),
+  hub_latest: (p) => isPlain(p) && hasOnlyKeys(p, ["author", "query"]) && typeof p.author === "string" && /^[A-Za-z0-9._-]{1,96}$/.test(p.author) && typeof p.query === "string" && p.query.length <= 120,
   train_dataset_save: (p) => isPlain(p) && hasOnlyKeys(p, ["name", "text"]) && typeof p.name === "string" && p.name.length > 0 && p.name.length <= 200 && typeof p.text === "string" && p.text.length <= 536_870_912,
   image_edit: (p) =>
     isPlain(p) &&

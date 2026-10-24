@@ -511,3 +511,8 @@
   color: var(--color-success);
 }
 
+
+/* A recommendation that would read part of the model from the drive for every word. */
+.livehub__swap {
+  color: var(--color-warning);
+}

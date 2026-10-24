@@ -381,6 +381,24 @@ pub async fn image_generate(engine: State<'_, Engine>, images: ImagesState<'_>, 
         .map_err(|_| "The image could not be made.".to_owned())?
 }
 
+/// A short animation (animated GIF) from the image model: `frames` frames at `fps`, each moving
+/// `strength` from the last; `end_prompt` takes over halfway when given.
+#[tauri::command]
+pub async fn image_video(engine: State<'_, Engine>, images: ImagesState<'_>, model_id: String, prompt: String, end_prompt: Option<String>, size: u32, frames: u32, fps: u32, strength: f32, seed: Option<u64>) -> Result<crate::images::Generated, String> {
+    let m = find_model(&engine, &model_id)?;
+    if m.kind != "image" || !m.supported {
+        return Err("That model does not make images (Stable Diffusion 2.x-family models such as SD-Turbo do).".to_owned());
+    }
+    if size % 64 != 0 || !(256..=768).contains(&size) || !(2..=96).contains(&frames) || !(1..=30).contains(&fps) || !(0.05..=0.9).contains(&strength) || prompt.chars().count() > 2000 || end_prompt.as_ref().is_some_and(|p| p.chars().count() > 2000) {
+        return Err("Use a size of 256 to 768 pixels, 2 to 96 frames at 1 to 30 per second, and motion between 0.05 and 0.9.".to_owned());
+    }
+    let seed = seed.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64 & 0xffff_ffff));
+    let img = std::sync::Arc::clone(images.inner());
+    tauri::async_runtime::spawn_blocking(move || img.animate(&m, crate::images::AnimRequest { prompt, end_prompt, size: size as usize, frames: frames as usize, fps, strength, seed }))
+        .await
+        .map_err(|_| "The animation could not be made.".to_owned())?
+}
+
 /// Changes a picture (one just made, or the user's own as a data: URL) following `prompt`;
 /// `strength` 0.05..1 is how far it may move from the original.
 #[tauri::command]
@@ -1059,6 +1077,12 @@ pub async fn hub_avatar(owner: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || hub::avatar(&owner)).await.map_err(|_| "The picture could not be read.".to_owned())?
 }
 
+/// The newest GGUF repositories of one publisher matching a query (the Hub's front page).
+#[tauri::command]
+pub async fn hub_latest(author: String, query: String) -> Result<Vec<HubRepo>, String> {
+    tauri::async_runtime::spawn_blocking(move || hub::latest(&author, &query)).await.map_err(|_| "The search failed.".to_owned())?
+}
+
 /// The GGUF files of one repository, with sizes.
 #[tauri::command]
 pub async fn hub_files(repo: String) -> Result<Vec<HubFile>, String> {
@@ -1335,6 +1359,32 @@ pub fn remote_options(remote: RemoteState<'_>, allow_chat: bool, allow_tailscale
 #[tauri::command(async)]
 pub fn remote_pair(remote: RemoteState<'_>) -> Result<serde_json::Value, String> {
     remote.pair()
+}
+
+/// Shares phone access over the internet through a Cloudflare quick tunnel (tunnel.rs): returns
+/// the public address and a one-time sign-in link on it. Needs phone access on with a password.
+#[tauri::command(async)]
+pub fn remote_tunnel_start(remote: RemoteState<'_>, tunnel: State<'_, std::sync::Arc<crate::tunnel::Tunnel>>) -> Result<serde_json::Value, String> {
+    if !remote.has_password() {
+        return Err("Set a password first: anyone with the link must also know it.".into());
+    }
+    let origin = remote.bound_addr().ok_or("Turn phone access on first.")?;
+    let url = tunnel.start(origin)?;
+    let pair = remote.pair()?;
+    let code = pair["url"].as_str().and_then(|u| u.split_once("#pair=")).map(|x| x.1.to_owned()).unwrap_or_default();
+    Ok(serde_json::json!({ "url": url, "pairUrl": format!("{url}/#pair={code}"), "expiresAt": pair["expiresAt"] }))
+}
+
+/// Ends internet sharing (the public link stops working at once).
+#[tauri::command(async)]
+pub fn remote_tunnel_stop(tunnel: State<'_, std::sync::Arc<crate::tunnel::Tunnel>>) {
+    tunnel.stop();
+}
+
+/// The public address while sharing, or null.
+#[tauri::command(async)]
+pub fn remote_tunnel_get(tunnel: State<'_, std::sync::Arc<crate::tunnel::Tunnel>>) -> Option<String> {
+    tunnel.url()
 }
 
 #[tauri::command(async)]

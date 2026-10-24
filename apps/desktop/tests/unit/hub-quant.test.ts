@@ -37,6 +37,11 @@ describe("the quant chooser", () => {
     expect(recommendQuant(files, machine(8, 32))?.file.quant).toBe("UD-Q5_K_XL");
   });
 
+  it("does not pick a 1- or 2-bit file just because it fits the card", () => {
+    const files = [file("UD-IQ1_M", 6.3), file("UD-IQ2_XXS", 7.0), file("UD-Q4_K_XL", 16.5), file("UD-Q8_K_XL", 29)];
+    expect(recommendQuant(files, machine(8, 32))?.file.quant).toBe("UD-Q4_K_XL");
+  });
+
   it("allows 16-bit only when the repository has nothing smaller", () => {
     expect(recommendQuant([file("F32", 7.2), file("F16", 3.8)], machine(8, 32))?.file.quant).toBe("F16");
   });

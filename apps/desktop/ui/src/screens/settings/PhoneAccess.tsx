@@ -447,7 +447,93 @@ export function PhoneAccess(): JSX.Element {
             </label>
           </div>
         </details>
+        <Show when={service.remoteTunnelStart}>
+          <InternetShare running={view()?.running === true} passwordSet={view()?.passwordSet === true} />
+        </Show>
       </div>
     </Section>
+  );
+}
+
+/**
+ * Sharing over the internet: a Cloudflare quick tunnel to this page's server. The public link is
+ * new each time; whoever opens it also needs the one-time sign-in link and your password.
+ */
+function InternetShare(props: { running: boolean; passwordSet: boolean }): JSX.Element {
+  const service = useService();
+  const [busy, setBusy] = createSignal(false);
+  const [link, setLink] = createSignal<{ url: string; pairUrl: string } | null>(null);
+  const [error, setError] = createSignal<string | null>(null);
+  void service.remoteTunnelGet?.().then((u) => u && setLink({ url: u, pairUrl: "" }));
+  const start = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setLink(await service.remoteTunnelStart!());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const stop = async () => {
+    await service.remoteTunnelStop?.();
+    setLink(null);
+  };
+  const copy = (text: string) => void navigator.clipboard.writeText(text).then(() => notify("Copied", undefined, "success"));
+  return (
+    <div class="phone__internet card">
+      <h3 class="phone__internet-title">Share over the internet</h3>
+      <p class="hint">
+        A public link through a Cloudflare tunnel, so you (or someone you trust) can chat with this computer's model from anywhere. Whoever opens it still needs the one-time sign-in link and your password; wrong
+        passwords lock it for a while. The link changes every time and stops working when you stop sharing or close Cerebro.
+      </p>
+      <Show
+        when={link()}
+        fallback={
+          <>
+            <button type="button" class="btn btn--primary btn--sm" disabled={busy() || !props.running || !props.passwordSet} onClick={() => void start()}>
+              {busy() ? "Opening the tunnel…" : "Create a public link"}
+            </button>
+            <Show when={!props.running || !props.passwordSet}>
+              <p class="hint">{!props.passwordSet ? "Set a password above first." : "Turn phone access on first."}</p>
+            </Show>
+          </>
+        }
+      >
+        {(l) => (
+          <div class="phone__internet-link">
+            <label class="phone__field">
+              <span>Public link</span>
+              <span class="phone__internet-row">
+                <input class="input mono" readonly value={l().url} />
+                <button type="button" class="btn btn--secondary btn--sm" onClick={() => copy(l().url)}>
+                  Copy
+                </button>
+              </span>
+            </label>
+            <Show when={l().pairUrl}>
+              <label class="phone__field">
+                <span>One-time sign-in link (send it once; it expires in a few minutes)</span>
+                <span class="phone__internet-row">
+                  <input class="input mono" readonly value={l().pairUrl} />
+                  <button type="button" class="btn btn--secondary btn--sm" onClick={() => copy(l().pairUrl)}>
+                    Copy
+                  </button>
+                </span>
+              </label>
+            </Show>
+            <button type="button" class="btn btn--tertiary btn--sm" onClick={() => void stop()}>
+              Stop sharing
+            </button>
+          </div>
+        )}
+      </Show>
+      <Show when={error()}>
+        <p class="phone__error" role="alert">
+          {error()}
+        </p>
+      </Show>
+    </div>
   );
 }

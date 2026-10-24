@@ -108,7 +108,10 @@ export function recommendQuant(files: readonly QuantFile[], hw: HardwareProfile 
   const ram = Math.round(hw.ramTotalGiB ?? 0);
   const lowest = Math.min(...list.map((f) => bitsOf(f.quant)));
   const cap = Math.max(8, lowest);
-  const onCard = best((f) => tone(f) === "good" && bitsOf(f.quant) <= cap);
+  // 1- and 2-bit files damage answers: on the card only from 3 bits up (a 4-5 bit split is the
+  // better trade), unless the repository has nothing else.
+  const floor = list.some((f) => bitsOf(f.quant) >= 3) ? 3 : 0;
+  const onCard = best((f) => tone(f) === "good" && bitsOf(f.quant) <= cap && bitsOf(f.quant) >= floor);
   if (onCard) return { file: onCard, why: `${onCard.quant}: the best quality that runs entirely on your ${gpu} GB graphics card.`, slow: false };
   const split = best((f) => tone(f) === "ok" && bitsOf(f.quant) >= 4 && bitsOf(f.quant) <= 5);
   if (split) {

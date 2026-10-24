@@ -16,6 +16,7 @@
 
 mod mcp;
 mod remote;
+mod tunnel;
 mod mcp_server;
 mod local_api;
 pub mod llama_backend;
@@ -116,6 +117,11 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::hub_avatar,
             commands::image_edit,
             commands::train_dataset_save,
+            commands::hub_latest,
+            commands::remote_tunnel_start,
+            commands::remote_tunnel_stop,
+            commands::remote_tunnel_get,
+            commands::image_video,
             commands::hub_pipeline_files,
             commands::hub_file_meta,
             commands::hub_download,
@@ -216,6 +222,7 @@ pub fn run() -> Result<(), tauri::Error> {
                 };
                 let phone = remote::Remote::new(settings, std::sync::Arc::new(commands::PhoneBackend(app.handle().clone())), Box::new(save));
                 app.manage(std::sync::Arc::clone(&phone));
+                app.manage(std::sync::Arc::new(tunnel::Tunnel::default()));
                 phone.resume();
                 // Cerebro as an MCP server for other apps on this computer (off by default).
                 let path = commands::mcp_server_file(app.handle());
@@ -279,6 +286,9 @@ pub fn run() -> Result<(), tauri::Error> {
                 use tauri::Manager;
                 if let Some(phone) = app.try_state::<std::sync::Arc<remote::Remote>>() {
                     phone.shutdown();
+                }
+                if let Some(t) = app.try_state::<std::sync::Arc<tunnel::Tunnel>>() {
+                    t.stop();
                 }
                 if let Some(srv) = app.try_state::<std::sync::Arc<mcp_server::McpServer>>() {
                     srv.stop();

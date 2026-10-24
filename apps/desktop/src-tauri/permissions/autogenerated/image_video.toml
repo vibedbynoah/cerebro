@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-image-video"
+description = "Enables the image_video command without any pre-configured scope."
+commands.allow = ["image_video"]
+
+[[permission]]
+identifier = "deny-image-video"
+description = "Denies the image_video command without any pre-configured scope."
+commands.deny = ["image_video"]

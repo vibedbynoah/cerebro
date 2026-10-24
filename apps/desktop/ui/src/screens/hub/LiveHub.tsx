@@ -5,8 +5,9 @@ import { LicenceNote } from "../../components/LicenceNote";
 import { memoryNeeds } from "../../components/QuantTable";
 import { ScreenHeader } from "../../components/Screen";
 import { VerifiedBadge } from "../../components/VerifiedBadge";
-import { ABILITY_LABELS, abilitiesOf, FEATURED_IMAGES, fitBadge, HUB_CATEGORIES, HUB_PICKS, type FeaturedImage, type HubPick } from "../../lib/hub-picks";
+import { ABILITY_LABELS, abilitiesOf, FEATURED_IMAGES, fitBadge, HUB_CATEGORIES, type FeaturedImage } from "../../lib/hub-picks";
 import { fitOf, recommendQuant, toGiB, type QuantFile, type QuantPick } from "../../lib/hub-quant";
+import { pickLatest, type LatestPick } from "../../lib/hub-latest";
 import { isVerified, sortRepos, verifiedPublisher, VERIFIED_NOTE } from "../../lib/hub-verified";
 import { fmtAge } from "../../lib/format";
 import { licenceForModel } from "../../lib/model-licences";
@@ -60,8 +61,6 @@ export function LiveHub(): JSX.Element {
   };
   const vramGiB = () => hw()?.gpu?.vramTotalGiB ?? 0;
   const ramGiB = () => hw()?.ramTotalGiB ?? 0;
-  const order = { good: 0, ok: 1, slow: 2, no: 3 } as const;
-  const picks = createMemo(() => HUB_PICKS.map((p) => ({ p, fit: fitBadge(p.sizeGiB, vramGiB(), ramGiB()) })).sort((a, b) => order[a.fit.tone] - order[b.fit.tone]));
   const filesFor = () => (blocked() ? undefined : repo());
   const [results] = createResource(search, (q) => service.hubSearch!(q));
   const [files, { refetch }] = createResource(filesFor, (r) => service.hubFiles!(r));
@@ -122,34 +121,28 @@ export function LiveHub(): JSX.Element {
   const fileOf = (path: string): HubFile | undefined => (files() ?? []).find((f) => f.path === path);
 
   /**
-   * The front page names the file each pick would use, so it reads that repository's own file list
-   * rather than guessing. A pick whose repository cannot be read keeps its typical size.
+   * The front page: the newest Qwen dense and MoE models that run on this computer, found live on
+   * Hugging Face (Unsloth's and Qwen's own GGUF uploads, newest first), so new releases appear the
+   * day they are published. File lists are kept for the Download button.
    */
-  const [pickInfo] = createResource(
+  const latestFiles = new Map<string, HubFile[]>();
+  const [latest] = createResource(
     () => {
-      if (blocked()) return undefined;
+      if (blocked() || !service.hubLatest) return undefined;
       const h = hw();
-      if (!h) return undefined;
-      return `${h.gpu?.vramTotalGiB ?? 0}:${h.ramTotalGiB ?? 0}`;
+      return h ? `${h.gpu?.vramTotalGiB ?? 0}:${h.ramTotalGiB ?? 0}` : undefined;
     },
     async () => {
-      const out: Record<string, QuantPick> = {};
-      await Promise.all(
-        picks().map(async ({ p }) => {
-          try {
-            const repos = await service.hubSearch!(p.query);
-            const repo = repos[0];
-            if (!repo) return;
-            const list = await service.hubFiles!(repo.id);
-            const pick = recommendQuant(list.map(quantFile), hw());
-            if (!pick) return;
-            out[p.title] = pick;
-          } catch {
-            // A repository that cannot be read keeps the typical size on its card.
-          }
-        }),
-      );
-      return out;
+      const h = hw()!;
+      const [a, b] = await Promise.all([service.hubLatest!("unsloth", "Qwen").catch(() => []), service.hubLatest!("Qwen", "Qwen").catch(() => [])]);
+      const repos = [...a, ...b];
+      const files = async (id: string): Promise<QuantFile[]> => {
+        const list = await service.hubFiles!(id);
+        latestFiles.set(id, list);
+        return list.map(quantFile);
+      };
+      const [dense, moe] = await Promise.all([pickLatest("dense", repos, h, files), pickLatest("moe", repos, h, files)]);
+      return [dense, moe].filter((x): x is LatestPick => x !== null);
     },
   );
 
@@ -215,19 +208,53 @@ export function LiveHub(): JSX.Element {
       <Show when={!submitted()}>
         <section class="livehub__picks" aria-labelledby="picks-title">
           <h2 id="picks-title">Recommended for this computer</h2>
-          <ul class="livehub__pick-grid">
-            <For each={picks()}>
-              {(x) => {
-                  const info = () => pickInfo()?.[x.p.title];
-                  // The fit of the file the card recommends, once the repository's list is read.
-                  const fit = () => {
-                    const i = info();
-                    return i ? fitBadge(i.file.sizeGiB, vramGiB(), ramGiB()) : x.fit;
-                  };
-                  return <PickCard pick={x.p} fit={fit()} info={info()} disabled={blocked()} onOpen={() => runSearch(x.p.query)} />;
-                }}
-            </For>
-          </ul>
+          <p class="livehub__muted">The newest Qwen models that run on this machine, checked against its graphics card and memory, with how fast each would write here.</p>
+          <Show when={!latest.loading} fallback={<p class="livehub__muted">Finding the newest models for this computer…</p>}>
+            <Show when={(latest() ?? []).length > 0} fallback={<p class="livehub__muted">{blocked() ? "Searching needs the network (Offline mode is on or downloads are switched off)." : "No model was found right now. Search above for any model."}</p>}>
+              <ul class="livehub__pick-grid">
+                <For each={latest()}>
+                  {(x) => {
+                    const key = () => `${x.repo.id}/${x.file.file.path}`;
+                    const hubFile = () => latestFiles.get(x.repo.id)?.find((f) => f.path === x.file.file.path);
+                    const name = x.repo.id.split("/").pop()!.replace(/-GGUF$/i, "").replace(/-/g, " ");
+                    return (
+                      <li class="livehub__pick card" data-fit={x.speed.swapping ? "slow" : "good"}>
+                        <div class="livehub__pick-head">
+                          <FamilyTile name="qwen" owner="Qwen" size={44} />
+                          <div>
+                            <span class="livehub__muted">{x.kind === "moe" ? "Newest MoE model" : "Newest dense model"}</span>
+                            <h3>{name}</h3>
+                            <span class="livehub__muted mono">{x.kind === "moe" ? `${x.parsed.totalB}B total, ${x.parsed.activeB}B active` : `${x.parsed.totalB}B`}</span>
+                          </div>
+                        </div>
+                        <p class="livehub__pick-size">
+                          <span class="livehub__muted">
+                            Recommended <span class="mono">{x.file.file.quant}</span> · {x.file.file.sizeGiB.toFixed(1)} GiB · from {x.repo.author}
+                          </span>
+                        </p>
+                        <p classList={{ "livehub__swap": x.speed.swapping }}>{x.speed.note}</p>
+                        <div class="livehub__pick-foot">
+                          <Show
+                            when={progress()[key()]}
+                            fallback={
+                              <button type="button" class="btn btn--primary btn--sm" disabled={blocked() || !hubFile()} onClick={() => hubFile() && start(x.repo.id, hubFile()!)}>
+                                Download
+                              </button>
+                            }
+                          >
+                            {(pr) => <span class="livehub__muted">{pr().error ? pr().error : pr().path ? "Downloaded: it is in Models" : `Downloading ${pr().total > 0 ? Math.floor((100 * pr().done) / pr().total) : 0}%`}</span>}
+                          </Show>
+                          <button type="button" class="btn btn--secondary btn--sm" disabled={blocked()} onClick={() => runSearch(x.repo.id.split("/").pop()!.replace(/-GGUF$/i, ""))}>
+                            See all files
+                          </button>
+                        </div>
+                      </li>
+                    );
+                  }}
+                </For>
+              </ul>
+            </Show>
+          </Show>
         </section>
         <Show when={service.hubPipelineFiles}>
           <section class="livehub__picks" aria-labelledby="featured-title">
@@ -514,37 +541,3 @@ function ImageCard(props: { img: FeaturedImage; sizeGiB: number | null; fit: { l
   );
 }
 
-function PickCard(props: { pick: HubPick; fit: { label: string; tone: string }; info: QuantPick | undefined; disabled: boolean; onOpen: () => void }): JSX.Element {
-  const publisher = () => verifiedPublisher(props.pick.publisher);
-  return (
-    <li class="livehub__pick card" data-fit={props.fit.tone}>
-      <div class="livehub__pick-head">
-        <FamilyTile name={props.pick.family} owner={props.pick.publisher} size={44} />
-        <div>
-          <h3>{props.pick.title}</h3>
-          <span class="livehub__muted mono">{props.pick.params}</span>
-        </div>
-        <Show when={publisher()}>{(v) => <VerifiedBadge publisher={v().name} />}</Show>
-      </div>
-      <p class="livehub__pick-size">
-        <Show when={props.info} fallback={<span class="livehub__muted">about {props.pick.sizeGiB.toFixed(1)} GiB</span>}>
-          {(i) => (
-            <span class="livehub__muted">
-              Recommended <span class="mono">{i().file.quant}</span> · {gib(i().file.sizeGiB * GIB)} GiB
-            </span>
-          )}
-        </Show>
-      </p>
-      <p>{props.pick.blurb}</p>
-      <div class="livehub__badges">
-        <For each={props.pick.abilities}>{(a) => <span class="livehub__badge">{ABILITY_LABELS[a]}</span>}</For>
-      </div>
-      <div class="livehub__pick-foot">
-        <span class={`livehub__fit livehub__fit--${props.fit.tone}`}>{props.fit.label}</span>
-        <button type="button" class="btn btn--secondary btn--sm" disabled={props.disabled} onClick={() => props.onOpen()} aria-label={`See files for ${props.pick.title}`}>
-          See files
-        </button>
-      </div>
-    </li>
-  );
-}

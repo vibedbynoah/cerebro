@@ -52,6 +52,9 @@
 :root.motion-ready .reveal[data-motion-armed]:not(.is-visible) {
   opacity: 0;
   transform: translateY(16px);
+  /* Safety net: a section the scroll observer never reaches still appears after a moment
+     (a section taller than the window, or one rendered after the screen was wired). */
+  animation: reveal-fallback var(--duration-slow) var(--ease-emphasized) 700ms forwards;
 }
 
 /* Hero-weight variant: rises further and scales in slightly. */
@@ -373,5 +376,12 @@
 
   html {
     scroll-behavior: auto !important;
+  }
+}
+
+@keyframes reveal-fallback {
+  to {
+    opacity: 1;
+    transform: none;
   }
 }

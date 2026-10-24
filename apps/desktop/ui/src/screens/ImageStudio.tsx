@@ -63,9 +63,27 @@ function ImagesDesktop(): JSX.Element {
     const t = seedText().trim();
     return /^\d{1,9}$/.test(t) ? Number(t) : null;
   };
+  // Short videos: animated GIFs from the image model, each frame grown from the last.
+  const [mode, setMode] = createSignal<"picture" | "video">("picture");
+  const [endPrompt, setEndPrompt] = createSignal("");
+  const [frames, setFrames] = createSignal(24);
+  const [fps, setFps] = createSignal(8);
+  const [motion, setMotion] = createSignal(0.35);
+  const makeVideo = () => {
+    const m = model();
+    if (!m || busy() || !prompt().trim() || !service.makeVideo) return;
+    setBusy(true);
+    setError(null);
+    const p = prompt().trim();
+    service
+      .makeVideo({ modelId: m.id, prompt: p, endPrompt: endPrompt().trim() || null, size: Math.min(size(), 768), frames: frames(), fps: fps(), strength: motion(), seed: seedValue() })
+      .then((g) => setResults((r) => [{ ...g, prompt: endPrompt().trim() ? `${p} → ${endPrompt().trim()}` : p }, ...r].slice(0, 24)))
+      .catch((e: unknown) => setError(e instanceof Error && e.message ? e.message : "The video could not be made."))
+      .finally(() => setBusy(false));
+  };
   // Editing: a follow-up instruction for the current picture, or a picture of the user's own.
   const [followUp, setFollowUp] = createSignal("");
-  const [strength, setStrength] = createSignal(0.6);
+  const [strength, setStrength] = createSignal(0.7);
   const editFrom = (source: string, instruction: string) => {
     const m = model();
     if (!m || busy() || !instruction.trim() || !service.editImage) return;
@@ -129,6 +147,18 @@ function ImagesDesktop(): JSX.Element {
       >
         <div class="img-layout">
           <section class="img-controls card" aria-label="Settings">
+            <Show when={service.makeVideo}>
+              <div class="segmented segmented--sm img-mode" role="radiogroup" aria-label="Make">
+                <label class="segmented__option" data-press>
+                  <input type="radio" name="img-mode" checked={mode() === "picture"} onChange={() => setMode("picture")} />
+                  <span>Picture</span>
+                </label>
+                <label class="segmented__option" data-press>
+                  <input type="radio" name="img-mode" checked={mode() === "video"} onChange={() => setMode("video")} />
+                  <span>Short video</span>
+                </label>
+              </div>
+            </Show>
             <label class="img-field">
               <span>Model</span>
               <select value={model()?.id ?? ""} onChange={(e) => setModelId(e.currentTarget.value)}>
@@ -136,7 +166,7 @@ function ImagesDesktop(): JSX.Element {
               </select>
             </label>
             <label class="img-field">
-              <span>Describe the picture</span>
+              <span>{mode() === "video" ? "Describe the scene" : "Describe the picture"}</span>
               <textarea
                 rows={4}
                 maxLength={2000}
@@ -148,6 +178,24 @@ function ImagesDesktop(): JSX.Element {
                 placeholder="A red apple on a wooden table, soft window light"
               />
             </label>
+            <Show when={mode() === "video"}>
+              <label class="img-field">
+                <span>Ends as (optional: the scene changes into this halfway)</span>
+                <textarea rows={2} maxLength={2000} value={endPrompt()} onInput={(e) => setEndPrompt(e.currentTarget.value)} placeholder="The same lighthouse in a thunderstorm" />
+              </label>
+              <label class="img-field">
+                <span>
+                  Length: {frames()} frames at {fps()} per second ({(frames() / fps()).toFixed(1)} s)
+                </span>
+                <input type="range" min="8" max="72" step="4" value={frames()} onInput={(e) => setFrames(Number(e.currentTarget.value))} aria-label="Frames" />
+                <input type="range" min="4" max="24" step="2" value={fps()} onInput={(e) => setFps(Number(e.currentTarget.value))} aria-label="Frames per second" />
+              </label>
+              <label class="img-field" title="How much each frame may change from the one before: low is calm, high is lively.">
+                <span>Motion: {Math.round(motion() * 100)}%</span>
+                <input type="range" min="0.15" max="0.7" step="0.05" value={motion()} onInput={(e) => setMotion(Number(e.currentTarget.value))} />
+              </label>
+              <p class="hint">Short animations made by the image model: each frame grows out of the one before, so scenes move and change rather than playing like filmed video. Everything is made on this computer.</p>
+            </Show>
             <fieldset class="img-aspects">
               <legend>Size</legend>
               <For each={SIZES}>
@@ -159,10 +207,12 @@ function ImagesDesktop(): JSX.Element {
                 )}
               </For>
             </fieldset>
-            <label class="img-field">
-              <span>Steps: {steps()}</span>
-              <input type="range" min="1" max="4" step="1" value={steps()} onInput={(e) => setSteps(Number(e.currentTarget.value))} />
-            </label>
+            <Show when={mode() === "picture"}>
+              <label class="img-field">
+                <span>Steps: {steps()}</span>
+                <input type="range" min="1" max="4" step="1" value={steps()} onInput={(e) => setSteps(Number(e.currentTarget.value))} />
+              </label>
+            </Show>
             <label class="img-field">
               <span>Seed (empty for a new one)</span>
               <input inputMode="numeric" maxLength={9} value={seedText()} onInput={(e) => setSeedText(e.currentTarget.value)} aria-invalid={seedText().trim() !== "" && seedValue() === null ? "true" : undefined} />
@@ -180,9 +230,9 @@ function ImagesDesktop(): JSX.Element {
                 </div>
               )}
             </Show>
-            <button type="button" class="btn btn--primary img-go" data-press disabled={!prompt().trim() || busy()} aria-busy={busy() ? "true" : undefined} onClick={generate}>
+            <button type="button" class="btn btn--primary img-go" data-press disabled={!prompt().trim() || busy()} aria-busy={busy() ? "true" : undefined} onClick={() => (mode() === "video" ? makeVideo() : generate())}>
               <Icon name="images" size={16} />
-              {busy() ? "Making the image…" : "Generate"}
+              {busy() ? (mode() === "video" ? "Making the video…" : "Making the image…") : mode() === "video" ? "Make video" : "Generate"}
             </button>
           </section>
           <section class="img-stage card" aria-label="Result">
@@ -209,7 +259,7 @@ function ImagesDesktop(): JSX.Element {
                         Show in folder
                       </button>
                     </Show>
-                    <a class="btn btn--secondary btn--sm" href={g().dataUrl} download={`cerebro-${g().seed || "image"}.png`}>
+                    <a class="btn btn--secondary btn--sm" href={g().dataUrl} download={`cerebro-${g().seed || "image"}.${g().dataUrl.startsWith("data:image/gif") ? "gif" : "png"}`}>
                       Download
                     </a>
                   </div>

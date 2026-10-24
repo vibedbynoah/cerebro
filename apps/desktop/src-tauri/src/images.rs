@@ -113,8 +113,20 @@ pub fn rgb_square(data_url: &str, size: u32) -> Result<Vec<u8>, String> {
     Ok(sq.resize_exact(size, size, image::imageops::FilterType::Lanczos3).to_rgb8().into_raw())
 }
 
+/// A short animation: the frames, how fast they play and how much each moves from the last.
+pub struct AnimRequest {
+    pub prompt: String,
+    pub end_prompt: Option<String>,
+    pub size: usize,
+    pub frames: usize,
+    pub fps: u32,
+    pub strength: f32,
+    pub seed: u64,
+}
+
 enum Job {
     Generate(LibraryModel, Request, Sender<Result<(Vec<u8>, f64), String>>),
+    Animate(LibraryModel, AnimRequest, Sender<Result<(Vec<Vec<u8>>, f64), String>>),
 }
 
 /// Image generation on its own thread.
@@ -130,13 +142,31 @@ impl Default for Images {
             .name("cerebro-images".into())
             .spawn(move || {
                 let mut loaded: Option<(String, Diffusion)> = None;
-                while let Ok(Job::Generate(m, r, reply)) = rx.recv() {
-                    let res = (|| -> Result<(Vec<u8>, f64), String> {
-                        if loaded.as_ref().is_none_or(|l| l.0 != m.id) {
-                            loaded = None;
-                            let d = Diffusion::load(Path::new(&m.path)).map_err(|e| format!("Could not load the image model: {e}"))?;
-                            loaded = Some((m.id.clone(), d));
+                let ensure = |loaded: &mut Option<(String, Diffusion)>, m: &LibraryModel| -> Result<(), String> {
+                    if loaded.as_ref().is_none_or(|l| l.0 != m.id) {
+                        *loaded = None;
+                        let d = Diffusion::load(Path::new(&m.path)).map_err(|e| format!("Could not load the image model: {e}"))?;
+                        *loaded = Some((m.id.clone(), d));
+                    }
+                    Ok(())
+                };
+                while let Ok(job) = rx.recv() {
+                    let (m, r, reply) = match job {
+                        Job::Generate(m, r, reply) => (m, r, reply),
+                        Job::Animate(m, a, reply) => {
+                            let res = (|| -> Result<(Vec<Vec<u8>>, f64), String> {
+                                ensure(&mut loaded, &m)?;
+                                let d = &loaded.as_ref().ok_or("The image model is not loaded.")?.1;
+                                let t = std::time::Instant::now();
+                                let f = d.animate(&a.prompt, a.end_prompt.as_deref(), a.size, a.frames, a.strength, a.seed, |_| {}).map_err(|e| format!("The animation could not be made: {e}"))?;
+                                Ok((f, t.elapsed().as_secs_f64()))
+                            })();
+                            let _ = reply.send(res);
+                            continue;
                         }
+                    };
+                    let res = (|| -> Result<(Vec<u8>, f64), String> {
+                        ensure(&mut loaded, &m)?;
                         let d = &loaded.as_ref().ok_or("The image model is not loaded.")?.1;
                         let t = std::time::Instant::now();
                         let rgb = match &r.edit {
@@ -155,6 +185,42 @@ impl Default for Images {
 }
 
 impl Images {
+    /// A short animation as an animated GIF (saved beside the images): frames chained in latent
+    /// space, so the scene moves and evolves; the end prompt, when given, takes over halfway.
+    pub fn animate(&self, m: &LibraryModel, a: AnimRequest) -> Result<Generated, String> {
+        if a.prompt.trim().is_empty() {
+            return Err("Describe the scene first.".to_owned());
+        }
+        let (size, seed, fps) = (a.size, a.seed, a.fps.clamp(1, 30));
+        let (reply, rx) = channel();
+        self.tx.lock().unwrap_or_else(|e| e.into_inner()).send(Job::Animate(m.clone(), a, reply)).map_err(|_| "The image engine stopped.".to_owned())?;
+        let (frames, seconds) = rx.recv().map_err(|_| "The image engine stopped.".to_owned())??;
+        let mut gif = Vec::new();
+        {
+            let mut enc = image::codecs::gif::GifEncoder::new_with_speed(&mut gif, 10);
+            enc.set_repeat(image::codecs::gif::Repeat::Infinite).map_err(|e| e.to_string())?;
+            let delay = image::Delay::from_numer_denom_ms(1000, fps);
+            for f in frames {
+                let rgb = image::RgbImage::from_raw(size as u32, size as u32, f).ok_or("A frame had the wrong size.")?;
+                let rgba = image::DynamicImage::ImageRgb8(rgb).to_rgba8();
+                enc.encode_frame(image::Frame::from_parts(rgba, 0, 0, delay)).map_err(|e| format!("The animation could not be encoded: {e}."))?;
+            }
+        }
+        let dir = self.out_dir.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(std::env::temp_dir);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("The images folder could not be made: {e}."))?;
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+        let path = dir.join(format!("cerebro-{stamp}-{seed}.gif"));
+        std::fs::write(&path, &gif).map_err(|e| format!("The animation could not be saved: {e}."))?;
+        Ok(Generated {
+            data_url: format!("data:image/gif;base64,{}", base64::engine::general_purpose::STANDARD.encode(&gif)),
+            path: path.to_string_lossy().into_owned(),
+            seed,
+            seconds,
+            width: size as u32,
+            height: size as u32,
+        })
+    }
+
     /// Where images are saved (`<app data>\images`).
     pub fn set_out_dir(&self, dir: PathBuf) {
         *self.out_dir.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir);
@@ -214,7 +280,7 @@ mod tests {
         let m = describe(dir, "other", "msd".into()).expect("model");
         let img = Images::default();
         img.set_out_dir(std::env::temp_dir().join("cerebro-images-test"));
-        let g = img.generate(&m, Request { prompt: "a red apple on a wooden table, photo".into(), size: 512, steps: 1, seed: 7 }).expect("generate");
+        let g = img.generate(&m, Request { prompt: "a red apple on a wooden table, photo".into(), size: 512, steps: 1, seed: 7, edit: None }).expect("generate");
         println!("{} in {:.1} s", g.path, g.seconds);
         assert!(g.data_url.starts_with("data:image/png;base64,") && std::path::Path::new(&g.path).exists());
     }

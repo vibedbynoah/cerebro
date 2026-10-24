@@ -216,6 +216,7 @@ export function createDesktopService(local: CerebroService): CerebroService {
     removeCloudProvider: (id) => invoke<CloudProvider[]>("cloud_provider_remove", { id }),
     listCloudModels: (provider, apiKey) => invoke<string[]>("cloud_models_list", { provider, apiKey }),
     generateImage: (req) => invoke<GeneratedImage>("image_generate", { modelId: req.modelId, prompt: req.prompt, size: req.size, steps: req.steps, seed: req.seed }),
+    makeVideo: (req) => invoke<GeneratedImage>("image_video", { modelId: req.modelId, prompt: req.prompt, endPrompt: req.endPrompt, size: req.size, frames: req.frames, fps: req.fps, strength: req.strength, seed: req.seed }),
     editImage: (req) => invoke<GeneratedImage>("image_edit", { modelId: req.modelId, prompt: req.prompt, source: req.source, strength: req.strength, size: req.size, steps: req.steps, seed: req.seed }),
     revealImage: (path) => invoke<boolean>("image_reveal", { path }),
     readAloud: (text) => invoke<void>("tts_read", { text: text.slice(0, 100_000) }),
@@ -325,6 +326,9 @@ export function createDesktopService(local: CerebroService): CerebroService {
     remoteEnable: (on) => invoke<RemoteView>("remote_enable", { on }),
     remoteOptions: (o) => invoke<RemoteView>("remote_options", { allowChat: o.allowChat, allowTailscale: o.allowTailscale, address: o.address, sessionDays: o.sessionDays }),
     remotePair: () => invoke<RemotePairing>("remote_pair"),
+    remoteTunnelStart: () => invoke<{ url: string; pairUrl: string; expiresAt: number }>("remote_tunnel_start"),
+    remoteTunnelStop: () => invoke<void>("remote_tunnel_stop"),
+    remoteTunnelGet: () => invoke<string | null>("remote_tunnel_get"),
     remoteRevoke: (id) => invoke<RemoteView>("remote_revoke", { id }),
 
     async chat(request: ChatRequest, onEvent: (e: ChatEvent) => void, signal: AbortSignal) {
@@ -348,6 +352,7 @@ export function createDesktopService(local: CerebroService): CerebroService {
     hubSearch: (query) => invoke<HubRepo[]>("hub_search", { query }),
     hubFiles: (repo) => invoke<HubFile[]>("hub_files", { repo }),
     hubAvatar: (owner) => invoke<string>("hub_avatar", { owner }),
+    hubLatest: (author, query) => invoke<HubRepo[]>("hub_latest", { author, query }),
     saveDataset: (name, text) => invoke<string>("train_dataset_save", { name, text }),
     hubPipelineFiles: (repo) => invoke<{ files: string[]; total: number }>("hub_pipeline_files", { repo }),
     hubFileMeta: (repo, file) => invoke<HubFileMeta>("hub_file_meta", { repo, file }),

@@ -144,9 +144,9 @@ try {
       // model thought and then a finished answer (it once stopped after the thinking).
       if (/qwen3|qwq|gemma-?4|gpt-oss|deepseek/i.test(`${m.family} ${m.name}`)) {
         const before = await page.locator(".msg--bot").count();
-        await page.locator("#speed-mode").fill("3");
+        await page.locator("#speed-mode").fill(process.env.E2E_THINK_MODE ?? "3");
         await sleep(400);
-        await box.fill("What is 17 + 25? Then name the capital of France.");
+        await box.fill(process.env.E2E_THINK_Q ?? "What is 17 + 25? Then name the capital of France.");
         const t3 = Date.now();
         await box.press("Enter");
         await page.waitForFunction(

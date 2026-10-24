@@ -462,6 +462,16 @@ impl Remote {
         }
     }
 
+    /// Where phone access listens now (the public tunnel's origin).
+    pub fn bound_addr(&self) -> Option<SocketAddr> {
+        self.bound()
+    }
+
+    /// Whether a password is set (the public link requires one).
+    pub fn has_password(&self) -> bool {
+        self.settings().password_hash.is_some()
+    }
+
     fn bound(&self) -> Option<SocketAddr> {
         self.running.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|r| r.addr)
     }

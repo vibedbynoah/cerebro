@@ -144,6 +144,8 @@ export interface CerebroService {
   listCloudModels(p: CloudProvider, apiKey: string | null): Promise<string[]>;
   /** Image Studio: makes an image with an image model (desktop). */
   generateImage(req: { modelId: string; prompt: string; size: number; steps: number; seed: number | null }): Promise<GeneratedImage>;
+  /** A short animation (animated GIF) from the image model. */
+  makeVideo?(req: { modelId: string; prompt: string; endPrompt: string | null; size: number; frames: number; fps: number; strength: number; seed: number | null }): Promise<GeneratedImage>;
   /** Changes a picture (a data: URL) following the prompt; strength 0.05..1 is how far it may move. */
   editImage?(req: { modelId: string; prompt: string; source: string; strength: number; size: number; steps: number; seed: number | null }): Promise<GeneratedImage>;
   /** Opens File Explorer at a generated image. */
@@ -244,6 +246,10 @@ export interface CerebroService {
   remoteEnable(on: boolean): Promise<RemoteView>;
   remoteOptions(options: RemoteOptions): Promise<RemoteView>;
   remotePair(): Promise<RemotePairing>;
+  /** Shares phone access over the internet (Cloudflare quick tunnel): the public link and a sign-in link. */
+  remoteTunnelStart?(): Promise<{ url: string; pairUrl: string; expiresAt: number }>;
+  remoteTunnelStop?(): Promise<void>;
+  remoteTunnelGet?(): Promise<string | null>;
   /** "*" signs out every phone. */
   remoteRevoke(id: string): Promise<RemoteView>;
 
@@ -271,6 +277,8 @@ export interface CerebroService {
   hubFiles?(repo: string): Promise<HubFile[]>;
   /** A Hugging Face account's picture (its logo), as a data URL. */
   hubAvatar?(owner: string): Promise<string>;
+  /** The newest GGUF repositories of a publisher matching a query, newest first. */
+  hubLatest?(author: string, query: string): Promise<HubRepo[]>;
   /** Saves a picked dataset file into Cerebro's datasets folder; resolves with its path. */
   saveDataset?(name: string, text: string): Promise<string>;
   /** The files an image model needs (its diffusers folder), with their total size in bytes. */
