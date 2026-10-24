@@ -1729,6 +1729,10 @@ fn review_verdict(v: &str) -> Option<bool> {
 fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex<Status>>, cancel: &Arc<AtomicBool>, tooling: Tooling<'_>, kv: Option<&Arc<Mutex<KvStore>>>) {
     use crate::toolcall::{self, Piece, Scanner};
     let (think, think_budget) = thinking(req.native.as_ref());
+    // The model's own chat format (Gemma 4 and Llama 3 are not ChatML); their thinking is not
+    // rendered yet, so they answer directly.
+    let fmt = cerebro_engine::ChatFormat::of(l.model.gguf());
+    let think = think && fmt.think_tags();
     let think_budget = think_budget.min(req.sampler.max_tokens.saturating_sub(ANSWER_RESERVE).max(ANSWER_RESERVE / 4));
     let plan_mode = req.client_tools.is_none() && req.tools.as_ref().is_some_and(|t| t.plan_mode);
     let mut ctx = ToolContext::from_request(req.tools.as_ref());
@@ -1852,7 +1856,7 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
             break;
         }
         let turns: Vec<(&str, &str)> = convo.iter().map(|(r, t)| (r.as_str(), t.as_str())).collect();
-        let text = cerebro_engine::chatml((!system.is_empty()).then_some(system.as_str()), &turns, think);
+        let text = fmt.render((!system.is_empty()).then_some(system.as_str()), &turns, think);
         // Text pieces around the images (one piece when there are none). Tool results added in
         // later rounds may contain the mark: only the first `embeds.len()` count.
         let pieces: Vec<Vec<u32>> = crate::vision_input::split_prompt(&text, embeds.len()).iter().map(|p| l.tok.encode(p)).collect();
@@ -1993,7 +1997,7 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
         // thinking reply never ends empty. The log keeps what the model wrote, for the root cause.
         if think && thinking_tokens > 0 && answer.trim().is_empty() && out.calls.is_empty() && out.bad.is_empty() && result.is_ok() && !cancel.load(Ordering::SeqCst) {
             eprintln!("chat: thinking ({thinking_tokens} pieces) ended without an answer; answering with thinking off. Last output: {:?}", out.raw.chars().rev().take(200).collect::<String>().chars().rev().collect::<String>());
-            let plain = l.tok.encode(&cerebro_engine::chatml((!system.is_empty()).then_some(system.as_str()), &turns, false));
+            let plain = l.tok.encode(&fmt.render((!system.is_empty()).then_some(system.as_str()), &turns, false));
             let again = generate(&l.model, &mut l.session, &l.tok, &plain, &cfg, |piece| {
                 answer.push_str(piece);
                 out.raw.push_str(piece);
@@ -2172,7 +2176,7 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
     // fresh context; a pass that finds a problem replaces the reply with its correction.
     let mut extra_ms = 0.0;
     let tools_used = convo.len() > req.turns.len();
-    if req.passes > 0 && !stopped && !cancel.load(Ordering::SeqCst) && !answer.trim().is_empty() && !tools_used && pics.is_empty() {
+    if req.passes > 0 && fmt == cerebro_engine::ChatFormat::ChatMl && !stopped && !cancel.load(Ordering::SeqCst) && !answer.trim().is_empty() && !tools_used && pics.is_empty() {
         let tp = Instant::now();
         set(st, |s| s.activity = "checking");
         let question = req.turns.last().map(|t| t.text.as_str()).unwrap_or("");
@@ -2285,7 +2289,8 @@ struct EngineLlm<'a> {
 
 impl crate::orchestrate::Llm for EngineLlm<'_> {
     fn call(&mut self, role: &str, system: &str, user: &str, temperature: f32) -> Result<crate::orchestrate::Reply, String> {
-        let text = cerebro_engine::chatml(Some(system), &[("user", user)], self.think);
+        let fmt = cerebro_engine::ChatFormat::of(self.l.model.gguf());
+        let text = fmt.render(Some(system), &[("user", user)], self.think && fmt.think_tags());
         let ids = self.l.tok.encode(&text);
         self.cfg.sampler.temperature = temperature;
         self.cfg.sampler.seed = now_ms();
