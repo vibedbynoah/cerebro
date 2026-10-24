@@ -959,6 +959,8 @@ pub struct PortableState {
     dim: usize,
     vocab: usize,
     pub bytes: u64,
+    /// The layer count was set by the RAM free for an integrated GPU, not by the card filling up.
+    fitted: bool,
 }
 
 const P_RMS: usize = 0;
@@ -1107,11 +1109,46 @@ impl PortableState {
         // Q4_K_M: 49.0 vs 45.9 tok/s). An integrated GPU uses system memory and is short of
         // arithmetic, so it keeps int8 (Iris Xe: 24.2 native vs 33.8 tok/s int8).
         // CEREBRO_PORTABLE_INT8=1 / =0 forces either.
-        let native = match std::env::var("CEREBRO_PORTABLE_INT8").ok().as_deref() {
+        let forced = std::env::var("CEREBRO_PORTABLE_INT8").ok();
+        let mut native = match forced.as_deref() {
             Some("1") => false,
             Some("0") => true,
             _ => ai.device_type != wgpu::DeviceType::IntegratedGpu,
         };
+        // An integrated GPU's memory is system RAM, so filling it until an allocation fails takes
+        // the whole machine's memory (a 14B int8 copy ran a 32 GB laptop out and stopped a sweep).
+        // Its copy is sized against the RAM free now instead: the int8 layout when the whole model
+        // fits, else the file's Q4_K blocks, else as many layers as fit. The processor runs the
+        // rest, from the drive when RAM is short there too (auto_drive_tier after this load).
+        let mut fit_cap = None;
+        let mut fit = None;
+        if ai.device_type == wgpu::DeviceType::IntegratedGpu {
+            let mat = |mm: &Mat, q4k: bool| if q4k && mm.dtype == crate::quant::DType::Q4K && mm.cols % 256 == 0 { (mm.rows * mm.row_bytes) as u64 } else { (mm.rows * mm.cols / 32 * 36) as u64 };
+            let layer = |l: &crate::model::Layer, q4k: bool| -> u64 {
+                let Ffn::Dense { gate, up, down } = &l.ffn else { return 0 };
+                [&l.q, &l.k, &l.v, &l.o, gate, up, down].iter().map(|mm| mat(mm, q4k)).sum::<u64>() + (max_ctx * kvd * 4) as u64
+            };
+            let budget = crate::gguf::available_ram().saturating_sub(crate::placement::RAM_MARGIN + 2 * SCRATCH as u64 + (2 << 30));
+            let total = |q4k: bool| m.layers().iter().map(|l| layer(l, q4k)).sum::<u64>() + mat(m.output_mat(), q4k);
+            let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+            if total(native) > budget {
+                if forced.is_none() {
+                    native = true;
+                }
+                if total(native) > budget {
+                    let mut used = 0;
+                    let k = m.layers().iter().take_while(|l| {
+                        used += layer(l, native);
+                        used <= budget
+                    }).count();
+                    fit_cap = Some(k);
+                    fit = Some(format!("{k} layers as {} fit the {:.1} GiB of RAM free for the integrated GPU", if native { "Q4_K" } else { "int8" }, gib(budget)));
+                } else {
+                    fit = Some(format!("Q4_K blocks: the int8 copy ({:.1} GiB) would not fit the {:.1} GiB of RAM free", gib(total(false)), gib(budget)));
+                }
+                trace(fit.as_deref().unwrap_or(""));
+            }
+        }
         let is_q4k = |mm: &Mat| native && mm.dtype == crate::quant::DType::Q4K && mm.cols % 256 == 0;
         let placeholder = device.create_buffer(&wgpu::BufferDescriptor { label: Some("no scales"), size: 16, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
         // Stacks matrices of one width row-wise (q|k|v, gate|up) and uploads them in parts that each
@@ -1265,7 +1302,10 @@ impl PortableState {
         // A non-zero Layers on the graphics card switch (or CEREBRO_PORTABLE_LAYERS) caps the count.
         let n_layer = m.layers().len();
         let cap = std::env::var("CEREBRO_PORTABLE_LAYERS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(crate::switches::get(crate::switches::GPU_LAYERS) as usize);
-        let limit = if cap == 0 { n_layer } else { cap.min(n_layer) };
+        let limit = if cap == 0 { n_layer } else { cap.min(n_layer) }.min(fit_cap.unwrap_or(n_layer));
+        if limit == 0 {
+            return Err(no_room());
+        }
         let is_oom = |e: &str| e.to_lowercase().contains("memory");
         let mut layer_calls = Vec::new();
         let mut ran_out = false;
@@ -1356,7 +1396,7 @@ impl PortableState {
         // computes wrong results on some GPU must never be chosen there: one did, on every GPU,
         // before a fix), and the fastest of that group is kept, for one token and for TB tokens.
         let fxc = ai.backend == wgpu::Backend::Dx12 && !has_dxc();
-        let mut words = Vec::new();
+        let mut words: Vec<String> = fit.iter().cloned().collect();
         // (label, pipeline, rows per workgroup, tokens per weight read)
         let int8: Vec<(&str, usize, u32, usize)> = MV_VARIANTS
             .iter()
@@ -1571,7 +1611,7 @@ impl PortableState {
             words.push(if fxc { "shaders compiled by FXC".into() } else { "shaders compiled by DXC".into() });
         }
         let kernels = words.join(", ");
-        Ok(Self { device, error, queue, info, max_ctx, chunk, x, step, logits, readback, readback_x, pipes, layer_calls, head_calls, pass_tokens: 4.min(chunk), pass_layers: n_layer, mv1, mv8, qk1, qk8, gemm, kernels, dim, vocab: c.vocab, bytes })
+        Ok(Self { device, error, queue, info, max_ctx, chunk, x, step, logits, readback, readback_x, pipes, layer_calls, head_calls, pass_tokens: 4.min(chunk), pass_layers: n_layer, mv1, mv8, qk1, qk8, gemm, kernels, dim, vocab: c.vocab, bytes, fitted: fit_cap.is_some() })
     }
 
     /// Where the model went, for the app (the same shape as the CUDA planner's): every layer on this
@@ -1584,7 +1624,7 @@ impl PortableState {
         let file = m.gguf().len() as u64;
         let cpu = if self.is_split() { file * (n - k) as u64 / n as u64 + (m.output_mat().rows * m.output_mat().row_bytes) as u64 } else { 0 };
         let first = if self.is_split() {
-            format!("The first {k} of {n} layers on the {} through {api}; the processor runs the other {} and the output head. The card filled up at layer {}.", self.info.name, n - k, k + 1)
+            format!("The first {k} of {n} layers on the {} through {api}; the processor runs the other {} and the output head. {}", self.info.name, n - k, if self.fitted { "That is as much as the free RAM holds.".to_string() } else { format!("The card filled up at layer {}.", k + 1) })
         } else {
             format!("All {n} layers on the {} through {api}; the conversation cache as f16.", self.info.name)
         };
