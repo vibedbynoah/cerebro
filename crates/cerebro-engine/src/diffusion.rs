@@ -1238,12 +1238,12 @@ mod tests {
         let mut w = vec![0.0; 9];
         w[4] = 1.0;
         w[0] = 1.0;
-        let conv = Conv { lin: Lin { rows: 1, cols: 9, w, bias: vec![0.0] }, ic: 1, k: 3, stride: 1 };
+        let conv = Conv { lin: Lin { rows: 1, cols: 9, w, bias: vec![0.0] }, ic: 1, k: 3, stride: 1, one_sided: false };
         let x = vec![1.0, 2.0, 3.0, 4.0];
         let (y, h, ww) = conv.run(&x, 2, 2);
         assert_eq!((h, ww), (2, 2));
         assert_eq!(y, vec![1.0, 2.0, 3.0, 4.0 + 1.0]);
-        let conv2 = Conv { lin: Lin { rows: 1, cols: 9, w: vec![1.0; 9], bias: vec![0.0] }, ic: 1, k: 3, stride: 2 };
+        let conv2 = Conv { lin: Lin { rows: 1, cols: 9, w: vec![1.0; 9], bias: vec![0.0] }, ic: 1, k: 3, stride: 2, one_sided: false };
         let (y, h, _) = conv2.run(&[1.0; 16], 4, 4);
         assert_eq!(h, 2);
         assert_eq!(y[0], 4.0); // the top-left output sees a 2x2 corner
