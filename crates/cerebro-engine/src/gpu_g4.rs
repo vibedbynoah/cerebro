@@ -75,8 +75,9 @@ struct F {
     rms_add_b: CudaFunction,
     ple_b: CudaFunction,
     gelu_ple_b: CudaFunction,
-    /// Tensor-core GEMMs (sm_80+): 64x64, 128x64 and 128x128 blocks.
-    mma: Option<[CudaFunction; 3]>,
+    /// Tensor-core GEMMs (sm_80+): 64x64, 128x64 and 128x128 blocks, and Q4_K straight from
+    /// its blocks.
+    mma: Option<[CudaFunction; 5]>,
 }
 
 /// Prompt-batch buffers, CH tokens.
@@ -177,7 +178,7 @@ impl G4Gpu {
             gelu_ple_b: lf("g4_gelu_ple_b")?,
             mma: if ctx.compute_capability().map_err(gerr)?.0 >= 8 {
                 let m = ctx.load_module(Ptx::from_src(PTX_MMA)).map_err(gerr)?;
-                Some([m.load_function("matmul_q8_mma").map_err(gerr)?, m.load_function("matmul_q8_mma_big").map_err(gerr)?, m.load_function("matmul_q8_mma_x").map_err(gerr)?])
+                Some([m.load_function("matmul_q8_mma").map_err(gerr)?, m.load_function("matmul_q8_mma_big").map_err(gerr)?, m.load_function("matmul_q8_mma_x").map_err(gerr)?, m.load_function("mmq_q4k").map_err(gerr)?, m.load_function("mmq_q4k_x").map_err(gerr)?])
             } else {
                 None
             },
@@ -323,6 +324,15 @@ impl G4Gpu {
             W::K { rows, cols, .. } | W::Q8 { rows, cols, .. } => (*rows, *cols),
         };
         let (k8q, k8d) = k8;
+        if let (W::K { w, dtype: 12, .. }, None) = (m, std::env::var_os("CEREBRO_NO_MMQ")) {
+            // Q4_K straight from its blocks: no int8 copy.
+            let (ri, ci, ti, add) = (rows as i32, cols as i32, t as i32, 0i32);
+            // 128 tokens a block once a prompt is long enough to fill it.
+            let (k, bn, th) = if t >= 128 { (&mma[4], 128u32, 256u32) } else { (&mma[3], 64, 128) };
+            let cfg = LaunchConfig { grid_dim: ((t as u32).div_ceil(bn), (rows as u32).div_ceil(128), 1), block_dim: (th, 1, 1), shared_mem_bytes: 0 };
+            unsafe { s.launch_builder(k).arg(w).arg(xq).arg(xd).arg(y).arg(&ri).arg(&ci).arg(&ti).arg(&add).arg(&ri).launch(cfg) }.map_err(gerr)?;
+            return Ok(());
+        }
         if let W::K { w, dtype, bb, .. } = m {
             let (r, c) = (rows as i32, cols as i32);
             let subs = (rows * cols / 32) as u32;

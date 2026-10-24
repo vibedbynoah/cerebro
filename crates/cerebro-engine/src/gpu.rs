@@ -133,6 +133,8 @@ struct Funcs {
     matmul_mma_big: Option<CudaFunction>,
     /// 128 x 128 blocks of 8 warps, for the longest prompts (256+ tokens).
     matmul_mma_x: Option<CudaFunction>,
+    /// Q4_K prompt GEMM straight from the file's blocks (no int8 copy): 64 and 128 tokens a block.
+    mmq_q4k: Option<(CudaFunction, CudaFunction)>,
     /// Tensor-core flash attention for prefill, head size 128 (sm_80+).
     attn_mma: Option<CudaFunction>,
     silu_b: CudaFunction,
@@ -747,14 +749,15 @@ impl GpuState {
         let lf = |n: &str| module.load_function(n).map_err(gerr);
         let cc8 = ctx.compute_capability().map_err(gerr)?.0 >= 8;
         let (mm_on, at_on) = (cc8 && switches::enabled(switches::GPU_MMA_MATMUL), cc8 && switches::enabled(switches::GPU_MMA_ATTENTION));
-        let (matmul_mma, attn_mma, attn_mma256, matmul_mma_big, matmul_mma_x) = if mm_on || at_on {
+        let (matmul_mma, attn_mma, attn_mma256, matmul_mma_big, matmul_mma_x, mmq_q4k) = if mm_on || at_on {
             let m = ctx.load_module(Ptx::from_src(PTX_MMA)).map_err(gerr)?;
             let f = |on: bool, n: &str| if on { m.load_function(n).map(Some).map_err(gerr) } else { Ok(None) };
             let big = if std::env::var_os("CEREBRO_NO_BIG_GEMM").is_some() { None } else { f(mm_on, "matmul_q8_mma_big")? };
             let x = if std::env::var_os("CEREBRO_NO_X_GEMM").is_some() { None } else { f(mm_on, "matmul_q8_mma_x")? };
-            (f(mm_on, "matmul_q8_mma")?, f(at_on, "attn_prefill_mma")?, f(at_on, "attn_prefill_mma256")?, big, x)
+            let q4 = if std::env::var_os("CEREBRO_NO_MMQ").is_some() || !mm_on { None } else { Some((m.load_function("mmq_q4k").map_err(gerr)?, m.load_function("mmq_q4k_x").map_err(gerr)?)) };
+            (f(mm_on, "matmul_q8_mma")?, f(at_on, "attn_prefill_mma")?, f(at_on, "attn_prefill_mma256")?, big, x, q4)
         } else {
-            (None, None, None, None, None)
+            (None, None, None, None, None, None)
         };
         let f = Funcs {
             attn_mma256,
@@ -767,6 +770,7 @@ impl GpuState {
             matmul_mma,
             matmul_mma_big,
             matmul_mma_x,
+            mmq_q4k,
             attn_mma,
             matvec: lf("matvec_q8")?,
             rmsnorm_quant: lf("rmsnorm_quant")?,
@@ -2582,56 +2586,66 @@ impl GpuState {
         };
         let mm = |m: &GMat, xq: &CudaSlice<i8>, xd: &CudaSlice<f32>, y: &mut CudaSlice<f32>, add: bool| -> Result<(), Error> {
             if let (GMat::K { parts, cols }, Some(k), true) = (m, &f.matmul_mma, t >= MMA_MIN_T) {
-                // The stacked parts are converted to int8 and multiplied a piece of rows at a
-                // time, so the conversion buffer stays at K8_PIECE bytes however big the matrix.
+                // Part by part: Q4_K straight from its blocks (mmq_q4k: no int8 copy); other formats
+                // converted to int8 a piece of rows at a time (the buffer stays at K8_PIECE bytes)
+                // and multiplied on the tensor cores.
                 let rows: usize = parts.iter().map(|p| p.rows).sum();
-                let piece = (K8_PIECE / cols / 128 * 128).max(128).min(rows);
-                let n = piece * cols;
-                let mut sc = k8.borrow_mut();
-                if sc.as_ref().is_none_or(|(q, _)| q.len() < n) {
-                    *sc = Some((s.alloc_zeros::<i8>(n).map_err(gerr)?, s.alloc_zeros::<f32>(n / 32).map_err(gerr)?));
-                }
-                let (qs, ds) = sc.as_mut().expect("scratch");
                 let (cols_i, add_i, ys) = (*cols as i32, add as i32, rows as i32);
-                let mut g0 = 0;
-                while g0 < rows {
-                    let g1 = (g0 + piece).min(rows);
-                    if profiling {
-                        s.synchronize().map_err(gerr)?;
-                    }
-                    let t_conv = std::time::Instant::now();
-                    // Rows g0..g1 of the stack, part by part.
-                    let (mut base, mut out) = (0, 0);
-                    for p in parts {
-                        let (lo, hi) = (g0.max(base), g1.min(base + p.rows));
-                        if lo < hi {
-                            // Row size from the format (a streamed slot buffer is sized for the largest layer).
-                            let rb = (*cols >> 8) * p.bb as usize;
-                            let (r, c) = ((hi - lo) as i32, *cols as i32);
-                            let subs = ((hi - lo) * cols / 32) as u32;
-                            let cfg = LaunchConfig { grid_dim: (subs.div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
-                            let w = p.w.slice((lo - base) * rb..(hi - base) * rb);
-                            let mut qv = qs.slice_mut(out * cols..(out + hi - lo) * cols);
-                            let mut dv = ds.slice_mut(out * cols / 32..(out + hi - lo) * cols / 32);
-                            unsafe { s.launch_builder(&f.k_to_q8).arg(&w).arg(&p.dtype).arg(&p.bb).arg(&r).arg(&c).arg(&mut qv).arg(&mut dv).launch(cfg) }.map_err(gerr)?;
-                            out += hi - lo;
+                let mut base = 0;
+                for p in parts {
+                    if let (Some(q4), 12, true) = (&f.mmq_q4k, p.dtype, *cols % 256 == 0) {
+                        if profiling {
+                            s.synchronize().map_err(gerr)?;
                         }
+                        let t_mm = std::time::Instant::now();
+                        let pr = p.rows as i32;
+                        let (q4, bn, th) = if t >= 128 { (&q4.1, 128u32, 256u32) } else { (&q4.0, 64, 128) };
+                        let cfg = LaunchConfig { grid_dim: ((t as u32).div_ceil(bn), (p.rows as u32).div_ceil(128), 1), block_dim: (th, 1, 1), shared_mem_bytes: 0 };
+                        let mut yv = y.slice_mut(base..);
+                        unsafe { s.launch_builder(q4).arg(&p.w).arg(xq).arg(xd).arg(&mut yv).arg(&pr).arg(&cols_i).arg(&ti).arg(&add_i).arg(&ys).launch(cfg) }.map_err(gerr)?;
+                        lap(1, t_mm)?;
                         base += p.rows;
+                        continue;
                     }
-                    lap(0, t_conv)?;
-                    let t_mm = std::time::Instant::now();
-                    let pr = g1 - g0;
-                    let rows_i = pr as i32;
-                    let (k, bm, bn, th) = match (&f.matmul_mma_x, &f.matmul_mma_big) {
-                        (Some(x), _) if pr >= 1024 && t >= 256 => (x, 128u32, 128u32, 256u32),
-                        (_, Some(b)) if pr >= 1024 && t >= 128 => (b, 128, 64, 128),
-                        _ => (k, 64, 64, 128),
-                    };
-                    let cfg = LaunchConfig { grid_dim: ((t as u32).div_ceil(bn), (pr as u32).div_ceil(bm), 1), block_dim: (th, 1, 1), shared_mem_bytes: 0 };
-                    let mut yv = y.slice_mut(g0..);
-                    unsafe { s.launch_builder(k).arg(&*qs).arg(&*ds).arg(xq).arg(xd).arg(&mut yv).arg(&rows_i).arg(&cols_i).arg(&ti).arg(&add_i).arg(&ys).launch(cfg) }.map_err(gerr)?;
-                    lap(1, t_mm)?;
-                    g0 = g1;
+                    let piece = (K8_PIECE / cols / 128 * 128).max(128).min(p.rows);
+                    let n = piece * cols;
+                    let mut sc = k8.borrow_mut();
+                    if sc.as_ref().is_none_or(|(q, _)| q.len() < n) {
+                        *sc = Some((s.alloc_zeros::<i8>(n).map_err(gerr)?, s.alloc_zeros::<f32>(n / 32).map_err(gerr)?));
+                    }
+                    let (qs, ds) = sc.as_mut().expect("scratch");
+                    // Row size from the format (a streamed slot buffer is sized for the largest layer).
+                    let rb = (*cols >> 8) * p.bb as usize;
+                    let mut lo = 0;
+                    while lo < p.rows {
+                        let hi = (lo + piece).min(p.rows);
+                        if profiling {
+                            s.synchronize().map_err(gerr)?;
+                        }
+                        let t_conv = std::time::Instant::now();
+                        let (r, c) = ((hi - lo) as i32, *cols as i32);
+                        let subs = ((hi - lo) * cols / 32) as u32;
+                        let cfg = LaunchConfig { grid_dim: (subs.div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+                        let w = p.w.slice(lo * rb..hi * rb);
+                        let mut qv = qs.slice_mut(0..(hi - lo) * cols);
+                        let mut dv = ds.slice_mut(0..(hi - lo) * cols / 32);
+                        unsafe { s.launch_builder(&f.k_to_q8).arg(&w).arg(&p.dtype).arg(&p.bb).arg(&r).arg(&c).arg(&mut qv).arg(&mut dv).launch(cfg) }.map_err(gerr)?;
+                        lap(0, t_conv)?;
+                        let t_mm = std::time::Instant::now();
+                        let pr = hi - lo;
+                        let rows_i = pr as i32;
+                        let (k, bm, bn, th) = match (&f.matmul_mma_x, &f.matmul_mma_big) {
+                            (Some(x), _) if pr >= 1024 && t >= 256 => (x, 128u32, 128u32, 256u32),
+                            (_, Some(b)) if pr >= 1024 && t >= 128 => (b, 128, 64, 128),
+                            _ => (k, 64, 64, 128),
+                        };
+                        let cfg = LaunchConfig { grid_dim: ((t as u32).div_ceil(bn), (pr as u32).div_ceil(bm), 1), block_dim: (th, 1, 1), shared_mem_bytes: 0 };
+                        let mut yv = y.slice_mut(base + lo..);
+                        unsafe { s.launch_builder(k).arg(&*qs).arg(&*ds).arg(xq).arg(xd).arg(&mut yv).arg(&rows_i).arg(&cols_i).arg(&ti).arg(&add_i).arg(&ys).launch(cfg) }.map_err(gerr)?;
+                        lap(1, t_mm)?;
+                        lo = hi;
+                    }
+                    base += p.rows;
                 }
                 return Ok(());
             }

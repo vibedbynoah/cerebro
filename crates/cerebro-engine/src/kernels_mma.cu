@@ -656,3 +656,350 @@ extern "C" __global__ void __launch_bounds__(256) matmul_q8_mma_x(
                 }
             }
 }
+
+// ---- Q4_K straight from the file's blocks (no int8 copy) ------------------------------------------
+// Y[t][row] (+)= W[row] . X[t] with W in Q4_K (144-byte blocks of 256: d, dmin, 12 scale bytes,
+// 128 bytes of nibbles). Each 64-value stage of a row is one 32-byte chunk of its block: byte k
+// holds value k of sub-block 2j (low nibble) and of sub-block 2j+1 (high nibble), so a fragment's
+// four consecutive weights are one 32-bit load and a mask: the weights go from the file's bytes to
+// the tensor cores with no conversion pass and no int8 copy in memory. Per 32 values:
+//   sum_k w_k x_k = d*sc * sum_k q_k x_k - dmin*m * sum_k x_k,
+// the first from the MMA (q in 0..15), the second from the activations' block sums.
+// Block tile 128 rows x 64 tokens, 4 warps (each 64 x 32), stages double-buffered with cp.async.
+#define QK_BM 128
+#define QK_BN 64
+#define QK_LDA 48 // 32 bytes + 16 padding: a fragment's 8 rows hit distinct banks
+#define QK_LDB 80
+
+struct StageQ4 {
+    unsigned char a[QK_BM * QK_LDA];
+    signed char b[QK_BN * QK_LDB];
+    float wsc[2][QK_BM];
+    float wmn[2][QK_BM];
+    float xd[2][QK_BN];
+    float xs[2][QK_BN];
+};
+
+__device__ __forceinline__ void q4k_scale_min(int j, const unsigned char* q, int& sc, int& m) {
+    if (j < 4) {
+        sc = q[j] & 63;
+        m = q[j + 4] & 63;
+    } else {
+        sc = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+        m = (q[j + 4] >> 4) | ((q[j] >> 6) << 4);
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(128) mmq_q4k(
+    const unsigned char* __restrict__ w, const signed char* __restrict__ xq, const float* __restrict__ xd,
+    float* __restrict__ y, int rows, int cols, int T, int add, int ys) {
+    __shared__ __align__(16) StageQ4 st[2];
+    const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+    const int g = lane >> 2, tg = lane & 3;
+    const int r0 = blockIdx.y * QK_BM, t0 = blockIdx.x * QK_BN;
+    const int wm = (warp & 1) * 64, wn = (warp >> 1) * 32;
+    const int nb = cols >> 5;
+    const size_t rb = (size_t)(cols >> 8) * 144;
+    const int stages = cols >> 6;
+
+    auto load = [&](int s, int k0) {
+        StageQ4& S = st[s];
+        const int sb = k0 >> 8, j = (k0 >> 6) & 3;
+        #pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            int c = tid + i * 128, r = c >> 1, h = c & 1;
+            bool ok = r0 + r < rows;
+            cp_async16(&S.a[r * QK_LDA + 16 * h], w + (ok ? (size_t)(r0 + r) * rb + (size_t)sb * 144 + 16 + 32 * j + 16 * h : 0), ok);
+        }
+        #pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            int c = tid + i * 128, r = c >> 2, k = k0 + (c & 3) * 16;
+            bool ok = t0 + r < T;
+            cp_async16(&S.b[r * QK_LDB + (c & 3) * 16], xq + (ok ? (size_t)(t0 + r) * cols + k : 0), ok);
+        }
+        {
+            int kb = tid >> 6, r = tid & 63, b = (k0 >> 5) + kb;
+            bool ok = t0 + r < T;
+            cp_async4(&S.xd[kb][r], xd + (ok ? (size_t)(t0 + r) * nb + b : 0), ok);
+        }
+        cp_commit();
+        // The two sub-blocks' scales and mins of this thread's row, from the block header.
+        {
+            int r = tid;
+            float s0 = 0.f, s1 = 0.f, m0f = 0.f, m1f = 0.f;
+            if (r0 + r < rows) {
+                const unsigned char* hb = w + (size_t)(r0 + r) * rb + (size_t)sb * 144;
+                float d = __half2float(*reinterpret_cast<const __half*>(hb));
+                float dm = __half2float(*reinterpret_cast<const __half*>(hb + 2));
+                int sc, m;
+                q4k_scale_min(2 * j, hb + 4, sc, m);
+                s0 = d * sc;
+                m0f = dm * m;
+                q4k_scale_min(2 * j + 1, hb + 4, sc, m);
+                s1 = d * sc;
+                m1f = dm * m;
+            }
+            S.wsc[0][r] = s0;
+            S.wsc[1][r] = s1;
+            S.wmn[0][r] = m0f;
+            S.wmn[1][r] = m1f;
+        }
+    };
+
+    float acc[4][4][4];
+    #pragma unroll
+    for (int i = 0; i < 4; ++i)
+        #pragma unroll
+        for (int jj = 0; jj < 4; ++jj)
+            #pragma unroll
+            for (int e = 0; e < 4; ++e) acc[i][jj][e] = 0.f;
+
+    load(0, 0);
+    for (int s = 0; s < stages; ++s) {
+        if (s + 1 < stages) {
+            load((s + 1) & 1, (s + 1) * 64);
+            cp_wait<1>();
+        } else {
+            cp_wait<0>();
+        }
+        __syncthreads();
+        StageQ4& S = st[s & 1];
+        // Each token's sum of its two 32-value blocks, times its scale (the min term).
+        {
+            int kb = tid >> 6, r = tid & 63;
+            const int* xb = reinterpret_cast<const int*>(&S.b[r * QK_LDB + kb * 32]);
+            int sum = 0;
+            #pragma unroll
+            for (int q = 0; q < 8; ++q) sum = __dp4a(xb[q], 0x01010101, sum);
+            S.xs[kb][r] = S.xd[kb][r] * (float)sum;
+        }
+        __syncthreads();
+        unsigned wa[4][4];
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            const unsigned char* p = &S.a[(wm + i * 16 + g) * QK_LDA + tg * 4];
+            wa[i][0] = *(const unsigned*)p;
+            wa[i][1] = *(const unsigned*)(p + 8 * QK_LDA);
+            wa[i][2] = *(const unsigned*)(p + 16);
+            wa[i][3] = *(const unsigned*)(p + 8 * QK_LDA + 16);
+        }
+        #pragma unroll
+        for (int kb = 0; kb < 2; ++kb) {
+            const int ko = kb * 32 + tg * 4;
+            unsigned b[4][2];
+            #pragma unroll
+            for (int jj = 0; jj < 4; ++jj) {
+                const signed char* p = &S.b[(wn + jj * 8 + g) * QK_LDB + ko];
+                b[jj][0] = *(const unsigned*)p;
+                b[jj][1] = *(const unsigned*)(p + 16);
+            }
+            float sw[4][2], mw[4][2], sx[4][2], xsv[4][2];
+            #pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                int rr = wm + i * 16 + g;
+                sw[i][0] = S.wsc[kb][rr];
+                sw[i][1] = S.wsc[kb][rr + 8];
+                mw[i][0] = S.wmn[kb][rr];
+                mw[i][1] = S.wmn[kb][rr + 8];
+            }
+            #pragma unroll
+            for (int jj = 0; jj < 4; ++jj) {
+                int tt = wn + jj * 8 + tg * 2;
+                sx[jj][0] = S.xd[kb][tt];
+                sx[jj][1] = S.xd[kb][tt + 1];
+                xsv[jj][0] = S.xs[kb][tt];
+                xsv[jj][1] = S.xs[kb][tt + 1];
+            }
+            #pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                unsigned a0 = kb ? (wa[i][0] >> 4) & 0x0F0F0F0F : wa[i][0] & 0x0F0F0F0F;
+                unsigned a1 = kb ? (wa[i][1] >> 4) & 0x0F0F0F0F : wa[i][1] & 0x0F0F0F0F;
+                unsigned a2 = kb ? (wa[i][2] >> 4) & 0x0F0F0F0F : wa[i][2] & 0x0F0F0F0F;
+                unsigned a3 = kb ? (wa[i][3] >> 4) & 0x0F0F0F0F : wa[i][3] & 0x0F0F0F0F;
+                #pragma unroll
+                for (int jj = 0; jj < 4; ++jj) {
+                    int c0, c1, c2, c3;
+                    asm volatile(
+                        "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
+                        "{%10,%10,%10,%10};\n"
+                        : "=r"(c0), "=r"(c1), "=r"(c2), "=r"(c3)
+                        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b[jj][0]), "r"(b[jj][1]), "r"(0));
+                    acc[i][jj][0] += i2f_small(c0) * sw[i][0] * sx[jj][0] - mw[i][0] * xsv[jj][0];
+                    acc[i][jj][1] += i2f_small(c1) * sw[i][0] * sx[jj][1] - mw[i][0] * xsv[jj][1];
+                    acc[i][jj][2] += i2f_small(c2) * sw[i][1] * sx[jj][0] - mw[i][1] * xsv[jj][0];
+                    acc[i][jj][3] += i2f_small(c3) * sw[i][1] * sx[jj][1] - mw[i][1] * xsv[jj][1];
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i)
+        #pragma unroll
+        for (int jj = 0; jj < 4; ++jj)
+            #pragma unroll
+            for (int e = 0; e < 4; ++e) {
+                int r = r0 + wm + i * 16 + g + (e >> 1) * 8, t = t0 + wn + jj * 8 + tg * 2 + (e & 1);
+                if (r < rows && t < T) {
+                    float* o = y + (size_t)t * ys + r;
+                    *o = add ? *o + acc[i][jj][e] : acc[i][jj][e];
+                }
+            }
+}
+
+// mmq_q4k with a 128 x 128 block of 8 warps (2 x 4, each 64 rows x 32 tokens): every Q4_K chunk
+// staged in shared memory serves 128 tokens. The rows' block headers arrive with cp.async like the
+// weights; after each stage lands, threads 0..127 decode their row's two scales and mins while all
+// 256 threads sum the tokens' 32-value blocks, behind one barrier.
+#define QX_BN 128
+
+struct StageQ4X {
+    unsigned char a[QK_BM * QK_LDA];
+    signed char b[QX_BN * QK_LDB];
+    unsigned char hdr[QK_BM * 16];
+    float wsc[2][QK_BM];
+    float wmn[2][QK_BM];
+    float xd[2][QX_BN];
+    float xs[2][QX_BN];
+};
+
+// Two blocks per SM (<= 128 registers): with one, half the warps were missing to hide latency.
+extern "C" __global__ void __launch_bounds__(256, 2) mmq_q4k_x(
+    const unsigned char* __restrict__ w, const signed char* __restrict__ xq, const float* __restrict__ xd,
+    float* __restrict__ y, int rows, int cols, int T, int add, int ys) {
+    __shared__ __align__(16) StageQ4X st[2];
+    const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+    const int g = lane >> 2, tg = lane & 3;
+    const int r0 = blockIdx.y * QK_BM, t0 = blockIdx.x * QX_BN;
+    const int wm = (warp & 1) * 64, wn = (warp >> 1) * 32;
+    const int nb = cols >> 5;
+    const size_t rb = (size_t)(cols >> 8) * 144;
+    const int stages = cols >> 6;
+
+    auto load = [&](int s, int k0) {
+        StageQ4X& S = st[s];
+        const int sb = k0 >> 8, j = (k0 >> 6) & 3;
+        // Weights: 128 rows x 32 bytes = 256 chunks; headers: 128 x 16 bytes; one or two per thread.
+        {
+            int r = tid >> 1, h = tid & 1;
+            bool ok = r0 + r < rows;
+            const unsigned char* base = w + (ok ? (size_t)(r0 + r) * rb + (size_t)sb * 144 : 0);
+            cp_async16(&S.a[r * QK_LDA + 16 * h], base + (ok ? 16 + 32 * j + 16 * h : 0), ok);
+            if (h == 0) cp_async16(&S.hdr[r * 16], base, ok);
+        }
+        // Activations: 128 tokens x 64 bytes = 512 chunks, two per thread; scales 2 x 128.
+        #pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            int c = tid + i * 256, r = c >> 2, k = k0 + (c & 3) * 16;
+            bool ok = t0 + r < T;
+            cp_async16(&S.b[r * QK_LDB + (c & 3) * 16], xq + (ok ? (size_t)(t0 + r) * cols + k : 0), ok);
+        }
+        {
+            int kb = tid >> 7, r = tid & 127, b = (k0 >> 5) + kb;
+            bool ok = t0 + r < T;
+            cp_async4(&S.xd[kb][r], xd + (ok ? (size_t)(t0 + r) * nb + b : 0), ok);
+        }
+        cp_commit();
+    };
+
+    float acc[4][4][4];
+    #pragma unroll
+    for (int i = 0; i < 4; ++i)
+        #pragma unroll
+        for (int jj = 0; jj < 4; ++jj)
+            #pragma unroll
+            for (int e = 0; e < 4; ++e) acc[i][jj][e] = 0.f;
+
+    load(0, 0);
+    for (int s = 0; s < stages; ++s) {
+        if (s + 1 < stages) {
+            load((s + 1) & 1, (s + 1) * 64);
+            cp_wait<1>();
+        } else {
+            cp_wait<0>();
+        }
+        __syncthreads();
+        StageQ4X& S = st[s & 1];
+        {
+            int kb = tid >> 7, r = tid & 127;
+            const int* xb = reinterpret_cast<const int*>(&S.b[r * QK_LDB + kb * 32]);
+            int sum = 0;
+            #pragma unroll
+            for (int q = 0; q < 8; ++q) sum = __dp4a(xb[q], 0x01010101, sum);
+            S.xs[kb][r] = S.xd[kb][r] * (float)sum;
+            if (tid < QK_BM) {
+                const unsigned char* hb = &S.hdr[tid * 16];
+                const int j = (s & 3);
+                float d = __half2float(*reinterpret_cast<const __half*>(hb));
+                float dm = __half2float(*reinterpret_cast<const __half*>(hb + 2));
+                int sc, m;
+                q4k_scale_min(2 * j, hb + 4, sc, m);
+                S.wsc[0][tid] = d * sc;
+                S.wmn[0][tid] = dm * m;
+                q4k_scale_min(2 * j + 1, hb + 4, sc, m);
+                S.wsc[1][tid] = d * sc;
+                S.wmn[1][tid] = dm * m;
+            }
+        }
+        __syncthreads();
+        #pragma unroll
+        for (int kb = 0; kb < 2; ++kb) {
+            const int ko = kb * 32 + tg * 4;
+            unsigned b[4][2];
+            #pragma unroll
+            for (int jj = 0; jj < 4; ++jj) {
+                const signed char* p = &S.b[(wn + jj * 8 + g) * QK_LDB + ko];
+                b[jj][0] = *(const unsigned*)p;
+                b[jj][1] = *(const unsigned*)(p + 16);
+            }
+            float sx[4][2], xsv[4][2];
+            #pragma unroll
+            for (int jj = 0; jj < 4; ++jj) {
+                int tt = wn + jj * 8 + tg * 2;
+                sx[jj][0] = S.xd[kb][tt];
+                sx[jj][1] = S.xd[kb][tt + 1];
+                xsv[jj][0] = S.xs[kb][tt];
+                xsv[jj][1] = S.xs[kb][tt + 1];
+            }
+            #pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const unsigned char* p = &S.a[(wm + i * 16 + g) * QK_LDA + tg * 4];
+                const int sh = kb * 4;
+                unsigned a0 = (*(const unsigned*)p >> sh) & 0x0F0F0F0F;
+                unsigned a1 = (*(const unsigned*)(p + 8 * QK_LDA) >> sh) & 0x0F0F0F0F;
+                unsigned a2 = (*(const unsigned*)(p + 16) >> sh) & 0x0F0F0F0F;
+                unsigned a3 = (*(const unsigned*)(p + 8 * QK_LDA + 16) >> sh) & 0x0F0F0F0F;
+                const int rr = wm + i * 16 + g;
+                const float sw0 = S.wsc[kb][rr], sw1 = S.wsc[kb][rr + 8], mw0 = S.wmn[kb][rr], mw1 = S.wmn[kb][rr + 8];
+                #pragma unroll
+                for (int jj = 0; jj < 4; ++jj) {
+                    int c0, c1, c2, c3;
+                    asm volatile(
+                        "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
+                        "{%10,%10,%10,%10};\n"
+                        : "=r"(c0), "=r"(c1), "=r"(c2), "=r"(c3)
+                        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b[jj][0]), "r"(b[jj][1]), "r"(0));
+                    acc[i][jj][0] += i2f_small(c0) * sw0 * sx[jj][0] - mw0 * xsv[jj][0];
+                    acc[i][jj][1] += i2f_small(c1) * sw0 * sx[jj][1] - mw0 * xsv[jj][1];
+                    acc[i][jj][2] += i2f_small(c2) * sw1 * sx[jj][0] - mw1 * xsv[jj][0];
+                    acc[i][jj][3] += i2f_small(c3) * sw1 * sx[jj][1] - mw1 * xsv[jj][1];
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i)
+        #pragma unroll
+        for (int jj = 0; jj < 4; ++jj)
+            #pragma unroll
+            for (int e = 0; e < 4; ++e) {
+                int r = r0 + wm + i * 16 + g + (e >> 1) * 8, t = t0 + wn + jj * 8 + tg * 2 + (e & 1);
+                if (r < rows && t < T) {
+                    float* o = y + (size_t)t * ys + r;
+                    *o = add ? *o + acc[i][jj][e] : acc[i][jj][e];
+                }
+            }
+}
