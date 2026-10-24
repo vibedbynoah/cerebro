@@ -330,6 +330,9 @@ impl Model {
         let inv_freq = (0..rd / 2).map(|i| 1.0 / cfg.rope_base.powf(2.0 * i as f32 / rd as f32)).collect();
         // Hyper-connection models norm the output in their last mixer.
         let out_norm = if hc.is_some() && !g.tensors.contains_key("output_norm.weight") { Vec::new() } else { vec_f32(&g, "output_norm.weight")? };
+        if cfg.n_expert > 0 {
+            crate::activity::reset(cfg.n_layer, cfg.n_expert);
+        }
         let m = Self { path: path.to_path_buf(), embed: Mat::of(embed_t), out_norm, layers, output, inv_freq, cfg, gguf: g, packs: Default::default(), stream_map: Default::default(), hc, #[cfg(feature = "cuda")] offload: Default::default(), #[cfg(feature = "cuda")] batch_gpu: Default::default() };
         let n = crate::switches::get(crate::switches::STREAM_LAYERS).max(0) as usize;
         if n > 0 {
@@ -2794,6 +2797,7 @@ impl Session {
                 }
                 Ffn::Moe(e) => {
                     route(&e.router, &self.h, c.n_used, &mut self.router, &mut self.chosen);
+                    crate::activity::fire(li, self.chosen.iter().map(|&(ex, _)| ex));
                     lap(4, &mut self.prof);
                     for &(ex, _) in &self.chosen {
                         self.expert_counts[li * c.n_expert + ex] += 1;

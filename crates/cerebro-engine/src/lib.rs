@@ -6,6 +6,7 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const COMMIT: &str = env!("CEREBRO_ENGINE_COMMIT");
 
+pub mod activity;
 pub mod audio;
 pub mod chat;
 pub mod cluster;

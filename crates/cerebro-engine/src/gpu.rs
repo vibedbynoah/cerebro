@@ -1939,6 +1939,7 @@ impl GpuState {
             let tc = std::time::Instant::now();
             let sel = mo.sel_h.as_slice().map_err(gerr)?.to_vec();
             let mut on_cpu: Vec<(usize, f32)> = Vec::with_capacity(mo.k);
+            crate::activity::fire(li, (0..mo.k).map(|t| sel[t] as usize));
             for t in 0..mo.k {
                 let (e, w, slot) = (sel[t] as usize, f32::from_bits(sel[mo.k + t] as u32), sel[2 * mo.k + t]);
                 mo.counts[li * mo.ne + e] += 1.0;
@@ -2310,6 +2311,8 @@ impl GpuState {
                     mo.counts[li * mo.ne + e] += 1.0;
                 }
             }
+            let used: Vec<(usize, usize)> = by_expert.iter().enumerate().filter(|(_, v)| !v.is_empty()).map(|(e, v)| (e, v.len())).collect();
+            crate::activity::fire_counts(li, &used, t);
             let mut gpu_groups: Vec<(usize, i32)> = Vec::new();
             let mut stream_groups: Vec<usize> = Vec::new();
             let mut cpu_groups: Vec<(usize, Vec<(usize, f32)>)> = Vec::new();
