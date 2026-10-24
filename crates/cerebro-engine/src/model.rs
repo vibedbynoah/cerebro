@@ -168,6 +168,8 @@ pub struct Model {
     stream_map: std::sync::OnceLock<(Vec<Option<usize>>, Option<usize>)>,
     /// Hyper-connections and n-gram embeddings (hc.rs), for models that have them.
     pub hc: Option<crate::hc::HcModel>,
+    /// Gemma 4's per-layer kinds, per-layer inputs and extra norms (gemma4.rs).
+    pub g4: Option<crate::gemma4::G4Model>,
     /// GPU assist (gpu.rs Offload): matrices the GPU multiplies for a processor session.
     #[cfg(feature = "cuda")]
     offload: std::sync::OnceLock<std::sync::Mutex<crate::gpu::Offload>>,
@@ -176,7 +178,7 @@ pub struct Model {
     batch_gpu: std::sync::OnceLock<Option<std::sync::Mutex<crate::gpu::BatchGpu>>>,
 }
 
-fn vec_f32(g: &Gguf, name: &str) -> Result<Vec<f32>, Error> {
+pub(crate) fn vec_f32(g: &Gguf, name: &str) -> Result<Vec<f32>, Error> {
     let t = g.tensor(name)?;
     let mut out = vec![0f32; t.elements() as usize];
     dequant_row(t.dtype, g.bytes(t), &mut out);
@@ -184,7 +186,7 @@ fn vec_f32(g: &Gguf, name: &str) -> Result<Vec<f32>, Error> {
 }
 
 /// The architectures this engine runs (`general.architecture`): the app lists models by it.
-pub const ARCHITECTURES: &[&str] = &["qwen3", "qwen3moe", "qwen2", "llama", "qwen35", "qwen35moe", "qwen3vl", "qwen3tts", "qwen4exp"];
+pub const ARCHITECTURES: &[&str] = &["qwen3", "qwen3moe", "qwen2", "llama", "qwen35", "qwen35moe", "qwen3vl", "qwen3tts", "qwen4exp", "gemma4"];
 
 impl Model {
     /// Whether any attention or output matrix is Q8_0 (four-row dots only apply to those).
@@ -338,7 +340,8 @@ impl Model {
         if cfg.n_expert > 0 {
             crate::activity::reset(cfg.n_layer, cfg.n_expert);
         }
-        let m = Self { path: path.to_path_buf(), embed: Mat::of(embed_t), out_norm, layers, output, inv_freq, cfg, gguf: g, packs: Default::default(), stream_map: Default::default(), hc, rope_mscale: 1.0, ctx_extension: None, #[cfg(feature = "cuda")] offload: Default::default(), #[cfg(feature = "cuda")] batch_gpu: Default::default() };
+        let g4 = if cfg.arch == "gemma4" { Some(crate::gemma4::G4Model::load(&g, cfg.n_layer, cfg.eps)?) } else { None };
+        let m = Self { path: path.to_path_buf(), embed: Mat::of(embed_t), out_norm, layers, output, inv_freq, cfg, gguf: g, packs: Default::default(), stream_map: Default::default(), hc, g4, rope_mscale: 1.0, ctx_extension: None, #[cfg(feature = "cuda")] offload: Default::default(), #[cfg(feature = "cuda")] batch_gpu: Default::default() };
         let n = crate::switches::get(crate::switches::STREAM_LAYERS).max(0) as usize;
         if n > 0 {
             m.stream_from_drive(n);
@@ -1677,6 +1680,16 @@ impl Session {
         if common == prompt.len() {
             common -= 1;
         }
+        if m.g4.is_some() {
+            // Gemma 4: the cache of the common prefix stays; the rest is read token by token.
+            self.tokens.truncate(common);
+            let t = std::time::Instant::now();
+            for &tok in &prompt[common..] {
+                self.step(m, tok);
+            }
+            self.stats = Stats { prompt_tokens: prompt.len(), reused_tokens: common, prefill_ms: t.elapsed().as_secs_f64() * 1000.0, ..Default::default() };
+            return Ok(common);
+        }
         // A recurrent (DeltaNet) state holds everything up to the last token and cannot rewind:
         // reuse only an exact continuation, otherwise start over.
         if m.cfg.ssm.is_some() && common < self.tokens.len() {
@@ -1901,7 +1914,7 @@ impl Session {
         }
         // Hyper-connections (qwen4exp) have no GPU kernels yet; shared experts and DeltaNet MoE
         // layers run on the card with the routed experts split between it and the processor.
-        if m.hc.is_some() {
+        if m.hc.is_some() || m.g4.is_some() {
             return Err(Error::Unsupported("this model's layer types run on the processor for now".into()));
         }
         let mut g = crate::gpu::GpuState::load_with(m, max_ctx, force_layers)?;
@@ -2309,6 +2322,10 @@ impl Session {
 
     pub fn step(&mut self, m: &Model, token: u32) {
         crate::pool::for_writing(self.tokens.len());
+        if let Some(g4) = m.g4.as_ref() {
+            self.step_gemma4(m, g4, token);
+            return;
+        }
         #[cfg(feature = "portable")]
         if let Some(p) = self.portable.as_mut() {
             let pos = self.tokens.len();
@@ -2641,6 +2658,137 @@ impl Session {
         if !on_gpu {
             self.head(m);
         }
+    }
+
+    /// One Gemma 4 token on the processor (gemma4.rs has the architecture): per-layer inputs, then
+    /// each layer's attention (sliding or global, possibly over another layer's cache), sandwich
+    /// norms, GELU feed-forward and per-layer input, scaled; then the soft-capped head.
+    fn step_gemma4(&mut self, m: &Model, g4: &crate::gemma4::G4Model, token: u32) {
+        use crate::gemma4::{gelu, rms, rope};
+        let c = &m.cfg;
+        let (dim, eps, pos) = (c.dim, c.eps, self.tokens.len());
+        let (nh, nkv, ple, nl) = (g4.n_head, g4.n_kv, g4.ple, c.n_layer);
+        m.embed_row(token, &mut self.x);
+        let sc = (dim as f32).sqrt();
+        self.x.iter_mut().for_each(|v| *v *= sc);
+        // Per-layer inputs: the token's own rows (x sqrt(ple)) plus the normed projection of the
+        // scaled embedding (x 1/sqrt(dim)), both x 1/sqrt(2).
+        let mut pl = vec![0f32; nl * ple];
+        dequant_row(g4.ple_embd.dtype, m.row(&g4.ple_embd, token as usize), &mut pl);
+        let mut pp = vec![0f32; nl * ple];
+        self.qa_dim.quantize(&self.x);
+        m.matvec(&g4.ple_proj, &self.x, &self.qa_dim, &mut pp);
+        let (ps, ts) = (1.0 / sc, (ple as f32).sqrt());
+        for l in 0..nl {
+            let chunk = &mut pp[l * ple..(l + 1) * ple];
+            chunk.iter_mut().for_each(|v| *v *= ps);
+            rms(chunk, &g4.ple_proj_norm, eps);
+            for j in 0..ple {
+                pl[l * ple + j] = (chunk[j] + pl[l * ple + j] * ts) * std::f32::consts::FRAC_1_SQRT_2;
+            }
+        }
+        let mut att = vec![0f32; nh * g4.layers.iter().map(|l| l.hd).max().unwrap_or(0)];
+        let mut ple_g = vec![0f32; ple];
+        let mut qa_ple = QAct::new(ple);
+        for (li, (l, gl)) in m.layers.iter().zip(&g4.layers).enumerate() {
+            let hd = gl.hd;
+            let (qd, kd) = (nh * hd, nkv * hd);
+            let base = if gl.swa { g4.base_swa } else { g4.base };
+            let factors = (!gl.swa).then_some(&g4.rope_freqs[..hd / 2]);
+            rmsnorm(&self.x, &l.attn_norm, eps, &mut self.h);
+            self.qa_dim.quantize(&self.h);
+            let own_kv = li < g4.kv_layers;
+            if own_kv {
+                m.matvec_many(&mut [(&l.q, &mut self.q[..qd]), (&l.k, &mut self.kb[..kd]), (&l.v, &mut self.vb[..kd])], &self.h, &self.qa_dim);
+            } else {
+                m.matvec(&l.q, &self.h, &self.qa_dim, &mut self.q[..qd]);
+            }
+            let qn = l.q_norm.as_deref().unwrap_or(&[]);
+            for hq in self.q[..qd].chunks_exact_mut(hd) {
+                rms(hq, qn, eps);
+                rope(hq, pos, base, factors);
+            }
+            if own_kv {
+                let kn = l.k_norm.as_deref().unwrap_or(&[]);
+                for (hk, hv) in self.kb[..kd].chunks_exact_mut(hd).zip(self.vb[..kd].chunks_exact_mut(hd)) {
+                    rms(hk, kn, eps);
+                    rope(hk, pos, base, factors);
+                    rms(hv, &[], eps);
+                }
+                let o = pos * kd;
+                for i in 0..kd {
+                    self.k[li][o + i] = crate::quant::to_f16(self.kb[i]);
+                    self.v[li][o + i] = crate::quant::to_f16(self.vb[i]);
+                }
+            }
+            // Attention over the cache of `kv_from` (scale 1: q and k are normed), the last `swa`
+            // positions for a sliding layer.
+            let (kc, vc) = (&self.k[gl.kv_from], &self.v[gl.kv_from]);
+            let start = if gl.swa { (pos + 1).saturating_sub(g4.swa) } else { 0 };
+            let group = nh / nkv;
+            let q = &self.q[..qd];
+            use rayon::prelude::*;
+            att[..qd].par_chunks_mut(hd).enumerate().for_each(|(h, out)| {
+                let kh = h / group;
+                let qh = &q[h * hd..(h + 1) * hd];
+                let mut sc = Vec::with_capacity(pos + 1 - start);
+                let mut mx = f32::NEG_INFINITY;
+                for p in start..=pos {
+                    let kr = &kc[p * kd + kh * hd..p * kd + (kh + 1) * hd];
+                    let s: f32 = qh.iter().zip(kr).map(|(a, b)| a * crate::quant::f16_to_f32(*b)).sum();
+                    mx = mx.max(s);
+                    sc.push(s);
+                }
+                let mut sum = 0f32;
+                sc.iter_mut().for_each(|s| {
+                    *s = (*s - mx).exp();
+                    sum += *s;
+                });
+                out.iter_mut().for_each(|v| *v = 0.0);
+                for (i, p) in (start..=pos).enumerate() {
+                    let w = sc[i] / sum;
+                    let vr = &vc[p * kd + kh * hd..p * kd + (kh + 1) * hd];
+                    out.iter_mut().zip(vr).for_each(|(o, v)| *o += w * crate::quant::f16_to_f32(*v));
+                }
+            });
+            let mut qa_att = QAct::new(qd);
+            qa_att.quantize(&att[..qd]);
+            m.matvec(&l.o, &att[..qd], &qa_att, &mut self.tmp[..dim]);
+            rms(&mut self.tmp[..dim], &gl.post_attn_norm, eps);
+            self.x.iter_mut().zip(&self.tmp[..dim]).for_each(|(x, t)| *x += t);
+            // Feed-forward: GELU(gate) * up, down, normed.
+            let Ffn::Dense { gate, up, down } = &l.ffn else { unreachable!("gemma4 layers are dense") };
+            rmsnorm(&self.x, &l.ffn_norm, eps, &mut self.h);
+            self.qa_dim.quantize(&self.h);
+            let ff = gate.rows;
+            m.matvec_many(&mut [(gate, &mut self.g[..ff]), (up, &mut self.u[..ff])], &self.h, &self.qa_dim);
+            for i in 0..ff {
+                self.g[i] = gelu(self.g[i]) * self.u[i];
+            }
+            let mut qa_ff = QAct::new(ff);
+            qa_ff.quantize(&self.g[..ff]);
+            m.matvec(down, &self.g[..ff], &qa_ff, &mut self.tmp[..dim]);
+            rms(&mut self.tmp[..dim], &gl.post_ffn_norm, eps);
+            self.x.iter_mut().zip(&self.tmp[..dim]).for_each(|(x, t)| *x += t);
+            // Per-layer input: GELU(gate x) * this layer's input, projected back, normed, added.
+            self.qa_dim.quantize(&self.x);
+            m.matvec(&gl.inp_gate, &self.x, &self.qa_dim, &mut ple_g);
+            for j in 0..ple {
+                ple_g[j] = gelu(ple_g[j]) * pl[li * ple + j];
+            }
+            qa_ple.quantize(&ple_g);
+            m.matvec(&gl.proj, &ple_g, &qa_ple, &mut self.tmp[..dim]);
+            rms(&mut self.tmp[..dim], &gl.post_norm, eps);
+            for i in 0..dim {
+                self.x[i] = (self.x[i] + self.tmp[i]) * gl.out_scale;
+            }
+        }
+        self.head(m);
+        if g4.softcap > 0.0 {
+            let cap = g4.softcap;
+            self.logits.iter_mut().for_each(|v| *v = cap * (*v / cap).tanh());
+        }
+        self.tokens.push(token);
     }
 
     fn head(&mut self, m: &Model) {

@@ -72,7 +72,8 @@ fn main() {
     }
     for p in prompts {
         let turns: Vec<(&str, &str)> = history.iter().flat_map(|(u, a)| [("user", u.as_str()), ("assistant", a.as_str())]).chain([("user", p.as_str())]).collect();
-        let ids = tok.encode(&chatml(None, &turns, think));
+        // --raw: the prompt is already in the model's own chat format (Gemma 4: <|turn>user ...).
+        let ids = if args.iter().any(|a| a == "--raw") { tok.encode(&p) } else { tok.encode(&chatml(None, &turns, think)) };
         let reused = session.feed(&model, &ids).unwrap_or_else(|e| die(e.to_string()));
         let mut out = Vec::new();
         let td = Instant::now();

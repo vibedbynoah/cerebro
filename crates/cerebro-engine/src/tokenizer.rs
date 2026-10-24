@@ -1,6 +1,8 @@
-//! Byte-level BPE tokenizer built from GGUF metadata (`tokenizer.ggml.*`), as used by the Qwen,
-//! Llama 3 and GPT families: text is split by the model's pre-tokenizer pattern, each piece is mapped
-//! to byte symbols, then merged by rank. Special tokens (`<|im_start|>` …) are matched first.
+//! BPE tokenizer built from GGUF metadata (`tokenizer.ggml.*`). Byte-level ("gpt2": Qwen, Llama 3,
+//! GPT): text is split by the model's pre-tokenizer pattern, each piece is mapped to byte symbols,
+//! then merged by rank. SentencePiece-style ("gemma4"): spaces become U+2581, the text is split only
+//! at newlines, characters are merged by rank, and a character outside the vocabulary is spelled
+//! as its UTF-8 bytes (`<0xNN>` tokens). Special tokens (`<|im_start|>` …) are matched first.
 
 use std::collections::HashMap;
 
@@ -21,6 +23,10 @@ pub struct Tokenizer {
     pattern: Regex,
     pub eos: u32,
     pub eot: Vec<u32>,
+    /// SentencePiece-style BPE (gemma4); byte-level otherwise.
+    spm: bool,
+    /// Token prepended to every encoding (Gemma 4 always starts with `<bos>`).
+    pub bos: Option<u32>,
 }
 
 fn bytes_to_unicode() -> [char; 256] {
@@ -44,9 +50,10 @@ fn bytes_to_unicode() -> [char; 256] {
 impl Tokenizer {
     pub fn from_gguf(g: &Gguf) -> Result<Self, Error> {
         let model = g.str("tokenizer.ggml.model").unwrap_or("gpt2");
-        if model != "gpt2" {
+        if model != "gpt2" && model != "gemma4" {
             return Err(Error::Unsupported(format!("tokenizer type {model}")));
         }
+        let spm = model == "gemma4";
         let arr = |k: &str| g.meta.get(k).and_then(Value::as_array).ok_or_else(|| Error::Format(format!("missing {k}")));
         let vocab: Vec<String> = arr("tokenizer.ggml.tokens")?.iter().map(|v| v.as_str().unwrap_or("").to_owned()).collect();
         let types: Vec<u64> = g.meta.get("tokenizer.ggml.token_type").and_then(Value::as_array).map(|a| a.iter().map(|v| v.as_u64().unwrap_or(1)).collect()).unwrap_or_default();
@@ -69,15 +76,17 @@ impl Tokenizer {
         let byte_dec = byte_enc.iter().enumerate().map(|(b, c)| (*c, b as u8)).collect();
         let eos = g.u64("tokenizer.ggml.eos_token_id").unwrap_or(0) as u32;
         let mut eot = vec![eos];
-        for name in ["<|im_end|>", "<|endoftext|>", "<|eot_id|>", "<end_of_turn>"] {
+        for name in ["<|im_end|>", "<|endoftext|>", "<|eot_id|>", "<end_of_turn>", "<turn|>"] {
             if let Some(&id) = ids.get(name) {
                 if !eot.contains(&id) {
                     eot.push(id);
                 }
             }
         }
-        let pattern = Regex::new(QWEN2_PATTERN).map_err(|e| Error::Format(e.to_string()))?;
-        Ok(Self { vocab, ids, ranks, specials, byte_enc, byte_dec, pattern, eos, eot })
+        let pattern = Regex::new(if spm { r"[^\n]+|\n+" } else { QWEN2_PATTERN }).map_err(|e| Error::Format(e.to_string()))?;
+        // llama.cpp always adds <bos> for Gemma 4, whatever the file says.
+        let bos = spm.then(|| g.u64("tokenizer.ggml.bos_token_id").ok().map(|v| v as u32)).flatten();
+        Ok(Self { vocab, ids, ranks, specials, byte_enc, byte_dec, pattern, eos, eot, spm, bos })
     }
 
     pub fn vocab_size(&self) -> usize {
@@ -86,6 +95,11 @@ impl Tokenizer {
 
     pub fn encode(&self, text: &str) -> Vec<u32> {
         let mut out = Vec::new();
+        if let Some(b) = self.bos {
+            if !text.starts_with("<bos>") {
+                out.push(b);
+            }
+        }
         let mut rest = text;
         while !rest.is_empty() {
             // Next special token, if any.
@@ -108,7 +122,7 @@ impl Tokenizer {
 
     fn encode_plain(&self, text: &str, out: &mut Vec<u32>) {
         for m in self.pattern.find_iter(text).flatten() {
-            let piece: String = m.as_str().bytes().map(|b| self.byte_enc[b as usize]).collect();
+            let piece: String = if self.spm { m.as_str().replace(' ', "\u{2581}") } else { m.as_str().bytes().map(|b| self.byte_enc[b as usize]).collect() };
             if let Some(&id) = self.ids.get(&piece) {
                 out.push(id);
                 continue;
@@ -131,10 +145,18 @@ impl Tokenizer {
                 if let Some(&id) = self.ids.get(&p) {
                     out.push(id);
                 } else {
-                    // Fall back to single bytes (always in a byte-level vocabulary).
+                    // Fall back to single characters (always in a byte-level vocabulary), or to
+                    // their UTF-8 bytes as <0xNN> tokens (SentencePiece byte fallback).
                     for c in p.chars() {
                         if let Some(&id) = self.ids.get(&c.to_string()) {
                             out.push(id);
+                        } else if self.spm {
+                            let mut buf = [0u8; 4];
+                            for b in c.encode_utf8(&mut buf).bytes() {
+                                if let Some(&id) = self.ids.get(&format!("<0x{b:02X}>")) {
+                                    out.push(id);
+                                }
+                            }
                         }
                     }
                 }
@@ -149,6 +171,14 @@ impl Tokenizer {
             let Some(t) = self.vocab.get(id as usize) else { continue };
             if self.specials.iter().any(|(_, s)| *s == id) {
                 out.extend_from_slice(t.as_bytes());
+                continue;
+            }
+            if self.spm {
+                // <0xNN> is one byte; U+2581 is a space.
+                match t.strip_prefix("<0x").and_then(|h| h.strip_suffix('>')).and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                    Some(b) if t.len() == 6 => out.push(b),
+                    _ => out.extend_from_slice(t.replace('\u{2581}', " ").as_bytes()),
+                }
                 continue;
             }
             for c in t.chars() {

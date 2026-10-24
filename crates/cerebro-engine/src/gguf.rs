@@ -61,6 +61,14 @@ impl Value {
             _ => None,
         }
     }
+    pub fn as_bool(&self) -> Option<bool> {
+        match *self {
+            Value::Bool(v) => Some(v),
+            Value::U8(v) => Some(v != 0),
+            _ => None,
+        }
+    }
+
     pub fn as_array(&self) -> Option<&[Value]> {
         match self {
             Value::Array(a) => Some(a),

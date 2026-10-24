@@ -12,6 +12,7 @@ pub mod chat;
 pub mod cluster;
 pub mod diffusion;
 pub mod experts;
+pub mod gemma4;
 pub mod gguf;
 #[cfg(feature = "cuda")]
 pub mod gpu;
