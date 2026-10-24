@@ -175,19 +175,23 @@ struct Conv {
     ic: usize,
     k: usize,
     stride: usize,
+    /// Padding only below and to the right (the VAE encoder's downsampling: diffusers pads
+    /// (0, 1, 0, 1) and convolves without padding).
+    one_sided: bool,
 }
 
 impl Conv {
     fn load(st: &SafeTensors, name: &str, stride: usize) -> Result<Self, Error> {
         let s = st.shape(&format!("{name}.weight"))?.to_vec();
-        Ok(Conv { lin: st.lin(name)?, ic: s[1], k: s[2], stride })
+        Ok(Conv { lin: st.lin(name)?, ic: s[1], k: s[2], stride, one_sided: false })
     }
 
     /// x [h][w][ic] -> ([oh][ow][oc], oh, ow); padding k/2.
     fn run(&self, x: &[f32], h: usize, w: usize) -> (Vec<f32>, usize, usize) {
         let (k, s, ic) = (self.k, self.stride, self.ic);
-        let pad = k / 2;
-        let (oh, ow) = ((h + 2 * pad - k) / s + 1, (w + 2 * pad - k) / s + 1);
+        let pad = if self.one_sided { 0 } else { k / 2 };
+        let extra = if self.one_sided { 1 } else { 2 * pad };
+        let (oh, ow) = ((h + extra - k) / s + 1, (w + extra - k) / s + 1);
         let oc = self.lin.rows;
         let mut out = vec![0f32; oh * ow * oc];
         if k == 1 && s == 1 {
@@ -845,6 +849,100 @@ impl VaeDecoder {
     }
 }
 
+// ---- VAE encoder (image to latents, for editing an image) -----------------------------------------
+
+/// The VAE's encoder half: an image [H][W][3] in -1..1 to latents [H/8][W/8][4] (the mean of the
+/// latent distribution, times the scaling factor), as diffusers' AutoencoderKL.encode does.
+pub struct VaeEncoder {
+    conv_in: Conv,
+    down: Vec<(Vec<Resnet>, Option<Conv>)>,
+    mid: (Resnet, (Vec<f32>, Vec<f32>), Attn, Resnet),
+    norm_out: (Vec<f32>, Vec<f32>),
+    conv_out: Conv,
+    quant: Option<Conv>,
+    scaling: f32,
+}
+
+impl VaeEncoder {
+    pub fn load(path: &Path, scaling: f32) -> Result<Self, Error> {
+        let st = SafeTensors::open(path)?;
+        let eps = 1e-6;
+        let p = "encoder";
+        let mut down = Vec::new();
+        for i in 0.. {
+            let b = format!("{p}.down_blocks.{i}");
+            if !st.has(&format!("{b}.resnets.0.norm1.weight")) {
+                break;
+            }
+            let mut resnets = Vec::new();
+            for j in 0.. {
+                if !st.has(&format!("{b}.resnets.{j}.norm1.weight")) {
+                    break;
+                }
+                resnets.push(Resnet::load(&st, &format!("{b}.resnets.{j}"), eps)?);
+            }
+            let d = if st.has(&format!("{b}.downsamplers.0.conv.weight")) {
+                let mut c = Conv::load(&st, &format!("{b}.downsamplers.0.conv"), 2)?;
+                c.one_sided = true;
+                Some(c)
+            } else {
+                None
+            };
+            down.push((resnets, d));
+        }
+        if down.is_empty() {
+            return Err(Error::Unsupported("this image model's VAE has no encoder, so it cannot edit images".into()));
+        }
+        let a = format!("{p}.mid_block.attentions.0");
+        Ok(VaeEncoder {
+            conv_in: Conv::load(&st, &format!("{p}.conv_in"), 1)?,
+            down,
+            mid: (
+                Resnet::load(&st, &format!("{p}.mid_block.resnets.0"), eps)?,
+                st.norm(&format!("{a}.group_norm"))?,
+                Attn { q: st.lin(&format!("{a}.to_q"))?, k: st.lin(&format!("{a}.to_k"))?, v: st.lin(&format!("{a}.to_v"))?, out: st.lin(&format!("{a}.to_out.0"))? },
+                Resnet::load(&st, &format!("{p}.mid_block.resnets.1"), eps)?,
+            ),
+            norm_out: st.norm(&format!("{p}.conv_norm_out"))?,
+            conv_out: Conv::load(&st, &format!("{p}.conv_out"), 1)?,
+            quant: if st.has("quant_conv.weight") { Some(Conv::load(&st, "quant_conv", 1)?) } else { None },
+            scaling,
+        })
+    }
+
+    /// Image [h][w][3] in -1..1 (h, w multiples of 8) to scaled latents [h/8][w/8][4].
+    pub fn run(&self, img: &[f32], h: usize, w: usize) -> Vec<f32> {
+        let (mut x, mut hh, mut ww) = self.conv_in.run(img, h, w);
+        let mut c = self.conv_in.lin.rows;
+        for (resnets, d) in &self.down {
+            for r in resnets {
+                x = r.run(&x, hh, ww, c, None);
+                c = r.c1.lin.rows;
+            }
+            if let Some(d) = d {
+                let (y, nh, nw) = d.run(&x, hh, ww);
+                (x, hh, ww) = (y, nh, nw);
+            }
+        }
+        x = self.mid.0.run(&x, hh, ww, c, None);
+        {
+            let t = group_norm(&x, c, 32, &self.mid.1, 1e-6);
+            let a = self.mid.2.run(&t, hh * ww, None, 1);
+            x.iter_mut().zip(&a).for_each(|(p, q)| *p += q);
+        }
+        x = self.mid.3.run(&x, hh, ww, c, None);
+        let mut t = group_norm(&x, c, 32, &self.norm_out, 1e-6);
+        silu_all(&mut t);
+        let mut m = self.conv_out.run(&t, hh, ww).0;
+        if let Some(q) = &self.quant {
+            m = q.run(&m, hh, ww).0;
+        }
+        // Moments are [mean (4) | log variance (4)] per pixel: the mean, scaled.
+        let oc = m.len() / (hh * ww);
+        (0..hh * ww).flat_map(|i| (0..4).map(move |k| (i, k))).map(|(i, k)| m[i * oc + k] * self.scaling).collect()
+    }
+}
+
 // ---- scheduler and pipeline ----------------------------------------------------------------------
 
 /// The Euler scheduler with "trailing" spacing (scaled-linear betas 0.00085..0.012 over 1000):
@@ -873,6 +971,9 @@ pub fn euler_schedule(steps: usize) -> Vec<(f32, f32)> {
 /// is one this backend runs on, otherwise for the processor.
 pub struct Diffusion {
     pub tokenizer: ClipTokenizer,
+    /// The VAE weights, for the encoder an edit loads on first use.
+    vae_path: std::path::PathBuf,
+    encoder: std::sync::OnceLock<Result<VaeEncoder, String>>,
     /// The VAE's latent scaling factor.
     pub scaling: f32,
     cpu: Option<(TextEncoder, UNet, VaeDecoder)>,
@@ -907,7 +1008,7 @@ impl Diffusion {
                     // Slice sums in f16: 13% faster on GeForce cards, and the image matches the f32
                     // reference to cosine 1.000000 (`sdcheck`). CEREBRO_HALF_ACC=0 turns it off.
                     g.set_half_accumulation(std::env::var("CEREBRO_HALF_ACC").map_or(true, |v| v != "0"));
-                    return Ok(Diffusion { tokenizer, scaling, cpu: None, gpu: Some(parts) });
+                    return Ok(Diffusion { tokenizer, scaling, vae_path: pick("vae", "diffusion_pytorch_model"), encoder: std::sync::OnceLock::new(), cpu: None, gpu: Some(parts) });
                 }
                 Err(e) => eprintln!("image model on the graphics card: {e}; using the processor"),
             }
@@ -915,6 +1016,8 @@ impl Diffusion {
         Ok(Diffusion {
             tokenizer,
             scaling,
+            vae_path: pick("vae", "diffusion_pytorch_model"),
+            encoder: std::sync::OnceLock::new(),
             cpu: Some((text()?, unet()?, vae()?)),
             #[cfg(feature = "cuda")]
             gpu: None,
@@ -979,6 +1082,37 @@ impl Diffusion {
         let init = (sched[0].1 * sched[0].1 + 1.0).sqrt();
         lat.iter_mut().for_each(|v| *v *= init);
         self.finish(lat, lh, &ctx, ids.len(), &sched)
+    }
+
+    /// An edit of `image` (RGB, row by row, `size` x `size`, 0..255) following `prompt`: the image
+    /// is encoded, noised to `strength` (0 keeps it, 1 starts from noise) and denoised over the last
+    /// `steps` steps of a schedule stretched to steps / strength, as diffusers' img2img does.
+    pub fn edit(&self, prompt: &str, image: &[u8], size: usize, steps: usize, strength: f32, seed: u64) -> Result<Vec<u8>, Error> {
+        if size % 64 != 0 || size == 0 || image.len() != size * size * 3 {
+            return Err(Error::Request("the image must be size x size RGB with size a multiple of 64".into()));
+        }
+        let enc = self.encoder.get_or_init(|| VaeEncoder::load(&self.vae_path, self.scaling).map_err(|e| e.to_string()));
+        let enc = enc.as_ref().map_err(|e| Error::Unsupported(e.clone()))?;
+        let x: Vec<f32> = image.iter().map(|&v| v as f32 / 127.5 - 1.0).collect();
+        let z = enc.run(&x, size, size);
+        let ids = self.tokenizer.encode(prompt);
+        let ctx = self.encode_text(&ids)?;
+        let lh = size / 8;
+        let strength = strength.clamp(0.05, 1.0);
+        let steps = steps.max(1);
+        let total = ((steps as f32 / strength).round() as usize).max(steps);
+        let full = euler_schedule(total);
+        let sched = &full[total - steps..];
+        let mut rng = crate::tts::Rng::new(seed);
+        let sigma = sched[0].1;
+        let lat: Vec<f32> = z
+            .iter()
+            .map(|v| {
+                let (u1, u2) = (rng.next_f32().max(1e-7), rng.next_f32());
+                v + sigma * (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
+            })
+            .collect();
+        self.finish(lat, lh, &ctx, ids.len(), sched)
     }
 
     /// Denoises latents (pixel-major [h][w][4], already scaled) over `sched` and decodes them.
