@@ -112,14 +112,23 @@ pub fn avatar(owner: &str) -> Result<String, String> {
     Ok(url)
 }
 
-/// Repositories with GGUF files matching `query`, most downloaded first.
-pub fn search(query: &str) -> Result<Vec<HubRepo>, String> {
+/// How a search may be ordered (Hugging Face's own sort keys).
+pub const SORTS: [&str; 5] = ["downloads", "trendingScore", "likes", "createdAt", "lastModified"];
+
+/// Repositories with GGUF files matching `query` (empty: all of them), ordered by `sort` (one of
+/// SORTS; most downloaded first by default).
+pub fn search(query: &str, sort: Option<&str>) -> Result<Vec<HubRepo>, String> {
     let q = query.trim();
     if q.len() > 120 {
         return Err("That search is too long.".into());
     }
+    let sort = match sort {
+        None => "downloads",
+        Some(s) if SORTS.contains(&s) => s,
+        Some(_) => return Err("Not a way to sort the search.".into()),
+    };
     let resp = client()?
-        .get(format!("{HF}/api/models?search={}&filter=gguf&sort=downloads&direction=-1&limit=40", encode(q)))
+        .get(format!("{HF}/api/models?search={}&filter=gguf&sort={sort}&direction=-1&limit=48", encode(q)))
         .send()
         .map_err(|_| "Hugging Face could not be reached. Check the connection.".to_owned())?;
     if !resp.status().is_success() {

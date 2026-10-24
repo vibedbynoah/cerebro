@@ -1,4 +1,5 @@
-import { createEffect, createMemo, createSignal, lazy, Match, on, onCleanup, onMount, Show, Switch, type Accessor, type JSX } from "solid-js";
+import { BrandLockup } from "./components/Brand";
+import { createEffect, createMemo, createSignal, lazy, Match, on, onCleanup, onMount, Show, Suspense, Switch, type Accessor, type JSX } from "solid-js";
 import { ChatSearch } from "./components/ChatSearch";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import { Sidebar } from "./components/Sidebar";
@@ -26,6 +27,8 @@ import { Home } from "./screens/Home";
 // Every screen except Home loads on demand, so first paint carries only the frame and Home; each
 // screen is its own chunk under check-bundle's per-chunk cap. No <Suspense> around the screens: it
 // would also catch each screen's own data loading and hold back its UI (the Models drawer link).
+// The title bar's live logo loads after first paint (the static lockup shows until then).
+const LiveLockup = lazy(() => import("./components/LiveMark").then((m) => ({ default: m.LiveLockup })));
 const named = <K extends string>(load: () => Promise<Record<K, (p: never) => JSX.Element>>, key: K) =>
   lazy(() => load().then((m) => ({ default: m[key] as (p: any) => JSX.Element })));
 const About = named(() => import("./screens/About"), "About");
@@ -238,7 +241,17 @@ function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Eleme
         <a class="skip-link" href="#main" onClick={(e) => { e.preventDefault(); main?.focus(); }}>
           Skip to content
         </a>
-        <TitleBar platform={props.platform} onOpenPalette={openPalette} paletteOpen={paletteOpen()} status={<StatusPill />} />
+        <TitleBar
+          platform={props.platform}
+          onOpenPalette={openPalette}
+          paletteOpen={paletteOpen()}
+          status={<StatusPill />}
+          brand={
+            <Suspense fallback={<BrandLockup height={24} class="titlebar__lockup" />}>
+              <LiveLockup height={24} class="titlebar__lockup" />
+            </Suspense>
+          }
+        />
         <Sidebar route={router.route()} collapsed={collapsed()} onToggle={toggleSidebar} />
         <main id="main" class="main" tabindex="-1" ref={main}>
           <Switch>

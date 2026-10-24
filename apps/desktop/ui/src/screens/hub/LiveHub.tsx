@@ -14,11 +14,24 @@ import { licenceForModel } from "../../lib/model-licences";
 import { estimateFor, type MemoryModel } from "../../lib/memory-estimate";
 import { contextLabel } from "../../onboarding/autoconfig";
 import { useService } from "../../service/context";
-import type { HubDownloadEvent, HubFile, HubFileMeta, HubRepo } from "../../service/types";
+import type { HubDownloadEvent, HubFile, HubFileMeta, HubRepo, HubSort } from "../../service/types";
 import { hrefFor } from "../../lib/routes";
 import { useAppState } from "../../state";
 
 const GIB = 1024 ** 3;
+
+/** How search results can be ordered: Cerebro's best match, or one of Hugging Face's own orders. */
+const ORDERS: ReadonlyArray<{ id: "relevance" | HubSort; label: string }> = [
+  { id: "relevance", label: "Best match" },
+  { id: "trendingScore", label: "Trending" },
+  { id: "downloads", label: "Most downloaded" },
+  { id: "likes", label: "Most liked" },
+  { id: "createdAt", label: "Newest" },
+  { id: "lastModified", label: "Recently updated" },
+];
+
+/** Publishers one click away (searches match their account name). */
+const PUBLISHERS: readonly string[] = ["Qwen", "unsloth", "bartowski", "google", "mistralai", "microsoft", "meta-llama", "deepseek-ai", "openai", "nvidia", "ibm-granite", "lmstudio-community"];
 const gib = (b: number) => (b / GIB).toFixed(b >= 10 * GIB ? 1 : 2);
 
 /** The Hub sizes every file with a full-precision KV cache. */
@@ -48,11 +61,12 @@ export function LiveHub(): JSX.Element {
   const [submitted, setSubmitted] = createSignal("");
   const [repo, setRepo] = createSignal<string | null>(null);
   const [verifiedOnly, setVerifiedOnly] = createSignal(false);
+  const [order, setOrder] = createSignal<"relevance" | HubSort>("relevance");
   const [hw] = createResource(() => service.detectHardware().catch(() => undefined));
   const offline = () => app.settings()?.offlineMode === true || app.network() !== "online";
   const downloadsOff = () => app.settings()?.allowModelDownloads === false;
   const blocked = () => offline() || downloadsOff();
-  const search = () => (blocked() || !submitted() ? undefined : submitted());
+  const search = () => (blocked() || !submitted() ? undefined : { q: submitted(), sort: order() });
   const runSearch = (q: string) => {
     if (blocked()) return;
     setQuery(q);
@@ -62,7 +76,20 @@ export function LiveHub(): JSX.Element {
   const vramGiB = () => hw()?.gpu?.vramTotalGiB ?? 0;
   const ramGiB = () => hw()?.ramTotalGiB ?? 0;
   const filesFor = () => (blocked() ? undefined : repo());
-  const [results] = createResource(search, (q) => service.hubSearch!(q));
+  const [results] = createResource(search, (k) => service.hubSearch!(k.q, k.sort === "relevance" ? undefined : k.sort));
+  // The front page's live lists: what is trending on Hugging Face now, and the all-time favourites.
+  const browse = (sort: HubSort) => () => (blocked() || submitted() || !service.hubSearch ? undefined : sort);
+  const [trending] = createResource(browse("trendingScore"), (s) => service.hubSearch!("", s).catch(() => [] as HubRepo[]));
+  const [popular] = createResource(browse("downloads"), (s) => service.hubSearch!("", s).catch(() => [] as HubRepo[]));
+  /** Opens one repository: searches for it and shows its files. */
+  const openRepo = (id: string) => {
+    runSearch(id);
+    setRepo(id);
+  };
+  let filesPane: HTMLElement | undefined;
+  createEffect(() => {
+    if (repo()) queueMicrotask(() => filesPane?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  });
   const [files, { refetch }] = createResource(filesFor, (r) => service.hubFiles!(r));
   const selected = () => (results() ?? []).find((r) => r.id === repo()) ?? null;
   const [progress, setProgress] = createSignal<Record<string, { done: number; total: number; bps: number; error?: string; path?: string }>>({});
@@ -73,7 +100,8 @@ export function LiveHub(): JSX.Element {
   /** The results as they are shown: the best match first, and at equal relevance the publishers on
    *  Cerebro's list before the rest. */
   const shown = createMemo(() => {
-    const sorted = sortRepos(results() ?? [], submitted());
+    // Hugging Face's own orders are kept as they come; "Best match" ranks by relevance.
+    const sorted = order() === "relevance" ? sortRepos(results() ?? [], submitted()) : (results() ?? []);
     return verifiedOnly() ? sorted.filter((r) => isVerified(r.id)) : sorted;
   });
 
@@ -205,6 +233,27 @@ export function LiveHub(): JSX.Element {
           </button>
         </Show>
       </div>
+      <div class="livehub__tools">
+        <label class="livehub__order">
+          <span>Order</span>
+          <select class="input input--sm" value={order()} disabled={blocked()} onChange={(e) => setOrder(e.currentTarget.value as "relevance" | HubSort)}>
+            <For each={ORDERS}>{(o) => <option value={o.id}>{o.label}</option>}</For>
+          </select>
+        </label>
+        <div class="livehub__chips livehub__publishers" role="group" aria-label="Publishers">
+          <span class="livehub__muted">Publishers</span>
+          <For each={PUBLISHERS}>
+            {(p) => (
+              <button type="button" class="chip livehub__chip" aria-pressed={submitted() === p} disabled={blocked()} onClick={() => runSearch(p)}>
+                {p}
+              </button>
+            )}
+          </For>
+        </div>
+        <a class="text-link livehub__hf" href="https://huggingface.co/models?library=gguf&sort=trending" target="_blank" rel="noopener noreferrer">
+          Browse GGUF models on huggingface.co
+        </a>
+      </div>
       <Show when={!submitted()}>
         <section class="livehub__picks" aria-labelledby="picks-title">
           <h2 id="picks-title">Recommended for this computer</h2>
@@ -256,6 +305,8 @@ export function LiveHub(): JSX.Element {
             </Show>
           </Show>
         </section>
+        <RepoGrid title="Trending now" id="trending-title" note="What people are downloading on Hugging Face this week." repos={trending()} loading={trending.loading} onOpen={openRepo} />
+        <RepoGrid title="Most downloaded" id="popular-title" note="The most downloaded GGUF models of all time." repos={popular()} loading={popular.loading} onOpen={openRepo} />
         <Show when={service.hubPipelineFiles}>
           <section class="livehub__picks" aria-labelledby="featured-title">
             <h2 id="featured-title">Featured image models</h2>
@@ -303,11 +354,11 @@ export function LiveHub(): JSX.Element {
           <Show when={!results.loading} fallback={<p class="livehub__muted">Searching…</p>}>
             <Show when={!results.error} fallback={<p class="notice">{String(results.error?.message ?? results.error)}</p>}>
               <Show when={shown().length > 0} fallback={<p class="livehub__muted">{verifiedOnly() ? "No repository from a verified publisher matches this search." : "No GGUF repositories match."}</p>}>
-                <ul>
+                <ul class="livehub__repo-grid">
                   <For each={shown()}>
                     {(r: HubRepo) => (
                       <li>
-                        <button type="button" class="livehub__repo" aria-pressed={repo() === r.id} onClick={() => setRepo(r.id)}>
+                        <button type="button" class="livehub__repo card" aria-pressed={repo() === r.id} onClick={() => setRepo(r.id)}>
                           <FamilyTile name={r.id} owner={r.author} size={34} />
                           <span class="livehub__repo-body">
                           <span class="livehub__repo-name">
@@ -331,10 +382,13 @@ export function LiveHub(): JSX.Element {
             </Show>
           </Show>
         </section>
-        <section class="livehub__files" aria-label="Files">
+        <section class="livehub__files" aria-label="Files" ref={filesPane}>
           <Show when={repo()} fallback={<p class="livehub__muted">Pick a repository to see its files.</p>}>
             <div class="livehub__repo-head">
               <h2 class="livehub__title">{repo()}</h2>
+              <a class="text-link" href={`https://huggingface.co/${repo()}`} target="_blank" rel="noopener noreferrer">
+                Open on Hugging Face
+              </a>
               <Show when={selected() ? verifiedPublisher(selected()!.id) : null}>
                 {(v) => <VerifiedBadge publisher={v().name} />}
               </Show>
@@ -500,6 +554,43 @@ export function LiveHub(): JSX.Element {
 }
 
 /** 12,345 as "12K", 1,234,567 as "1.2M". */
+/** A live list of repositories as cards across the page; a card opens the repository's files. */
+function RepoGrid(props: { title: string; id: string; note: string; repos: HubRepo[] | undefined; loading: boolean; onOpen: (id: string) => void }): JSX.Element {
+  return (
+    <Show when={props.loading || (props.repos ?? []).length > 0}>
+      <section class="livehub__picks" aria-labelledby={props.id}>
+        <h2 id={props.id}>{props.title}</h2>
+        <p class="livehub__muted">{props.note}</p>
+        <Show when={!props.loading} fallback={<p class="livehub__muted">Asking Hugging Face…</p>}>
+          <ul class="livehub__repo-grid">
+            <For each={(props.repos ?? []).slice(0, 12)}>
+              {(r) => (
+                <li>
+                  <button type="button" class="livehub__repo card" onClick={() => props.onOpen(r.id)}>
+                    <FamilyTile name={r.id} owner={r.author} size={34} />
+                    <span class="livehub__repo-body">
+                      <span class="livehub__repo-name">
+                        <span class="livehub__repo-id">{r.id}</span>
+                        <Show when={verifiedPublisher(r.id)}>{(v) => <VerifiedBadge publisher={v().name} />}</Show>
+                      </span>
+                      <span class="livehub__muted">
+                        {compactCount(r.downloads)} downloads · {compactCount(r.likes)} likes · updated {fmtAge(r.updated)}
+                      </span>
+                      <span class="livehub__badges">
+                        <For each={abilitiesOf(r.id, r.tags)}>{(a) => <span class="livehub__badge">{ABILITY_LABELS[a]}</span>}</For>
+                      </span>
+                    </span>
+                  </button>
+                </li>
+              )}
+            </For>
+          </ul>
+        </Show>
+      </section>
+    </Show>
+  );
+}
+
 function compactCount(n: number): string {
   if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M`;
   if (n >= 1e3) return `${(n / 1e3).toFixed(n >= 1e4 ? 0 : 1)}K`;

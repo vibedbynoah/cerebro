@@ -17,7 +17,7 @@ import type { CatalogModel, DedupeResult, DiskReport, DuplicateGroup, GpuInfo, H
 import { CURRENT_CATALOG } from "./catalog";
 import type { TrainerStatus, TrainEvent, TrainInstalled } from "./train-types";
 import type { Placement } from "./types";
-import type { ActivePatch, EngineSwitch, LocalApiView, McpServerView, RemotePairing, RemoteView, McpCallResult, McpConfig, McpServerStatus, McpTool, HubDownloadEvent, HubFile, HubFileMeta, HubRepo, LoadPreset, PatchProfile } from "./types";
+import type { ActivePatch, EngineSwitch, LocalApiView, McpServerView, RemotePairing, RemoteView, McpCallResult, McpConfig, McpServerStatus, McpTool, HubDownloadEvent, HubFile, HubFileMeta, HubRepo, MoeActivity, LoadPreset, PatchProfile } from "./types";
 import type { MachineTuneEvent, MachineTuneOutcome, TuneEvent, TuneProfile, TuneRunInfo } from "./types";
 import { EMPTY_TWEAKS, profileNameError, sanitizeTweaks } from "../lib/tweaks";
 
@@ -349,10 +349,11 @@ export function createDesktopService(local: CerebroService): CerebroService {
     transcribe: () => invoke<string>("stt_transcribe", {}),
     transcribeAudio: (audio) => invoke<string>("stt_transcribe_file", { data: audio.data, modelId: null }),
 
-    hubSearch: (query) => invoke<HubRepo[]>("hub_search", { query }),
+    hubSearch: (query, sort) => invoke<HubRepo[]>("hub_search", sort ? { query, sort } : { query }),
     hubFiles: (repo) => invoke<HubFile[]>("hub_files", { repo }),
     hubAvatar: (owner) => invoke<string>("hub_avatar", { owner }),
     hubLatest: (author, query) => invoke<HubRepo[]>("hub_latest", { author, query }),
+    moeActivity: () => invoke<MoeActivity | null>("moe_activity", {}),
     saveDataset: (name, text) => invoke<string>("train_dataset_save", { name, text }),
     hubPipelineFiles: (repo) => invoke<{ files: string[]; total: number }>("hub_pipeline_files", { repo }),
     hubFileMeta: (repo, file) => invoke<HubFileMeta>("hub_file_meta", { repo, file }),

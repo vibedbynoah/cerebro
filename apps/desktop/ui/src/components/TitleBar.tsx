@@ -11,7 +11,7 @@ import { Icon, type IconName } from "./icons";
  * The brand lockup sits on the left at 24 px (mark height), its clear space kept by the bar's
  * padding; it passes pointer events through, so the whole corner still drags the window.
  */
-export function TitleBar(props: { platform: Platform; onOpenPalette?: () => void; paletteOpen?: boolean; status?: JSX.Element }): JSX.Element {
+export function TitleBar(props: { platform: Platform; onOpenPalette?: () => void; paletteOpen?: boolean; status?: JSX.Element; brand?: JSX.Element }): JSX.Element {
   // Maximize turns into Restore while the window is maximized, like native Windows controls. The
   // webview resizes whenever the window does (button, double-click on the bar, Win+Up, snapping),
   // so one resize listener, coalesced to a frame, catches every way the state can change.
@@ -54,7 +54,7 @@ export function TitleBar(props: { platform: Platform; onOpenPalette?: () => void
   return (
     <header class="titlebar" data-tauri-drag-region>
       <div class="titlebar__brand" data-tauri-drag-region>
-        <BrandLockup height={24} class="titlebar__lockup" />
+        {props.brand ?? <BrandLockup height={24} class="titlebar__lockup" />}
       </div>
       <div class="titlebar__center" data-tauri-drag-region>
         <Show when={props.onOpenPalette}>

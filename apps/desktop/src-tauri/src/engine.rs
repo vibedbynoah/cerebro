@@ -1775,6 +1775,9 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
     let (mut ttft_ms, mut decode_ms, mut prefill_tps, mut stopped) = (0.0f64, 0.0f64, 0.0f64, false);
     let mut failed: Option<String> = None;
     let mut n = 0usize;
+    // When the first and the latest piece arrived, and how many: the writing speed is the pieces
+    // after the first over that time, so a two-word reply is not charged the step that ends it.
+    let mut piece_t: Option<(std::time::Instant, std::time::Instant, usize)> = None;
     let embeds = match encode_images(l, &pics) {
         Ok(v) => v,
         Err(e) => {
@@ -1846,6 +1849,8 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
             }
             set(st, |s| s.activity = "generating");
             n += 1;
+            let now = std::time::Instant::now();
+            piece_t = Some(piece_t.map_or((now, now, 1), |(a, _, k)| (a, now, k + 1)));
             pending.push_str(piece);
             loop {
                 if in_think {
@@ -2164,7 +2169,11 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
         }
     }
     let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
-    let decode_tps = if decode_ms > 0.0 { out_tokens as f64 / (decode_ms / 1000.0) } else { 0.0 };
+    let decode_tps = match piece_t {
+        Some((a, b, k)) if k >= 2 && b > a => (k - 1) as f64 / (b - a).as_secs_f64(),
+        _ if decode_ms > 0.0 => out_tokens as f64 / (decode_ms / 1000.0),
+        _ => 0.0,
+    };
     let length = !stopped && out_tokens >= cfg.max_tokens;
     events(ChatEvent::Done {
         stats: ChatStats { prompt_tokens, length, output_tokens: out_tokens, thinking_tokens, tok_per_sec: decode_tps, ttft_ms, total_ms, extra_ms, stopped },

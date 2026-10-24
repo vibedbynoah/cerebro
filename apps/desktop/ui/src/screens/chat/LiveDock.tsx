@@ -5,6 +5,7 @@ import { DASH, num } from "../../lib/monitor";
 import type { Sampler } from "../../service/chat-types";
 import { useMetrics } from "../../service/metrics";
 import { Sparkline } from "../monitor/Sparkline";
+import { ExpertHeatmap } from "./ExpertHeatmap";
 
 /**
  * Chat's live dock: what the model and the machine are doing right now, and the settings people
@@ -85,6 +86,13 @@ export function LiveDock(props: {
           )}
         </Show>
       </section>
+
+      <Show when={s()?.engine.moe}>
+        <section class="dock__section" aria-labelledby="dock-experts">
+          <h3 id="dock-experts">Experts firing</h3>
+          <ExpertHeatmap />
+        </section>
+      </Show>
 
       <section class="dock__section" aria-labelledby="dock-machine">
         <h3 id="dock-machine">Machine</h3>

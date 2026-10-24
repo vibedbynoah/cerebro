@@ -23,7 +23,7 @@ export interface Parsed {
 }
 
 /** Repositories that are not chat models (speech, embeddings, rerankers, vision-only parts). */
-const NOT_CHAT = /embed|rerank|asr|tts|omni|guard|vl-|-vl\b|vision|mmproj|audio|ocr|image|diffusion|draft|eagle|mtp/i;
+const NOT_CHAT = /embed|rerank|asr|tts|omni|guard|vl-|-vl\b|vision|mmproj|audio|ocr|image|diffusion|draft|eagle|mtp|agentworld|world-?model/i;
 
 /** Size and kind from a repository name: "Qwen3.6-35B-A3B-GGUF" is a 35B MoE with 3B active. */
 export function parseRepo(id: string): Parsed | null {
@@ -39,9 +39,10 @@ export function parseRepo(id: string): Parsed | null {
   return { totalB, activeB: totalB, kind: "dense" };
 }
 
-/** Bytes per second from each tier, measured on this engine (see the module note). */
+/** Bytes per second from each tier, measured on this engine (see the module note; the RAM figure
+ *  is what the processor's experts reach beside the card: Qwen3.6-35B-A3B Q4_K_M writes 44.5 tok/s). */
 const GPU_GBS = 260;
-const RAM_GBS = 46;
+const RAM_GBS = 56;
 const SSD_GBS = 2;
 
 export interface SpeedEstimate {
@@ -63,10 +64,8 @@ export function estimateSpeed(sizeGiB: number, activeShare: number, hw: Hardware
   const secs = (activeShare * onGpu) / GPU_GBS + (activeShare * inRam) / RAM_GBS + (activeShare * onDrive) / SSD_GBS;
   const tps = secs > 0 ? 1 / secs : 0;
   const swapping = onDrive > 0.05 * sizeGiB;
-  const where = onDrive > 0 ? "graphics card, memory and drive" : inRam > 0 ? (onGpu > 0 ? "graphics card and memory" : "memory") : "graphics card";
-  const note = swapping
-    ? `Heavy swapping: ${onDrive.toFixed(0)} GiB of it is read from the drive for every word. About ${tps < 10 ? tps.toFixed(1) : Math.round(tps)} tok/s here.`
-    : `About ${tps < 10 ? tps.toFixed(1) : Math.round(tps)} tok/s here, from the ${where}.`;
+  const rate = `About ${tps < 10 ? tps.toFixed(1) : Math.round(tps)} tokens per second on this computer.`;
+  const note = swapping ? `Heavy swapping: ${onDrive.toFixed(0)} GiB of it is read from the drive for every word. ${rate}` : rate;
   return { tps, swapping, note };
 }
 

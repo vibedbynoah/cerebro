@@ -114,6 +114,9 @@ export function ranOn(p: { layout: string; gpuLayers: number; totalLayers: numbe
   if (!p) return undefined;
   const drive = (p.driveBytesPerToken ?? 0) > 0 ? " + drive" : "";
   if (p.layout === "gpu-int8" || p.layout === "gpu-native") return "graphics card";
+  // Mixture-of-experts plans place experts, not layers: every layer is on the card, the experts
+  // that do not fit there run on the processor.
+  if (p.layout === "split" && p.totalLayers === 0) return `graphics card + processor for some experts${drive}`;
   if (p.layout === "split") return `graphics card ${p.gpuLayers}/${p.totalLayers} layers + processor${drive}`;
   if (p.layout === "cpu") return `processor${drive}`;
   return undefined;

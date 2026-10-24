@@ -2314,3 +2314,15 @@ body {
 .licence-note--compact .licence-note__summary {
   display: none;
 }
+
+/* The title bar's live mark: the route moves to the firing expert's square. */
+.live-mark__hidden { opacity: 0; }
+.live-mark__route { stroke: var(--color-accent); stroke-width: 3; }
+.live-mark .brand__idle rect { transition: opacity var(--duration-fast, 120ms) ease; }
+@media (prefers-reduced-motion: reduce) {
+  .live-mark .brand__idle rect { transition: none; }
+}
+
+/* Chat dock: the experts heatmap. */
+.heatmap { display: grid; gap: var(--space-2); }
+.heatmap canvas { display: block; width: 100%; border-radius: 6px; }

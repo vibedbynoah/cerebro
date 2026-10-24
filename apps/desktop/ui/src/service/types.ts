@@ -601,6 +601,20 @@ export type TuneEvent = TuneEventBody & {
   at: number;
 };
 
+/** A mixture-of-experts model's experts as they fire (engine activity.rs). */
+export interface MoeActivity {
+  layers: number;
+  experts: number;
+  /** 0-255 per (layer, expert), layer-major, scaled by the hottest. */
+  heat: number[];
+  /** The experts the latest token picked, per layer. */
+  last: number[][];
+  tokens: number;
+}
+
+/** How a Model Hub search is ordered (Hugging Face's sort keys). */
+export type HubSort = "downloads" | "trendingScore" | "likes" | "createdAt" | "lastModified";
+
 /** A Hugging Face repository with GGUF files (Model Hub search result). */
 export interface HubRepo {
   id: string;

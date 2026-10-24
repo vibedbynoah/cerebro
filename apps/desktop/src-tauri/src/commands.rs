@@ -1042,8 +1042,8 @@ use crate::hub::{self, DownloadEvent, Downloads, HubFile, HubFileMeta, HubRepo};
 
 /// Searches Hugging Face for repositories with GGUF files.
 #[tauri::command]
-pub async fn hub_search(query: String) -> Result<Vec<HubRepo>, String> {
-    tauri::async_runtime::spawn_blocking(move || hub::search(&query)).await.map_err(|_| "The search failed.".to_owned())?
+pub async fn hub_search(query: String, sort: Option<String>) -> Result<Vec<HubRepo>, String> {
+    tauri::async_runtime::spawn_blocking(move || hub::search(&query, sort.as_deref())).await.map_err(|_| "The search failed.".to_owned())?
 }
 
 /// The files an image model needs (its diffusers folder) and their total size; download them with
@@ -1870,4 +1870,13 @@ mod history_tests {
             assert_eq!(downsample(&samples(30, |_| Some(1.0)), step_s, points).len(), points);
         }
     }
+}
+
+/// Which experts of the mixture-of-experts model are firing: `heat` is 0-255 per (layer, expert),
+/// layer-major, scaled by the hottest; `last` the experts the latest token picked in each layer.
+/// Null before an MoE model has loaded.
+#[tauri::command]
+pub fn moe_activity() -> Option<serde_json::Value> {
+    let s = cerebro_engine::activity::snapshot()?;
+    Some(serde_json::json!({ "layers": s.layers, "experts": s.experts, "heat": s.heat, "last": s.last, "tokens": s.tokens }))
 }

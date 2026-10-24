@@ -38,6 +38,8 @@ import type { EngineSwitch, LocalApiView, McpServerView, RemoteOptions, RemotePa
   HubFile,
   HubFileMeta,
   HubRepo,
+  HubSort,
+  MoeActivity,
 } from "./types";
 
 import type { ChatEvent, ChatRequest } from "./chat-types";
@@ -272,13 +274,16 @@ export interface CerebroService {
   // ---- Model Hub (desktop: live Hugging Face). Absent in the web preview. ----
 
   /** Repositories with GGUF files matching the query, most downloaded first. */
-  hubSearch?(query: string): Promise<HubRepo[]>;
+  /** GGUF repositories matching `query` ("" for all), most downloaded first unless `sort` says otherwise. */
+  hubSearch?(query: string, sort?: HubSort): Promise<HubRepo[]>;
   /** A repository's GGUF files with their real sizes. */
   hubFiles?(repo: string): Promise<HubFile[]>;
   /** A Hugging Face account's picture (its logo), as a data URL. */
   hubAvatar?(owner: string): Promise<string>;
   /** The newest GGUF repositories of a publisher matching a query, newest first. */
   hubLatest?(author: string, query: string): Promise<HubRepo[]>;
+  /** Which experts the loaded mixture-of-experts model is firing; null for a dense model. */
+  moeActivity?(): Promise<MoeActivity | null>;
   /** Saves a picked dataset file into Cerebro's datasets folder; resolves with its path. */
   saveDataset?(name: string, text: string): Promise<string>;
   /** The files an image model needs (its diffusers folder), with their total size in bytes. */

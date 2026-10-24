@@ -516,3 +516,30 @@
 .livehub__swap {
   color: var(--color-warning);
 }
+
+/* Search results and the live lists: cards across the page. */
+.livehub__panes { grid-template-columns: 1fr; }
+.livehub__results ul.livehub__repo-grid,
+.livehub__repo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-3);
+  max-height: none;
+  overflow: visible;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.livehub__repo-grid > li { display: flex; }
+.livehub__repo-grid .livehub__repo { height: 100%; padding: var(--space-3) var(--space-4); }
+.livehub__files { scroll-margin-top: var(--space-4); }
+.livehub__tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+.livehub__order { display: inline-flex; align-items: center; gap: var(--space-2); }
+.livehub__publishers { margin: 0; }
+.livehub__hf { margin-left: auto; }

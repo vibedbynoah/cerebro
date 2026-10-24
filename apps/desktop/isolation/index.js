@@ -279,6 +279,7 @@ const WITH_ARGS = {
     Number.isInteger(p.size) &&
     Number.isInteger(p.steps) &&
     (p.seed === undefined || p.seed === null || (Number.isInteger(p.seed) && /** @type {number} */ (p.seed) >= 0)),
+  moe_activity: (p) => isPlain(p) && hasOnlyKeys(p, []),
   image_video: (p) =>
     isPlain(p) &&
     hasOnlyKeys(p, ["modelId", "prompt", "size", "frames", "fps", "strength"], ["endPrompt", "seed"]) &&
@@ -339,7 +340,12 @@ const WITH_ARGS = {
     p.edits.length <= 64 &&
     p.edits.every((e) => isPlain(e) && hasOnlyKeys(e, ["key", "value"]) && typeof e.key === "string" && e.key.length > 0 && e.key.length <= 256 && (typeof e.value === "string" ? e.value.length <= 65_536 : typeof e.value === "boolean" || (typeof e.value === "number" && Number.isFinite(e.value)))),
   gguf_copy_revert: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && isModelId(p.id),
-  hub_search: (p) => isPlain(p) && hasOnlyKeys(p, ["query"]) && typeof p.query === "string" && p.query.length <= 120,
+  hub_search: (p) =>
+    isPlain(p) &&
+    hasOnlyKeys(p, ["query"], ["sort"]) &&
+    typeof p.query === "string" &&
+    p.query.length <= 120 &&
+    (p.sort === undefined || p.sort === null || ["downloads", "trendingScore", "likes", "createdAt", "lastModified"].includes(/** @type {string} */ (p.sort))),
   hub_files: (p) => isPlain(p) && hasOnlyKeys(p, ["repo"]) && isRepo(p.repo),
   hub_pipeline_files: (p) => isPlain(p) && hasOnlyKeys(p, ["repo"]) && isRepo(p.repo),
   hub_avatar: (p) => isPlain(p) && hasOnlyKeys(p, ["owner"]) && typeof p.owner === "string" && /^[A-Za-z0-9._-]{1,96}$/.test(p.owner) && !p.owner.includes(".."),

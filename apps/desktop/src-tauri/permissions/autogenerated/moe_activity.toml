@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-moe-activity"
+description = "Enables the moe_activity command without any pre-configured scope."
+commands.allow = ["moe_activity"]
+
+[[permission]]
+identifier = "deny-moe-activity"
+description = "Denies the moe_activity command without any pre-configured scope."
+commands.deny = ["moe_activity"]
