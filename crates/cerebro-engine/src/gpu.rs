@@ -69,12 +69,22 @@ struct GLayer {
     down: Option<GMat>,
     /// MoE router weights (n_expert x dim, f32).
     router: Option<CudaSlice<f32>>,
+    /// The shared expert every token of a MoE layer also runs (Qwen3.5/3.6 MoE).
+    shared: Option<GShared>,
     /// f16 KV cache, max_ctx positions (one element for DeltaNet layers, which keep a state instead).
     kc: CudaSlice<u16>,
     vc: CudaSlice<u16>,
     /// Gated DeltaNet layer (Qwen3.5/3.8): then `qkv` is the fused [q|k|v | z | alpha | beta]
     /// projection and `o` the output projection.
     delta: Option<GDelta>,
+}
+
+/// A MoE layer's shared expert: fused gate|up, down, and the sigmoid gate's weights (None: unscaled).
+struct GShared {
+    gu: GMat,
+    down: GMat,
+    gate_inp: Option<CudaSlice<f32>>,
+    ffn: usize,
 }
 
 /// A Gated DeltaNet layer's small tensors and recurrent state on the GPU.
@@ -135,6 +145,7 @@ struct Funcs {
     router_b: CudaFunction,
     scatter_add: CudaFunction,
     add_inplace: CudaFunction,
+    shared_gate_add: CudaFunction,
     attn_tiled: CudaFunction,
 }
 
@@ -346,6 +357,11 @@ struct Batch {
     /// Gated attention: the projection's [q|gate] rows before they are split, and the gates.
     qg: CudaSlice<f32>,
     gate: CudaSlice<f32>,
+    /// Shared expert: gate|up output, its quantised activation, and its output before the gate.
+    sgu: CudaSlice<f32>,
+    sxq: CudaSlice<i8>,
+    sxd: CudaSlice<f32>,
+    sout: CudaSlice<f32>,
 }
 
 /// Gated DeltaNet sizes: key heads, key/value head size, value heads, convolution taps.
@@ -680,6 +696,14 @@ fn repack(g: &Gguf, mats: &[&Mat]) -> (Vec<i8>, Vec<f32>, usize, usize) {
     (qs, ds, rows, cols)
 }
 
+/// Output rows of a stacked GPU matrix (the row stride of its product).
+fn gmat_rows(m: &GMat) -> usize {
+    match m {
+        GMat::K { parts, .. } => parts.iter().map(|p| p.rows).sum(),
+        GMat::Q8 { rows, .. } => *rows,
+    }
+}
+
 /// Largest int8 copy of a native-format matrix made at once for a prompt (bytes, plus 1/8 for
 /// its scales): bigger stacks are converted and multiplied in pieces of rows.
 pub(crate) const K8_PIECE: usize = 64 << 20;
@@ -748,6 +772,7 @@ impl GpuState {
             router_b: lf("router_topk_batch")?,
             scatter_add: lf("scatter_add")?,
             add_inplace: lf("add_inplace")?,
+            shared_gate_add: lf("shared_gate_add")?,
             attn_tiled: lf("attn_prefill_tiled")?,
         };
         let c = &model.cfg;
@@ -757,10 +782,6 @@ impl GpuState {
             // Smallest compiled group size that holds this model's group (registers follow it).
             let g = [1, 2, 4, 8].into_iter().find(|&g| g >= c.n_head / c.n_kv).unwrap_or(8);
             f.attn_gqa = Some(lf(&format!("attn_decode_gqa_{}_{g}", c.head_dim))?);
-        }
-        // Qwen3.8 hybrids (Gated DeltaNet + gated attention) run on the CPU until their GPU kernels land.
-        if (c.ssm.is_some() || c.attn_gate) && c.n_expert > 0 {
-            return Err(Error::Unsupported("hybrid mixture-of-experts layers on the GPU".into()));
         }
         if let Some(ss) = c.ssm {
             if ss.dv % 32 != 0 || ss.dk > 256 || ss.dk % 32 != 0 || ss.conv > 9 || ss.dv > 1024 {
@@ -805,9 +826,20 @@ impl GpuState {
         };
         let mut layers = Vec::with_capacity(n_gpu);
         for l in &model.layers()[..n_gpu] {
-            let (gu, down, router) = match &l.ffn {
-                Ffn::Dense { gate, up: upm, down } => (Some(up(&[gate, upm])?), Some(up(&[down])?), None),
-                Ffn::Moe(m) => (None, None, Some(stream.clone_htod(&m.router).map_err(gerr)?)),
+            let (gu, down, router, shared) = match &l.ffn {
+                Ffn::Dense { gate, up: upm, down } => (Some(up(&[gate, upm])?), Some(up(&[down])?), None, None),
+                Ffn::Moe(m) => {
+                    let shared = match &m.shared {
+                        Some(se) => Some(GShared {
+                            gu: up(&[&se.gate, &se.up])?,
+                            down: up(&[&se.down])?,
+                            gate_inp: se.gate_inp.as_deref().map(|w| stream.clone_htod(w)).transpose().map_err(gerr)?,
+                            ffn: se.gate.rows,
+                        }),
+                        None => None,
+                    };
+                    (None, None, Some(stream.clone_htod(&m.router).map_err(gerr)?), shared)
+                }
             };
             let (qkv, o, delta) = match (&l.delta, c.ssm) {
                 (Some(d), Some(ss)) => (
@@ -836,6 +868,7 @@ impl GpuState {
                 gu,
                 down,
                 router,
+                shared,
                 kc: stream.alloc_zeros::<u16>(if attn { max_ctx * kvd } else { 1 }).map_err(gerr)?,
                 vc: stream.alloc_zeros::<u16>(if attn { max_ctx * kvd } else { 1 }).map_err(gerr)?,
             });
@@ -865,6 +898,15 @@ impl GpuState {
         let gqa_splits = (8 * sms).div_ceil(c.n_kv.max(1)).clamp(1, 128);
         let row = qd + 2 * kvd;
         let _ = row;
+        let sffn = model
+            .layers()
+            .iter()
+            .filter_map(|l| match &l.ffn {
+                Ffn::Moe(m) => m.shared.as_ref().map(|se| se.gate.rows),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
         let b = Batch {
             qg: z(CHUNK * qg_w)?,
             gate: z(if c.attn_gate { CHUNK * qd } else { 0 })?,
@@ -877,6 +919,10 @@ impl GpuState {
             toks: stream.alloc_zeros::<i32>(CHUNK).map_err(gerr)?,
             pos0: stream.alloc_zeros::<i32>(2).map_err(gerr)?,
             rtab: stream.alloc_zeros::<i32>(3 * CHUNK).map_err(gerr)?,
+            sgu: z(CHUNK * 2 * sffn)?,
+            sxq: stream.alloc_zeros::<i8>((CHUNK * sffn).max(32)).map_err(gerr)?,
+            sxd: z(CHUNK * sffn / 32)?,
+            sout: z(if sffn > 0 { CHUNK * c.dim } else { 0 })?,
         };
         // Everything uploaded so far is read from VRAM only; free its RAM for the CPU-side weights.
         // A split keeps the CPU's layers and the head (and the embeddings, looked up on the CPU).
@@ -895,9 +941,12 @@ impl GpuState {
                         }
                     }
                 }
-                if let Ffn::Dense { gate, up, down } = &l.ffn {
-                    for m in [gate, up, down] {
-                        rel(m);
+                match &l.ffn {
+                    Ffn::Dense { gate, up, down } => [gate, up, down].into_iter().for_each(rel),
+                    Ffn::Moe(m) => {
+                        if let Some(se) = &m.shared {
+                            [&se.gate, &se.up, &se.down].into_iter().for_each(rel);
+                        }
                     }
                 }
             }
@@ -1107,6 +1156,7 @@ impl GpuState {
                 gu: None,
                 down: None,
                 router: None,
+                shared: None,
                 kc: c.alloc_zeros::<u16>(max_ctx * kvd).map_err(gerr)?,
                 vc: c.alloc_zeros::<u16>(max_ctx * kvd).map_err(gerr)?,
                 delta: None,
@@ -1377,8 +1427,7 @@ pub fn plan_for(model: &Model, max_ctx: usize, vram_free: u64, force_layers: Opt
         use crate::placement::{drive_of, plan_dense, plan_moe, LayerCost, Machine, ModelCost};
         let c = &model.cfg;
         let (_, ram) = crate::hw::memory();
-        let hybrid = c.ssm.is_some() || c.attn_gate;
-        let gpu_kernels = !(hybrid && c.n_expert > 0) && c.head_dim <= 256 && c.head_dim % 64 == 0 && c.dim <= 8192;
+        let gpu_kernels = c.head_dim <= 256 && c.head_dim % 64 == 0 && c.dim <= 8192;
         let mach = Machine::new(if gpu_kernels { vram_free } else { 0 }, ram, drive_of(&model.path));
         let kvd = (c.n_kv * c.head_dim) as u64;
         let native_bytes = |m: &Mat| -> Option<u64> {
@@ -1390,13 +1439,29 @@ pub fn plan_for(model: &Model, max_ctx: usize, vram_free: u64, force_layers: Opt
         let widest = c.dim.max(c.ffn).max(qd);
         let scratch = (CHUNK * (c.dim + qd + 2 * kvd as usize + qd + 2 * c.ffn) * 4 + CHUNK * widest * 2 + (SPEC_MAX + 1) * c.vocab * 4 + 64 * (c.n_head * c.head_dim) * 4 * 4) as u64;
         if c.n_expert > 0 {
-            let mut dense = scratch + c.n_layer as u64 * 2 * max_ctx as u64 * kvd * 2;
+            // KV for the attention layers; a DeltaNet layer keeps its recurrent state instead.
+            let attn = model.layers().iter().filter(|l| l.delta.is_none()).count() as u64;
+            let state = c.ssm.map_or(0, |ss| (ss.nv * ss.dk * ss.dv + (ss.conv - 1) * ss.channels()) as u64 * 4);
+            // The shared expert's prompt buffers (gate|up, activation, output) beside the scratch.
+            let sffn = model.layers().iter().filter_map(|l| match &l.ffn {
+                Ffn::Moe(m) => m.shared.as_ref().map(|se| se.gate.rows as u64),
+                _ => None,
+            }).max().unwrap_or(0);
+            let shared_buf = CHUNK as u64 * (2 * sffn * 4 + sffn + sffn / 8 + c.dim as u64 * 4);
+            let mut dense = scratch + shared_buf + attn * 2 * max_ctx as u64 * kvd * 2 + (c.n_layer as u64 - attn) * state;
             let mut experts = 0u64;
             for l in model.layers() {
-                dense += [&l.q, &l.k, &l.v, &l.o].iter().map(|m| native_bytes(m).unwrap_or(int8_bytes(m))).sum::<u64>();
+                let mut mats: Vec<&Mat> = match &l.delta {
+                    Some(d) => vec![&d.qkv, &d.z, &d.alpha, &d.beta, &d.out],
+                    None => vec![&l.q, &l.k, &l.v, &l.o],
+                };
                 if let Ffn::Moe(m) = &l.ffn {
                     experts += [&m.gate, &m.up, &m.down].iter().map(|x| (x.rows * x.row_bytes) as u64).sum::<u64>();
+                    if let Some(se) = &m.shared {
+                        mats.extend([&se.gate, &se.up, &se.down]);
+                    }
                 }
+                dense += mats.iter().map(|m| native_bytes(m).unwrap_or(int8_bytes(m))).sum::<u64>();
             }
             let out = model.output_mat();
             dense += native_bytes(out).unwrap_or(int8_bytes(out));
@@ -1824,6 +1889,21 @@ impl GpuState {
             let mo = self.moe.as_mut().expect("MoE state");
             let router = l.router.as_ref().expect("router");
             unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&l.ffn_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&mut mo.h).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
+            if let Some(se) = &l.shared {
+                // The shared expert on its own buffers (the routed experts still read xq).
+                let b = &mut self.b;
+                Self::matvec(s, f, &se.gu, &self.xq, &self.xd, &mut b.sgu, false)?;
+                let n = se.ffn as i32;
+                unsafe { s.launch_builder(&f.silu_mul_quant).arg(&b.sgu).arg(&mut b.sxq).arg(&mut b.sxd).arg(&n).launch(blocks(se.ffn)) }.map_err(gerr)?;
+                Self::matvec(s, f, &se.down, &b.sxq, &b.sxd, &mut b.sout, false)?;
+                let mut lb = s.launch_builder(&f.shared_gate_add);
+                lb.arg(&mut self.x).arg(&b.sout);
+                match &se.gate_inp {
+                    Some(g) => lb.arg(g),
+                    None => lb.arg(&null_f),
+                };
+                unsafe { lb.arg(&mo.h).arg(&dim).launch(LaunchConfig { grid_dim: (1, 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
+            }
             let (ne, k) = (mo.ne as i32, mo.k as i32);
             {
                 let tab = mo.slot_tab.slice(li * mo.ne..(li + 1) * mo.ne);
@@ -2126,7 +2206,18 @@ impl GpuState {
         };
         // Dense matrix (K parts stacked by rows) over all T tokens.
         let dense = |m: &GMat, xq: &CudaSlice<i8>, xd: &CudaSlice<f32>, y: &mut CudaSlice<f32>, ystride: usize, add: bool| -> Result<(), Error> {
-            let GMat::K { parts, cols } = m else { return Err(Error::Unsupported("int8 weights in the MoE prefill".into())) };
+            let (parts, cols) = match m {
+                GMat::K { parts, cols } => (parts, cols),
+                GMat::Q8 { qs, ds, rows, cols } => {
+                    // Small int8 matrices (DeltaNet gates in some files): the output rows are the stride.
+                    if *rows != ystride {
+                        return Err(Error::Unsupported("int8 weights with an output stride in the MoE prefill".into()));
+                    }
+                    let (r, c, a) = (*rows as i32, *cols as i32, add as i32);
+                    unsafe { s.launch_builder(&f.matmul_b).arg(qs).arg(ds).arg(xq).arg(xd).arg(y).arg(&r).arg(&c).arg(&ti).arg(&a).launch(LaunchConfig { grid_dim: ((*rows as u32).div_ceil(8), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
+                    return Ok(());
+                }
+            };
             let mut r0 = 0;
             for p in parts {
                 let mut yv = y.slice_mut(r0..);
@@ -2140,7 +2231,20 @@ impl GpuState {
         for li in 0..self.layers.len() {
             let l = &mut self.layers[li];
             unsafe { s.launch_builder(&f.norm_b).arg(&b.x).arg(&l.attn_norm).arg(&mut b.xq).arg(&mut b.xd).arg(&dim).arg(&eps).arg(&null_f).launch(norm_cfg) }.map_err(gerr)?;
-            dense(&l.qkv, &b.xq, &b.xd, &mut b.qkv, row, false)?;
+            if let Some(dl) = l.delta.as_mut() {
+                // Gated DeltaNet over the chunk (as in the dense prefill).
+                dense(&l.qkv, &b.xq, &b.xd, &mut b.qkv, gmat_rows(&l.qkv), false)?;
+                Self::delta_core(s, f, sh, dl, &mut b.qkv, &mut b.att, t)?;
+                let n = (t * sh.delta.map_or(0, |d| d.nv * d.dv)) as i32;
+                unsafe { s.launch_builder(&f.quant).arg(&b.att).arg(&mut b.xq).arg(&mut b.xd).arg(&n).launch(LaunchConfig { grid_dim: ((n as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
+                dense(&l.o, &b.xq, &b.xd, &mut b.x, sh.dim, true)?;
+            } else {
+            if sh.gate {
+                dense(&l.qkv, &b.xq, &b.xd, &mut b.qg, gmat_rows(&l.qkv), false)?;
+                Self::unpack_gate(s, f, sh, &b.qg, &mut b.qkv, &mut b.gate, t)?;
+            } else {
+                dense(&l.qkv, &b.xq, &b.xd, &mut b.qkv, row, false)?;
+            }
             {
                 let qn = l.q_norm.as_ref().unwrap_or(&l.attn_norm);
                 let kn = l.k_norm.as_ref().unwrap_or(&l.attn_norm);
@@ -2162,8 +2266,12 @@ impl GpuState {
                 Self::attn_batch(s, f, sh, &b.qkv, &l.kc, &l.vc, &mut b.att, &b.pos0, t)?;
             }
             let qn_total = (t * qd) as i32;
+            if sh.gate {
+                Self::apply_gate(s, f, &mut b.att, &b.gate, t * qd)?;
+            }
             unsafe { s.launch_builder(&f.quant).arg(&b.att).arg(&mut b.xq).arg(&mut b.xd).arg(&qn_total).launch(LaunchConfig { grid_dim: ((qn_total as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
             dense(&l.o, &b.xq, &b.xd, &mut b.x, sh.dim, true)?;
+            }
             // Router for every token.
             let mo = self.moe.as_mut().expect("MoE state");
             let router = l.router.as_ref().expect("router");
@@ -2173,6 +2281,20 @@ impl GpuState {
                 let tab = mo.slot_tab.slice(li * mo.ne..(li + 1) * mo.ne);
                 let cfg = LaunchConfig { grid_dim: (t as u32, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
                 unsafe { s.launch_builder(&f.router_b).arg(router).arg(&mo.bh).arg(&dim).arg(&ne).arg(&k).arg(&tab).arg(&mut mo.bsel).launch(cfg) }.map_err(gerr)?;
+            }
+            if let Some(se) = &l.shared {
+                // The shared expert for every token, on its own buffers (the routed experts read xq).
+                dense(&se.gu, &b.xq, &b.xd, &mut b.sgu, 2 * se.ffn, false)?;
+                let (sf, n) = (se.ffn as i32, (t * se.ffn) as u32);
+                unsafe { s.launch_builder(&f.silu_b).arg(&b.sgu).arg(&mut b.sxq).arg(&mut b.sxd).arg(&sf).arg(&ti).launch(LaunchConfig { grid_dim: (n.div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
+                dense(&se.down, &b.sxq, &b.sxd, &mut b.sout, sh.dim, false)?;
+                let mut lb = s.launch_builder(&f.shared_gate_add);
+                lb.arg(&mut b.x).arg(&b.sout);
+                match &se.gate_inp {
+                    Some(g) => lb.arg(g),
+                    None => lb.arg(&null_f),
+                };
+                unsafe { lb.arg(&mo.bh).arg(&dim).launch(LaunchConfig { grid_dim: (t as u32, 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
             }
             let mut sel = vec![0i32; t * 3 * mo.k];
             s.memcpy_dtoh(&mo.bsel.slice(0..t * 3 * mo.k), &mut sel).map_err(gerr)?;

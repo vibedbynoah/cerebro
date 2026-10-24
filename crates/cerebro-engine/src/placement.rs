@@ -291,6 +291,9 @@ pub fn plan_dense(cost: &ModelCost, m: &Machine, force_gpu_layers: Option<usize>
 pub fn plan_moe(dense_gpu: u64, expert_bytes: u64, active_fraction: f64, m: &Machine) -> Plan {
     let budget = m.vram_free.saturating_sub(VRAM_MARGIN);
     let gpu_ok = m.vram_free > 0 && dense_gpu <= budget;
+    if std::env::var_os("CEREBRO_PLAN_DEBUG").is_some() {
+        eprintln!("plan (experts): budget {:.2} GiB, shared layers {:.2} GiB, experts {:.2} GiB", gib(budget), gib(dense_gpu), gib(expert_bytes));
+    }
     let cache = if gpu_ok { budget - dense_gpu } else { 0 }.min(expert_bytes);
     let ram_budget = m.ram_available.saturating_sub(RAM_MARGIN);
     let ram_resident = expert_bytes.min(ram_budget);

@@ -1453,3 +1453,24 @@ extern "C" __global__ void gate_mul(float* __restrict__ att, const float* __rest
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) att[i] *= 1.f / (1.f + __expf(-gate[i]));
 }
+
+// x[t] += g_t * so[t], g_t = sigmoid(gi . h[t]) (1 when gi is null): a MoE layer's shared expert
+// output, scaled by its gate on the layer's normed input. One block per token.
+extern "C" __global__ void shared_gate_add(float* __restrict__ x, const float* __restrict__ so, const float* __restrict__ gi,
+                                           const float* __restrict__ h, int dim) {
+    __shared__ float red[32];
+    __shared__ float gate;
+    const size_t o = (size_t)blockIdx.x * dim;
+    float sum = 0.f;
+    if (gi) for (int i = threadIdx.x; i < dim; i += blockDim.x) sum += gi[i] * h[o + i];
+    sum = warp_sum(sum);
+    if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = sum;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float tsum = 0.f;
+        for (int w = 0; w < (int)(blockDim.x >> 5); ++w) tsum += red[w];
+        gate = gi ? 1.f / (1.f + __expf(-tsum)) : 1.f;
+    }
+    __syncthreads();
+    for (int i = threadIdx.x; i < dim; i += blockDim.x) x[o + i] += gate * so[o + i];
+}

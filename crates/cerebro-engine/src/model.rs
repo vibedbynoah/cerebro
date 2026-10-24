@@ -1846,7 +1846,9 @@ impl Session {
         if force_layers == Some(0) {
             return Err(Error::Unsupported("no layers on the graphics card (chosen when loading)".into()));
         }
-        if m.hc.is_some() || m.layers.iter().any(|l| matches!(&l.ffn, Ffn::Moe(e) if e.shared.is_some())) {
+        // Hyper-connections (qwen4exp) have no GPU kernels yet; shared experts and DeltaNet MoE
+        // layers run on the card with the routed experts split between it and the processor.
+        if m.hc.is_some() {
             return Err(Error::Unsupported("this model's layer types run on the processor for now".into()));
         }
         let g = crate::gpu::GpuState::load_with(m, max_ctx, force_layers)?;
