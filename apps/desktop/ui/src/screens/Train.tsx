@@ -169,7 +169,28 @@ export function Train(): JSX.Element {
               when={datasetKind() === "file"}
               fallback={<input class="input mono" aria-label="Hugging Face dataset id" placeholder="tatsu-lab/alpaca" value={job().datasetHf ?? ""} onInput={(e) => patch({ datasetHf: e.currentTarget.value })} />}
             >
-              <input class="input mono" aria-label="Dataset file path" placeholder="C:\data\examples.jsonl" value={job().datasetPath ?? ""} onInput={(e) => patch({ datasetPath: e.currentTarget.value })} />
+              <div class="train-dataset__file">
+                <input class="input mono" aria-label="Dataset file path" placeholder="C:\data\examples.jsonl" value={job().datasetPath ?? ""} onInput={(e) => patch({ datasetPath: e.currentTarget.value })} />
+                <Show when={service.saveDataset}>
+                  <label class="btn btn--secondary">
+                    Choose a file…
+                    <input
+                      type="file"
+                      accept=".jsonl,.json,.csv,.txt"
+                      class="sr-only"
+                      onChange={(e) => {
+                        const f = e.currentTarget.files?.[0];
+                        if (!f) return;
+                        void f
+                          .text()
+                          .then((t) => service.saveDataset!(f.name, t))
+                          .then((path) => patch({ datasetPath: path }))
+                          .catch((err: unknown) => notify("The dataset could not be added", err instanceof Error ? err.message : String(err), "error"));
+                      }}
+                    />
+                  </label>
+                </Show>
+              </div>
             </Show>
             <span class="select">
               <select class="input" aria-label="Dataset format" value={job().format} onChange={(e) => patch({ format: e.currentTarget.value as TrainFormat })}>

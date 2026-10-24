@@ -54,6 +54,10 @@ pub const MAIN_WINDOW: &str = "main";
 /// # Errors
 /// Returns the Tauri error if the runtime or the main window cannot be created.
 pub fn run() -> Result<(), tauri::Error> {
+    let Some(instance) = instance::claim() else {
+        // Cerebro is already open: that window was brought forward.
+        return Ok(());
+    };
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             commands::window_minimize,
@@ -109,6 +113,10 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::request_detail,
             commands::hub_search,
             commands::hub_files,
+            commands::hub_avatar,
+            commands::image_edit,
+            commands::train_dataset_save,
+            commands::hub_pipeline_files,
             commands::hub_file_meta,
             commands::hub_download,
             commands::hub_cancel,
@@ -248,15 +256,20 @@ pub fn run() -> Result<(), tauri::Error> {
                 .find(|w| w.label == MAIN_WINDOW)
                 .cloned()
                 .ok_or("tauri.conf.json has no window labelled \"main\"")?;
-            let builder = WebviewWindowBuilder::from_config(app.handle(), &config)?;
-            // Test builds only (`--features e2e`, never in a release bundle): WebView2 remote
-            // debugging so scripts/e2e-real.mjs can drive the real app.
-            #[cfg(feature = "e2e")]
-            let builder = builder.additional_browser_args("--remote-debugging-port=9333 --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection");
-            builder
-                .on_navigation(navigation::is_app_url)
-                .on_new_window(|_url, _features| NewWindowResponse::Deny)
-                .build()?;
+            if let Some(listener) = instance {
+                instance::serve(listener, app.handle().clone());
+            }
+            // A window that was just closed can hold WebView2's profile for a moment ("The requested
+            // resource is in use"): wait for it rather than fail to start.
+            for attempt in 0.. {
+                match main_window(app, &config) {
+                    Err(e) if attempt < 20 && e.to_string().contains("0x800700AA") => std::thread::sleep(std::time::Duration::from_millis(500)),
+                    r => {
+                        r?;
+                        break;
+                    }
+                }
+            }
             Ok(())
         })
         .build(tauri::generate_context!())?
@@ -273,4 +286,83 @@ pub fn run() -> Result<(), tauri::Error> {
             }
         });
     Ok(())
+}
+
+/// The main window, with the navigation and new-window guards attached before it loads anything.
+fn main_window(app: &tauri::App, config: &tauri::utils::config::WindowConfig) -> Result<(), tauri::Error> {
+    let builder = WebviewWindowBuilder::from_config(app.handle(), config)?;
+    // Test builds only (`--features e2e`, never in a release bundle): WebView2 remote
+    // debugging so scripts/e2e-real.mjs can drive the real app, on CEREBRO_E2E_PORT (default
+    // 9333) so a test run can pick a port no leftover WebView holds.
+    #[cfg(feature = "e2e")]
+    let e2e_args = format!(
+        "--remote-debugging-port={} --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection",
+        std::env::var("CEREBRO_E2E_PORT").ok().and_then(|p| p.parse::<u16>().ok()).unwrap_or(9333)
+    );
+    #[cfg(feature = "e2e")]
+    let builder = builder.additional_browser_args(&e2e_args);
+    builder
+        .on_navigation(navigation::is_app_url)
+        .on_new_window(|_url, _features| NewWindowResponse::Deny)
+        .build()?;
+    Ok(())
+}
+
+/// One Cerebro at a time. The first instance listens on a fixed loopback port; a second launch
+/// connects, asks it to show its window and exits, instead of starting a second engine and
+/// colliding with the first window's WebView2 profile. Test builds skip this so a test can run
+/// next to the user's app. Nothing here is reachable from another computer.
+mod instance {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+    use std::time::Duration;
+    use tauri::Manager;
+
+    const PORT: u16 = 47_613;
+    const HELLO: &str = "cerebro-show";
+    const ANSWER: &str = "cerebro-shown";
+
+    /// Some(listener) for the first instance (None inside it when the port belongs to another
+    /// program: Cerebro then runs without the check); None when Cerebro is already open.
+    pub fn claim() -> Option<Option<TcpListener>> {
+        if cfg!(feature = "e2e") {
+            return Some(None);
+        }
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, PORT));
+        if let Ok(l) = TcpListener::bind(addr) {
+            return Some(Some(l));
+        }
+        let asked = TcpStream::connect_timeout(&addr, Duration::from_millis(500)).and_then(|mut s| {
+            s.set_read_timeout(Some(Duration::from_secs(2)))?;
+            writeln!(s, "{HELLO}")?;
+            let mut line = String::new();
+            BufReader::new(s).read_line(&mut line)?;
+            Ok(line.trim() == ANSWER)
+        });
+        if asked.unwrap_or(false) {
+            None
+        } else {
+            Some(None)
+        }
+    }
+
+    /// Answers later launches by bringing the main window forward.
+    pub fn serve(listener: TcpListener, app: tauri::AppHandle) {
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut line = String::new();
+                if BufReader::new(&stream).read_line(&mut line).is_err() || line.trim() != HELLO {
+                    continue;
+                }
+                let _ = (&stream).write_all(format!("{ANSWER}
+").as_bytes());
+                if let Some(w) = app.get_webview_window(super::MAIN_WINDOW) {
+                    let _ = w.unminimize();
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+        });
+    }
 }

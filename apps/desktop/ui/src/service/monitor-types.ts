@@ -32,6 +32,8 @@ export interface MetricsLive {
   firstTokenS: number | null;
   /** What the model is writing: hidden reasoning, the answer, or a tool call. */
   phase: "reasoning" | "answer" | "tool-call" | null;
+  /** A download the load is waiting on (the llama.cpp release), or null. */
+  download?: { what: string; doneBytes: number; totalBytes: number } | null;
 }
 
 /** One graphics card's readings. Totals for a multi-GPU machine are in MetricsHardware. */

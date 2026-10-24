@@ -12,6 +12,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -89,9 +90,17 @@ pub fn installed(build: Build) -> Option<PathBuf> {
     folder(build).filter(|d| d.join("llama-server.exe").is_file())
 }
 
+/// The download running now, (bytes done, bytes in all), for the Models screen and the status pill.
+static DOWNLOAD: Mutex<Option<(u64, u64)>> = Mutex::new(None);
+
+/// The download running now, if any: (bytes done, bytes in all).
+pub fn download_progress() -> Option<(u64, u64)> {
+    *DOWNLOAD.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Downloads and unpacks the release (see the module notes). `progress(done, total)` as it goes.
 /// Refused in Offline mode; a copy already installed is used either way.
-pub fn install(build: Build, progress: impl FnMut(u64, u64)) -> Result<PathBuf, String> {
+pub fn install(build: Build, mut progress: impl FnMut(u64, u64)) -> Result<PathBuf, String> {
     if let Some(d) = installed(build) {
         return Ok(d);
     }
@@ -99,7 +108,14 @@ pub fn install(build: Build, progress: impl FnMut(u64, u64)) -> Result<PathBuf, 
         return Err("Offline mode is on, so llama.cpp was not downloaded.".to_owned());
     }
     let dir = folder(build).ok_or("There is no local app data folder.")?;
-    install_from(&format!("https://github.com/ggml-org/llama.cpp/releases/download/{TAG}"), build.files(), &dir, progress)?;
+    let set = |v| *DOWNLOAD.lock().unwrap_or_else(|e| e.into_inner()) = v;
+    set(Some((0, build.download_bytes())));
+    let r = install_from(&format!("https://github.com/ggml-org/llama.cpp/releases/download/{TAG}"), build.files(), &dir, |done, total| {
+        set(Some((done, total)));
+        progress(done, total);
+    });
+    set(None);
+    r?;
     installed(build).ok_or_else(|| "The llama.cpp files did not contain llama-server.exe.".to_owned())
 }
 

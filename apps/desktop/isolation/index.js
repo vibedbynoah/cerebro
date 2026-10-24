@@ -146,6 +146,9 @@ const isRepo = (v) => typeof v === "string" && /^[A-Za-z0-9._-]{1,96}\/[A-Za-z0-
 /** A .gguf path inside a repository, no traversal. @param {unknown} v */
 const isGguf = (v) => typeof v === "string" && v.length <= 300 && /^[A-Za-z0-9._+-]+(\/[A-Za-z0-9._+-]+)*\.gguf$/.test(v) && !v.includes("..");
 
+/** A file of an image model's diffusers folder: configs, tokenizer and safetensors weights only. @param {unknown} v */
+const isPipelineFile = (v) => typeof v === "string" && v.length <= 300 && /^[A-Za-z0-9._+-]+(\/[A-Za-z0-9._+-]+)*\.(json|txt|safetensors)$/.test(v) && !v.includes("..");
+
 /** An MCP server name in mcp.json. @param {unknown} v */
 const isServerName = (v) => typeof v === "string" && /^[A-Za-z0-9 ._-]{1,64}$/.test(v);
 
@@ -276,6 +279,23 @@ const WITH_ARGS = {
     Number.isInteger(p.size) &&
     Number.isInteger(p.steps) &&
     (p.seed === undefined || p.seed === null || (Number.isInteger(p.seed) && /** @type {number} */ (p.seed) >= 0)),
+  train_dataset_save: (p) => isPlain(p) && hasOnlyKeys(p, ["name", "text"]) && typeof p.name === "string" && p.name.length > 0 && p.name.length <= 200 && typeof p.text === "string" && p.text.length <= 536_870_912,
+  image_edit: (p) =>
+    isPlain(p) &&
+    hasOnlyKeys(p, ["modelId", "prompt", "source", "strength", "size", "steps"], ["seed"]) &&
+    isModelId(p.modelId) &&
+    typeof p.prompt === "string" &&
+    p.prompt.length > 0 &&
+    p.prompt.length <= 2000 &&
+    typeof p.source === "string" &&
+    p.source.startsWith("data:image/") &&
+    p.source.length <= 40_000_000 &&
+    typeof p.strength === "number" &&
+    p.strength >= 0.05 &&
+    p.strength <= 1 &&
+    Number.isInteger(p.size) &&
+    Number.isInteger(p.steps) &&
+    (p.seed === undefined || p.seed === null || (Number.isInteger(p.seed) && /** @type {number} */ (p.seed) >= 0)),
   image_reveal: (p) => isPlain(p) && hasOnlyKeys(p, ["path"]) && typeof p.path === "string" && p.path.length > 0 && p.path.length <= 1024,
   tts_sample: (p) => isPlain(p) && hasOnlyKeys(p, ["modelId", "text"]) && isModelId(p.modelId) && typeof p.text === "string" && p.text.length > 0 && p.text.length <= 280,
   tts_read: (p) => isPlain(p) && hasOnlyKeys(p, ["text"]) && typeof p.text === "string" && p.text.length > 0 && p.text.length <= 100_000,
@@ -304,8 +324,10 @@ const WITH_ARGS = {
   gguf_copy_revert: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && isModelId(p.id),
   hub_search: (p) => isPlain(p) && hasOnlyKeys(p, ["query"]) && typeof p.query === "string" && p.query.length <= 120,
   hub_files: (p) => isPlain(p) && hasOnlyKeys(p, ["repo"]) && isRepo(p.repo),
+  hub_pipeline_files: (p) => isPlain(p) && hasOnlyKeys(p, ["repo"]) && isRepo(p.repo),
+  hub_avatar: (p) => isPlain(p) && hasOnlyKeys(p, ["owner"]) && typeof p.owner === "string" && /^[A-Za-z0-9._-]{1,96}$/.test(p.owner) && !p.owner.includes(".."),
   hub_file_meta: (p) => isPlain(p) && hasOnlyKeys(p, ["repo", "file"]) && isRepo(p.repo) && isGguf(p.file),
-  hub_download: (p) => isPlain(p) && hasOnlyKeys(p, ["repo", "file", "parts", "total", "onEvent"]) && isRepo(p.repo) && isGguf(p.file) && Array.isArray(p.parts) && p.parts.length > 0 && p.parts.length <= 64 && p.parts.every(isGguf) && Number.isSafeInteger(p.total) && isChannel(p.onEvent),
+  hub_download: (p) => isPlain(p) && hasOnlyKeys(p, ["repo", "file", "parts", "total", "onEvent"]) && isRepo(p.repo) && Array.isArray(p.parts) && p.parts.length > 0 && p.parts.length <= 64 && ((isGguf(p.file) && p.parts.every(isGguf)) || (p.file === "model_index.json" && p.parts.every(isPipelineFile))) && Number.isSafeInteger(p.total) && isChannel(p.onEvent),
   hub_cancel: (p) => isPlain(p) && hasOnlyKeys(p, ["repo", "file"]) && isRepo(p.repo) && isGguf(p.file),
   switch_set: (p) => isPlain(p) && hasOnlyKeys(p, ["id", "value"]) && typeof p.id === "string" && /^[a-z0-9_]{1,48}$/.test(p.id) && Number.isSafeInteger(p.value),
   network_offline_set: (p) => isPlain(p) && hasOnlyKeys(p, ["on"]) && typeof p.on === "boolean",

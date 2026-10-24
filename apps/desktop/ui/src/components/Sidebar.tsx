@@ -93,7 +93,7 @@ export function Sidebar(props: { route: RouteId; collapsed: boolean; onToggle: (
                 </span>
               </p>
               <ul class="nav-group__list" aria-labelledby={`nav-${group}`}>
-                <For each={ROUTES.filter((r) => r.group === group)}>{(r) => <li>{link(r)}</li>}</For>
+                <For each={ROUTES.filter((r) => r.group === group && r.inSidebar !== false)}>{(r) => <li>{link(r)}</li>}</For>
               </ul>
             </div>
           )}

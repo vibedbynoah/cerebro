@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-image-edit"
+description = "Enables the image_edit command without any pre-configured scope."
+commands.allow = ["image_edit"]
+
+[[permission]]
+identifier = "deny-image-edit"
+description = "Denies the image_edit command without any pre-configured scope."
+commands.deny = ["image_edit"]

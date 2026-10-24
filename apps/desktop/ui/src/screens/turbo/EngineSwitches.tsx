@@ -66,10 +66,14 @@ export function EngineSwitches(props: { version?: number }): JSX.Element {
 
   const renderNote = (s: EngineSwitch) => {
     const level = app.level();
-    const text = level === "beginner" ? s.beginner : s.advanced;
+    // The plain sentence for everyone; the engineering detail as a smaller second line on the
+    // Advanced level.
     return (
       <>
-        {text}
+        {s.beginner}
+        <Show when={level === "advanced"}>
+          <span class="switches__detail">{s.advanced}</span>
+        </Show>
         <span class={`badge badge--${s.channel}`}>{CHANNEL_LABELS[s.channel]}</span>
         <Show when={s.applies !== "live"}>
           <span class="badge">
@@ -77,7 +81,6 @@ export function EngineSwitches(props: { version?: number }): JSX.Element {
           </span>
         </Show>
         <Show when={level === "advanced"}>
-          <code class="switches__env">{s.env}</code>
           <Show when={s.value !== s.default}>
             <button class="btn btn--tertiary btn--sm" type="button" onClick={() => update(s, s.default)}>
               Default

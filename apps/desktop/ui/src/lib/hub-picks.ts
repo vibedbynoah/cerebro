@@ -47,6 +47,19 @@ export const HUB_PICKS: readonly HubPick[] = [
   { title: "Qwen3 TTS 1.7B", family: "qwen", query: "Qwen3-TTS GGUF", sizeGiB: 1.9, params: "1.7B", abilities: ["speech"], blurb: "Reads replies aloud in a natural voice.", publisher: "Qwen" },
 ];
 
+/** Image models featured on the front page: the ones the engine runs (Stable Diffusion 2.x family,
+ *  diffusers folders), downloaded whole from the publisher's own repository. */
+export interface FeaturedImage {
+  title: string;
+  repo: string;
+  publisher: string;
+  params: string;
+  blurb: string;
+}
+export const FEATURED_IMAGES: readonly FeaturedImage[] = [
+  { title: "SD Turbo", repo: "stabilityai/sd-turbo", publisher: "stabilityai", params: "1.3B", blurb: "A 512 x 512 picture in a single step: makes the images for /imagine and Image Studio." },
+];
+
 export const ABILITY_LABELS: Readonly<Record<Ability, string>> = {
   chat: "Chat",
   code: "Code",

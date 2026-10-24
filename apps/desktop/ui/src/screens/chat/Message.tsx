@@ -1,7 +1,7 @@
 import { createEffect, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { Icon } from "../../components/icons";
 import { parseMarkdown, plainText } from "../../lib/chat/markdown";
-import { EFFORT_LABELS, REASONING_LABELS } from "../../lib/chat/prompt";
+import { EFFORT_LABELS } from "../../lib/chat/prompt";
 import type { ChatMessage } from "../../lib/chat/store";
 import type { Source } from "../../lib/rag";
 import { LedgerPanel } from "./Ledger";
@@ -261,7 +261,7 @@ function AssistantMessage(props: {
         {(s) => (
           <footer class="msg__foot">
             <span class="msg__meta" data-testid="reply-meta">
-              {EFFORT_LABELS[m().effort]} effort · {REASONING_LABELS[m().source]} · <span class="mono">{s().tokPerSec.toFixed(1)} tok/s</span> · first token{" "}
+              {EFFORT_LABELS[m().effort]} effort · <span class="mono">{s().tokPerSec.toFixed(1)} tok/s</span> · first token{" "}
               <span class="mono">{ms(s().ttftMs)}</span>
               <Show when={s().thinkingTokens > 0}>
                 {" "}

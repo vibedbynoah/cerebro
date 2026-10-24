@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-hub-pipeline-files"
+description = "Enables the hub_pipeline_files command without any pre-configured scope."
+commands.allow = ["hub_pipeline_files"]
+
+[[permission]]
+identifier = "deny-hub-pipeline-files"
+description = "Denies the hub_pipeline_files command without any pre-configured scope."
+commands.deny = ["hub_pipeline_files"]

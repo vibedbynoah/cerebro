@@ -9,6 +9,7 @@ import { DEFAULT_SAMPLER, type ChatEvent } from "../../ui/src/service/chat-types
 const base: PromptInputs = {
   base: "You are helpful.",
   effort: "high",
+  thinking: "medium",
   verbosity: "brief",
   source: "native",
   addInstructions: true,
@@ -18,42 +19,34 @@ const base: PromptInputs = {
   modelMaxThinking: 32768,
 };
 
-describe("effort and reasoning source (effort-levels.md)", () => {
-  it("native only sends the model's own control and adds no verification text", () => {
-    const r = buildRequest(base);
-    expect(r.native).toEqual({ reasoningEffort: "medium", thinkingBudget: 4096 });
-    expect(r.systemPrompt).not.toContain(EFFORT_LEVELS.high.instruction);
-    expect(r.passes).toBe(0);
+describe("thinking and effort are separate settings", () => {
+  it("thinking sets the model's own reasoning budget", () => {
+    expect(buildRequest(base).native).toEqual({ reasoningEffort: "medium", thinkingBudget: 4096 });
+    expect(buildRequest({ ...base, thinking: "high" }).native).toEqual({ reasoningEffort: "high", thinkingBudget: 16384 });
   });
-  it("Cerebro prompts adds the instruction and passes, no native params", () => {
-    const r = buildRequest({ ...base, source: "prompts" });
-    expect(r.native).toBeNull();
-    expect(r.systemPrompt).toContain(EFFORT_LEVELS.high.instruction);
-    expect(r.passes).toBe(1);
+  it("low thinking still thinks; only off turns thinking off", () => {
+    expect(buildRequest({ ...base, thinking: "low" }).native?.thinkingBudget).toBe(1024);
+    expect(buildRequest({ ...base, thinking: "off" }).native?.thinkingBudget).toBe(0);
   });
-  it("both sends native params and the instruction", () => {
-    const r = buildRequest({ ...base, source: "both", effort: "max" });
-    expect(r.native).toEqual({ reasoningEffort: "high", thinkingBudget: 32768 });
+  it("effort does not change thinking", () => {
+    expect(buildRequest({ ...base, effort: "low" }).native).toEqual(buildRequest({ ...base, effort: "max" }).native);
+  });
+  it("effort adds Cerebro's instruction and review passes", () => {
+    const r = buildRequest({ ...base, effort: "max" });
     expect(r.systemPrompt).toContain(EFFORT_LEVELS.max.instruction);
     expect(r.passes).toBe(2);
-  });
-  it("neither is the raw model plus verbosity and memory only", () => {
-    const r = buildRequest({ ...base, source: "none", effort: "max" });
-    expect(r.native).toBeNull();
-    expect(r.passes).toBe(0);
-    expect(r.systemPrompt).not.toContain(EFFORT_LEVELS.max.instruction);
+    expect(buildRequest({ ...base, effort: "low" }).passes).toBe(0);
   });
   it("no added prompt sends only the user's own system prompt", () => {
-    const r = buildRequest({ ...base, source: "both", addInstructions: false });
+    const r = buildRequest({ ...base, effort: "max", addInstructions: false });
     expect(r.systemPrompt).toBe("You are helpful.");
     expect(r.passes).toBe(0);
     expect(r.notes.join(" ")).toMatch(/No added prompt/);
   });
-  it("falls back to the instruction when the model has no native control, and says so", () => {
+  it("a model without its own reasoning gets no thinking parameters, and effort still applies", () => {
     const r = buildRequest({ ...base, nativeSupported: false });
     expect(r.native).toBeNull();
     expect(r.systemPrompt).toContain(EFFORT_LEVELS.high.instruction);
-    expect(r.notes[0]).toMatch(/no native reasoning control/);
   });
   it("adds verbosity and memory, and leaves memory out when off", () => {
     const r = buildRequest(base);
@@ -61,15 +54,19 @@ describe("effort and reasoning source (effort-levels.md)", () => {
     expect(r.systemPrompt).toContain("Uses Rust.");
     expect(buildRequest({ ...base, memoryOn: false }).systemPrompt).not.toContain("Uses Rust.");
   });
+  it("custom effort adds exactly the help that is ticked", () => {
+    const none = buildRequest({ ...base, custom: { instruction: false, selfReview: false, freshCheck: false } });
+    expect(none.passes).toBe(0);
+    expect(none.systemPrompt).not.toContain(EFFORT_LEVELS.high.instruction);
+    const check = buildRequest({ ...base, effort: "low", custom: { instruction: true, selfReview: false, freshCheck: true } });
+    expect(check.passes).toBe(2);
+    expect(check.systemPrompt).toContain(EFFORT_LEVELS.high.instruction);
+    expect(buildRequest({ ...base, custom: { instruction: false, selfReview: true, freshCheck: false } }).passes).toBe(1);
+  });
   it("caps thinking at the model's ceiling and reserves the answer budget", () => {
-    const r = buildRequest({ ...base, effort: "xhigh", modelMaxThinking: 8000 });
+    const r = buildRequest({ ...base, thinking: "max", modelMaxThinking: 8000 });
     expect(r.native?.thinkingBudget).toBe(8000);
     expect(r.answerReserve).toBeGreaterThan(0);
-  });
-  it("low effort has no thinking and no passes", () => {
-    expect(EFFORT_LEVELS.low.thinkingTokens).toBe(0);
-    expect(EFFORT_LEVELS.low.passes).toBe(0);
-    expect(EFFORT_LEVELS.max.passes).toBe(2);
   });
   it("knows which families have native reasoning", () => {
     expect(supportsNativeReasoning("Qwen3 Qwen3-30B-A3B")).toBe(true);

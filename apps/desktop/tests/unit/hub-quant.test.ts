@@ -20,18 +20,32 @@ describe("the quant chooser", () => {
     expect(pick?.slow).toBe(false);
   });
 
-  it("takes the largest dynamic quant that fits this computer", () => {
+  it("takes the largest dynamic quant that runs entirely on the graphics card", () => {
     const files = [file("UD-Q4_K_XL", 5), file("UD-Q8_0", 9), file("UD-Q2_K", 2)];
     const pick = recommendQuant(files, machine(8, 32));
-    expect(pick?.file.quant).toBe("UD-Q8_0");
-    expect(pick?.why).toBe("UD-Q8_0: the best quality that fits your 8 GB graphics card and 32 GB of memory.");
+    expect(pick?.file.quant).toBe("UD-Q4_K_XL");
+    expect(pick?.why).toBe("UD-Q4_K_XL: the best quality that runs entirely on your 8 GB graphics card.");
   });
 
-  it("takes the largest file that fits when the repository has no dynamic quant", () => {
+  it("never picks a full-precision file that only fits split with the processor", () => {
+    const files = [file("f32", 29.9), file("f16", 15), file("Q8_0", 8), file("Q4_K_M", 4.6), file("Q6_K", 6.1)];
+    expect(recommendQuant(files, machine(8, 32))?.file.quant).toBe("Q6_K");
+  });
+
+  it("takes a 4- or 5-bit file for a model too big for the card", () => {
+    const files = [file("UD-Q8_K_XL", 29.3), file("UD-Q6_K_XL", 22), file("UD-Q4_K_XL", 16.5), file("UD-Q5_K_XL", 19), file("UD-IQ2_XXS", 8)];
+    expect(recommendQuant(files, machine(8, 32))?.file.quant).toBe("UD-Q5_K_XL");
+  });
+
+  it("allows 16-bit only when the repository has nothing smaller", () => {
+    expect(recommendQuant([file("F32", 7.2), file("F16", 3.8)], machine(8, 32))?.file.quant).toBe("F16");
+  });
+
+  it("takes the largest file on the card when the repository has no dynamic quant", () => {
     const files = [file("Q4_K_M", 4.6), file("Q8_0", 12), file("IQ2_XXS", 2)];
     const pick = recommendQuant(files, machine(8, 32));
-    expect(pick?.file.quant).toBe("Q8_0");
-    expect(pick?.why).toMatch(/your 8 GB graphics card and 32 GB of memory/);
+    expect(pick?.file.quant).toBe("Q4_K_M");
+    expect(pick?.why).toMatch(/your 8 GB graphics card/);
   });
 
   it("recommends the smallest file when nothing fits, and says it will be slow", () => {

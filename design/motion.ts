@@ -150,7 +150,9 @@ export function initScrollReveal(root: ParentNode = document, options: RevealOpt
         }
       }
     },
-    { root: null, rootMargin: options.rootMargin ?? "0px 0px -10% 0px", threshold: options.threshold ?? 0.15 },
+    // Threshold 0: a section shows as its top edge enters (above the bottom 10%). A fraction of
+    // the section never arrives for one taller than the window (the Plugins catalogue stayed hidden).
+    { root: null, rootMargin: options.rootMargin ?? "0px 0px -10% 0px", threshold: options.threshold ?? 0 },
   );
   for (const el of elements) {
     arm(el);

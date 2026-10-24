@@ -33,7 +33,7 @@ export interface ModePreset {
   summary: string;
   /** What actually changes, for the notice. */
   changes: readonly string[];
-  prefs: Pick<ChatPrefs, "effort" | "verbosity" | "source" | "addInstructions" | "memoryOn" | "orchestrate" | "workers" | "rounds">;
+  prefs: Pick<ChatPrefs, "effort" | "effortCustom" | "thinking" | "verbosity" | "source" | "addInstructions" | "memoryOn" | "orchestrate" | "workers" | "rounds">;
   base: string;
   sampler: Partial<Sampler>;
 }
@@ -49,7 +49,7 @@ export const MODE_PRESETS: Readonly<Record<Mode, ModePreset>> = {
       "Greedy decoding: on an NVIDIA card every word is picked on the card, with no round trip per word",
       "Replies capped at 1,024 tokens",
     ],
-    prefs: { effort: "low", verbosity: "brief", source: "native", addInstructions: true, memoryOn: false, orchestrate: false, workers: 3, rounds: 3 },
+    prefs: { effortCustom: null, thinking: "off", effort: "low", verbosity: "brief", source: "native", addInstructions: true, memoryOn: false, orchestrate: false, workers: 3, rounds: 3 },
     base: FASTEST_PROMPT,
     sampler: { temperature: 0, repeatPenalty: 1, topK: 1, topP: 1, minP: 0, maxTokens: 1024 },
   },
@@ -57,23 +57,23 @@ export const MODE_PRESETS: Readonly<Record<Mode, ModePreset>> = {
     label: "Fast",
     summary: "Short, direct answers with thinking off and a short system prompt.",
     changes: ["Thinking off", "A short system prompt", "Brief answers", "Replies capped at 2,048 tokens"],
-    prefs: { effort: "low", verbosity: "brief", source: "native", addInstructions: true, memoryOn: true, orchestrate: false, workers: 3, rounds: 3 },
+    prefs: { effortCustom: null, thinking: "off", effort: "low", verbosity: "brief", source: "native", addInstructions: true, memoryOn: true, orchestrate: false, workers: 3, rounds: 3 },
     base: FAST_PROMPT,
     sampler: { temperature: 0.5, repeatPenalty: 1.05, topK: 40, topP: 0.95, minP: 0.05, maxTokens: 2048 },
   },
   3: {
     label: "Balanced",
     summary: "The default: the model thinks first (up to 1,024 tokens) where it supports it, and checks key facts and numbers. Much more often right on multi-step problems, and many times slower than Fast.",
-    changes: ["Medium effort: up to 1,024 thinking tokens", "Key facts and numbers checked", "Your memories added"],
-    prefs: { effort: "medium", verbosity: "brief", source: "native", addInstructions: true, memoryOn: true, orchestrate: false, workers: 3, rounds: 3 },
+    changes: ["Thinking Low: up to 1,024 thinking tokens", "Medium effort", "Key facts and numbers checked", "Your memories added"],
+    prefs: { effortCustom: null, thinking: "low", effort: "medium", verbosity: "brief", source: "native", addInstructions: true, memoryOn: true, orchestrate: false, workers: 3, rounds: 3 },
     base: DEFAULT_BASE_PROMPT,
     sampler: { temperature: 0.7, repeatPenalty: 1.05, topK: 40, topP: 0.95, minP: 0.05, maxTokens: 4096 },
   },
   4: {
     label: "Accurate",
     summary: "Long thinking, a detailed correctness prompt and a review pass: about 3-4 times slower than Balanced.",
-    changes: ["Extra-high effort: up to 16,384 thinking tokens", "A detailed prompt for checking every step", "The draft is reviewed once and corrected", "Lower temperature"],
-    prefs: { effort: "xhigh", verbosity: "normal", source: "both", addInstructions: true, memoryOn: true, orchestrate: false, workers: 3, rounds: 3 },
+    changes: ["Thinking High: up to 16,384 thinking tokens", "Extra-high effort", "A detailed prompt for checking every step", "The draft is reviewed once and corrected", "Lower temperature"],
+    prefs: { effortCustom: null, thinking: "high", effort: "xhigh", verbosity: "normal", source: "both", addInstructions: true, memoryOn: true, orchestrate: false, workers: 3, rounds: 3 },
     base: ACCURATE_PROMPT,
     sampler: { temperature: 0.4, repeatPenalty: 1.05, topK: 40, topP: 0.95, minP: 0.05, maxTokens: 8192 },
   },
@@ -83,10 +83,10 @@ export const MODE_PRESETS: Readonly<Record<Mode, ModePreset>> = {
     changes: [
       "Orchestrate on: a manager plans and curates tasks in a shared ledger (plan, notes, tasks, result)",
       "Five workers per round, each a fresh instance trying a different approach, up to three rounds",
-      "Maximum effort and two review passes in each call",
+      "Thinking Max, maximum effort and two review passes in each call",
       "On one graphics card the instances take turns, so this is the slowest setting",
     ],
-    prefs: { effort: "max", verbosity: "normal", source: "both", addInstructions: true, memoryOn: true, orchestrate: true, workers: 5, rounds: 3 },
+    prefs: { effortCustom: null, thinking: "max", effort: "max", verbosity: "normal", source: "both", addInstructions: true, memoryOn: true, orchestrate: true, workers: 5, rounds: 3 },
     base: ACCURATE_PROMPT,
     sampler: { temperature: 0.4, repeatPenalty: 1.05, topK: 40, topP: 0.95, minP: 0.05, maxTokens: 8192 },
   },

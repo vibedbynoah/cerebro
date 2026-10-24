@@ -2,14 +2,32 @@ import { readPref, writePref } from "../storage";
 
 /**
  * What Chat sends with each message: the system prompt the user can see and edit, and the native
- * reasoning parameters. Implements docs/specs/effort-levels.md exactly: five effort levels, each
- * setting a thinking budget, a verification instruction and self-check passes; and the reasoning
- * source (native model effort, Cerebro prompts, both, or neither). Pure, so every rule is tested.
+ * reasoning parameters. Two separate settings:
+ *  - Thinking: the model's own reasoning, for models that have it. Off = the model does not think;
+ *    Low, Medium, High and Max = it thinks, with a larger budget at each step.
+ *  - Effort: how much Cerebro helps the model: a verification instruction in the system prompt and
+ *    review passes after the draft (docs/specs/effort-levels.md).
+ * Pure, so every rule is tested.
  */
 
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
 export const EFFORTS: readonly Effort[] = ["low", "medium", "high", "xhigh", "max"];
 export const EFFORT_LABELS: Readonly<Record<Effort, string>> = { low: "Low", medium: "Medium", high: "High", xhigh: "XHigh", max: "Max" };
+
+/** The model's own reasoning: off, or on with a budget. */
+export type Thinking = "off" | "low" | "medium" | "high" | "max";
+export const THINKINGS: readonly Thinking[] = ["off", "low", "medium", "high", "max"];
+export const THINKING_LABELS: Readonly<Record<Thinking, string>> = { off: "Off", low: "Low", medium: "Medium", high: "High", max: "Max" };
+/** Thinking tokens allowed at each level; Max uses the model's own ceiling. */
+export const THINKING_BUDGETS: Readonly<Record<Thinking, number>> = { off: 0, low: 1024, medium: 4096, high: 16384, max: Number.POSITIVE_INFINITY };
+const THINKING_NATIVE: Readonly<Record<Thinking, "low" | "medium" | "high">> = { off: "low", low: "low", medium: "medium", high: "high", max: "high" };
+export const THINKING_NOTES: Readonly<Record<Thinking, string>> = {
+  off: "The model answers straight away, without reasoning first. Fastest.",
+  low: "The model reasons briefly before answering (up to 1,024 tokens).",
+  medium: "The model reasons before answering (up to 4,096 tokens).",
+  high: "The model reasons at length before answering (up to 16,384 tokens).",
+  max: "The model reasons for as long as it needs, up to its own limit. Slowest.",
+};
 
 export type Verbosity = "brief" | "normal" | "detailed";
 export const VERBOSITIES: readonly Verbosity[] = ["brief", "normal", "detailed"];
@@ -96,11 +114,24 @@ export interface Memory {
   scope: "you" | "project";
 }
 
+/** Effort picked help by help (the "What Cerebro adds" tick boxes) instead of by level. */
+export interface CustomEffort {
+  /** The check-the-answer instruction in the system prompt. */
+  instruction: boolean;
+  /** The model rereads its draft and corrects it. */
+  selfReview: boolean;
+  /** A fresh instance checks the answer too (implies the self-review). */
+  freshCheck: boolean;
+}
+
 export interface PromptInputs {
   /** The levels in force (the defaults, or the user's edits from Settings). */
   levels?: Readonly<Record<Effort, EffortLevel>>;
+  /** Overrides the level's instruction and passes when set. */
+  custom?: CustomEffort | null;
   base: string;
   effort: Effort;
+  thinking: Thinking;
   verbosity: Verbosity;
   source: ReasoningSource;
   /** False when the user chose "no added prompt": only `base` is sent. */
@@ -130,31 +161,24 @@ export const ANSWER_RESERVE = 2048;
 export function buildRequest(i: PromptInputs): BuiltRequest {
   const level = (i.levels ?? EFFORT_LEVELS)[i.effort];
   const notes: string[] = [];
-  const usePrompts = i.addInstructions && (i.source === "prompts" || i.source === "both");
-  const wantNative = i.source === "native" || i.source === "both";
+  // Effort is Cerebro's help, so its instruction goes in whenever added prompts are on.
+  const usePrompts = i.addInstructions;
 
   const parts = [i.base.trim()];
   if (i.addInstructions) {
     parts.push(VERBOSITY_INSTRUCTIONS[i.verbosity]);
-    if (usePrompts) parts.push(level.instruction);
+    if (usePrompts && (i.custom ? i.custom.instruction : true)) parts.push(i.custom ? (i.levels ?? EFFORT_LEVELS).high.instruction : level.instruction);
     if (i.memoryOn && i.memories.length) parts.push(`What you know about the user:\n${i.memories.map((m) => `- ${m.text}`).join("\n")}`);
   }
 
+  // Thinking is the model's own: sent to every model that has it, whatever the effort.
   let native: BuiltRequest["native"] = null;
-  if (wantNative) {
-    if (i.nativeSupported) {
-      const budget = Number.isFinite(level.thinkingTokens) ? Math.min(level.thinkingTokens, i.modelMaxThinking) : i.modelMaxThinking;
-      native = { reasoningEffort: level.nativeEffort, thinkingBudget: budget };
-    } else {
-      notes.push("This model has no native reasoning control, so only the verification instruction applies.");
-    }
+  if (i.nativeSupported) {
+    const b = THINKING_BUDGETS[i.thinking];
+    native = { reasoningEffort: THINKING_NATIVE[i.thinking], thinkingBudget: Number.isFinite(b) ? Math.min(b, i.modelMaxThinking) : i.modelMaxThinking };
   }
-  // Native only on a model without native control would otherwise mean no effort at all: fall back
-  // to the instruction so the chosen level still does something, and say so.
-  const fallbackPrompt = i.source === "native" && !i.nativeSupported && i.addInstructions;
-  if (fallbackPrompt) parts.push(level.instruction);
 
-  const passes = i.source === "none" || !(usePrompts || fallbackPrompt) ? 0 : level.passes;
+  const passes = !usePrompts ? 0 : i.custom ? (i.custom.freshCheck ? 2 : i.custom.selfReview ? 1 : 0) : level.passes;
   if (!i.addInstructions) notes.push("No added prompt: the model sees only your system prompt.");
 
   return { systemPrompt: parts.filter(Boolean).join("\n\n"), native, passes, answerReserve: ANSWER_RESERVE, notes };
@@ -164,6 +188,9 @@ export function buildRequest(i: PromptInputs): BuiltRequest {
 
 export interface ChatPrefs {
   effort: Effort;
+  /** Set when the user ticked the kinds of help one by one: Effort then reads "Custom". */
+  effortCustom: CustomEffort | null;
+  thinking: Thinking;
   verbosity: Verbosity;
   source: ReasoningSource;
   addInstructions: boolean;
@@ -182,7 +209,7 @@ export interface ChatPrefs {
   toolsOn: boolean;
 }
 
-export const DEFAULT_PREFS: ChatPrefs = { effort: "medium", verbosity: "brief", source: "native", addInstructions: true, base: DEFAULT_BASE_PROMPT, memoryOn: true, orchestrate: false, workers: 3, rounds: 3, planMode: false, toolsOn: false };
+export const DEFAULT_PREFS: ChatPrefs = { effortCustom: null, effort: "medium", thinking: "low", verbosity: "brief", source: "native", addInstructions: true, base: DEFAULT_BASE_PROMPT, memoryOn: true, orchestrate: false, workers: 3, rounds: 3, planMode: false, toolsOn: false };
 
 const isOneOf = <T extends string>(list: readonly T[], v: unknown): v is T => typeof v === "string" && (list as readonly string[]).includes(v);
 
@@ -200,6 +227,8 @@ export function parsePrefs(raw: string | null): ChatPrefs {
   const inRange = (x: unknown, min: number, max: number, d: number): number => (typeof x === "number" && Number.isInteger(x) && x >= min && x <= max ? x : d);
   return {
     effort: isOneOf(EFFORTS, v.effort) ? v.effort : DEFAULT_PREFS.effort,
+    thinking: isOneOf(THINKINGS, v.thinking) ? v.thinking : DEFAULT_PREFS.thinking,
+    effortCustom: parseCustom(v.effortCustom),
     verbosity: isOneOf(VERBOSITIES, v.verbosity) ? v.verbosity : DEFAULT_PREFS.verbosity,
     source: isOneOf(REASONING_SOURCES, v.source) ? v.source : DEFAULT_PREFS.source,
     addInstructions: typeof v.addInstructions === "boolean" ? v.addInstructions : DEFAULT_PREFS.addInstructions,
@@ -211,6 +240,18 @@ export function parsePrefs(raw: string | null): ChatPrefs {
     planMode: typeof v.planMode === "boolean" ? v.planMode : DEFAULT_PREFS.planMode,
     toolsOn: typeof v.toolsOn === "boolean" ? v.toolsOn : DEFAULT_PREFS.toolsOn,
   };
+}
+
+function parseCustom(v: unknown): CustomEffort | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  if (typeof o.instruction !== "boolean" || typeof o.selfReview !== "boolean" || typeof o.freshCheck !== "boolean") return null;
+  return { instruction: o.instruction, selfReview: o.selfReview, freshCheck: o.freshCheck };
+}
+
+/** The help a level gives, as the tick boxes show it. */
+export function customOf(level: EffortLevel): CustomEffort {
+  return { instruction: level.instruction.trim() !== "", selfReview: level.passes >= 1, freshCheck: level.passes === 2 };
 }
 
 /** Model families whose chat template exposes a native reasoning control (thinking on/off, budget

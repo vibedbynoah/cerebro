@@ -201,6 +201,8 @@ export function Chat(): JSX.Element {
       levels,
       base: prefs().base,
       effort: prefs().effort,
+      custom: prefs().effortCustom,
+      thinking: prefs().thinking,
       verbosity: prefs().verbosity,
       source: prefs().source,
       addInstructions: prefs().addInstructions,
@@ -721,7 +723,7 @@ export function Chat(): JSX.Element {
       case "think": {
         const on = switchArg(arg);
         if (on === null) return need("on or off");
-        setPrefs(on ? { effort: prefs().effort === "low" ? "medium" : prefs().effort, source: prefs().source === "none" ? "native" : prefs().source } : { effort: "low" });
+        setPrefs({ thinking: on ? (prefs().thinking === "off" ? "low" : prefs().thinking) : "off" });
         return notify(on ? "Thinking on" : "Thinking off", on ? "The model thinks before it answers." : "The model answers straight away.");
       }
       case "system":
@@ -1347,6 +1349,7 @@ export function Chat(): JSX.Element {
           <Show when={panel() === "settings"}>
             <div class="chat-side__body">
               <ChatSettings
+                thinkingSupported={supportsNativeReasoning(`${model()?.family ?? ""} ${model()?.name ?? ""}`)}
                 levels={levels}
                 mode={modeOf(prefs(), sampler())}
                 onMode={pickMode}
@@ -1374,8 +1377,8 @@ export function Chat(): JSX.Element {
               onMode={(m) => pickMode(m, false)}
               sampler={sampler()}
               setSampler={setSampler}
-              thinking={prefs().effort !== "low" && prefs().source !== "none"}
-              setThinking={(on) => setPrefs(on ? { effort: prefs().effort === "low" ? "medium" : prefs().effort, source: prefs().source === "none" ? "native" : prefs().source } : { effort: "low" })}
+              thinking={prefs().thinking !== "off"}
+              setThinking={(on) => setPrefs({ thinking: on ? (prefs().thinking === "off" ? "low" : prefs().thinking) : "off" })}
               onOpenPrompt={() => setPanel("prompt")}
               hasPreset={presetIds().has(modelId())}
               onSavePreset={() => {

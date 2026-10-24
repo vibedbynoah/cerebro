@@ -2,7 +2,7 @@ import { createEffect, createSignal, For, on, onCleanup, Show, type JSX } from "
 import { Icon } from "../../components/icons";
 import { closest, parseCommand, suggest, unknownCommand, type CommandDef } from "../../lib/chat/commands";
 import { MODE_PRESETS, MODES, type Mode } from "../../lib/chat/modes";
-import { EFFORT_LABELS, EFFORTS, REASONING_LABELS, REASONING_NOTES, REASONING_SOURCES, VERBOSITIES, VERBOSITY_LABELS, type ChatPrefs, type Effort, type EffortLevel } from "../../lib/chat/prompt";
+import { customOf, EFFORT_LABELS, EFFORTS, THINKING_LABELS, THINKING_NOTES, THINKINGS, VERBOSITIES, VERBOSITY_LABELS, type ChatPrefs, type CustomEffort, type Effort, type EffortLevel } from "../../lib/chat/prompt";
 import type { Attachment } from "../../lib/chat/store";
 import { readPref, writePref } from "../../lib/storage";
 
@@ -403,6 +403,8 @@ export function ChatSettings(props: {
   docsScope: string;
   onDocsScope: (key: string) => void;
   docsNote: string;
+  /** The loaded model has its own reasoning (thinking) control. */
+  thinkingSupported: boolean;
 }): JSX.Element {
   return (
     <div class="chat-settings">
@@ -437,23 +439,81 @@ export function ChatSettings(props: {
         <summary class="composer__more-summary">
           <Icon name="sliders" size={15} />
           <span class="composer__more-title">Fine-tune</span>
-          <span class="composer__more-meta" aria-hidden="true">Effort, reasoning and prompt</span>
+          <span class="composer__more-meta" aria-hidden="true">Thinking, effort and prompt</span>
           <span class="composer__more-chevron" aria-hidden="true">
             <Icon name="chevron" size={14} />
           </span>
         </summary>
         <div class="composer__more-body">
           <div class="composer__controls">
+            <Show when={props.thinkingSupported}>
+              <fieldset class="segmented segmented--sm effort" aria-describedby="thinking-note">
+                <legend>Thinking</legend>
+                <For each={THINKINGS}>
+                  {(t) => (
+                    <label class="segmented__option" data-press>
+                      <input type="radio" name="thinking" value={t} checked={props.prefs.thinking === t} onChange={() => props.setPrefs({ thinking: t })} />
+                      <span>{THINKING_LABELS[t]}</span>
+                    </label>
+                  )}
+                </For>
+              </fieldset>
+              <p class="composer__hint" id="thinking-note">
+                {THINKING_NOTES[props.prefs.thinking]}
+              </p>
+            </Show>
             <fieldset class="segmented segmented--sm effort" aria-describedby="effort-note">
               <legend>Effort</legend>
               <For each={EFFORTS}>
                 {(e) => (
                   <label class="segmented__option" data-press>
-                    <input type="radio" name="effort" value={e} checked={props.prefs.effort === e} onChange={() => props.setPrefs({ effort: e })} />
+                    <input type="radio" name="effort" value={e} checked={!props.prefs.effortCustom && props.prefs.effort === e} onChange={() => props.setPrefs({ effort: e, effortCustom: null })} />
                     <span>{EFFORT_LABELS[e]}</span>
                   </label>
                 )}
               </For>
+            </fieldset>
+            <fieldset class="composer__adds" aria-describedby="effort-note">
+              <legend>
+                What Cerebro adds{props.prefs.effortCustom ? " (Custom)" : ""}
+              </legend>
+              {(() => {
+                const now = () => props.prefs.effortCustom ?? customOf(props.levels[props.prefs.effort]);
+                const tick = (k: keyof CustomEffort, v: boolean) => {
+                  const next = { ...now(), [k]: v };
+                  if (k === "freshCheck" && v) next.selfReview = true;
+                  if (k === "selfReview" && !v) next.freshCheck = false;
+                  props.setPrefs({ effortCustom: next });
+                };
+                return (
+                  <>
+                    <label class="composer__check" title="A system-prompt instruction to check facts, numbers and code before answering.">
+                      <input type="checkbox" checked={now().instruction} onChange={(e) => tick("instruction", e.currentTarget.checked)} />
+                      <span>Check-the-answer instruction</span>
+                    </label>
+                    <label class="composer__check" title="After the draft, the model rereads it and corrects any mistake it finds.">
+                      <input type="checkbox" checked={now().selfReview} onChange={(e) => tick("selfReview", e.currentTarget.checked)} />
+                      <span>Self-review of the draft</span>
+                    </label>
+                    <label class="composer__check" title="A fresh instance of the model, without the conversation, checks the answer as well.">
+                      <input type="checkbox" checked={now().freshCheck} onChange={(e) => tick("freshCheck", e.currentTarget.checked)} />
+                      <span>Independent second check</span>
+                    </label>
+                    <label class="composer__check" title="Several instances plan, split the work and check each other through a shared ledger (GVS5H). Slower, often better on hard problems.">
+                      <input type="checkbox" checked={props.prefs.orchestrate} onChange={(e) => props.setPrefs({ orchestrate: e.currentTarget.checked })} />
+                      <span>Shared ledger (several instances)</span>
+                    </label>
+                    <label class="composer__check" title="Lets the model read files, search and call your MCP tools.">
+                      <input type="checkbox" checked={props.prefs.toolsOn} onChange={(e) => props.setPrefs({ toolsOn: e.currentTarget.checked })} data-testid="tools-on" />
+                      <span>Tools</span>
+                    </label>
+                    <label class="composer__check" title="What you asked it to remember about you.">
+                      <input type="checkbox" checked={props.prefs.memoryOn} onChange={(e) => props.setPrefs({ memoryOn: e.currentTarget.checked })} />
+                      <span>Memories</span>
+                    </label>
+                  </>
+                );
+              })()}
             </fieldset>
             <fieldset class="segmented segmented--sm">
               <legend>Verbosity</legend>
@@ -466,27 +526,13 @@ export function ChatSettings(props: {
                 )}
               </For>
             </fieldset>
-            <label class="composer__select">
-              <span>Reasoning</span>
-              <select value={props.prefs.source} onChange={(e) => props.setPrefs({ source: e.currentTarget.value as ChatPrefs["source"] })} aria-describedby="source-note">
-                <For each={REASONING_SOURCES}>{(s) => <option value={s}>{REASONING_LABELS[s]}</option>}</For>
-              </select>
-            </label>
             <label class="composer__check">
               <input type="checkbox" checked={!props.prefs.addInstructions} onChange={(e) => props.setPrefs({ addInstructions: !e.currentTarget.checked })} />
               <span>No added prompt</span>
             </label>
-            <label class="composer__check" title="Lets the model read files, search and call your MCP tools. Their descriptions make every prompt longer, which slows small models.">
-              <input type="checkbox" checked={props.prefs.toolsOn} onChange={(e) => props.setPrefs({ toolsOn: e.currentTarget.checked })} data-testid="tools-on" />
-              <span>Let the model use tools</span>
-            </label>
             <label class="composer__check" title="The model looks around without changing anything, then shows you a plan to approve.">
               <input type="checkbox" checked={props.prefs.planMode} onChange={(e) => props.setPrefs({ planMode: e.currentTarget.checked })} />
               <span>Plan first</span>
-            </label>
-            <label class="composer__check">
-              <input type="checkbox" checked={props.prefs.orchestrate} onChange={(e) => props.setPrefs({ orchestrate: e.currentTarget.checked })} />
-              <span>Orchestrate</span>
             </label>
             <Show when={props.prefs.orchestrate}>
               <span class="stepper">
@@ -541,7 +587,7 @@ export function ChatSettings(props: {
             </button>
           </div>
           <p class="composer__hint" id="effort-note">
-            <span id="source-note">{REASONING_NOTES[props.prefs.source]}</span> {EFFORT_LABELS[props.prefs.effort]}: {props.levels[props.prefs.effort].slowdown}
+            Effort is how much Cerebro checks the answer. {EFFORT_LABELS[props.prefs.effort]}: {props.levels[props.prefs.effort].slowdown}
             {props.levels[props.prefs.effort].passes ? `, ${props.levels[props.prefs.effort].passes} review pass${props.levels[props.prefs.effort].passes > 1 ? "es" : ""}` : ""}.
             <For each={props.notes}>{(n) => <> {n}</>}</For>
           </p>

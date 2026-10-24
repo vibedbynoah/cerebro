@@ -58,6 +58,60 @@ struct ApiModel {
     tags: Vec<String>,
 }
 
+/// A publisher's picture from its Hugging Face profile (the logo Hugging Face shows next to its
+/// models: Qwen's for Qwen, Google's for Gemma), as a data URL for the Hub's tiles. Kept in
+/// Cerebro's folder, so each one is fetched once and shown offline afterwards; nothing is fetched
+/// while Offline mode is on. Organisations first, then user accounts.
+pub fn avatar(owner: &str) -> Result<String, String> {
+    if owner.is_empty() || owner.len() > 96 || owner.contains("..") || !owner.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)) {
+        return Err("Not a Hugging Face account name.".to_owned());
+    }
+    let dir = std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("Cerebro").join("avatars"));
+    let cached = dir.as_ref().map(|d| d.join(format!("{}.txt", owner.to_ascii_lowercase())));
+    if let Some(url) = cached.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).filter(|u| u.starts_with("data:image/")) {
+        return Ok(url);
+    }
+    if crate::llama_backend::offline() {
+        return Err("Offline mode is on.".to_owned());
+    }
+    let c = client()?;
+    #[derive(Deserialize)]
+    struct Avatar {
+        #[serde(rename = "avatarUrl")]
+        avatar_url: String,
+    }
+    let mut src = None;
+    for kind in ["organizations", "users"] {
+        let r = c.get(format!("{HF}/api/{kind}/{}/avatar", encode(owner))).send().map_err(|_| "Hugging Face could not be reached.".to_owned())?;
+        if r.status().is_success() {
+            if let Ok(a) = r.json::<Avatar>() {
+                src = Some(if a.avatar_url.starts_with('/') { format!("{HF}{}", a.avatar_url) } else { a.avatar_url });
+                break;
+            }
+        }
+    }
+    let src = src.ok_or("This account has no picture.")?;
+    // Hugging Face's own hosts only.
+    let host = src.strip_prefix("https://").and_then(|r| r.split('/').next()).unwrap_or("");
+    if !(host == "huggingface.co" || host.ends_with(".huggingface.co")) {
+        return Err("The picture is not on Hugging Face.".to_owned());
+    }
+    let r = c.get(&src).send().map_err(|_| "The picture could not be downloaded.".to_owned())?;
+    let kind = r.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").split(';').next().unwrap_or("").trim().to_owned();
+    if !matches!(kind.as_str(), "image/png" | "image/jpeg" | "image/webp" | "image/gif" | "image/svg+xml") {
+        return Err("The picture is not an image.".to_owned());
+    }
+    let mut bytes = Vec::new();
+    r.take(1 << 20).read_to_end(&mut bytes).map_err(|_| "The picture could not be downloaded.".to_owned())?;
+    use base64::Engine as _;
+    let url = format!("data:{kind};base64,{}", base64::engine::general_purpose::STANDARD.encode(&bytes));
+    if let (Some(d), Some(p)) = (dir, cached) {
+        let _ = std::fs::create_dir_all(d);
+        let _ = std::fs::write(p, &url);
+    }
+    Ok(url)
+}
+
 /// Repositories with GGUF files matching `query`, most downloaded first.
 pub fn search(query: &str) -> Result<Vec<HubRepo>, String> {
     let q = query.trim();
@@ -144,6 +198,71 @@ fn valid_repo(repo: &str) -> bool {
 
 fn valid_file(path: &str) -> bool {
     path.len() <= 300 && path.ends_with(".gguf") && !path.contains("..") && !path.starts_with('/') && !path.contains('\\') && path.split('/').all(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.+".contains(c)))
+}
+
+/// A file of an image model's diffusers folder that Cerebro downloads: configs, the tokenizer and
+/// safetensors weights (never pickled .bin or .ckpt files, which can run code when loaded).
+fn valid_pipeline_file(path: &str) -> bool {
+    path.len() <= 300
+        && (path.ends_with(".json") || path.ends_with(".txt") || path.ends_with(".safetensors"))
+        && !path.contains("..")
+        && !path.starts_with('/')
+        && !path.contains('\\')
+        && path.split('/').all(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.+".contains(c)))
+}
+
+/// The files of an image model on Hugging Face that Cerebro needs, with their total size: the
+/// diffusers folder of a Stable Diffusion 2.x-family pipeline (what the engine runs), 16-bit
+/// weights where the repository has them. Refused for any other kind of pipeline, before anything
+/// large is downloaded.
+pub fn pipeline_files(repo: &str) -> Result<(Vec<String>, u64), String> {
+    if !valid_repo(repo) {
+        return Err("Not a Hugging Face repository.".into());
+    }
+    let c = client()?;
+    let index: serde_json::Value = c
+        .get(format!("{HF}/{repo}/resolve/main/model_index.json"))
+        .send()
+        .ok()
+        .filter(|r| r.status().is_success())
+        .and_then(|r| r.json().ok())
+        .ok_or("This repository has no diffusers model_index.json, so it is not an image model Cerebro can run.")?;
+    let class = index["_class_name"].as_str().unwrap_or("");
+    if class != "StableDiffusionPipeline" {
+        return Err(format!("Cerebro runs Stable Diffusion 2.x-family image models (such as SD Turbo); this repository is a {class}."));
+    }
+    #[derive(Deserialize)]
+    struct Entry {
+        #[serde(rename = "type")]
+        kind: String,
+        path: String,
+        #[serde(default)]
+        size: u64,
+    }
+    let tree: Vec<Entry> = c
+        .get(format!("{HF}/api/models/{repo}/tree/main?recursive=true"))
+        .send()
+        .map_err(|_| "Hugging Face could not be reached.".to_owned())?
+        .json()
+        .map_err(|_| "Hugging Face sent a file list Cerebro could not read.".to_owned())?;
+    let files: Vec<&Entry> = tree.iter().filter(|e| e.kind == "file").collect();
+    let mut pick: Vec<&Entry> = files.iter().copied().filter(|e| e.path == "model_index.json" || e.path == "scheduler/scheduler_config.json" || (e.path.starts_with("tokenizer/") && valid_pipeline_file(&e.path))).collect();
+    for part in ["text_encoder", "unet", "vae"] {
+        let in_part = |e: &&Entry| e.path.starts_with(&format!("{part}/")) && !e.path[part.len() + 1..].contains('/');
+        if let Some(cfg) = files.iter().copied().filter(in_part).find(|e| e.path.ends_with("/config.json")) {
+            pick.push(cfg);
+        } else {
+            return Err(format!("The repository has no {part}/config.json."));
+        }
+        let weights: Vec<&Entry> = files.iter().copied().filter(in_part).filter(|e| e.path.ends_with(".safetensors")).collect();
+        let w = weights.iter().find(|e| e.path.ends_with(".fp16.safetensors")).or_else(|| weights.iter().find(|e| !e.path.contains(".fp16.") && !e.path.contains("non_ema"))).or(weights.first());
+        match w {
+            Some(w) => pick.push(w),
+            None => return Err(format!("The repository has no safetensors weights for its {part}.")),
+        }
+    }
+    let total = pick.iter().map(|e| e.size).sum();
+    Ok((pick.iter().map(|e| e.path.clone()).collect(), total))
 }
 
 /// The quant label in a file name, e.g. "UD-Q4_K_XL" or "Q8_0".
@@ -441,7 +560,9 @@ pub struct Downloads {
 /// Downloads every part of `file` into Cerebro's model folder (`.part` until complete, so a broken
 /// download never shows up in the library). Resumes a partial file.
 pub fn download(repo: &str, file: &str, parts: &[String], total: u64, events: &Channel<DownloadEvent>, cancel: &AtomicBool) -> Result<String, String> {
-    if !valid_repo(repo) || !valid_file(file) || parts.is_empty() || !parts.iter().all(|p| valid_file(p)) {
+    // A GGUF model (its parts), or an image model's diffusers folder (model_index.json and the rest).
+    let pipeline = file == "model_index.json" && parts.iter().all(|p| valid_pipeline_file(p));
+    if !valid_repo(repo) || !(pipeline || valid_file(file)) || parts.is_empty() || !(pipeline || parts.iter().all(|p| valid_file(p))) {
         return Err("That is not a downloadable model file.".into());
     }
     let c = client()?;
@@ -457,7 +578,7 @@ pub fn download(repo: &str, file: &str, parts: &[String], total: u64, events: &C
         if let Some(dir) = dest.parent() {
             std::fs::create_dir_all(dir).map_err(|_| "Could not create Cerebro's model folder.".to_owned())?;
         }
-        let tmp = dest.with_extension("gguf.part");
+        let tmp = PathBuf::from(format!("{}.part", dest.display()));
         let have = std::fs::metadata(&tmp).map_or(0, |m| m.len());
         let mut req = c.get(format!("{HF}/{repo}/resolve/main/{part}"));
         if have > 0 {
@@ -492,7 +613,8 @@ pub fn download(repo: &str, file: &str, parts: &[String], total: u64, events: &C
         drop(out);
         std::fs::rename(&tmp, &dest).map_err(|_| "Could not finish the model file.".to_owned())?;
     }
-    let first = local_path(repo, &parts[0]).to_string_lossy().into_owned();
+    // An image model is its folder; a GGUF model its first file.
+    let first = if pipeline { models_dir().join(repo.replace('/', "__")) } else { local_path(repo, &parts[0]) }.to_string_lossy().into_owned();
     let _ = events.send(DownloadEvent::Progress { done: total.max(done_all), total, bytes_per_sec: done_all as f64 / t0.elapsed().as_secs_f64().max(1e-3) });
     let _ = events.send(DownloadEvent::Done { path: first.clone() });
     Ok(first)

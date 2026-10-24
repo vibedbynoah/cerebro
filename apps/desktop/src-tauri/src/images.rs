@@ -39,7 +39,16 @@ pub fn describe(dir: &Path, source: &'static str, id: String) -> Option<LibraryM
     }
     let unet: serde_json::Value = std::fs::read_to_string(dir.join("unet").join("config.json")).ok().and_then(|t| serde_json::from_str(&t).ok())?;
     let supported = unet["use_linear_projection"].as_bool() == Some(true);
-    let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    // The folder's name as people write it: a Hugging Face cache snapshot is named by a hash, so
+    // its repository folder (models--owner--name) is used; "owner__name" (Cerebro's downloads)
+    // keeps the model's part.
+    let folder = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut raw = folder(dir);
+    if raw.len() == 40 && raw.chars().all(|c| c.is_ascii_hexdigit()) {
+        raw = dir.parent().and_then(Path::parent).map(folder).unwrap_or(raw);
+    }
+    let raw = raw.rsplit("--").next().unwrap_or(&raw).rsplit("__").next().unwrap_or(&raw).to_owned();
+    let name = crate::engine::display_name(&raw);
     let fp16 = dir.join("unet").join("diffusion_pytorch_model.fp16.safetensors").exists();
     Some(LibraryModel {
         id,
@@ -88,6 +97,20 @@ pub struct Request {
     pub size: usize,
     pub steps: usize,
     pub seed: u64,
+    /// An image to change instead of a new one: size x size RGB and how strongly to change it.
+    pub edit: Option<(Vec<u8>, f32)>,
+}
+
+/// A picture the user gave (a data: URL of any common format) as size x size RGB: the centre
+/// square, scaled.
+pub fn rgb_square(data_url: &str, size: u32) -> Result<Vec<u8>, String> {
+    let b64 = data_url.split_once(";base64,").map(|x| x.1).ok_or("That is not an image.")?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).map_err(|_| "That image could not be read.".to_owned())?;
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("That image could not be read: {e}."))?;
+    let (w, h) = (img.width(), img.height());
+    let side = w.min(h);
+    let sq = img.crop_imm((w - side) / 2, (h - side) / 2, side, side);
+    Ok(sq.resize_exact(size, size, image::imageops::FilterType::Lanczos3).to_rgb8().into_raw())
 }
 
 enum Job {
@@ -116,7 +139,11 @@ impl Default for Images {
                         }
                         let d = &loaded.as_ref().ok_or("The image model is not loaded.")?.1;
                         let t = std::time::Instant::now();
-                        let rgb = d.generate(&r.prompt, r.size, r.steps, r.seed).map_err(|e| format!("The image could not be made: {e}"))?;
+                        let rgb = match &r.edit {
+                            Some((src, strength)) => d.edit(&r.prompt, src, r.size, r.steps, *strength, r.seed),
+                            None => d.generate(&r.prompt, r.size, r.steps, r.seed),
+                        }
+                        .map_err(|e| format!("The image could not be made: {e}"))?;
                         Ok((rgb, t.elapsed().as_secs_f64()))
                     })();
                     let _ = reply.send(res);

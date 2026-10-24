@@ -376,9 +376,30 @@ pub async fn image_generate(engine: State<'_, Engine>, images: ImagesState<'_>, 
     }
     let seed = seed.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64 & 0xffff_ffff));
     let img = std::sync::Arc::clone(images.inner());
-    tauri::async_runtime::spawn_blocking(move || img.generate(&m, crate::images::Request { prompt, size: size as usize, steps: steps as usize, seed }))
+    tauri::async_runtime::spawn_blocking(move || img.generate(&m, crate::images::Request { prompt, size: size as usize, steps: steps as usize, seed, edit: None }))
         .await
         .map_err(|_| "The image could not be made.".to_owned())?
+}
+
+/// Changes a picture (one just made, or the user's own as a data: URL) following `prompt`;
+/// `strength` 0.05..1 is how far it may move from the original.
+#[tauri::command]
+pub async fn image_edit(engine: State<'_, Engine>, images: ImagesState<'_>, model_id: String, prompt: String, source: String, strength: f32, size: u32, steps: u32, seed: Option<u64>) -> Result<crate::images::Generated, String> {
+    let m = find_model(&engine, &model_id)?;
+    if m.kind != "image" || !m.supported {
+        return Err("That model does not make images (Stable Diffusion 2.x-family models such as SD-Turbo do).".to_owned());
+    }
+    if size % 64 != 0 || !(256..=1024).contains(&size) || !(1..=8).contains(&steps) || prompt.chars().count() > 2000 || !(0.05..=1.0).contains(&strength) || !source.starts_with("data:image/") || source.len() > 40_000_000 {
+        return Err("Use a size of 256 to 1,024 pixels in steps of 64, 1 to 8 steps, a strength between 0.05 and 1 and an image under 30 MB.".to_owned());
+    }
+    let seed = seed.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64 & 0xffff_ffff));
+    let img = std::sync::Arc::clone(images.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let rgb = crate::images::rgb_square(&source, size)?;
+        img.generate(&m, crate::images::Request { prompt, size: size as usize, steps: steps as usize, seed, edit: Some((rgb, strength)) })
+    })
+    .await
+    .map_err(|_| "The image could not be changed.".to_owned())?
 }
 
 /// Opens File Explorer at a generated image (only files in Cerebro's images folder).
@@ -830,6 +851,7 @@ pub fn metrics(engine: State<'_, Engine>, tele: State<'_, Telemetry>) -> serde_j
             "decodeTps": if activity == "generating" { s.live_decode_tps } else { None },
             "prefillTps": read.and_then(|r| r.2), "firstTokenS": null,
             "phase": if activity == "generating" { Some("answer") } else { None },
+            "download": crate::llama_backend::download_progress().map(|(done, total)| serde_json::json!({ "what": "llama.cpp", "doneBytes": done, "totalBytes": total })),
         },
         "hardware": {
             "gpuUtil": gp.util_pct,
@@ -1004,6 +1026,37 @@ use crate::hub::{self, DownloadEvent, Downloads, HubFile, HubFileMeta, HubRepo};
 #[tauri::command]
 pub async fn hub_search(query: String) -> Result<Vec<HubRepo>, String> {
     tauri::async_runtime::spawn_blocking(move || hub::search(&query)).await.map_err(|_| "The search failed.".to_owned())?
+}
+
+/// The files an image model needs (its diffusers folder) and their total size; download them with
+/// hub_download, file "model_index.json".
+#[tauri::command]
+pub async fn hub_pipeline_files(repo: String) -> Result<serde_json::Value, String> {
+    let (files, total) = tauri::async_runtime::spawn_blocking(move || hub::pipeline_files(&repo)).await.map_err(|_| "Listing the files failed.".to_owned())??;
+    Ok(serde_json::json!({ "files": files, "total": total }))
+}
+
+/// Saves a dataset the user picked in Train (JSONL, JSON, CSV or text) into Cerebro's datasets
+/// folder and returns its path, so the trainer can read it. The window cannot hand over a file's
+/// path, only its contents.
+#[tauri::command]
+pub fn train_dataset_save(name: String, text: String) -> Result<String, String> {
+    let ext = std::path::Path::new(&name).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+    if !matches!(ext.as_str(), "jsonl" | "json" | "csv" | "txt" | "parquet") || text.len() > 512 << 20 {
+        return Err("Pick a JSONL, JSON, CSV or text file under 512 MB.".to_owned());
+    }
+    let stem: String = std::path::Path::new(&name).file_stem().and_then(|s| s.to_str()).unwrap_or("dataset").chars().map(|c| if c.is_ascii_alphanumeric() || "-_.".contains(c) { c } else { '-' }).take(80).collect();
+    let dir = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from).ok_or("There is no local app data folder.")?.join("Cerebro").join("datasets");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("The datasets folder could not be made: {e}."))?;
+    let path = dir.join(format!("{stem}.{ext}"));
+    std::fs::write(&path, text).map_err(|e| format!("The dataset could not be saved: {e}."))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// A publisher's logo from its Hugging Face profile, as a data URL (cached on disk).
+#[tauri::command]
+pub async fn hub_avatar(owner: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || hub::avatar(&owner)).await.map_err(|_| "The picture could not be read.".to_owned())?
 }
 
 /// The GGUF files of one repository, with sizes.

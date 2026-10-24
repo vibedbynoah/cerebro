@@ -204,3 +204,11 @@
     transition: none;
   }
 }
+
+/* The dataset path with its file picker beside it. */
+.train-dataset__file {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-2);
+  align-items: center;
+}

@@ -5,6 +5,9 @@ import { IllustrativeFlag } from "../../components/Screen";
 import { Term } from "../../components/Term";
 import { fitClass, type FitClass } from "../../lib/fit";
 import { hrefFor } from "../../lib/routes";
+import { readPref, writePref } from "../../lib/storage";
+import { bitsOf } from "../../lib/hub-quant";
+import { useMetrics } from "../../service/metrics";
 import type { LibraryModel, ModelSource } from "../../service/types";
 import { FitChip, LastTune, ModalityBadges, publisherOf, Size, SOURCE_LABELS, Spinner } from "./parts";
 import { useModels } from "./store";
@@ -15,6 +18,31 @@ const HEAD_H = 40;
 
 type ModalityFilter = "all" | "text" | "vision" | "audio" | "image";
 type SortKey = "name" | "size" | "speed" | "recent";
+
+/** "8B", "0.6B", "35B-A3B" -> billions of parameters (Infinity when unknown, so nothing is flagged). */
+function paramsB(p: string): number {
+  const m = /([\d.]+)\s*B/i.exec(p);
+  return m ? Number(m[1]) : Number.POSITIVE_INFINITY;
+}
+
+/** Models the user pinned, kept between sessions: they sit right under the loaded ones. */
+const PINS_KEY = "cerebro-model-pins";
+const [pins, setPins] = createSignal<ReadonlySet<string>>(
+  (() => {
+    try {
+      const v: unknown = JSON.parse(readPref(PINS_KEY) ?? "[]");
+      return new Set(Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").slice(0, 500) : []);
+    } catch {
+      return new Set<string>();
+    }
+  })(),
+);
+function togglePin(id: string): void {
+  const next = new Set(pins());
+  if (!next.delete(id)) next.add(id);
+  setPins(next);
+  writePref(PINS_KEY, next.size ? JSON.stringify([...next]) : null);
+}
 
 const MODALITY_FILTERS: ReadonlyArray<{ id: ModalityFilter; label: string }> = [
   { id: "all", label: "All" },
@@ -76,7 +104,9 @@ export function Library(): JSX.Element {
       speed: (a, b) => (b.tuneResult?.decodeTpsDepth ?? -1) - (a.tuneResult?.decodeTpsDepth ?? -1),
       recent: (a, b) => (b.tunedAt ?? "").localeCompare(a.tunedAt ?? ""),
     };
-    return out.sort(cmp[by]);
+    // Loaded models first, then pinned ones, then the chosen order.
+    const rank = (m: LibraryModel) => (store.isLoaded(m.id) ? 0 : pins().has(m.id) ? 1 : 2);
+    return out.sort((a, b) => rank(a) - rank(b) || cmp[by](a, b));
   });
 
   const filtered = () => query() !== "" || modality() !== "all" || fit() !== "all" || source() !== "all";
@@ -325,6 +355,12 @@ function Row(props: { model: LibraryModel; index: number; fit: FitClass; active:
   const loaded = () => store.isLoaded(props.model.id);
   const busy = () => store.isPending(props.model.id);
   const pub = () => publisherOf(props.model);
+  // A load waiting on a download (the llama.cpp release) says how far it is.
+  const feed = useMetrics();
+  const download = () => {
+    const d = busy() && !loaded() ? feed.snapshot()?.live.download : null;
+    return d && d.totalBytes > 0 ? `${Math.floor((100 * d.doneBytes) / d.totalBytes)}%` : null;
+  };
   return (
     <div
       role="row"
@@ -343,6 +379,18 @@ function Row(props: { model: LibraryModel; index: number; fit: FitClass; active:
     >
       <span role="rowheader" class="lib-cell lib-cell--model">
         <span class="lib-name">
+          <button
+            type="button"
+            class="btn btn--icon btn--xs lib-pin"
+            classList={{ "is-pinned": pins().has(props.model.id) }}
+            tabindex={-1}
+            aria-pressed={pins().has(props.model.id)}
+            aria-label={pins().has(props.model.id) ? `Unpin ${props.model.name} ${props.model.quant}` : `Pin ${props.model.name} ${props.model.quant} to the top`}
+            title={pins().has(props.model.id) ? "Unpin" : "Pin to the top"}
+            onClick={() => togglePin(props.model.id)}
+          >
+            <Icon name="pin" size={13} />
+          </button>
           <span class="lib-name__text">{props.model.name}</span>
           <ModalityBadges modalities={props.model.modalities} compact />
           <Show when={loaded()}>
@@ -372,11 +420,24 @@ function Row(props: { model: LibraryModel; index: number; fit: FitClass; active:
         <LastTune model={props.model} />
       </span>
       <span role="gridcell" class="lib-cell num">
-        {/* No quality run exists yet; speed is never shown as if it were the whole story. */}
-        <span class="muted" aria-hidden="true">
-          –
-        </span>
-        <span class="sr-only">Not measured yet</span>
+        {/* No quality run exists yet; speed is never shown as if it were the whole story. A 1- or
+            2-bit file of a small model is flagged: those often answer wrongly (measured against
+            llama.cpp on Qwen3 0.6B: both engines gave wrong answers at 2 bits). */}
+        <Show
+          when={bitsOf(props.model.quant) <= 2 && paramsB(props.model.params) < 8}
+          fallback={
+            <>
+              <span class="muted" aria-hidden="true">
+                –
+              </span>
+              <span class="sr-only">Not measured yet</span>
+            </>
+          }
+        >
+          <span class="chip lib-lowbit" data-tone="warn" title="1- and 2-bit files of small models often give wrong answers. A 4-bit or larger file of the same model answers far better.">
+            Low bits
+          </span>
+        </Show>
       </span>
       <span role="gridcell" class="lib-cell lib-cell--action">
         <button
@@ -390,7 +451,7 @@ function Row(props: { model: LibraryModel; index: number; fit: FitClass; active:
           onClick={() => void (loaded() ? store.unload(props.model.id) : store.load(props.model.id, null))}
         >
           <Spinner />
-          <span class="btn__label">{loaded() ? "Unload" : "Load"}</span>
+          <span class="btn__label">{loaded() ? "Unload" : (download() ?? "Load")}</span>
         </button>
       </span>
     </div>

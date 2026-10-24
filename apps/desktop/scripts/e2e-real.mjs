@@ -2,6 +2,9 @@
 // End-to-end check of the real desktop exe (no mock): starts target/release/cerebro-desktop.exe with
 // WebView2 remote debugging, drives the UI over CDP, calls the engine through the app's own IPC,
 // saves screenshots, then closes the app. Usage: node scripts/e2e-real.mjs [model-name-substring]
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { chromium } from "playwright-core";
@@ -11,7 +14,10 @@ const want = (process.argv[2] ?? "0.6B").toLowerCase();
 const out = new URL("../test-results/e2e-real/", import.meta.url).pathname.replace(/^\/(\w:)/, "$1");
 mkdirSync(out, { recursive: true });
 
-const app = spawn(exe, [], { env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=9333" }, stdio: ["ignore", "pipe", "pipe"] });
+// Its own WebView profile, so the test's chats never land in the user's app.
+const profile = join(tmpdir(), "cerebro-e2e-real-profile");
+rmSync(profile, { recursive: true, force: true });
+const app = spawn(exe, [], { env: { ...process.env, WEBVIEW2_USER_DATA_FOLDER: profile, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=9333" }, stdio: ["ignore", "pipe", "pipe"] });
 let log = "";
 app.stdout.on("data", (d) => (log += d));
 app.stderr.on("data", (d) => (log += d));

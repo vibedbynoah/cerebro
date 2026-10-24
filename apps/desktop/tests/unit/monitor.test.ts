@@ -77,6 +77,7 @@ describe("header pill", () => {
     expect(pillView({ ...LIVE_IDLE, state: "generating", decodeTps: 21.44 }, true).text).toBe("Generating 21.4 tok/s");
     expect(pillView({ ...LIVE_IDLE, state: "generating", decodeTps: 21.4, queued: 2 }, true).queued).toBe(2);
     expect(pillView({ ...LIVE_IDLE, state: "loading" }, true).text).toBe("Loading model");
+    expect(pillView({ ...LIVE_IDLE, state: "loading", download: { what: "llama.cpp", doneBytes: 300, totalBytes: 1000 } }, true).text).toBe("Downloading llama.cpp 30%");
     expect(pillView(LIVE_IDLE, false)).toEqual({ tone: "offline", text: "Engine not reachable", queued: 0 });
     expect(pillView(null, true).text).toBe("Connecting");
   });

@@ -2,12 +2,12 @@ import "../styles/plugins.css";
 import { createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { Icon } from "../components/icons";
 import { IllustrativeFlag, ScreenHeader } from "../components/Screen";
-import { Preview } from "../components/Preview";
 import { SettingSwitch } from "../components/SettingSwitch";
 import { CATEGORIES, CATEGORY_LABELS, checkLocalFile, hasUpdate, loadInstalled, PLUGINS, saveInstalled, type Category, type InstalledState, type Plugin } from "../lib/plugins";
 import { hrefFor } from "../lib/routes";
 import { notify } from "../lib/toast";
 import { useAppState } from "../state";
+import { McpServers } from "./tools/McpServers";
 
 /**
  * Plugins: a catalogue of MCP servers and Cerebro plugins with one-click install, detail pages,
@@ -15,38 +15,21 @@ import { useAppState } from "../state";
  * Catalogue installs need a network; installed plugins run offline unless marked otherwise.
  */
 export function Plugins(): JSX.Element {
-  // No plugin runtime ships yet; MCP servers (Tools) are how models get new abilities today.
-  if (__DESKTOP__) return <PluginsPlanned />;
+  // On the desktop, plugins are MCP servers: the catalogue and the official registry, added in one
+  // click and run behind the same per-tool permissions as everything on Tools.
+  if (__DESKTOP__) return <PluginsCatalogue />;
   return <PluginsPreview />;
 }
 
-function PluginsPlanned(): JSX.Element {
+function PluginsCatalogue(): JSX.Element {
   return (
     <div class="screen">
       <ScreenHeader route="plugins" />
-      <Preview
-        art="plugins"
-        title="Plugins that add to Cerebro"
-        lede={
-          <>
-            A catalogue of add-ons is planned. Today, give your models new tools through MCP servers on the{" "}
-            <a class="text-link" href={hrefFor("tools")}>
-              Tools
-            </a>{" "}
-            screen: files, git, web fetch, memory, databases and anything else that speaks MCP.
-          </>
-        }
-        features={[
-          { icon: "plugins", title: "One-click add-ons", text: "Install, update and remove from a catalogue, each with the permissions it asks for." },
-          { icon: "lock", title: "Your rules", text: "Every plugin runs behind the same per-tool permissions as MCP servers." },
-          { icon: "offline", title: "Offline first", text: "Each plugin says whether it ever uses the network." },
-        ]}
-      />
+      <McpServers />
     </div>
   );
 }
 
-/** The browser preview's design study of the catalogue (illustrative; nothing installs). */
 function PluginsPreview(): JSX.Element {
   const app = useAppState();
   const [state, setStateS] = createSignal<InstalledState>(loadInstalled());

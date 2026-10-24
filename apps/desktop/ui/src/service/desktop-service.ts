@@ -216,6 +216,7 @@ export function createDesktopService(local: CerebroService): CerebroService {
     removeCloudProvider: (id) => invoke<CloudProvider[]>("cloud_provider_remove", { id }),
     listCloudModels: (provider, apiKey) => invoke<string[]>("cloud_models_list", { provider, apiKey }),
     generateImage: (req) => invoke<GeneratedImage>("image_generate", { modelId: req.modelId, prompt: req.prompt, size: req.size, steps: req.steps, seed: req.seed }),
+    editImage: (req) => invoke<GeneratedImage>("image_edit", { modelId: req.modelId, prompt: req.prompt, source: req.source, strength: req.strength, size: req.size, steps: req.steps, seed: req.seed }),
     revealImage: (path) => invoke<boolean>("image_reveal", { path }),
     readAloud: (text) => invoke<void>("tts_read", { text: text.slice(0, 100_000) }),
     stopSpeaking: () => invoke<void>("tts_stop"),
@@ -346,6 +347,9 @@ export function createDesktopService(local: CerebroService): CerebroService {
 
     hubSearch: (query) => invoke<HubRepo[]>("hub_search", { query }),
     hubFiles: (repo) => invoke<HubFile[]>("hub_files", { repo }),
+    hubAvatar: (owner) => invoke<string>("hub_avatar", { owner }),
+    saveDataset: (name, text) => invoke<string>("train_dataset_save", { name, text }),
+    hubPipelineFiles: (repo) => invoke<{ files: string[]; total: number }>("hub_pipeline_files", { repo }),
     hubFileMeta: (repo, file) => invoke<HubFileMeta>("hub_file_meta", { repo, file }),
     async hubDownload(repo, file, onEvent) {
       const channel = new Channel<HubDownloadEvent>();

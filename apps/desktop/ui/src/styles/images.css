@@ -275,7 +275,9 @@
 .img-art {
   display: block;
   width: 100%;
+  height: auto;
   max-height: 560px;
+  object-fit: contain;
   border-radius: var(--radius-lg);
 }
 
@@ -327,7 +329,27 @@
 
 .img-tile .img-art {
   border-radius: 0;
-  aspect-ratio: 1 !important;
+  max-height: 240px;
+  background: var(--color-surface-2);
+}
+
+.img-tile__open {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: zoom-in;
+}
+
+.img-tile__prompt {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
 }
 
 .img-tile__bar {
@@ -392,4 +414,37 @@
 
 .img-licence .hint {
   margin: 0;
+}
+
+/* Changing the current picture: an instruction, how far it may move, Apply. */
+.img-result__actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.img-followup {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.img-followup__strength {
+  display: grid;
+  gap: 2px;
+  font-size: var(--text-small);
+  color: var(--color-text-secondary);
+}
+
+.img-upload {
+  align-self: flex-end;
+  margin-bottom: var(--space-2);
+  cursor: pointer;
+}
+
+@media (max-width: 640px) {
+  .img-followup {
+    grid-template-columns: 1fr;
+  }
 }

@@ -417,7 +417,7 @@
 /* ---------------------------------------------------------------------- */
 
 .lib-grid {
-  --cols: minmax(0, 1fr) 84px 136px 104px 76px 104px;
+  --cols: minmax(0, 1fr) 84px 200px 120px 76px 104px;
   position: relative;
   height: min(600px, max(360px, calc(100dvh - 330px)));
   overflow-y: auto;
@@ -2609,7 +2609,7 @@
 
 @media (max-width: 1100px) {
   .lib-grid {
-    --cols: minmax(0, 1fr) 72px 124px 92px 64px 96px;
+    --cols: minmax(0, 1fr) 72px 172px 104px 64px 96px;
   }
 
   .lib-hint {
@@ -2723,4 +2723,21 @@
   padding-left: var(--space-5);
   color: var(--color-text-secondary);
   font-size: var(--text-small);
+}
+
+/* Pin: quiet until the row is hovered or the model is pinned. */
+.lib-pin {
+  opacity: 0;
+  color: var(--color-text-secondary);
+  transition: opacity var(--motion-fast, 120ms) ease;
+}
+
+.lib-row:hover .lib-pin,
+.lib-row:focus-within .lib-pin,
+.lib-pin.is-pinned {
+  opacity: 1;
+}
+
+.lib-pin.is-pinned {
+  color: var(--color-accent);
 }

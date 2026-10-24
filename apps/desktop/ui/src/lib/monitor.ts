@@ -115,7 +115,7 @@ export function pillView(live: MetricsLive | null, reachable: boolean): PillView
   const queued = Math.max(0, Math.floor(live.queued));
   switch (live.state) {
     case "loading":
-      return { tone: "loading", text: "Loading model", queued };
+      return { tone: "loading", text: live.download ? `Downloading ${live.download.what} ${Math.floor(pct(live.download.doneBytes, live.download.totalBytes))}%` : "Loading model", queued };
     case "reading":
       return { tone: "reading", text: live.promptTotal > 0 ? `Reading prompt ${Math.floor(pct(live.promptRead, live.promptTotal))}%` : "Reading prompt", queued };
     case "generating":
@@ -138,6 +138,11 @@ export interface StateView {
 }
 
 export function stateView(live: MetricsLive, last: RequestSummary | undefined): StateView {
+  if (live.state === "loading" && live.download) {
+    const d = live.download;
+    const p = pct(d.doneBytes, d.totalBytes);
+    return { label: `Downloading ${d.what}`, detail: `${num(d.doneBytes / 2 ** 20)} of ${num(d.totalBytes / 2 ** 20)} MB, once, for this model's placement`, progress: p, progressLabel: `Downloaded ${Math.floor(p)}%` };
+  }
   if (live.state === "loading") return { label: "Loading model", detail: "Reading the model file into memory", progress: 0, progressLabel: "Loading" };
   if (live.state === "waiting") return { label: "Waiting for you", detail: "A tool call needs your approval in Chat", progress: 0, progressLabel: "Waiting" };
   if (live.state === "tool") return { label: "Running a tool", detail: "The model asked for a tool; its result goes back to the model", progress: 0, progressLabel: "Tool" };

@@ -421,3 +421,11 @@
   color: var(--color-text-primary);
   font-weight: var(--weight-medium);
 }
+
+/* The engineering detail under a switch's plain sentence (Advanced level). */
+.switches__detail {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--text-caption, 12px);
+  color: var(--color-text-muted);
+}

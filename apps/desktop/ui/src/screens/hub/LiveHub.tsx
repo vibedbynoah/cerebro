@@ -5,7 +5,7 @@ import { LicenceNote } from "../../components/LicenceNote";
 import { memoryNeeds } from "../../components/QuantTable";
 import { ScreenHeader } from "../../components/Screen";
 import { VerifiedBadge } from "../../components/VerifiedBadge";
-import { ABILITY_LABELS, abilitiesOf, fitBadge, HUB_CATEGORIES, HUB_PICKS, type HubPick } from "../../lib/hub-picks";
+import { ABILITY_LABELS, abilitiesOf, FEATURED_IMAGES, fitBadge, HUB_CATEGORIES, HUB_PICKS, type FeaturedImage, type HubPick } from "../../lib/hub-picks";
 import { fitOf, recommendQuant, toGiB, type QuantFile, type QuantPick } from "../../lib/hub-quant";
 import { isVerified, sortRepos, verifiedPublisher, VERIFIED_NOTE } from "../../lib/hub-verified";
 import { fmtAge } from "../../lib/format";
@@ -217,10 +217,48 @@ export function LiveHub(): JSX.Element {
           <h2 id="picks-title">Recommended for this computer</h2>
           <ul class="livehub__pick-grid">
             <For each={picks()}>
-              {(x) => <PickCard pick={x.p} fit={x.fit} info={pickInfo()?.[x.p.title]} disabled={blocked()} onOpen={() => runSearch(x.p.query)} />}
+              {(x) => {
+                  const info = () => pickInfo()?.[x.p.title];
+                  // The fit of the file the card recommends, once the repository's list is read.
+                  const fit = () => {
+                    const i = info();
+                    return i ? fitBadge(i.file.sizeGiB, vramGiB(), ramGiB()) : x.fit;
+                  };
+                  return <PickCard pick={x.p} fit={fit()} info={info()} disabled={blocked()} onOpen={() => runSearch(x.p.query)} />;
+                }}
             </For>
           </ul>
         </section>
+        <Show when={service.hubPipelineFiles}>
+          <section class="livehub__picks" aria-labelledby="featured-title">
+            <h2 id="featured-title">Featured image models</h2>
+            <ul class="livehub__pick-grid">
+              <For each={FEATURED_IMAGES}>
+                {(img) => {
+                  const [list] = createResource(
+                    () => (blocked() ? undefined : img.repo),
+                    (r) => service.hubPipelineFiles!(r).catch(() => null),
+                  );
+                  const key = () => `${img.repo}/model_index.json`;
+                  const p = () => progress()[key()];
+                  return (
+                    <ImageCard
+                      img={img}
+                      sizeGiB={list() ? list()!.total / GIB : null}
+                      fit={list() ? fitBadge(list()!.total / GIB, vramGiB(), ramGiB()) : null}
+                      progress={p()}
+                      disabled={blocked() || !list()}
+                      onDownload={() => {
+                        const l = list();
+                        if (l) start(img.repo, { path: "model_index.json", size: l.total, parts: l.files, quant: "FP16", downloaded: false });
+                      }}
+                    />
+                  );
+                }}
+              </For>
+            </ul>
+          </section>
+        </Show>
       </Show>
       <p class="livehub__note">
         Live from huggingface.co. Sizes are the files' real sizes; fit is judged against this machine: {hw() ? `${hw()!.gpu ? `${hw()!.gpu!.name}, ${hw()!.gpu!.vramTotalGiB.toFixed(0)} GiB graphics memory · ` : ""}${hw()!.ramTotalGiB.toFixed(0)} GiB system memory` : "reading…"}
@@ -243,7 +281,7 @@ export function LiveHub(): JSX.Element {
                     {(r: HubRepo) => (
                       <li>
                         <button type="button" class="livehub__repo" aria-pressed={repo() === r.id} onClick={() => setRepo(r.id)}>
-                          <FamilyTile name={r.id} size={34} />
+                          <FamilyTile name={r.id} owner={r.author} size={34} />
                           <span class="livehub__repo-body">
                           <span class="livehub__repo-name">
                             <span class="livehub__repo-id">{r.id}</span>
@@ -441,12 +479,47 @@ function compactCount(n: number): string {
   return String(n);
 }
 
+function ImageCard(props: { img: FeaturedImage; sizeGiB: number | null; fit: { label: string; tone: string } | null; progress: { done: number; total: number; error?: string; path?: string } | undefined; disabled: boolean; onDownload: () => void }): JSX.Element {
+  const pct = () => (props.progress && props.progress.total > 0 ? Math.floor((100 * props.progress.done) / props.progress.total) : 0);
+  return (
+    <li class="livehub__pick card" data-fit={props.fit?.tone ?? "ok"}>
+      <div class="livehub__pick-head">
+        <FamilyTile name={props.img.title} owner={props.img.publisher} size={44} />
+        <div>
+          <h3>{props.img.title}</h3>
+          <span class="livehub__muted mono">{props.img.params}</span>
+        </div>
+      </div>
+      <p class="livehub__pick-size">
+        <span class="livehub__muted">{props.sizeGiB !== null ? `16-bit · ${props.sizeGiB.toFixed(2)} GiB` : "Reading the file list…"}</span>
+      </p>
+      <p>{props.img.blurb}</p>
+      <div class="livehub__badges">
+        <span class="livehub__badge">Images</span>
+      </div>
+      <div class="livehub__pick-foot">
+        <Show when={props.fit}>{(f) => <span class={`livehub__fit livehub__fit--${f().tone}`}>{f().label}</span>}</Show>
+        <Show
+          when={props.progress}
+          fallback={
+            <button type="button" class="btn btn--secondary btn--sm" disabled={props.disabled} onClick={() => props.onDownload()} aria-label={`Download ${props.img.title}`}>
+              Download
+            </button>
+          }
+        >
+          {(p) => <span class="livehub__muted">{p().error ? p().error : p().path ? "Downloaded: open Image Studio" : `Downloading ${pct()}%`}</span>}
+        </Show>
+      </div>
+    </li>
+  );
+}
+
 function PickCard(props: { pick: HubPick; fit: { label: string; tone: string }; info: QuantPick | undefined; disabled: boolean; onOpen: () => void }): JSX.Element {
   const publisher = () => verifiedPublisher(props.pick.publisher);
   return (
     <li class="livehub__pick card" data-fit={props.fit.tone}>
       <div class="livehub__pick-head">
-        <FamilyTile name={props.pick.family} size={44} />
+        <FamilyTile name={props.pick.family} owner={props.pick.publisher} size={44} />
         <div>
           <h3>{props.pick.title}</h3>
           <span class="livehub__muted mono">{props.pick.params}</span>

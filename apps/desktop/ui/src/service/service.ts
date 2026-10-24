@@ -144,6 +144,8 @@ export interface CerebroService {
   listCloudModels(p: CloudProvider, apiKey: string | null): Promise<string[]>;
   /** Image Studio: makes an image with an image model (desktop). */
   generateImage(req: { modelId: string; prompt: string; size: number; steps: number; seed: number | null }): Promise<GeneratedImage>;
+  /** Changes a picture (a data: URL) following the prompt; strength 0.05..1 is how far it may move. */
+  editImage?(req: { modelId: string; prompt: string; source: string; strength: number; size: number; steps: number; seed: number | null }): Promise<GeneratedImage>;
   /** Opens File Explorer at a generated image. */
   revealImage(path: string): Promise<boolean>;
   /** Reads a reply aloud with the speech model in use; resolves when it has finished or stopped. */
@@ -267,6 +269,12 @@ export interface CerebroService {
   hubSearch?(query: string): Promise<HubRepo[]>;
   /** A repository's GGUF files with their real sizes. */
   hubFiles?(repo: string): Promise<HubFile[]>;
+  /** A Hugging Face account's picture (its logo), as a data URL. */
+  hubAvatar?(owner: string): Promise<string>;
+  /** Saves a picked dataset file into Cerebro's datasets folder; resolves with its path. */
+  saveDataset?(name: string, text: string): Promise<string>;
+  /** The files an image model needs (its diffusers folder), with their total size in bytes. */
+  hubPipelineFiles?(repo: string): Promise<{ files: string[]; total: number }>;
   /** The architecture numbers and real size of one file's GGUF header (metadata only). */
   hubFileMeta?(repo: string, file: string): Promise<HubFileMeta>;
   /** Downloads one file into Cerebro's model folder; resolves with its path when complete. */

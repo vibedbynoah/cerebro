@@ -43,5 +43,7 @@ export function Section(props: { title: string; description?: JSX.Element; child
 
 /** "Illustrative data — not a measurement": always inside the figure it qualifies. */
 export function IllustrativeFlag(): JSX.Element {
+  // The desktop app shows only real data; the badge belongs to the web preview's sample data.
+  if (__DESKTOP__) return null;
   return <span class="stat-tile__flag">Illustrative data — not a measurement</span>;
 }

@@ -100,6 +100,9 @@ export function MachineTune(props: { onTuned?: () => void }): JSX.Element {
           {(o) => (
             <div class="machine-tune__result">
               <p class="machine-tune__note" data-testid="machine-tune-note">
+                <Show when={!finished()}>
+                  <span class="machine-tune__last">Last tune: </span>
+                </Show>
                 {o().note}
               </p>
               {/* No trials: nothing on the processor to tune (the whole model is on the GPU). */}
@@ -109,8 +112,10 @@ export function MachineTune(props: { onTuned?: () => void }): JSX.Element {
                   {o().kept ? "Kept settings" : "Your settings"}: {settingsInWords(o().settings)}
                 </p>
               </Show>
-              <p class="machine-tune__machine">{o().machine}</p>
-              <p class="machine-tune__took">Took {formatSeconds(o().seconds)}.</p>
+              <Show when={o().trials.length > 0}>
+                <p class="machine-tune__machine">{o().machine}</p>
+                <p class="machine-tune__took">Took {formatSeconds(o().seconds)}.</p>
+              </Show>
             </div>
           )}
         </Show>

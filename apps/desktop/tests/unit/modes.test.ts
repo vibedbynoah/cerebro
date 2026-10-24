@@ -23,14 +23,14 @@ describe("the Speed <-> Accuracy slider", () => {
     expect(s.sampler.temperature).toBe(0);
     expect(s.sampler.repeatPenalty).toBe(1);
     expect(s.sampler.maxTokens).toBe(1024);
-    const req = buildRequest({ levels: EFFORT_LEVELS, base: s.prefs.base, effort: s.prefs.effort, verbosity: s.prefs.verbosity, source: s.prefs.source, addInstructions: s.prefs.addInstructions, memories: [{ id: "m", text: "Likes tea.", scope: "you" }], memoryOn: s.prefs.memoryOn, nativeSupported: true, modelMaxThinking: 32768 });
+    const req = buildRequest({ levels: EFFORT_LEVELS, base: s.prefs.base, effort: s.prefs.effort, thinking: s.prefs.thinking, verbosity: s.prefs.verbosity, source: s.prefs.source, addInstructions: s.prefs.addInstructions, memories: [{ id: "m", text: "Likes tea.", scope: "you" }], memoryOn: s.prefs.memoryOn, nativeSupported: true, modelMaxThinking: 32768 });
     expect(req.native?.thinkingBudget).toBe(0);
     expect(req.passes).toBe(0);
     expect(req.systemPrompt.startsWith(FASTEST_PROMPT)).toBe(true);
     expect(req.systemPrompt).not.toContain("Likes tea.");
     // Far shorter than the Accurate level's prompt.
     const acc = applyMode(4, DEFAULT_PREFS, DEFAULT_SAMPLER);
-    const accReq = buildRequest({ levels: EFFORT_LEVELS, base: acc.prefs.base, effort: acc.prefs.effort, verbosity: acc.prefs.verbosity, source: acc.prefs.source, addInstructions: true, memories: [], memoryOn: true, nativeSupported: true, modelMaxThinking: 32768 });
+    const accReq = buildRequest({ levels: EFFORT_LEVELS, base: acc.prefs.base, effort: acc.prefs.effort, thinking: acc.prefs.thinking, verbosity: acc.prefs.verbosity, source: acc.prefs.source, addInstructions: true, memories: [], memoryOn: true, nativeSupported: true, modelMaxThinking: 32768 });
     expect(req.systemPrompt.length * 5).toBeLessThan(accReq.systemPrompt.length);
     expect(accReq.systemPrompt.startsWith(ACCURATE_PROMPT)).toBe(true);
     expect(accReq.passes).toBe(1);

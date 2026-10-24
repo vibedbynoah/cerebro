@@ -112,7 +112,9 @@ export function shares(rows: ReadonlyArray<Omit<ComparisonRow, "share">>): Compa
 export function Comparison(props: { rows: readonly ComparisonRow[]; unit: string; label: string; note?: JSX.Element }): JSX.Element {
   return (
     <figure class="comparison-figure" aria-label={props.label}>
-      <figcaption class="stat-tile__flag">Illustrative data — not a measurement</figcaption>
+      <Show when={!__DESKTOP__}>
+        <figcaption class="stat-tile__flag">Illustrative data — not a measurement</figcaption>
+      </Show>
       <div class="comparison">
         <For each={props.rows}>
           {(row, i) => {

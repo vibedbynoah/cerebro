@@ -56,14 +56,6 @@ function memoryOf(hw: HardwareProfile): { vramGiB: number; ramGiB: number } {
   return { vramGiB: Math.max(0, hw.gpu?.vramTotalGiB ?? 0), ramGiB: Math.max(0, hw.ramTotalGiB ?? 0) };
 }
 
-/** Why this file is the one: the size it takes and the memory it fits into. */
-function whyFits(file: QuantFile, hw: HardwareProfile): string {
-  const gpu = Math.round(hw.gpu?.vramTotalGiB ?? 0);
-  const ram = Math.round(hw.ramTotalGiB ?? 0);
-  const where = gpu > 0 ? `your ${gpu} GB graphics card and ${ram} GB of memory` : `your ${ram} GB of memory`;
-  return `${file.quant}: the best quality that fits ${where}.`;
-}
-
 /** Why a file that does not fit is still recommended: it is the smallest one there is. */
 function whySlow(file: QuantFile): string {
   return `${file.quant}: the smallest file here, so it will run slowly from the drive.`;
@@ -79,14 +71,26 @@ function largest(files: readonly QuantFile[]): QuantFile | undefined {
   }, undefined);
 }
 
+/** Bits per weight a quant label stands for, roughly: what decides quality and speed. */
+export function bitsOf(quant: string): number {
+  const q = quant.toUpperCase();
+  if (/F32|FP32/.test(q)) return 32;
+  if (/BF16|F16|FP16/.test(q)) return 16;
+  const m = /(?:^|[^A-Z])I?Q([1-8])/.exec(q) ?? /^I?Q([1-8])/.exec(q.replace(/^UD-/, ""));
+  return m ? Number(m[1]) : 8;
+}
+
 /**
  * The file Cerebro would use on this computer, from the repository's own file list.
  *
- * Unsloth Dynamic quants are preferred when the repository has them. Among the candidates, the
- * largest file that fits this machine's graphics memory and system memory wins. When no candidate
- * fits but an ordinary one does, that one is used instead — a file that runs beats a better file
- * that does not. When nothing fits at all, the smallest file is recommended and the reason says it
- * will run slowly from the drive.
+ * Speed comes first, then quality: a model that runs entirely on the graphics card is several
+ * times faster than one split with the processor, and above 8 bits a file gains no quality anyone
+ * can tell. So, Unsloth Dynamic quants first when the repository has them:
+ *  1. the largest file of at most 8 bits that fits the graphics card (16-bit only when the
+ *     repository has nothing smaller, as some speech models do);
+ *  2. else the largest 4- or 5-bit file that fits the card and system memory together;
+ *  3. else the largest file of at most 4 bits that fits at all;
+ *  4. else the smallest file, which runs slowly from the drive.
  *
  * Null when the repository has no files with a size, or when the machine could not be read: then
  * there is nothing to judge a file against.
@@ -96,11 +100,23 @@ export function recommendQuant(files: readonly QuantFile[], hw: HardwareProfile 
   const list = files.filter((f) => Number.isFinite(f.sizeGiB) && f.sizeGiB > 0);
   if (!list.length) return null;
   const { vramGiB, ramGiB } = memoryOf(hw);
-  const fits = (f: QuantFile) => fitOf(f.sizeGiB, vramGiB, ramGiB).tone !== "no";
+  const tone = (f: QuantFile) => fitOf(f.sizeGiB, vramGiB, ramGiB).tone;
   const dynamic = list.filter(isDynamicQuant);
-  const pool = dynamic.length ? dynamic : list;
-  const chosen = largest(pool.filter(fits)) ?? largest(list.filter(fits));
-  if (chosen) return { file: chosen, why: whyFits(chosen, hw), slow: false };
+  // The dynamic quants when they include a match, else every file.
+  const best = (ok: (f: QuantFile) => boolean) => largest(dynamic.filter(ok)) ?? largest(list.filter(ok));
+  const gpu = Math.round(hw.gpu?.vramTotalGiB ?? 0);
+  const ram = Math.round(hw.ramTotalGiB ?? 0);
+  const lowest = Math.min(...list.map((f) => bitsOf(f.quant)));
+  const cap = Math.max(8, lowest);
+  const onCard = best((f) => tone(f) === "good" && bitsOf(f.quant) <= cap);
+  if (onCard) return { file: onCard, why: `${onCard.quant}: the best quality that runs entirely on your ${gpu} GB graphics card.`, slow: false };
+  const split = best((f) => tone(f) === "ok" && bitsOf(f.quant) >= 4 && bitsOf(f.quant) <= 5);
+  if (split) {
+    const where = gpu > 0 ? `your ${gpu} GB graphics card and ${ram} GB of memory together` : `your ${ram} GB of memory`;
+    return { file: split, why: `${split.quant}: fits ${where}; larger files would run much slower here.`, slow: false };
+  }
+  const small = best((f) => tone(f) !== "no" && bitsOf(f.quant) <= 4);
+  if (small) return { file: small, why: `${small.quant}: the most quality that still fits this computer's memory.`, slow: false };
   const smallest = list.reduce((a, b) => (b.sizeGiB < a.sizeGiB ? b : a));
   return { file: smallest, why: whySlow(smallest), slow: true };
 }

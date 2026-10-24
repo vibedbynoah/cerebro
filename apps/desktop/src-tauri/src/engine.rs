@@ -68,30 +68,96 @@ pub struct ModelArch {
     pub active_experts: Option<u64>,
 }
 
-/// The folders scanned for GGUF files, with the source label the UI shows.
-fn model_dirs() -> Vec<(PathBuf, &'static str)> {
+/// The folders scanned for models, with the source label the UI shows and how deep to look: every
+/// place a model is commonly kept, so nothing has to be set up. Cerebro's own folder; LM Studio's;
+/// the Hugging Face cache; Jan, GPT4All and text-generation-webui; the user's Downloads, Desktop
+/// and Documents (shallow); and a models / LLM / AI folder at the root of any drive.
+fn model_dirs() -> Vec<(PathBuf, &'static str, usize)> {
     let mut v = Vec::new();
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        v.push((PathBuf::from(local).join("Cerebro").join("models"), "cerebro"));
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let roaming = std::env::var_os("APPDATA").map(PathBuf::from);
+    if let Some(l) = &local {
+        v.push((l.join("Cerebro").join("models"), "cerebro", 6));
     }
-    if let Some(home) = std::env::var_os("USERPROFILE") {
-        v.push((PathBuf::from(&home).join(".lmstudio").join("models"), "lmstudio"));
-        v.push((PathBuf::from(&home).join(".cache").join("lm-studio").join("models"), "lmstudio"));
+    if let Some(home) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
+        v.push((home.join(".lmstudio").join("models"), "lmstudio", 6));
+        v.push((home.join(".cache").join("lm-studio").join("models"), "lmstudio", 6));
+        v.push((home.join(".cache").join("huggingface").join("hub"), "other", 5));
+        v.push((home.join("jan").join("models"), "other", 4));
+        v.push((home.join("text-generation-webui").join("models"), "other", 3));
+        for d in ["Downloads", "Desktop", "Documents"] {
+            v.push((home.join(d), "other", 2));
+        }
     }
-    v.push((PathBuf::from("C:\\models"), "other"));
+    if let Some(r) = &roaming {
+        v.push((r.join("Jan").join("data").join("models"), "other", 4));
+    }
+    if let Some(l) = &local {
+        v.push((l.join("nomic.ai").join("GPT4All"), "other", 2));
+    }
+    v.push((PathBuf::from("C:\\models"), "other", 6));
+    // models / LLM / AI folders at the root of every drive.
+    for letter in b'C'..=b'Z' {
+        let root = PathBuf::from(format!("{}:\\", letter as char));
+        let Ok(rd) = std::fs::read_dir(&root) else { continue };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            if e.path().is_dir() && matches!(name.as_str(), "models" | "model" | "llm" | "llms" | "ai" | "gguf" | "ggufs" | "lm studio" | "lmstudio") && !(letter == b'C' && name == "models") {
+                v.push((e.path(), "other", 6));
+            }
+        }
+    }
     v
 }
 
-fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+/// Ollama's models: its files have no extension, so they are found through its own manifests
+/// (each names the blob that holds the model's GGUF).
+fn ollama_models() -> Vec<PathBuf> {
+    let root = std::env::var_os("OLLAMA_MODELS").map(PathBuf::from).or_else(|| std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join(".ollama").join("models")));
+    let Some(root) = root else { return Vec::new() };
+    let mut manifests = Vec::new();
+    fn files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if depth < 5 {
+                    files(&p, depth + 1, out);
+                }
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    files(&root.join("manifests"), 0, &mut manifests);
+    let mut out = Vec::new();
+    for m in manifests {
+        let Some(v) = std::fs::read_to_string(&m).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) else { continue };
+        for layer in v["layers"].as_array().into_iter().flatten() {
+            if layer["mediaType"].as_str() == Some("application/vnd.ollama.image.model") {
+                if let Some(d) = layer["digest"].as_str() {
+                    let blob = root.join("blobs").join(d.replace(':', "-"));
+                    if blob.is_file() && !out.contains(&blob) {
+                        out.push(blob);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn walk(dir: &Path, depth: usize, max: usize, out: &mut Vec<PathBuf>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
+            let name = e.file_name().to_string_lossy().to_lowercase();
             // An image model is a folder (diffusers layout): listed whole, not searched inside.
             if crate::images::is_image_model(&p) {
                 out.push(p);
-            } else if depth < 6 {
-                walk(&p, depth + 1, out);
+            } else if depth < max && !matches!(name.as_str(), "node_modules" | ".git" | "$recycle.bin" | "windows" | "appdata") {
+                walk(&p, depth + 1, max, out);
             }
         } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("gguf")) {
             let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
@@ -184,6 +250,62 @@ fn file_size(path: &Path) -> u64 {
     total
 }
 
+/// A model's name as people write it, from the GGUF's name or its file name: no quant label
+/// ("Qwen3.8-27B-IQ1_M" -> "Qwen3.8 27B"), no publisher prefix a re-uploader added
+/// ("Qwen_Qwen3.6-35B-A3B" -> "Qwen3.6 35B A3B"), spaces between words and the usual capitals
+/// ("sd-turbo" -> "SD Turbo", "awq" -> "AWQ", "0.6b" -> "0.6B").
+pub fn display_name(raw: &str) -> String {
+    let is_quant = |t: &str| {
+        let u = t.to_ascii_uppercase();
+        let u = u.strip_prefix("UD_").or_else(|| u.strip_prefix("UD")).unwrap_or(&u).to_owned();
+        if matches!(u.as_str(), "F16" | "F32" | "BF16" | "FP16" | "FP32" | "GGUF" | "UD" | "") {
+            return true;
+        }
+        let b = u.strip_prefix('I').unwrap_or(&u);
+        b.len() >= 2 && b.starts_with('Q') && b.as_bytes()[1].is_ascii_digit() && b[2..].chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    let mut tokens: Vec<String> = raw.split(|c: char| c == '-' || c == ' ').filter(|t| !t.is_empty() && !is_quant(t)).map(str::to_owned).collect();
+    // "Owner_Model..." where the model name repeats the owner: keep the model name.
+    if let Some(first) = tokens.first_mut() {
+        if let Some((owner, rest)) = first.split_once('_') {
+            if !rest.is_empty() && rest.to_ascii_lowercase().starts_with(&owner.to_ascii_lowercase()) {
+                *first = rest.to_owned();
+            }
+        }
+    }
+    let words: Vec<String> = tokens
+        .iter()
+        .flat_map(|t| t.split('_').filter(|w| !w.is_empty()).map(str::to_owned).collect::<Vec<_>>())
+        .map(|w| {
+            let l = w.to_ascii_lowercase();
+            let size_like = l.chars().next().is_some_and(|c| c.is_ascii_digit()) || (l.len() <= 5 && l.starts_with('a') && l.ends_with('b') && l[1..l.len() - 1].chars().all(|c| c.is_ascii_digit() || c == '.') && l.len() > 2);
+            match l.as_str() {
+                "awq" | "gptq" | "sd" | "sdxl" | "tts" | "asr" | "vl" | "it" | "mlx" => l.to_ascii_uppercase(),
+                "moe" => "MoE".to_owned(),
+                _ if size_like => {
+                    // Sizes: 0.6b -> 0.6B, 35b -> 35B, a3b -> A3B, 12hz -> 12Hz.
+                    if let Some(n) = l.strip_suffix("hz") {
+                        format!("{n}Hz")
+                    } else {
+                        l.to_ascii_uppercase()
+                    }
+                }
+                _ if w.chars().all(|c| c.is_ascii_lowercase()) => {
+                    let mut c = w.chars();
+                    c.next().map(|f| f.to_ascii_uppercase().to_string() + c.as_str()).unwrap_or_default()
+                }
+                _ => w.clone(),
+            }
+        })
+        .collect();
+    let out = words.join(" ");
+    if out.is_empty() {
+        raw.to_owned()
+    } else {
+        out
+    }
+}
+
 fn describe(path: &Path, source: &'static str) -> Option<LibraryModel> {
     // All of a split model's files together.
     let size = file_size(path);
@@ -194,7 +316,7 @@ fn describe(path: &Path, source: &'static str) -> Option<LibraryModel> {
     let n_head = u("attention.head_count").unwrap_or(0);
     let dim = u("embedding_length").unwrap_or(0);
     let experts = u("expert_count").filter(|&e| e > 0);
-    let name = g.str("general.name").map(str::to_owned).unwrap_or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
+    let name = display_name(&g.str("general.name").map(str::to_owned).unwrap_or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()));
     // A metadata-edited copy (gguf_edit.rs) is its own model; its name says so.
     let name = if crate::gguf_edit::is_copy(path) { format!("{name} (edited)") } else { name };
     let params = g.str("general.size_label").map(str::to_owned).unwrap_or_default();
@@ -261,9 +383,15 @@ pub fn scan_library() -> Vec<LibraryModel> {
     let mut files = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for (dir, source) in model_dirs() {
+    let mut dirs = model_dirs();
+    dirs.push((PathBuf::new(), "ollama", 0));
+    for (dir, source, max) in dirs {
         files.clear();
-        walk(&dir, 0, &mut files);
+        if source == "ollama" {
+            files = ollama_models();
+        } else {
+            walk(&dir, 0, max, &mut files);
+        }
         for f in &files {
             let key = f.to_string_lossy().to_lowercase();
             if seen.insert(key) {
@@ -1174,20 +1302,18 @@ fn with_llama(model: Model, tok: Tokenizer, m: &LibraryModel, ctx: usize, gpu_la
     }
     let ctx = ctx.clamp(512, model.cfg.ctx_train.max(512));
     let nvidia = cerebro_engine::hw::gpus();
-    let (build, plan, layers) = if let Some(g) = nvidia.first() {
-        // NVIDIA: only a split goes to llama.cpp (a model that fits runs faster on Cerebro's engine).
-        match cerebro_engine::gpu::plan_for(&model, ctx, g.vram_free, gpu_layers) {
-            Ok(p) if p.layout == cerebro_engine::placement::Layout::Split && p.gpu_layers > 0 => {
-                let n = p.gpu_layers;
-                (crate::llama_backend::Build::Cuda, p, n)
-            }
-            _ => return Err((model, tok)),
-        }
+    let (build, plan, layers) = if !nvidia.is_empty() {
+        // NVIDIA: Cerebro's engine, whole or split. Its splits now read and write faster than
+        // llama.cpp's on the same card (sweep C, Qwen3-8B half on an RTX 3070 Ti: 1136 vs 947 tok/s
+        // reading, 16.7 vs 12.8 writing), and only its own session has Thinking, Tune, Benchmark,
+        // saved chat caches and review passes.
+        return Err((model, tok));
     } else {
         // AMD / Intel graphics the portable backend would use: llama.cpp's Vulkan build.
         let integrated_ok = cerebro_engine::switches::enabled(cerebro_engine::switches::PORTABLE_INTEGRATED);
-        let usable = cerebro_engine::switches::enabled(cerebro_engine::switches::PORTABLE_GPU)
-            && cerebro_engine::portable::adapters().iter().any(|a| a.kind.contains("Discrete") || (integrated_ok && a.kind.contains("Integrated")));
+        let adapters = cerebro_engine::portable::adapters();
+        let discrete = adapters.iter().any(|a| a.kind.contains("Discrete"));
+        let usable = cerebro_engine::switches::enabled(cerebro_engine::switches::PORTABLE_GPU) && (discrete || (integrated_ok && adapters.iter().any(|a| a.kind.contains("Integrated"))));
         if !usable {
             return Err((model, tok));
         }
@@ -1195,8 +1321,23 @@ fn with_llama(model: Model, tok: Tokenizer, m: &LibraryModel, ctx: usize, gpu_la
             Ok(p) => p,
             Err(_) => return Err((model, tok)),
         };
-        p.gpu_layers = p.total_layers;
-        (crate::llama_backend::Build::Vulkan, p, 999)
+        // Integrated graphics hold their layers in system RAM: as many as the RAM free now holds
+        // (2 GiB kept for the processor's share and the desktop); the rest run on the processor,
+        // which reads from the drive when RAM runs short. A card of its own fills its own memory.
+        let n = p.total_layers;
+        let layers = if discrete {
+            n
+        } else {
+            let per = model.gguf().len() as u64 / n.max(1) as u64;
+            let room = cerebro_engine::gguf::available_ram().saturating_sub(cerebro_engine::placement::RAM_MARGIN + (2 << 30));
+            (room / per.max(1)) as usize
+        }
+        .min(n);
+        if layers == 0 {
+            return Err((model, tok));
+        }
+        p.gpu_layers = layers;
+        (crate::llama_backend::Build::Vulkan, p, if layers == n { 999 } else { layers })
     };
     let dir = match crate::llama_backend::install(build, |done, total| {
         if done % (64 << 20) < (1 << 20) {
@@ -1214,6 +1355,7 @@ fn with_llama(model: Model, tok: Tokenizer, m: &LibraryModel, ctx: usize, gpu_la
             let mut p = plan.clone();
             p.notes.insert(0, match build {
                 crate::llama_backend::Build::Cuda => format!("llama.cpp runs this split ({} of {} layers on the graphics card): it reads prompts faster than Cerebro's engine does for splits today.", plan.gpu_layers, plan.total_layers),
+                crate::llama_backend::Build::Vulkan if plan.gpu_layers < plan.total_layers => format!("llama.cpp's Vulkan build runs {} of {} layers on your graphics, as many as the free memory holds; the processor runs the rest.", plan.gpu_layers, plan.total_layers),
                 crate::llama_backend::Build::Vulkan => "llama.cpp's Vulkan build runs this model on your graphics card: faster than Cerebro's engine on AMD and Intel graphics today.".to_owned(),
             });
             let dialect = crate::toolcall::dialect_from_template(model.gguf().str("tokenizer.chat_template").unwrap_or(""));
@@ -1437,6 +1579,9 @@ fn save_cache(l: &mut Loaded, store: &Arc<Mutex<KvStore>>) {
 /// so the user's chat does not have to be read again; a session that cannot save simply starts from
 /// the measurement prompt.
 fn run_tune(l: &mut Loaded, events: &TuneSink, cancel: &Arc<AtomicBool>) -> Result<tune::Outcome, String> {
+    if l.llama.is_some() {
+        return Err("This model runs on llama.cpp's Vulkan build on this graphics card, so Cerebro's processor settings do not change its speed: there is nothing to tune.".to_owned());
+    }
     let mut saved = Vec::new();
     let saved_ok = match l.session.save_kv(&l.model, &mut saved) {
         Ok(()) => true,
@@ -2646,5 +2791,21 @@ answer: {answer}", t.elapsed().as_secs_f64());
         assert!(!answer.trim().is_empty());
         assert!(matches!(events.last(), Some(ChatEvent::Done { .. })));
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    #[test]
+    fn model_names_read_like_people_write_them() {
+        assert_eq!(super::display_name("Qwen_Qwen3.6-35B-A3B-Q4_K_M"), "Qwen3.6 35B A3B");
+        assert_eq!(super::display_name("Qwen3.8-27B-IQ1_M"), "Qwen3.8 27B");
+        assert_eq!(super::display_name("Qwen3-0.6B"), "Qwen3 0.6B");
+        assert_eq!(super::display_name("sd-turbo"), "SD Turbo");
+        assert_eq!(super::display_name("Qwen3 8B Awq Compatible Instruct"), "Qwen3 8B AWQ Compatible Instruct");
+        assert_eq!(super::display_name("Qwen3-TTS-12Hz-1.7B-Base-Q8_0"), "Qwen3 TTS 12Hz 1.7B Base");
+        assert_eq!(super::display_name("Qwen3.8-27B-UD-Q4_K_XL"), "Qwen3.8 27B");
+        assert_eq!(super::display_name("Gemma 4 E4B"), "Gemma 4 E4B");
+        assert_eq!(super::display_name("Qwen3 0.6B Instruct"), "Qwen3 0.6B Instruct");
     }
 }

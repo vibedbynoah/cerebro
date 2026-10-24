@@ -28,6 +28,8 @@ export interface RouteDef {
   summary: string;
   /** Extra words the command palette matches on. */
   keywords: string;
+  /** False: reachable from other screens and the command palette, but not listed in the sidebar. */
+  inSidebar?: false;
 }
 
 export const ROUTES: readonly RouteDef[] = [
@@ -36,7 +38,7 @@ export const ROUTES: readonly RouteDef[] = [
   { id: "chat", label: "Chat", icon: "chat", group: "Run", summary: "Talk to a local model. It runs on this computer.", keywords: "conversation prompt assistant agent coding" },
   { id: "models", label: "Models", icon: "models", group: "Run", summary: "The models on this machine and how each one was tuned.", keywords: "library local gguf list" },
   { id: "cluster", label: "Cluster", icon: "link", group: "Run", summary: "Run one model across your computers over any network link, each running part of it.", keywords: "multiple computers network lan wifi ethernet usb distributed split homelab worker pair" },
-  { id: "tune", label: "Tune", icon: "tune", group: "Run", summary: "Measure the fastest safe settings for a model on this machine.", keywords: "benchmark measure speed optimize flags" },
+  { id: "tune", label: "Speed tune", icon: "tune", group: "Run", summary: "Measure the fastest settings for a model on this machine. Opened from a model's page; training is on Train.", keywords: "benchmark measure speed optimize flags tune", inSidebar: false },
   { id: "monitor", label: "Monitor", icon: "activity", group: "Run", summary: "The model and the machine, live: speed, memory, heat, and every request.", keywords: "metrics telemetry live gpu vram temperature requests inspector dashboard stats" },
   {
     id: "turbo",
@@ -67,7 +69,7 @@ export const ROUTES: readonly RouteDef[] = [
     icon: "plugins",
     group: "Extend",
     summary: __DESKTOP__
-      ? "Planned add-ons. Today, MCP servers on Tools give models new abilities."
+      ? "Add-ons that give models new abilities (files, git, web, databases), as MCP servers. Adding one needs the network; most then run offline."
       : "Add capabilities. Installing needs a network; installed plugins run offline.",
     keywords: "extensions addons install",
   },

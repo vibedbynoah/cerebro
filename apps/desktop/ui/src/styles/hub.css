@@ -260,6 +260,17 @@
   letter-spacing: -0.02em;
 }
 
+.family-tile--logo {
+  overflow: hidden;
+  background: var(--color-surface-2);
+}
+
+.family-tile--logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
 .family-tile[data-family="other"] {
   background: var(--color-surface-2);
   color: var(--color-text-secondary);

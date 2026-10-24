@@ -2234,3 +2234,40 @@
   color: var(--color-text-muted);
   text-transform: none;
 }
+
+/* "What Cerebro adds": the kinds of help as a column of tick boxes under their heading. */
+.composer__controls .composer__adds {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-1);
+  width: 100%;
+}
+
+.composer__controls .composer__adds legend {
+  float: none;
+  margin: 0 0 var(--space-1);
+  padding: 0;
+  color: var(--color-text-muted);
+}
+
+/* The side panel never scrolls sideways: every field shrinks to its column. */
+.chat-side {
+  overflow-x: hidden;
+}
+
+.chat-settings,
+.chat-settings .composer__controls > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chat-settings .composer__hint {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.sampler--inline input,
+.sampler--inline select {
+  width: 100%;
+  min-width: 0;
+}

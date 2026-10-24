@@ -38,9 +38,6 @@ export const TOOLS: readonly ToolDef[] = [
   { id: builtinKey("run_tests"), name: "Run tests", source: "built-in", risk: "run", description: "Runs your project's test command." },
   { id: builtinKey("fetch_url"), name: "Fetch web page", source: "built-in", risk: "network", description: "Downloads one web page. Off while offline mode is on." },
   { id: builtinKey("generate_image"), name: "Generate image", source: "built-in", risk: "write", description: "Makes an image with a local image model and saves it." },
-  { id: "web_search", name: "Web search", source: "plugin", plugin: "Search", risk: "network", description: "Searches the web through the installed search plugin." },
-  { id: "git_commit", name: "Git commit", source: "plugin", plugin: "Git", risk: "write", description: "Commits staged changes in a repository." },
-  { id: "send_email", name: "Send email", source: "plugin", plugin: "Mail", risk: "network", description: "Sends an email from your configured account." },
 ];
 
 export type Decision = "allow-once" | "allow-session" | "always" | "deny";
@@ -214,7 +211,6 @@ export const SAMPLE_CALLS: readonly ToolCall[] = [
     },
   },
   { id: "call-url", toolId: builtinKey("fetch_url"), preview: { kind: "url", method: "GET", url: "https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct" } },
-  { id: "call-plugin", toolId: "git_commit", preview: { kind: "plugin", plugin: "Git", action: "Commit", details: 'Commit 2 staged files with message "Fix config error handling"' } },
 ];
 
 export interface LogEntry {

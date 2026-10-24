@@ -63,6 +63,38 @@ function ImagesDesktop(): JSX.Element {
     const t = seedText().trim();
     return /^\d{1,9}$/.test(t) ? Number(t) : null;
   };
+  // Editing: a follow-up instruction for the current picture, or a picture of the user's own.
+  const [followUp, setFollowUp] = createSignal("");
+  const [strength, setStrength] = createSignal(0.6);
+  const editFrom = (source: string, instruction: string) => {
+    const m = model();
+    if (!m || busy() || !instruction.trim() || !service.editImage) return;
+    setBusy(true);
+    setError(null);
+    const p = instruction.trim();
+    service
+      .editImage({ modelId: m.id, prompt: p, source, strength: strength(), size: size(), steps: Math.max(2, steps()), seed: seedValue() })
+      .then((g) => {
+        setResults((r) => [{ ...g, prompt: p }, ...r].slice(0, 24));
+        setFollowUp("");
+      })
+      .catch((e: unknown) => setError(e instanceof Error && e.message ? e.message : "The image could not be changed."))
+      .finally(() => setBusy(false));
+  };
+  const upload = (file: File | undefined) => {
+    if (!file) return;
+    if (file.size > 30_000_000) {
+      setError("Pick an image under 30 MB.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const src = String(reader.result);
+      // Shown as the current picture; the next instruction edits it.
+      setResults((r) => [{ dataUrl: src, path: "", seed: 0, seconds: 0, width: size(), height: size(), prompt: `Your image: ${file.name}` }, ...r].slice(0, 24));
+    };
+    reader.readAsDataURL(file);
+  };
   const generate = () => {
     const m = model();
     if (!m || busy() || !prompt().trim()) return;
@@ -154,6 +186,13 @@ function ImagesDesktop(): JSX.Element {
             </button>
           </section>
           <section class="img-stage card" aria-label="Result">
+            <Show when={service.editImage}>
+              <label class="btn btn--tertiary btn--sm img-upload">
+                <Icon name="upload" size={14} />
+                Edit your own image
+                <input type="file" accept="image/png,image/jpeg,image/webp" class="sr-only" onChange={(e) => upload(e.currentTarget.files?.[0])} />
+              </label>
+            </Show>
             <Show when={current()} fallback={<p class="img-stage__empty">{busy() ? "Making the image on this computer…" : "Your image appears here."}</p>}>
               {(g) => (
                 <figure class="img-result">
@@ -164,11 +203,35 @@ function ImagesDesktop(): JSX.Element {
                       {g().width}×{g().height} · seed {g().seed} · {g().seconds.toFixed(1)} s
                     </span>
                   </figcaption>
-                  <div>
-                    <button type="button" class="btn btn--secondary btn--sm" onClick={() => void service.revealImage(g().path).catch(() => notify("Could not open the folder", undefined, "error"))}>
-                      Show in folder
-                    </button>
+                  <div class="img-result__actions">
+                    <Show when={g().path}>
+                      <button type="button" class="btn btn--secondary btn--sm" onClick={() => void service.revealImage(g().path).catch(() => notify("Could not open the folder", undefined, "error"))}>
+                        Show in folder
+                      </button>
+                    </Show>
+                    <a class="btn btn--secondary btn--sm" href={g().dataUrl} download={`cerebro-${g().seed || "image"}.png`}>
+                      Download
+                    </a>
                   </div>
+                  <Show when={service.editImage}>
+                    <form
+                      class="img-followup"
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        editFrom(g().dataUrl, followUp());
+                      }}
+                    >
+                      <label class="sr-only" for="img-followup">Change this picture</label>
+                      <input id="img-followup" class="input" maxLength={2000} placeholder="Change this picture: make the apple green, add rain…" value={followUp()} onInput={(e) => setFollowUp(e.currentTarget.value)} />
+                      <label class="img-followup__strength" title="How far the change may move from the picture: low keeps it close, high redraws more.">
+                        <span>Change {Math.round(strength() * 100)}%</span>
+                        <input type="range" min="0.2" max="0.95" step="0.05" value={strength()} onInput={(e) => setStrength(Number(e.currentTarget.value))} />
+                      </label>
+                      <button type="submit" class="btn btn--primary btn--sm" disabled={busy() || !followUp().trim()}>
+                        {busy() ? "Changing…" : "Apply"}
+                      </button>
+                    </form>
+                  </Show>
                 </figure>
               )}
             </Show>
@@ -182,8 +245,33 @@ function ImagesDesktop(): JSX.Element {
             <ul class="img-grid">
               <For each={results().slice(1)}>
                 {(g) => (
-                  <li>
-                    <img class="img-art" src={g.dataUrl} alt={g.prompt} width={g.width} height={g.height} />
+                  <li class="img-tile">
+                    <button type="button" class="img-tile__open" aria-label={`Show large: ${g.prompt}`} onClick={() => setResults((r) => [g, ...r.filter((x) => x !== g)])}>
+                      <img class="img-art" src={g.dataUrl} alt={g.prompt} width={g.width} height={g.height} />
+                    </button>
+                    <div class="img-tile__bar">
+                      <span class="img-tile__prompt" title={g.prompt}>
+                        {g.prompt}
+                      </span>
+                      <button
+                        type="button"
+                        class="btn btn--icon btn--xs"
+                        title="Use this prompt and seed again"
+                        aria-label={`Use the prompt and seed of: ${g.prompt}`}
+                        onClick={() => {
+                          setPrompt(g.prompt);
+                          setSeedText(String(g.seed));
+                        }}
+                      >
+                        <Icon name="refresh" size={13} />
+                      </button>
+                      <button type="button" class="btn btn--icon btn--xs" title="Show the file in its folder" aria-label={`Show the file of: ${g.prompt}`} onClick={() => void service.revealImage(g.path).catch(() => notify("Could not open the folder", undefined, "error"))}>
+                        <Icon name="folder" size={13} />
+                      </button>
+                      <button type="button" class="btn btn--icon btn--xs" title="Remove from this list (the file stays)" aria-label={`Remove from the list: ${g.prompt}`} onClick={() => setResults((r) => r.filter((x) => x !== g))}>
+                        <Icon name="close" size={13} />
+                      </button>
+                    </div>
                   </li>
                 )}
               </For>
