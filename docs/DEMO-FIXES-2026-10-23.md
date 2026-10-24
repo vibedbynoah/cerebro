@@ -111,3 +111,15 @@ checked in the real exe before it is ticked.
 - [ ] Models: drag to reorder and groups (loaded-first and pins are in).
 - [x] Train: a recommended value and plain explanation next to every setting (with a Use button).
 - [ ] Remaining speed losses: iGPU prompt attention, 8B whole-card prompt reading, low-bit decode.
+
+## Against llama.cpp (2026-10-24, RTX 3070 Ti laptop, 32 GB)
+Wins: 0.6B whole-card reading (22.5K vs 12.1K), 8B split reading and writing (1136 vs 947,
+16.7 vs 12.8), 27B Q4 split writing (4.03 vs 3.66), 27B IQ2_XXS reading (372 vs 38).
+Still losing:
+- [ ] 27B hybrid split prompt reading: 5 vs 273 tok/s. Streaming hybrid DeltaNet layers gives a
+      wrong context past about 20 tokens, so it is off (CEREBRO_HYBRID_STREAM=1 to work on it).
+- [ ] 27B low-bit writing: IQ1_S 17 vs 28.6, IQ1_M 9.5 vs 26 (61/56 of 64 layers on the card;
+      llama.cpp fits all 64).
+- [ ] Flash-Next: 2.4 vs 7.0 writing, 2.7 vs 5.2 reading (no whole-GPU path for qwen4exp).
+- [ ] 8B whole-card prompt reading: 1616 vs 2486.
+- [ ] Integrated GPU: reading 244 vs 928 (0.6B), writing 40 vs 45.6.
