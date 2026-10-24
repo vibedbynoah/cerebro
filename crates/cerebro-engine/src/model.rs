@@ -363,7 +363,7 @@ impl Model {
         let c = &self.cfg;
         let (per, head) = self.layer_bytes();
         let kv: u64 = self.layers.iter().skip(gpu_layers).filter(|l| l.delta.is_none()).count() as u64 * 2 * max_ctx as u64 * (c.n_kv * c.head_dim) as u64 * 2;
-        let budget = crate::gguf::available_ram().saturating_sub(crate::placement::RAM_MARGIN).saturating_sub(kv);
+        let budget = (crate::gguf::prefetch_room() as u64).saturating_sub(kv);
         let k = crate::placement::drive_layers(&per, head, gpu_layers, budget);
         if k > 0 && self.stream_from_drive(k) {
             let streamed: u64 = per[c.n_layer - k..].iter().sum();
@@ -449,7 +449,7 @@ impl Model {
         let on_gpu = 0usize;
         let per_token: usize = g.tensors.values().filter(|t| !t.name.contains("_exps") && !t.name.contains("token_embd")).map(|t| t.size).sum::<usize>().saturating_sub(on_gpu);
         let kv: usize = self.layers.iter().filter(|l| l.delta.is_none()).count() * 2 * max_ctx * c.n_kv * c.head_dim * 2;
-        let budget = (crate::gguf::available_ram() as usize).saturating_sub(crate::placement::RAM_MARGIN as usize + per_token + kv);
+        let budget = crate::gguf::prefetch_room().saturating_sub(per_token + kv);
         // CEREBRO_EXPERT_CACHE_MB pins the cache size (benchmarks: experts mostly from the drive).
         let forced = std::env::var("CEREBRO_EXPERT_CACHE_MB").ok().and_then(|v| v.parse::<usize>().ok()).map(|mb| mb << 20);
         let budget = forced.unwrap_or(budget);
@@ -1515,7 +1515,7 @@ impl Session {
         if crate::switches::enabled(crate::switches::PREFAULT) {
             // As much of what the processor reads from the file as available RAM holds (interleaved
             // copies are in memory already).
-            let mut room = (crate::gguf::available_ram() as f64 * 0.9) as usize;
+            let mut room = crate::gguf::prefetch_room();
             let t = Instant::now();
             let mut ranges = m.direct_ranges(0);
             ranges.retain_mut(|r| {
@@ -1848,7 +1848,7 @@ impl Session {
             // The CPU's share is read into RAM now (as a CPU session does at start), not by page
             // faults during the first prompt; as much as available RAM holds.
             let mut ranges = m.direct_ranges(g.gpu_layers());
-            let mut room = (crate::gguf::available_ram() as f64 * 0.9) as usize;
+            let mut room = crate::gguf::prefetch_room();
             ranges.retain_mut(|r| {
                 let keep = r.1.min(room);
                 room -= keep;

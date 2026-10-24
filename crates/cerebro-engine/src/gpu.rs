@@ -533,6 +533,13 @@ fn register_direct(model: &Model, from: usize) -> Option<Vec<usize>> {
             _ => merged.push((a, b)),
         }
     }
+    // Page-locked memory cannot be paged out: only when it leaves the computer its reserve.
+    // Otherwise the layers are copied through the pinned slots instead (a little slower).
+    let locked: usize = merged.iter().map(|(a, b)| b - a).sum();
+    if locked > crate::gguf::prefetch_room() {
+        eprintln!("split prefill: {:.1} GB of the processor's layers would not leave enough free memory page-locked; copying them instead", locked as f64 / 1e9);
+        return None;
+    }
     let t0 = std::time::Instant::now();
     let mut done = Vec::new();
     for &(a, b) in &merged {
@@ -1514,7 +1521,7 @@ impl GpuState {
         // the rest.
         let mut cpu_side: Vec<usize> = (0..total).filter(|&k| mg.slot_of[k].is_none()).collect();
         cpu_side.sort_by(|&a, &b| mg.counts[b].total_cmp(&mg.counts[a]));
-        let mut room = if !switches::enabled(switches::PREFAULT) { 0 } else { (crate::gguf::available_ram() as f64 * 0.85) as usize };
+        let mut room = if !switches::enabled(switches::PREFAULT) { 0 } else { crate::gguf::prefetch_room() };
         let (mut touch, mut ahead) = (Vec::new(), Vec::new());
         for k in cpu_side {
             let r = MoeGpu::expert_ranges(model, k / c.n_expert, k % c.n_expert);

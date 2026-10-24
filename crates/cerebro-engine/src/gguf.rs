@@ -479,6 +479,29 @@ pub fn available_ram() -> u64 {
     u64::MAX
 }
 
+/// Physical memory installed, in bytes (0 if unknown).
+pub fn total_ram() -> u64 {
+    #[cfg(windows)]
+    {
+        let mut st = win::MemoryStatusEx { length: std::mem::size_of::<win::MemoryStatusEx>() as u32, ..Default::default() };
+        // SAFETY: st is a properly sized MEMORYSTATUSEX with its length set.
+        if unsafe { win::GlobalMemoryStatusEx(&mut st) } != 0 {
+            return st.total_phys;
+        }
+    }
+    0
+}
+
+/// How much of the model the engine may read into RAM ahead of time or page-lock: what is
+/// available now, less a reserve the rest of the computer keeps (the larger of 4 GiB and a sixth
+/// of the installed memory). Reading ahead into the last free gigabytes made a 32 GB laptop run
+/// critically low while a 20 GB model loaded; past this, layers stay on the drive and are read as
+/// they are used.
+pub fn prefetch_room() -> usize {
+    let reserve = (4u64 << 30).max(total_ram() / 6);
+    available_ram().saturating_sub(reserve) as usize
+}
+
 /// The files of a split model, in order, when `path` is one part of one ("name-00002-of-00003.gguf"
 /// gives name-00001.. to name-00003..). None for an ordinary file.
 pub fn split_parts(path: &Path) -> Option<Vec<std::path::PathBuf>> {

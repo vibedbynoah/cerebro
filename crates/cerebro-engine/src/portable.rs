@@ -340,6 +340,116 @@ fn main(@builtin(workgroup_id) g: vec3<u32>, @builtin(local_invocation_id) l: ve
 }
 "#;
 
+/// The tiled product for the int8 layout with integer dot products (DP4A: dot4add_i8packed on DX12,
+/// OpSDot on Vulkan): four multiply-adds per instruction where GEMM does one, the same scheme as
+/// llama.cpp's quantised matrix products. Each token's 32-value slices are quantised to int8 with
+/// one scale per slice as they are staged; the weights are already int8 with a scale per 32. A
+/// workgroup computes BM rows x 32 tokens over SB slices per step, each thread TR rows x 4 tokens.
+const GEMM_DP4A: &str = r#"
+struct P { rows: u32, cols: u32, add: u32, off: u32, out_stride: u32, in_stride: u32, fixed: u32, _a: u32 }
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(2) var<storage, read> w: array<u32>;
+@group(0) @binding(3) var<storage, read> s: array<f32>;
+@group(0) @binding(4) var<storage, read> x: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> o: array<f32>;
+const BN: u32 = 32u;
+const BM: u32 = WG / 8u * TR;
+// Words per step: SB slices of 8 words, rows padded by one word against bank conflicts.
+const KW: u32 = 8u * SB;
+const LS: u32 = KW + 1u;
+var<workgroup> ws: array<u32, BM * LS>;
+var<workgroup> wsc: array<f32, BM * SB>;
+var<workgroup> xq: array<u32, BN * LS>;
+var<workgroup> xsc: array<f32, BN * SB>;
+@compute @workgroup_size(WG)
+fn main(@builtin(workgroup_id) g: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
+    let r0 = (g.x + g.y * 65535u) * BM;
+    let t0 = g.z * BN;
+    let nt = st.n;
+    let tid = l.x;
+    let tr = (tid % (WG / 8u)) * TR;
+    let tt = (tid / (WG / 8u)) * 4u;
+    var acc: array<vec4<f32>, TR>;
+    for (var i = 0u; i < TR; i++) { acc[i] = vec4<f32>(0.0); }
+    let xs = p.in_stride / 4u;
+    let cw = p.cols / 4u;
+    let nsl = p.cols / 32u;
+    for (var k0 = 0u; k0 < p.cols; k0 += 32u * SB) {
+        let w0 = k0 / 4u;
+        for (var idx = tid; idx < BM * KW; idx += WG) {
+            let r = idx / KW;
+            let c = idx % KW;
+            let gr = r0 + r;
+            var v = 0u;
+            if (gr < p.rows && w0 + c < cw) { v = w[gr * cw + w0 + c]; }
+            ws[r * LS + c] = v;
+        }
+        for (var idx = tid; idx < BM * SB; idx += WG) {
+            let r = idx / SB;
+            let b = idx % SB;
+            let gr = r0 + r;
+            var v = 0.0;
+            if (gr < p.rows && k0 / 32u + b < nsl) { v = s[gr * nsl + k0 / 32u + b]; }
+            wsc[idx] = v;
+        }
+        for (var idx = tid; idx < BN * SB; idx += WG) {
+            let t = idx / SB;
+            let b = idx % SB;
+            let kb = k0 / 32u + b;
+            var d = 0.0;
+            if (t0 + t < nt && kb < nsl) {
+                let xb = (t0 + t) * xs + kb * 8u;
+                var amax = 0.0;
+                for (var c = 0u; c < 8u; c++) {
+                    let v = abs(x[xb + c]);
+                    amax = max(amax, max(max(v.x, v.y), max(v.z, v.w)));
+                }
+                d = amax / 127.0;
+                let inv = select(0.0, 127.0 / amax, amax > 0.0);
+                for (var c = 0u; c < 8u; c++) {
+                    xq[t * LS + b * 8u + c] = pack4xI8(vec4<i32>(round(x[xb + c] * inv)));
+                }
+            } else {
+                for (var c = 0u; c < 8u; c++) { xq[t * LS + b * 8u + c] = 0u; }
+            }
+            xsc[idx] = d;
+        }
+        workgroupBarrier();
+        for (var b = 0u; b < SB; b++) {
+            var di: array<vec4<i32>, TR>;
+            for (var i = 0u; i < TR; i++) { di[i] = vec4<i32>(0); }
+            for (var c = b * 8u; c < b * 8u + 8u; c++) {
+                let b0 = xq[tt * LS + c];
+                let b1 = xq[(tt + 1u) * LS + c];
+                let b2 = xq[(tt + 2u) * LS + c];
+                let b3 = xq[(tt + 3u) * LS + c];
+                for (var i = 0u; i < TR; i++) {
+                    let a = ws[(tr + i) * LS + c];
+                    di[i] += vec4<i32>(dot4I8Packed(a, b0), dot4I8Packed(a, b1), dot4I8Packed(a, b2), dot4I8Packed(a, b3));
+                }
+            }
+            let sx = vec4<f32>(xsc[tt * SB + b], xsc[(tt + 1u) * SB + b], xsc[(tt + 2u) * SB + b], xsc[(tt + 3u) * SB + b]);
+            for (var i = 0u; i < TR; i++) {
+                acc[i] += vec4<f32>(di[i]) * sx * wsc[(tr + i) * SB + b];
+            }
+        }
+        workgroupBarrier();
+    }
+    for (var i = 0u; i < TR; i++) {
+        let r = r0 + tr + i;
+        if (r < p.rows) {
+            for (var j = 0u; j < 4u; j++) {
+                let t = t0 + tt + j;
+                if (t < nt) {
+                    let oi = t * p.out_stride + p.off + r;
+                    if (p.add == 1u) { o[oi] += acc[i][j]; } else { o[oi] = acc[i][j]; }
+                }
+            }
+        }
+    }
+}
+"#;
+
 /// GEMM's weight loader for the int8 layout: four weights of row `gr` at value k0 + 4c, scaled.
 const WLOAD_I8: &str = r#"
 fn wload(gr: u32, k0: u32, c: u32) -> vec4<f32> {
@@ -850,7 +960,13 @@ fn pick_adapter(inst: &wgpu::Instance) -> Result<wgpu::Adapter, Error> {
             wgpu::DeviceType::IntegratedGpu => 1,
             _ => 2,
         };
-        let preferred = if cfg!(windows) && i.vendor == INTEL { wgpu::Backend::Dx12 } else { wgpu::Backend::Vulkan };
+        // CEREBRO_PORTABLE_BACKEND=vulkan|dx12 overrides the choice (measuring both).
+        let preferred = match std::env::var("CEREBRO_PORTABLE_BACKEND").ok().as_deref() {
+            Some("vulkan") => wgpu::Backend::Vulkan,
+            Some("dx12") => wgpu::Backend::Dx12,
+            _ if cfg!(windows) && i.vendor == INTEL => wgpu::Backend::Dx12,
+            _ => wgpu::Backend::Vulkan,
+        };
         (kind, (i.backend != preferred) as u8)
     };
     if let Ok(want) = std::env::var("CEREBRO_PORTABLE_GPU") {
@@ -1000,6 +1116,14 @@ const MV0: usize = 15;
 /// Then the tiled prompt products (GEMM): (label, threads, rows per thread), int8 then Q4_K.
 const GEMM_VARIANTS: [(&str, u32, u32); 2] = [("4 rows x 4 tokens per thread", 128, 4), ("8 rows x 4 tokens per thread", 64, 8)];
 const P_GEMM0: usize = MV0 + MV_VARIANTS.len();
+/// Then the integer-dot GEMM for the int8 layout: (label, threads, rows per thread, slices per step).
+const DP4A_VARIANTS: [(&str, u32, u32, u32); 4] = [
+    ("int8 dot, 4 rows x 4 tokens, 64 values per step", 128, 4, 2),
+    ("int8 dot, 4 rows x 4 tokens, 128 values per step", 128, 4, 4),
+    ("int8 dot, 8 rows x 4 tokens, 64 values per step", 64, 8, 2),
+    ("int8 dot, 8 rows x 4 tokens, 128 values per step", 64, 8, 4),
+];
+const P_DP4A0: usize = P_GEMM0 + 2 * GEMM_VARIANTS.len();
 /// Tokens per GEMM workgroup (BN in the shader) and the fewest tokens for which the GEMM replaces
 /// the matvec kernels.
 const GEMM_BN: u32 = 32;
@@ -1279,6 +1403,28 @@ impl PortableState {
         for wl in [WLOAD_I8, WLOAD_Q4K] {
             for (label, wg, tr) in GEMM_VARIANTS {
                 pipes.push(pipe(format!("const WG: u32 = {wg}u; const TR: u32 = {tr}u;{STEP}{}", GEMM.replace("WLOAD", wl)), P_MATVEC, label));
+            }
+        }
+        // Integer dot products need a recent shader compiler and driver: a variant this GPU's
+        // stack rejects (DXC answered "Invalid record" on an Iris Xe) is left out, never fatal.
+        let mut dp4a_ok = [false; DP4A_VARIANTS.len()];
+        for (vi, (label, wg, tr, sb)) in DP4A_VARIANTS.into_iter().enumerate() {
+            // A compiler failure comes back as an internal error, a rejected shader as a validation one.
+            let outer = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let inner = device.push_error_scope(wgpu::ErrorFilter::Internal);
+            let p = pipe(format!("const WG: u32 = {wg}u; const TR: u32 = {tr}u; const SB: u32 = {sb}u;{STEP}{GEMM_DP4A}"), P_MATVEC, label);
+            let failed = pollster::block_on(inner.pop());
+            let failed = failed.or(pollster::block_on(outer.pop()));
+            match failed {
+                None => {
+                    dp4a_ok[vi] = true;
+                    pipes.push(p);
+                }
+                Some(e) => {
+                    trace(&format!("{label}: not available on this GPU ({})", e.to_string().lines().find(|l| l.contains("error")).unwrap_or("compile error").trim()));
+                    // A stand-in keeps the pipeline numbering; it is never selected.
+                    pipes.push(pipes[P_GEMM0].clone());
+                }
             }
         }
         trace("pipelines");
@@ -1600,8 +1746,36 @@ impl PortableState {
                         gemm[gi] = Some((gp, bm));
                     }
                 }
+                // The integer-dot GEMM for the int8 layout. Its activations are rounded to int8, so
+                // it is held to 2% of the largest output rather than 0.1% (llama.cpp's quantised
+                // products round the same way). CEREBRO_PORTABLE_NO_DP4A=1 leaves it out.
+                if !want_q4k && std::env::var_os("CEREBRO_PORTABLE_NO_DP4A").is_none() {
+                    for (vi, (label, wgs, tr, _)) in DP4A_VARIANTS.iter().enumerate() {
+                        if !dp4a_ok[vi] {
+                            continue;
+                        }
+                        let gp = P_DP4A0 + vi;
+                        let bm = wgs / 8 * tr;
+                        queue.write_buffer(input, 0, &vals);
+                        run(gp, Some(bm), 1)?;
+                        let b = read_out()?;
+                        if !a.iter().zip(&b).take(used).all(|(x, y)| (x - y).abs() <= 2e-2 * scale) {
+                            trace(&format!("gemm {label} disagrees with the matvec kernel: not used"));
+                            continue;
+                        }
+                        let mut tg = f64::MAX;
+                        for _ in 0..2 {
+                            tg = tg.min(run(gp, Some(bm), 10)? / 10.0);
+                        }
+                        trace(&format!("gemm {label}, {nt} tokens: {:.1} us against {:.1} us", tg * 1e6, tm * 1e6));
+                        if tg < best {
+                            best = tg;
+                            gemm[gi] = Some((gp, bm));
+                        }
+                    }
+                }
                 if let Some((gp, _)) = gemm[gi] {
-                    let label = GEMM_VARIANTS[(gp - P_GEMM0) % GEMM_VARIANTS.len()].0;
+                    let label = if gp >= P_DP4A0 { DP4A_VARIANTS[gp - P_DP4A0].0 } else { GEMM_VARIANTS[(gp - P_GEMM0) % GEMM_VARIANTS.len()].0 };
                     words.push(format!("tiled GEMM {label} for {kind} prompts ({:.1}x)", tm / best));
                 }
             }
