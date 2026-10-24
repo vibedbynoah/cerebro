@@ -1541,6 +1541,12 @@ extern "C" __global__ void matvec_q1(const unsigned char* __restrict__ w, const 
     }
 }
 
+// y[t * rows + r] += b[r] for T rows of `rows` values (q|k|v biases, Qwen2).
+extern "C" __global__ void add_bias_b(float* __restrict__ y, const float* __restrict__ b, int rows, int T) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < rows * T) y[i] += b[i % rows];
+}
+
 // ---- Gemma 4 (gpu_g4.rs) --------------------------------------------------------------------------
 
 // One token's q, k, v: RMS norm per head (q and k with weights, v without), rotary on q and k

@@ -71,6 +71,8 @@ struct GLayer {
     router: Option<CudaSlice<f32>>,
     /// The shared expert every token of a MoE layer also runs (Qwen3.5/3.6 MoE).
     shared: Option<GShared>,
+    /// q|k|v biases (Qwen2), added after the stacked projection.
+    bias: Option<CudaSlice<f32>>,
     /// f16 KV cache, max_ctx positions (one element for DeltaNet layers, which keep a state instead).
     kc: CudaSlice<u16>,
     vc: CudaSlice<u16>,
@@ -148,6 +150,7 @@ struct Funcs {
     scatter_add: CudaFunction,
     add_inplace: CudaFunction,
     shared_gate_add: CudaFunction,
+    add_bias: CudaFunction,
     attn_tiled: CudaFunction,
 }
 
@@ -792,6 +795,7 @@ impl GpuState {
             scatter_add: lf("scatter_add")?,
             add_inplace: lf("add_inplace")?,
             shared_gate_add: lf("shared_gate_add")?,
+            add_bias: lf("add_bias_b")?,
             attn_tiled: lf("attn_prefill_tiled")?,
         };
         let c = &model.cfg;
@@ -888,6 +892,7 @@ impl GpuState {
                 down,
                 router,
                 shared,
+                bias: l.qkv_bias.as_deref().map(|b| stream.clone_htod(b)).transpose().map_err(gerr)?,
                 kc: stream.alloc_zeros::<u16>(if attn { max_ctx * kvd } else { 1 }).map_err(gerr)?,
                 vc: stream.alloc_zeros::<u16>(if attn { max_ctx * kvd } else { 1 }).map_err(gerr)?,
             });
@@ -1056,6 +1061,10 @@ impl GpuState {
     /// Whether `prefill_streamed` can run this model's processor layers (`from..`): attention or
     /// Gated DeltaNet with a dense feed-forward, in formats the GPU converts.
     pub fn can_stream(model: &Model, from: usize) -> bool {
+        // Streamed slots carry no q|k|v biases: such layers read prompts on the processor.
+        if model.layers().iter().any(|l| l.qkv_bias.is_some()) {
+            return false;
+        }
         let ok = |ms: &[&Mat]| ms.iter().all(|m| m.cols % 256 == 0 && gpu_block(m.dtype).is_some()) || ms.iter().all(|m| m.cols % 32 == 0 && m.dtype == DType::Q8_0);
         model.hc.is_none()
             && model.layers()[from..].iter().all(|l| {
@@ -1178,6 +1187,7 @@ impl GpuState {
                 down: None,
                 router: None,
                 shared: None,
+                bias: None,
                 kc: c.alloc_zeros::<u16>(max_ctx * kvd).map_err(gerr)?,
                 vc: c.alloc_zeros::<u16>(max_ctx * kvd).map_err(gerr)?,
                 delta: None,
@@ -1825,6 +1835,10 @@ impl GpuState {
                 Self::unpack_gate(s, f, sh, &self.qg, &mut self.qkv, &mut self.gate, 1)?;
             } else {
                 Self::matvec(s, f, &l.qkv, &self.xq, &self.xd, &mut self.qkv, false)?;
+            }
+            if let Some(bias) = &l.bias {
+                let (r, one_t) = ((sh.n_head + 2 * sh.n_kv) as i32 * sh.hd as i32, 1i32);
+                unsafe { s.launch_builder(&f.add_bias).arg(&mut self.qkv).arg(bias).arg(&r).arg(&one_t).launch(blocks(r as usize)) }.map_err(gerr)?;
             }
             {
                 let qn = l.q_norm.as_ref().unwrap_or(&l.attn_norm);
@@ -2719,6 +2733,11 @@ impl GpuState {
             } else {
                 mm(&l.qkv, &b.xq, &b.xd, &mut b.qkv, false)?;
             }
+            if let Some(bias) = &l.bias {
+                let (r, ti2) = ((sh.n_head + 2 * sh.n_kv) as i32 * sh.hd as i32, t as i32);
+                let n = (r as usize * t) as u32;
+                unsafe { s.launch_builder(&f.add_bias).arg(&mut b.qkv).arg(bias).arg(&r).arg(&ti2).launch(LaunchConfig { grid_dim: (n.div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
+            }
             {
                 let qn = l.q_norm.as_ref().unwrap_or(&l.attn_norm);
                 let kn = l.k_norm.as_ref().unwrap_or(&l.attn_norm);
@@ -2870,7 +2889,10 @@ impl GpuState {
         if self.is_split() {
             return Err(Error::Unsupported("generate_greedy runs whole-GPU models only; a split model steps through Session::step".into()));
         }
-        if self.moe.is_some() {
+        // MoE models sync with the processor every layer; native-layout models look each token's
+        // embedding up on the processor (host_embed), which the device-side loop below would
+        // never refresh (every token after the first was computed from the first one's row).
+        if self.moe.is_some() || self.host_embed.is_some() {
             let mut t = first;
             let mut n = 0;
             while n < max_new && pos + n < self.max_ctx {
@@ -3318,7 +3340,8 @@ impl BatchGpu {
         s.memcpy_htod(&hd, &mut self.xd.slice_mut(0..t * cols / 32)).map_err(gerr)?;
         let (ri, ci, ti, add) = (rows as i32, cols as i32, t as i32, 0i32);
         let cfg = LaunchConfig { grid_dim: ((t as u32).div_ceil(64), (rows as u32).div_ceil(64), 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
-        unsafe { s.launch_builder(&self.gemm).arg(&self.qs).arg(&self.ds).arg(&self.xq).arg(&self.xd).arg(&mut self.y).arg(&ri).arg(&ci).arg(&ti).arg(&add).launch(cfg) }.map_err(gerr)?;
+        // The last argument is the output row stride (the kernels gained it with row pieces).
+        unsafe { s.launch_builder(&self.gemm).arg(&self.qs).arg(&self.ds).arg(&self.xq).arg(&self.xd).arg(&mut self.y).arg(&ri).arg(&ci).arg(&ti).arg(&add).arg(&ri).launch(cfg) }.map_err(gerr)?;
         s.memcpy_dtoh(&self.y.slice(0..t * rows), &mut out[..t * rows]).map_err(gerr)?;
         s.synchronize().map_err(gerr)?;
         self.calls += 1;

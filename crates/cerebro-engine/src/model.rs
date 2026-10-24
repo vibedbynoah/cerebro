@@ -143,6 +143,8 @@ pub struct Layer {
     pub o: Mat,
     pub q_norm: Option<Vec<f32>>,
     pub k_norm: Option<Vec<f32>>,
+    /// Biases added to q, k and v (Qwen2 / Qwen2.5), stacked [q | k | v].
+    pub qkv_bias: Option<Vec<f32>>,
     pub ffn_norm: Vec<f32>,
     pub ffn: Ffn,
 }
@@ -308,6 +310,14 @@ impl Model {
                 o: attn("attn_output")?,
                 q_norm: if has_qk_norm { Some(nv("attn_q_norm")?) } else { None },
                 k_norm: if has_qk_norm { Some(nv("attn_k_norm")?) } else { None },
+                qkv_bias: if g.tensors.contains_key(&format!("blk.{i}.attn_q.bias")) {
+                    let mut b = raw("attn_q.bias")?;
+                    b.extend(raw("attn_k.bias")?);
+                    b.extend(raw("attn_v.bias")?);
+                    Some(b)
+                } else {
+                    None
+                },
                 delta,
                 ffn_norm,
                 ffn: if cfg.n_expert > 0 {
@@ -2185,6 +2195,15 @@ impl Session {
             m.matmul_batch(&l.q, &h, &qa_dim, &mut q);
             m.matmul_batch(&l.k, &h, &qa_dim, &mut kb);
             m.matmul_batch(&l.v, &h, &qa_dim, &mut vb);
+            if let Some(b) = &l.qkv_bias {
+                let (bq, rest) = b.split_at(qd);
+                let (bk, bv) = rest.split_at(kvd);
+                for t in 0..nt {
+                    q[t * qd..(t + 1) * qd].iter_mut().zip(bq).for_each(|(x, b)| *x += b);
+                    kb[t * kvd..(t + 1) * kvd].iter_mut().zip(bk).for_each(|(x, b)| *x += b);
+                    vb[t * kvd..(t + 1) * kvd].iter_mut().zip(bv).for_each(|(x, b)| *x += b);
+                }
+            }
             {
                 let (qp, kp, kcp, vcp) = (Raw(q.as_mut_ptr()), Raw(kb.as_mut_ptr()), Raw(self.k[li].as_mut_ptr()), Raw(self.v[li].as_mut_ptr()));
                 let vbr = &vb;
@@ -2510,6 +2529,12 @@ impl Session {
                 }
             } else {
                 m.matvec_many(&mut [(&l.q, &mut self.q[..]), (&l.k, &mut self.kb[..]), (&l.v, &mut self.vb[..])], &self.h, &self.qa_dim);
+            }
+            if let Some(b) = &l.qkv_bias {
+                let (qd, kd) = (self.q.len(), self.kb.len());
+                self.q.iter_mut().zip(&b[..qd]).for_each(|(x, b)| *x += b);
+                self.kb.iter_mut().zip(&b[qd..qd + kd]).for_each(|(x, b)| *x += b);
+                self.vb.iter_mut().zip(&b[qd + kd..]).for_each(|(x, b)| *x += b);
             }
             lap(0, &mut self.prof);
             let rd = c.rope_dim;
