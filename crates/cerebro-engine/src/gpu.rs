@@ -29,10 +29,10 @@ use crate::model::{Ffn, Mat, Model, MoeScratch};
 use crate::quant::{dequant_row, f16_to_f32, DType, QAct};
 use crate::Error;
 
-const PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
+pub(crate) const PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
 /// Batches smaller than this use the dp4a kernel (an MMA tile of 64 tokens would be mostly padding).
 const MMA_MIN_T: usize = 8;
-const PTX_MMA: &str = include_str!(concat!(env!("OUT_DIR"), "/kernels_mma.ptx"));
+pub(crate) const PTX_MMA: &str = include_str!(concat!(env!("OUT_DIR"), "/kernels_mma.ptx"));
 
 /// A weight matrix on the GPU: repacked to int8 (`Q8`), or kept in its K-quant format as row-stacked
 /// parts (`K`; fused Q/K/V can mix formats, e.g. Q4_K and Q6_K).
@@ -153,7 +153,7 @@ struct Funcs {
 
 /// GPU-side block size of a K-quant format (Q6_K padded to 224 bytes for aligned loads) and its GGML
 /// type id, or None if experts in this format cannot be cached on the GPU.
-fn gpu_block(dt: DType) -> Option<(usize, i32)> {
+pub(crate) fn gpu_block(dt: DType) -> Option<(usize, i32)> {
     match dt {
         DType::Q4K => Some((144, 12)),
         DType::Q5K => Some((176, 13)),
@@ -174,7 +174,7 @@ fn gpu_block(dt: DType) -> Option<(usize, i32)> {
     }
 }
 
-fn to_gpu_layout(dt: DType, src: &[u8]) -> Vec<u8> {
+pub(crate) fn to_gpu_layout(dt: DType, src: &[u8]) -> Vec<u8> {
     if dt == DType::Q1_0 {
         let mut out = Vec::with_capacity(src.len());
         for pair in src.chunks_exact(36) {
@@ -668,13 +668,13 @@ struct StreamIn<'a> {
     v: &'a mut [Vec<u16>],
 }
 
-fn gerr<E: std::fmt::Debug>(e: E) -> Error {
+pub(crate) fn gerr<E: std::fmt::Debug>(e: E) -> Error {
     Error::Unsupported(format!("CUDA: {e:?}"))
 }
 
 /// Repacks one or more matrices with the same column count, stacked by rows, into int8 values plus one
 /// f32 scale per 32. Q8_0 keeps its exact values; other formats are dequantised and requantised.
-fn repack(g: &Gguf, mats: &[&Mat]) -> (Vec<i8>, Vec<f32>, usize, usize) {
+pub(crate) fn repack(g: &Gguf, mats: &[&Mat]) -> (Vec<i8>, Vec<f32>, usize, usize) {
     let cols = mats[0].cols;
     let rows: usize = mats.iter().map(|m| m.rows).sum();
     let nb = cols / 32;

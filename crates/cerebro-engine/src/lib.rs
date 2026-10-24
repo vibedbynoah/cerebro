@@ -17,6 +17,8 @@ pub mod gguf;
 #[cfg(feature = "cuda")]
 pub mod gpu;
 #[cfg(feature = "cuda")]
+pub mod gpu_g4;
+#[cfg(feature = "cuda")]
 pub mod gtensor;
 pub mod hc;
 pub mod hw;
@@ -49,6 +51,70 @@ pub enum Error {
     Unsupported(String),
     #[error("request: {0}")]
     Request(String),
+}
+
+/// The chat format a model's own template uses, so prompts read the way the model was trained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatFormat {
+    /// Qwen and most others: <|im_start|>role ... <|im_end|>, with Qwen3's think block.
+    ChatMl,
+    /// Llama 3: <|start_header_id|>role<|end_header_id|> ... <|eot_id|>.
+    Llama3,
+    /// Gemma 4: <|turn>role ... <turn|>, the model's turns called "model"; <|think|> in the system
+    /// turn turns its thinking on.
+    Gemma4,
+}
+
+impl ChatFormat {
+    /// From the file's `tokenizer.chat_template`.
+    pub fn of(g: &gguf::Gguf) -> Self {
+        let t = g.str("tokenizer.chat_template").unwrap_or("");
+        if t.contains("<|turn>") {
+            Self::Gemma4
+        } else if t.contains("<|start_header_id|>") {
+            Self::Llama3
+        } else {
+            Self::ChatMl
+        }
+    }
+
+    /// Whether replies carry Qwen-style <think> blocks (the other formats are rendered without
+    /// thinking for now).
+    pub fn think_tags(self) -> bool {
+        self == Self::ChatMl
+    }
+
+    /// The prompt for `turns` ("user" / "assistant"), ending where the model writes its reply.
+    pub fn render(self, system: Option<&str>, turns: &[(&str, &str)], think: bool) -> String {
+        match self {
+            Self::ChatMl => chatml(system, turns, think),
+            Self::Llama3 => {
+                let mut s = String::from("<|begin_of_text|>");
+                let mut push = |role: &str, text: &str| s.push_str(&format!("<|start_header_id|>{role}<|end_header_id|>\n\n{}<|eot_id|>", text.trim()));
+                if let Some(sys) = system {
+                    push("system", sys);
+                }
+                for (role, text) in turns {
+                    push(role, text);
+                }
+                s.push_str("<|start_header_id|>assistant<|end_header_id|>\n\n");
+                s
+            }
+            Self::Gemma4 => {
+                // <bos> comes from the tokenizer.
+                let mut s = String::new();
+                if let Some(sys) = system {
+                    s.push_str(&format!("<|turn>system\n{}<turn|>\n", sys.trim()));
+                }
+                for (role, text) in turns {
+                    let role = if *role == "assistant" { "model" } else { role };
+                    s.push_str(&format!("<|turn>{role}\n{}<turn|>\n", text.trim()));
+                }
+                s.push_str("<|turn>model\n");
+                s
+            }
+        }
+    }
 }
 
 /// Formats a chat for Qwen-family models (ChatML). `think: false` adds the empty think block that

@@ -1508,6 +1508,9 @@ pub struct Session {
     pub remote: Option<crate::cluster::Remote>,
     /// Hyper-connection streams and n-gram state (hc.rs), for models that have them.
     hcs: Option<crate::hc::HcState>,
+    /// Gemma 4 on the graphics card (gpu_g4.rs).
+    #[cfg(feature = "cuda")]
+    pub g4gpu: Option<crate::gpu_g4::G4Gpu>,
     /// Shared-expert scratch: gate, up, quantised activation, output.
     shg: Vec<f32>,
     shu: Vec<f32>,
@@ -1658,6 +1661,8 @@ impl Session {
             images: Vec::new(),
             remote: None,
             hcs: m.hc.as_ref().map(|h| crate::hc::HcState::new(h, c.dim)),
+            #[cfg(feature = "cuda")]
+            g4gpu: None,
             shg: vec![0.0; shared_ffn(m)],
             shu: vec![0.0; shared_ffn(m)],
             qa_sh: QAct::new(shared_ffn(m).max(32)),
@@ -1680,11 +1685,33 @@ impl Session {
         if common == prompt.len() {
             common -= 1;
         }
-        if m.g4.is_some() {
-            // Gemma 4: the cache of the common prefix stays; the rest is read token by token.
+        if let Some(g4) = m.g4.as_ref() {
+            // Gemma 4: the cache of the common prefix stays; the rest is read in batches on the
+            // card (gpu_g4.rs), else token by token.
             self.tokens.truncate(common);
             let t = std::time::Instant::now();
-            for &tok in &prompt[common..] {
+            let mut rest = &prompt[common..];
+            #[cfg(feature = "cuda")]
+            if self.g4gpu.as_ref().is_some_and(|g| g.batches()) {
+                let (dim, nlp) = (m.cfg.dim, m.cfg.n_layer * g4.ple);
+                let sc = (dim as f32).sqrt();
+                while rest.len() > 1 {
+                    // The last token goes through `step`, which leaves its logits like any other.
+                    let n = (rest.len() - 1).min(crate::gpu_g4::CH);
+                    let mut xs = vec![0f32; n * dim];
+                    let mut toks = vec![0f32; n * nlp];
+                    for (i, &tk) in rest[..n].iter().enumerate() {
+                        m.embed_row(tk, &mut xs[i * dim..(i + 1) * dim]);
+                        dequant_row(g4.ple_embd.dtype, m.row(&g4.ple_embd, tk as usize), &mut toks[i * nlp..(i + 1) * nlp]);
+                    }
+                    xs.iter_mut().for_each(|v| *v *= sc);
+                    let pos0 = self.tokens.len();
+                    self.g4gpu.as_mut().expect("checked").prefill(m, &xs, &toks, n, pos0, &mut self.logits)?;
+                    self.tokens.extend_from_slice(&rest[..n]);
+                    rest = &rest[n..];
+                }
+            }
+            for &tok in rest {
                 self.step(m, tok);
             }
             self.stats = Stats { prompt_tokens: prompt.len(), reused_tokens: common, prefill_ms: t.elapsed().as_secs_f64() * 1000.0, ..Default::default() };
@@ -1914,7 +1941,15 @@ impl Session {
         }
         // Hyper-connections (qwen4exp) have no GPU kernels yet; shared experts and DeltaNet MoE
         // layers run on the card with the routed experts split between it and the processor.
-        if m.hc.is_some() || m.g4.is_some() {
+        if m.g4.is_some() {
+            // Gemma 4: the whole model on the card (gpu_g4.rs); the processor keeps no cache.
+            let g = crate::gpu_g4::G4Gpu::load(m, max_ctx)?;
+            let mut s = Self::empty_from(m, max_ctx, m.cfg.n_layer);
+            s.max_ctx = max_ctx;
+            s.g4gpu = Some(g);
+            return Ok(s);
+        }
+        if m.hc.is_some() {
             return Err(Error::Unsupported("this model's layer types run on the processor for now".into()));
         }
         let mut g = crate::gpu::GpuState::load_with(m, max_ctx, force_layers)?;
@@ -2671,6 +2706,18 @@ impl Session {
         m.embed_row(token, &mut self.x);
         let sc = (dim as f32).sqrt();
         self.x.iter_mut().for_each(|v| *v *= sc);
+        #[cfg(feature = "cuda")]
+        if self.g4gpu.is_some() {
+            // On the card: the embedding and the token's per-layer rows go up, the logits come back.
+            let mut rows = vec![0f32; nl * ple];
+            dequant_row(g4.ple_embd.dtype, m.row(&g4.ple_embd, token as usize), &mut rows);
+            let gg = self.g4gpu.as_mut().expect("checked");
+            if let Err(e) = gg.step(m, &self.x, &rows, pos, &mut self.logits) {
+                panic!("GPU step failed: {e}");
+            }
+            self.tokens.push(token);
+            return;
+        }
         // Per-layer inputs: the token's own rows (x sqrt(ple)) plus the normed projection of the
         // scaled embedding (x 1/sqrt(dim)), both x 1/sqrt(2).
         let mut pl = vec![0f32; nl * ple];

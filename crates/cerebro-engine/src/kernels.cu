@@ -1540,3 +1540,387 @@ extern "C" __global__ void matvec_q1(const unsigned char* __restrict__ w, const 
         if (lane == 0 && r0 + r < rows) y[r0 + r] = add ? y[r0 + r] + v : v;
     }
 }
+
+// ---- Gemma 4 (gpu_g4.rs) --------------------------------------------------------------------------
+
+// One token's q, k, v: RMS norm per head (q and k with weights, v without), rotary on q and k
+// (rotate halves; freq[i] already holds base^(-2i/hd) / factor[i]), q in place, k and v into the f16
+// cache at the token's position. Grid: n_head blocks, plus 2 * n_kv when the layer keeps a cache;
+// block: hd / 2 threads, one rotation pair each.
+extern "C" __global__ void g4_qkv(float* __restrict__ q, const float* __restrict__ k, const float* __restrict__ v,
+                                  const float* __restrict__ qn, const float* __restrict__ kn, __half* __restrict__ kc,
+                                  __half* __restrict__ vc, const float* __restrict__ freq, const int* __restrict__ posp,
+                                  int n_head, int n_kv, int hd, float eps) {
+    __shared__ float red[32];
+    int h = blockIdx.x, i = threadIdx.x, half = hd >> 1;
+    int pos = posp[0];
+    int kind = h < n_head ? 0 : (h < n_head + n_kv ? 1 : 2);
+    const float* src;
+    const float* w;
+    __half* dst = nullptr;
+    if (kind == 0) {
+        src = q + h * hd;
+        w = qn;
+    } else if (kind == 1) {
+        int kh = h - n_head;
+        src = k + kh * hd;
+        w = kn;
+        dst = kc + (size_t)pos * n_kv * hd + kh * hd;
+    } else {
+        int kh = h - n_head - n_kv;
+        src = v + kh * hd;
+        w = nullptr;
+        dst = vc + (size_t)pos * n_kv * hd + kh * hd;
+    }
+    float a = src[i], b = src[i + half];
+    float s = rsqrtf(block_sum(a * a + b * b, red) / hd + eps);
+    a *= s;
+    b *= s;
+    if (w) {
+        a *= w[i];
+        b *= w[i + half];
+    }
+    if (kind < 2) {
+        float sn, cs;
+        sincosf((float)pos * freq[i], &sn, &cs);
+        float ra = a * cs - b * sn, rb = a * sn + b * cs;
+        a = ra;
+        b = rb;
+    }
+    if (kind == 0) {
+        q[h * hd + i] = a;
+        q[h * hd + i + half] = b;
+    } else {
+        dst[i] = __float2half(a);
+        dst[i + half] = __float2half(b);
+    }
+}
+
+// Decode attention over cache positions [start, len) (len = pos + 1; start = len - window for a
+// sliding layer, else 0), scale 1. Grid (n_head, splits) with `chunk` positions per split; block
+// 128: four warps take positions in turn, each lane holding hd / 32 of the dimensions. Writes the
+// split's max, sum and weighted values (-1e30 / 0 for an empty split) for g4_attn_combine.
+extern "C" __global__ void g4_attn_partial(const float* __restrict__ q, const __half* __restrict__ kc,
+                                           const __half* __restrict__ vc, float* __restrict__ pm, float* __restrict__ pl,
+                                           float* __restrict__ pacc, int n_head, int n_kv, int hd,
+                                           const int* __restrict__ posp, int window, int chunk) {
+    __shared__ float sm[4], sl[4];
+    __shared__ float sacc[4][512];
+    int head = blockIdx.x, split = blockIdx.y, splits = gridDim.y;
+    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    int len = posp[0] + 1;
+    int start = window > 0 ? max(0, len - window) : 0;
+    int s0 = start + split * chunk, s1 = min(len, s0 + chunk);
+    size_t o = (size_t)head * splits + split;
+    if (s0 >= s1) {
+        if (threadIdx.x == 0) {
+            pm[o] = -1e30f;
+            pl[o] = 0.f;
+        }
+        for (int d = threadIdx.x; d < hd; d += blockDim.x) pacc[o * hd + d] = 0.f;
+        return;
+    }
+    int kvh = head / (n_head / n_kv), kd = n_kv * hd, per = hd >> 5;
+    float qv[16], acc[16];
+    for (int j = 0; j < per; ++j) {
+        qv[j] = q[head * hd + lane * per + j];
+        acc[j] = 0.f;
+    }
+    float m = -1e30f, l = 0.f;
+    for (int p = s0 + warp; p < s1; p += 4) {
+        const __half* kr = kc + (size_t)p * kd + kvh * hd + lane * per;
+        float d = 0.f;
+        for (int j = 0; j < per; ++j) d += qv[j] * __half2float(kr[j]);
+        d = warp_sum(d);
+        float mn = fmaxf(m, d), corr = __expf(m - mn), e = __expf(d - mn);
+        l = l * corr + e;
+        const __half* vr = vc + (size_t)p * kd + kvh * hd + lane * per;
+        for (int j = 0; j < per; ++j) acc[j] = acc[j] * corr + e * __half2float(vr[j]);
+        m = mn;
+    }
+    if (lane == 0) {
+        sm[warp] = m;
+        sl[warp] = l;
+    }
+    for (int j = 0; j < per; ++j) sacc[warp][lane * per + j] = acc[j];
+    __syncthreads();
+    float M = fmaxf(fmaxf(sm[0], sm[1]), fmaxf(sm[2], sm[3]));
+    float w0 = __expf(sm[0] - M), w1 = __expf(sm[1] - M), w2 = __expf(sm[2] - M), w3 = __expf(sm[3] - M);
+    if (threadIdx.x == 0) {
+        pm[o] = M;
+        pl[o] = sl[0] * w0 + sl[1] * w1 + sl[2] * w2 + sl[3] * w3;
+    }
+    for (int d = threadIdx.x; d < hd; d += blockDim.x) pacc[o * hd + d] = sacc[0][d] * w0 + sacc[1][d] * w1 + sacc[2][d] * w2 + sacc[3][d] * w3;
+}
+
+// out[head] = merged splits of g4_attn_partial. Grid n_head; block 256.
+extern "C" __global__ void g4_attn_combine(const float* __restrict__ pm, const float* __restrict__ pl,
+                                           const float* __restrict__ pacc, float* __restrict__ out, int hd, int splits) {
+    int head = blockIdx.x;
+    float M = -1e30f;
+    for (int s = 0; s < splits; ++s) M = fmaxf(M, pm[head * splits + s]);
+    for (int d = threadIdx.x; d < hd; d += blockDim.x) {
+        float L = 0.f, v = 0.f;
+        for (int s = 0; s < splits; ++s) {
+            size_t o = (size_t)head * splits + s;
+            float w = pl[o] > 0.f ? __expf(pm[o] - M) : 0.f;
+            L += pl[o] * w;
+            v += pacc[o * hd + d] * w;
+        }
+        out[head * hd + d] = L > 0.f ? v / L : 0.f;
+    }
+}
+
+// GELU(g) * u, quantised for the next product (the feed-forward, and the per-layer input gate).
+extern "C" __global__ void g4_gelu_mul_quant(const float* __restrict__ g, const float* __restrict__ u,
+                                             signed char* __restrict__ xq, float* __restrict__ xd, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if ((i & ~31) >= n) return;
+    float x = i < n ? g[i] : 0.f;
+    float ge = 0.5f * x * (1.f + tanhf(0.7978845608f * x * (1.f + 0.044715f * x * x)));
+    quant32(i < n ? ge * u[i] : 0.f, xq, xd, i, threadIdx.x & 31);
+}
+
+// x = (x + rms(t) * w) * scale: a sandwich-normed block output into the residual. One block.
+extern "C" __global__ void g4_rms_add(float* __restrict__ x, const float* __restrict__ t, const float* __restrict__ w,
+                                      float eps, int n, float scale) {
+    __shared__ float red[32];
+    float ss = 0.f;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) ss += t[i] * t[i];
+    float s = rsqrtf(block_sum(ss, red) / n + eps);
+    for (int i = threadIdx.x; i < n; i += blockDim.x) x[i] = (x[i] + t[i] * s * w[i]) * scale;
+}
+
+// Per-layer inputs of one token: pl[l][j] = (rms(pp[l] * ps) * norm[j] + tok[l][j] * ts) / sqrt(2).
+// Grid n_layer; block ple.
+extern "C" __global__ void g4_ple_prep(const float* __restrict__ pp, const float* __restrict__ tok,
+                                       const float* __restrict__ norm, float* __restrict__ pl, int ple, float ps,
+                                       float ts, float eps) {
+    __shared__ float red[32];
+    int l = blockIdx.x, j = threadIdx.x;
+    float v = pp[l * ple + j] * ps;
+    float s = rsqrtf(block_sum(v * v, red) / ple + eps);
+    pl[l * ple + j] = (v * s * norm[j] + tok[l * ple + j] * ts) * 0.70710678f;
+}
+
+// logits = cap * tanh(logits / cap).
+extern "C" __global__ void g4_softcap(float* __restrict__ x, int n, float cap) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] = cap * tanhf(x[i] / cap);
+}
+
+// ---- Gemma 4 prompt batches (gpu_g4.rs prefill): token t of a chunk at position pos0 + t. -------
+
+// g4_qkv for T tokens: grid (heads, T); q, k, v rows token-major (n_head*hd, n_kv*hd per token).
+extern "C" __global__ void g4_qkv_b(float* __restrict__ q, const float* __restrict__ k, const float* __restrict__ v,
+                                    const float* __restrict__ qn, const float* __restrict__ kn, __half* __restrict__ kc,
+                                    __half* __restrict__ vc, const float* __restrict__ freq, const int* __restrict__ posp,
+                                    int n_head, int n_kv, int hd, float eps) {
+    __shared__ float red[32];
+    int h = blockIdx.x, t = blockIdx.y, i = threadIdx.x, half = hd >> 1;
+    int pos = posp[0] + t, qd = n_head * hd, kd = n_kv * hd;
+    int kind = h < n_head ? 0 : (h < n_head + n_kv ? 1 : 2);
+    const float* src;
+    const float* w;
+    __half* dst = nullptr;
+    if (kind == 0) {
+        src = q + (size_t)t * qd + h * hd;
+        w = qn;
+    } else if (kind == 1) {
+        int kh = h - n_head;
+        src = k + (size_t)t * kd + kh * hd;
+        w = kn;
+        dst = kc + (size_t)pos * kd + kh * hd;
+    } else {
+        int kh = h - n_head - n_kv;
+        src = v + (size_t)t * kd + kh * hd;
+        w = nullptr;
+        dst = vc + (size_t)pos * kd + kh * hd;
+    }
+    float a = src[i], b = src[i + half];
+    float s = rsqrtf(block_sum(a * a + b * b, red) / hd + eps);
+    a *= s;
+    b *= s;
+    if (w) {
+        a *= w[i];
+        b *= w[i + half];
+    }
+    if (kind < 2) {
+        float sn, cs;
+        sincosf((float)pos * freq[i], &sn, &cs);
+        float ra = a * cs - b * sn, rb = a * sn + b * cs;
+        a = ra;
+        b = rb;
+    }
+    if (kind == 0) {
+        float* d = q + (size_t)t * qd + h * hd;
+        d[i] = a;
+        d[i + half] = b;
+    } else {
+        dst[i] = __float2half(a);
+        dst[i + half] = __float2half(b);
+    }
+}
+
+// Causal attention for T query tokens (positions pos0 + t) over the cache, the last `window` for a
+// sliding layer, scale 1. Grid (n_head, T); block 128: four warps take positions in turn (online
+// softmax per warp, lanes holding hd / 32 dims), merged in shared memory. out token-major.
+extern "C" __global__ void g4_attn_b(const float* __restrict__ q, const __half* __restrict__ kc,
+                                     const __half* __restrict__ vc, float* __restrict__ out, int n_head, int n_kv, int hd,
+                                     const int* __restrict__ posp, int window) {
+    __shared__ float sm[4], sl[4];
+    __shared__ float sacc[4][512];
+    int head = blockIdx.x, t = blockIdx.y;
+    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    int len = posp[0] + t + 1;
+    int start = window > 0 ? max(0, len - window) : 0;
+    int kvh = head / (n_head / n_kv), kd = n_kv * hd, per = hd >> 5;
+    const float* qh = q + (size_t)t * n_head * hd + head * hd;
+    float qv[16], acc[16];
+    for (int j = 0; j < per; ++j) {
+        qv[j] = qh[lane * per + j];
+        acc[j] = 0.f;
+    }
+    float m = -1e30f, l = 0.f;
+    for (int p = start + warp; p < len; p += 4) {
+        const __half* kr = kc + (size_t)p * kd + kvh * hd + lane * per;
+        float d = 0.f;
+        for (int j = 0; j < per; ++j) d += qv[j] * __half2float(kr[j]);
+        d = warp_sum(d);
+        float mn = fmaxf(m, d), corr = __expf(m - mn), e = __expf(d - mn);
+        l = l * corr + e;
+        const __half* vr = vc + (size_t)p * kd + kvh * hd + lane * per;
+        for (int j = 0; j < per; ++j) acc[j] = acc[j] * corr + e * __half2float(vr[j]);
+        m = mn;
+    }
+    if (lane == 0) {
+        sm[warp] = m;
+        sl[warp] = l;
+    }
+    for (int j = 0; j < per; ++j) sacc[warp][lane * per + j] = acc[j];
+    __syncthreads();
+    float M = fmaxf(fmaxf(sm[0], sm[1]), fmaxf(sm[2], sm[3]));
+    float w0 = __expf(sm[0] - M), w1 = __expf(sm[1] - M), w2 = __expf(sm[2] - M), w3 = __expf(sm[3] - M);
+    float L = sl[0] * w0 + sl[1] * w1 + sl[2] * w2 + sl[3] * w3;
+    float* o = out + (size_t)t * n_head * hd + head * hd;
+    for (int d = threadIdx.x; d < hd; d += blockDim.x) o[d] = (sacc[0][d] * w0 + sacc[1][d] * w1 + sacc[2][d] * w2 + sacc[3][d] * w3) / L;
+}
+
+// g4_rms_add for T rows: grid T.
+extern "C" __global__ void g4_rms_add_b(float* __restrict__ x, const float* __restrict__ t, const float* __restrict__ w,
+                                        float eps, int n, float scale) {
+    __shared__ float red[32];
+    float* xr = x + (size_t)blockIdx.x * n;
+    const float* tr = t + (size_t)blockIdx.x * n;
+    float ss = 0.f;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) ss += tr[i] * tr[i];
+    float s = rsqrtf(block_sum(ss, red) / n + eps);
+    for (int i = threadIdx.x; i < n; i += blockDim.x) xr[i] = (xr[i] + tr[i] * s * w[i]) * scale;
+}
+
+// g4_ple_prep for T tokens: grid (n_layer, T); pp, tok and pl token-major (n_layer * ple per token).
+extern "C" __global__ void g4_ple_prep_b(const float* __restrict__ pp, const float* __restrict__ tok,
+                                         const float* __restrict__ norm, float* __restrict__ pl, int ple, int nl, float ps,
+                                         float ts, float eps) {
+    __shared__ float red[32];
+    size_t o = ((size_t)blockIdx.y * nl + blockIdx.x) * ple + threadIdx.x;
+    float v = pp[o] * ps;
+    float s = rsqrtf(block_sum(v * v, red) / ple + eps);
+    pl[o] = (v * s * norm[threadIdx.x] + tok[o] * ts) * 0.70710678f;
+}
+
+// GELU(gate) times layer `li`'s per-layer input, for T tokens (g: T x ple; pl: T x nl x ple),
+// quantised for the projection.
+extern "C" __global__ void g4_gelu_ple_b(const float* __restrict__ g, const float* __restrict__ pl,
+                                         signed char* __restrict__ xq, float* __restrict__ xd, int ple, int nl, int li, int T) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if ((i & ~31) >= ple * T) return;
+    int t = i / ple, j = i - t * ple;
+    float x = g[i];
+    float ge = 0.5f * x * (1.f + tanhf(0.7978845608f * x * (1.f + 0.044715f * x * x)));
+    quant32(ge * pl[((size_t)t * nl + li) * ple + j], xq, xd, i, threadIdx.x & 31);
+}
+
+// Tiled prompt attention (replaces g4_attn_b for prompts): one block per (KV head, 8 query tokens)
+// handles the 8 tokens of every query head sharing that KV head (up to 32 queries, four per warp),
+// so each K/V row is read from global memory once per block, not once per query. K/V tiles of 16
+// positions sit in shared memory; lanes own dimensions lane + 32 j (conflict-free reads); every
+// query keeps its own online softmax and its own causal / sliding-window range. Scale 1.
+#define G4_QT 8
+#define G4_PT 16
+extern "C" __global__ void __launch_bounds__(256) g4_attn_t(const float* __restrict__ q, const __half* __restrict__ kc,
+                                                          const __half* __restrict__ vc, float* __restrict__ out, int n_head,
+                                                          int n_kv, int hd, const int* __restrict__ posp, int window, int T) {
+    __shared__ __align__(16) __half ks[G4_PT][512];
+    __shared__ __align__(16) __half vs[G4_PT][512];
+    const int kvh = blockIdx.x, t0 = blockIdx.y * G4_QT;
+    const int group = n_head / n_kv, nq = group * G4_QT;
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, nw = blockDim.x >> 5;
+    const int per = hd >> 5, kd = n_kv * hd, pos0 = posp[0];
+    float qv[4][16], acc[4][16], m[4], l[4];
+    int qpos[4], qstart[4];
+    bool valid[4];
+    #pragma unroll
+    for (int k = 0; k < 4; ++k) {
+        int qi = warp + k * nw, tt = qi / group, hh = qi - tt * group;
+        int t = t0 + tt;
+        valid[k] = qi < nq && t < T;
+        qpos[k] = pos0 + t;
+        qstart[k] = window > 0 ? max(0, qpos[k] + 1 - window) : 0;
+        m[k] = -1e30f;
+        l[k] = 0.f;
+        const float* qh = q + (size_t)t * n_head * hd + (kvh * group + hh) * hd;
+        #pragma unroll
+        for (int j = 0; j < 16; ++j) {
+            qv[k][j] = (valid[k] && j < per) ? qh[lane + 32 * j] : 0.f;
+            acc[k][j] = 0.f;
+        }
+    }
+    const int tlast = min(T, t0 + G4_QT) - 1;
+    const int pend = pos0 + tlast;
+    const int pbeg = window > 0 ? max(0, pos0 + t0 + 1 - window) : 0;
+    const int h2 = hd >> 1;
+    for (int p0 = pbeg; p0 <= pend; p0 += G4_PT) {
+        for (int i = threadIdx.x; i < G4_PT * h2; i += blockDim.x) {
+            int r = i / h2, c2 = i - r * h2, p = p0 + r;
+            __half2 kk = __float2half2_rn(0.f), vv = kk;
+            if (p <= pend) {
+                kk = reinterpret_cast<const __half2*>(kc + (size_t)p * kd + kvh * hd)[c2];
+                vv = reinterpret_cast<const __half2*>(vc + (size_t)p * kd + kvh * hd)[c2];
+            }
+            reinterpret_cast<__half2*>(ks[r])[c2] = kk;
+            reinterpret_cast<__half2*>(vs[r])[c2] = vv;
+        }
+        __syncthreads();
+        #pragma unroll
+        for (int k = 0; k < 4; ++k) {
+            if (!valid[k]) continue;
+            for (int r = 0; r < G4_PT; ++r) {
+                int p = p0 + r;
+                if (p > qpos[k] || p < qstart[k]) continue;
+                float d = 0.f;
+                #pragma unroll
+                for (int j = 0; j < 16; ++j)
+                    if (j < per) d += qv[k][j] * __half2float(ks[r][lane + 32 * j]);
+                d = warp_sum(d);
+                float mn = fmaxf(m[k], d), corr = __expf(m[k] - mn), e = __expf(d - mn);
+                l[k] = l[k] * corr + e;
+                #pragma unroll
+                for (int j = 0; j < 16; ++j)
+                    if (j < per) acc[k][j] = acc[k][j] * corr + e * __half2float(vs[r][lane + 32 * j]);
+                m[k] = mn;
+            }
+        }
+        __syncthreads();
+    }
+    #pragma unroll
+    for (int k = 0; k < 4; ++k) {
+        if (!valid[k]) continue;
+        int qi = warp + k * nw, tt = qi / group, hh = qi - tt * group;
+        float* o = out + (size_t)(t0 + tt) * n_head * hd + (kvh * group + hh) * hd;
+        float il = l[k] > 0.f ? 1.f / l[k] : 0.f;
+        #pragma unroll
+        for (int j = 0; j < 16; ++j)
+            if (j < per) o[lane + 32 * j] = acc[k][j] * il;
+    }
+}
