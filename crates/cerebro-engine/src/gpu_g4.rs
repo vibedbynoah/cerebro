@@ -144,8 +144,11 @@ pub struct G4Gpu {
     b: Option<B>,
 }
 
-/// Positions per attention split (the grid covers max_ctx; empty splits return at once).
-const CHUNK: usize = 256;
+/// Decode attention: a fixed grid of SPLITS splits per head (so a captured graph replays at any
+/// length), each taking an equal share of the positions in view, at least CHUNK. With one split
+/// per 256 positions, a short conversation ran as 8 blocks (one per head) on a 46-SM card.
+const SPLITS: usize = 32;
+const CHUNK: usize = 16;
 
 impl G4Gpu {
     pub fn load(model: &Model, max_ctx: usize) -> Result<Self, Error> {
@@ -239,7 +242,7 @@ impl G4Gpu {
         let hd_max = hd_swa.max(hd_full);
         let ff = model.layers().iter().map(|l| if let Ffn::Dense { gate, .. } = &l.ffn { gate.rows } else { 0 }).max().unwrap_or(c.ffn);
         let widest = c.dim.max(g4.n_head * hd_max).max(ff);
-        let splits = max_ctx.div_ceil(CHUNK);
+        let splits = SPLITS.min(max_ctx.div_ceil(CHUNK)).max(1);
         let z = |n: usize| s.alloc_zeros::<f32>(n.max(1)).map_err(gerr);
         let output = up(model.output_mat())?;
         let ple_proj = up(&g4.ple_proj)?;

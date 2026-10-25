@@ -1607,9 +1607,10 @@ extern "C" __global__ void g4_qkv(float* __restrict__ q, const float* __restrict
 }
 
 // Decode attention over cache positions [start, len) (len = pos + 1; start = len - window for a
-// sliding layer, else 0), scale 1. Grid (n_head, splits) with `chunk` positions per split; block
-// 128: four warps take positions in turn, each lane holding hd / 32 of the dimensions. Writes the
-// split's max, sum and weighted values (-1e30 / 0 for an empty split) for g4_attn_combine.
+// sliding layer, else 0), scale 1. Grid (n_head, splits): the positions in view are shared out
+// equally, at least `chunk` per split, so every length uses the whole grid; block 128: four warps
+// take positions in turn, each lane holding hd / 32 of the dimensions. Writes the split's max, sum
+// and weighted values (-1e30 / 0 for an empty split) for g4_attn_combine.
 extern "C" __global__ void g4_attn_partial(const float* __restrict__ q, const __half* __restrict__ kc,
                                            const __half* __restrict__ vc, float* __restrict__ pm, float* __restrict__ pl,
                                            float* __restrict__ pacc, int n_head, int n_kv, int hd,
@@ -1620,6 +1621,7 @@ extern "C" __global__ void g4_attn_partial(const float* __restrict__ q, const __
     int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     int len = posp[0] + 1;
     int start = window > 0 ? max(0, len - window) : 0;
+    chunk = max(chunk, (len - start + splits - 1) / splits);
     int s0 = start + split * chunk, s1 = min(len, s0 + chunk);
     size_t o = (size_t)head * splits + split;
     if (s0 >= s1) {
