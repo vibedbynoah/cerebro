@@ -19,6 +19,8 @@ pub mod gpu;
 #[cfg(feature = "cuda")]
 pub mod gpu_g4;
 #[cfg(feature = "cuda")]
+pub mod gpu_probe;
+#[cfg(feature = "cuda")]
 pub mod gtensor;
 pub mod hc;
 pub mod hw;

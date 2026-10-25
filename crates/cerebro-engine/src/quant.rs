@@ -611,9 +611,10 @@ impl QAct {
     }
 
     pub fn quantize(&mut self, x: &[f32]) {
+        let lv = act_levels();
         for (bi, xb) in x.chunks_exact(32).enumerate() {
             let amax = xb.iter().fold(0f32, |m, v| m.max(v.abs()));
-            let d = amax / 127.0;
+            let d = amax / lv;
             let id = if d > 0.0 { 1.0 / d } else { 0.0 };
             self.d[bi] = d;
             let mut sum = 0i32;
@@ -628,7 +629,7 @@ impl QAct {
         if !self.kq.is_empty() {
             for (bi, xb) in x.chunks_exact(256).enumerate() {
                 let amax = xb.iter().fold(0f32, |m, v| m.max(v.abs()));
-                let d = amax / 127.0;
+                let d = amax / lv;
                 let id = if d > 0.0 { 1.0 / d } else { 0.0 };
                 self.kd[bi] = d;
                 for (gi, g) in xb.chunks_exact(16).enumerate() {
@@ -2281,4 +2282,14 @@ mod iq_tests {
         close(dot_q1_0_k8(&q1, &qa).unwrap(), dot_row(DType::Q1_0, &q1, &x));
     }
 
+}
+
+/// Largest activation level: 127 (8-bit). The experiment switch CEREBRO_ACT_BITS=4 rounds
+/// activations to 4-bit levels instead (what INT4 tensor-core math would need), to measure the cost.
+fn act_levels() -> f32 {
+    static LV: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *LV.get_or_init(|| match std::env::var("CEREBRO_ACT_BITS").ok().and_then(|v| v.parse::<i32>().ok()) {
+        Some(b @ 2..=8) => ((1 << (b - 1)) - 1) as f32,
+        _ => 127.0,
+    })
 }

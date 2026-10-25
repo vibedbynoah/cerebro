@@ -729,20 +729,22 @@ extern "C" __global__ void __launch_bounds__(256) matmul_q8_mma_x(
         #pragma unroll
         for (int kb = 0; kb < BK2 / 32; ++kb) {
             const int ko = kb * 32 + tg * 4;
+            // ldmatrix: one instruction per A fragment (four 8x16-byte matrices: rows 0-7 / 8-15 x
+            // bytes 0-15 / 16-31, which is the m16n8k32 A layout) and per two B fragments.
             unsigned a[4][4], b[4][2];
             #pragma unroll
             for (int i = 0; i < 4; ++i) {
-                const signed char* p = &S.a[(wm + i * 16 + g) * LDS2 + ko];
-                a[i][0] = *(const unsigned*)p;
-                a[i][1] = *(const unsigned*)(p + 8 * LDS2);
-                a[i][2] = *(const unsigned*)(p + 16);
-                a[i][3] = *(const unsigned*)(p + 8 * LDS2 + 16);
+                const signed char* p = &S.a[(wm + i * 16 + (lane & 7) + ((lane >> 3) & 1) * 8) * LDS2 + kb * 32 + (lane >> 4) * 16];
+                unsigned sp = (unsigned)__cvta_generic_to_shared(p);
+                asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                             : "=r"(a[i][0]), "=r"(a[i][1]), "=r"(a[i][2]), "=r"(a[i][3]) : "r"(sp));
             }
             #pragma unroll
-            for (int j = 0; j < 4; ++j) {
-                const signed char* p = &S.b[(wn + j * 8 + g) * LDS2 + ko];
-                b[j][0] = *(const unsigned*)p;
-                b[j][1] = *(const unsigned*)(p + 16);
+            for (int j = 0; j < 4; j += 2) {
+                const signed char* p = &S.b[(wn + j * 8 + (lane & 7) + (lane >> 4) * 8) * LDS2 + kb * 32 + ((lane >> 3) & 1) * 16];
+                unsigned sp = (unsigned)__cvta_generic_to_shared(p);
+                asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                             : "=r"(b[j][0]), "=r"(b[j][1]), "=r"(b[j + 1][0]), "=r"(b[j + 1][1]) : "r"(sp));
             }
             float sw[4][2], sx[4][2];
             #pragma unroll
@@ -1257,4 +1259,55 @@ extern "C" __global__ void __launch_bounds__(128) attn_prefill_mma512w(
         if (qa < T) *reinterpret_cast<float2*>(out + (size_t)qa * n_head * H5D + h * H5D + d) = make_float2(o[n][0] * ia, o[n][1] * ia);
         if (qb < T) *reinterpret_cast<float2*>(out + (size_t)qb * n_head * H5D + h * H5D + d) = make_float2(o[n][2] * ib, o[n][3] * ib);
     }
+}
+
+// ---- Tensor-core rate probe ------------------------------------------------------------------------
+// Each warp runs `iters` rounds of 8 independent MMAs of one kind (0: f16 in, f32 accumulate; 1: f16
+// in, f16 accumulate; 2: int8 in, int32 accumulate; 3: int4 in, int32 accumulate) and writes a value so none is optimised away.
+// GeForce Ampere runs kind 0 at half the rate of kind 1 unless the FP16/BF16 issue rate is unlocked.
+extern "C" __global__ void __launch_bounds__(256) tensor_probe(int kind, int iters, float* out) {
+    const unsigned a0 = 0x3c003c00u ^ threadIdx.x, a1 = a0 + 1, a2 = a0 + 2, a3 = a0 + 3, b0 = a0 + 5, b1 = a0 + 7;
+    float acc = 0.f;
+    if (kind == 0) {
+        float c[8][4] = {};
+        for (int i = 0; i < iters; ++i)
+            #pragma unroll
+            for (int k = 0; k < 8; ++k)
+                asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+                             : "+f"(c[k][0]), "+f"(c[k][1]), "+f"(c[k][2]), "+f"(c[k][3])
+                             : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+        #pragma unroll
+        for (int k = 0; k < 8; ++k) acc += c[k][0] + c[k][3];
+    } else if (kind == 1) {
+        unsigned c[8][2] = {};
+        for (int i = 0; i < iters; ++i)
+            #pragma unroll
+            for (int k = 0; k < 8; ++k)
+                asm volatile("mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%0,%1}, {%2,%3,%4,%5}, {%6,%7}, {%0,%1};\n"
+                             : "+r"(c[k][0]), "+r"(c[k][1])
+                             : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+        #pragma unroll
+        for (int k = 0; k < 8; ++k) acc += __int_as_float(c[k][0] & 0x3fffffff);
+    } else if (kind == 3) {
+        int c[8][4] = {};
+        for (int i = 0; i < iters; ++i)
+            #pragma unroll
+            for (int k = 0; k < 8; ++k)
+                asm volatile("mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+                             : "+r"(c[k][0]), "+r"(c[k][1]), "+r"(c[k][2]), "+r"(c[k][3])
+                             : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+        #pragma unroll
+        for (int k = 0; k < 8; ++k) acc += (float)(c[k][0] + c[k][3]);
+    } else {
+        int c[8][4] = {};
+        for (int i = 0; i < iters; ++i)
+            #pragma unroll
+            for (int k = 0; k < 8; ++k)
+                asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+                             : "+r"(c[k][0]), "+r"(c[k][1]), "+r"(c[k][2]), "+r"(c[k][3])
+                             : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+        #pragma unroll
+        for (int k = 0; k < 8; ++k) acc += (float)(c[k][0] + c[k][3]);
+    }
+    if (acc == 12345.f) out[blockIdx.x * blockDim.x + threadIdx.x] = acc;
 }

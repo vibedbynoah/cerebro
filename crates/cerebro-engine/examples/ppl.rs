@@ -30,14 +30,21 @@ fn main() {
         s.clear().expect("clear");
         let chunk = &ids[c * ctx..(c + 1) * ctx];
         for (j, &id) in chunk.iter().enumerate() {
-            s.step(&model, id);
+            // Like llama-perplexity, each chunk starts with the beginning-of-text token when the
+            // model has one (Gemma reads nonsense without it).
+            s.step(&model, if j == 0 { tok.bos.unwrap_or(id) } else { id });
             // The logits after token j predict token j + 1; score the second half.
             if j >= ctx / 2 && j + 1 < ctx {
                 let l = &s.logits;
                 let mx = l.iter().fold(f32::NEG_INFINITY, |m, &v| m.max(v));
                 let lse = mx as f64 + l.iter().map(|&v| ((v - mx) as f64).exp()).sum::<f64>().ln();
-                nll += lse - l[chunk[j + 1] as usize] as f64;
+                let t = lse - l[chunk[j + 1] as usize] as f64;
+                nll += t;
                 count += 1;
+                if std::env::var_os("PPL_TOKENS").is_some() {
+                    let top = (0..l.len()).max_by(|&a, &b| l[a].total_cmp(&l[b])).unwrap_or(0);
+                    println!("tok {c}:{} nll {t:.2} next {:?} top {:?}", j + 1, tok.decode(&chunk[j + 1..j + 2]), tok.decode(&[top as u32]));
+                }
             }
         }
         println!("[{}] {:.4}", c + 1, (nll / count as f64).exp());
