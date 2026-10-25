@@ -77,7 +77,7 @@ struct F {
     gelu_ple_b: CudaFunction,
     /// Tensor-core GEMMs (sm_80+): 64x64, 128x64 and 128x128 blocks, and Q4_K straight from
     /// its blocks.
-    mma: Option<[CudaFunction; 5]>,
+    mma: Option<[CudaFunction; 7]>,
 }
 
 /// Prompt-batch buffers, CH tokens.
@@ -178,7 +178,7 @@ impl G4Gpu {
             gelu_ple_b: lf("g4_gelu_ple_b")?,
             mma: if ctx.compute_capability().map_err(gerr)?.0 >= 8 {
                 let m = ctx.load_module(Ptx::from_src(PTX_MMA)).map_err(gerr)?;
-                Some([m.load_function("matmul_q8_mma").map_err(gerr)?, m.load_function("matmul_q8_mma_big").map_err(gerr)?, m.load_function("matmul_q8_mma_x").map_err(gerr)?, m.load_function("mmq_q4k").map_err(gerr)?, m.load_function("mmq_q4k_x").map_err(gerr)?])
+                Some([m.load_function("matmul_q8_mma").map_err(gerr)?, m.load_function("matmul_q8_mma_big").map_err(gerr)?, m.load_function("matmul_q8_mma_x").map_err(gerr)?, m.load_function("mmq_q4k").map_err(gerr)?, m.load_function("mmq_q4k_x").map_err(gerr)?, m.load_function("attn_prefill_mma256w").map_err(gerr)?, m.load_function("attn_prefill_mma512w").map_err(gerr)?])
             } else {
                 None
             },
@@ -412,8 +412,16 @@ impl G4Gpu {
                 let src = &self.layers[kv_from];
                 let window = if swa { g4.swa as i32 } else { 0 };
                 let cfg = LaunchConfig { grid_dim: (g4.n_head as u32, n as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
-                // Tiled: queries of one KV head share its K/V tiles (needs group * 8 <= 32 queries).
-                if (g4.n_head / g4.n_kv) * 8 <= 32 && std::env::var_os("CEREBRO_G4_UNTILED").is_none() {
+                let group = (g4.n_head / g4.n_kv) as i32;
+                if let (Some(mma), 256 | 512, None) = (f.mma.as_ref(), hd, std::env::var_os("CEREBRO_G4_NO_MMA_ATTN")) {
+                    // Tensor-core flash attention (256- or 512-wide heads, sliding or global, scale
+                    // 1), each block 128 output dimensions.
+                    let cfg = LaunchConfig { grid_dim: (g4.n_head as u32, (n as u32).div_ceil(64), (hd / 128) as u32), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
+                    let (qrow, one) = ((g4.n_head * hd) as i32, 1.0f32);
+                    let k = if hd == 256 { &mma[5] } else { &mma[6] };
+                    unsafe { s.launch_builder(k).arg(&b.q).arg(&src.kc).arg(&src.vc).arg(&mut b.att).arg(&nh).arg(&nkv).arg(&self.pos).arg(&group).arg(&one).arg(&ti).arg(&qrow).arg(&window).launch(cfg) }.map_err(gerr)?;
+                } else if (g4.n_head / g4.n_kv) * 8 <= 32 && std::env::var_os("CEREBRO_G4_UNTILED").is_none() {
+                    // Tiled: queries of one KV head share its K/V tiles (needs group * 8 <= 32 queries).
                     let cfg = LaunchConfig { grid_dim: (g4.n_kv as u32, (n as u32).div_ceil(8), 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
                     unsafe { s.launch_builder(&f.attn_t).arg(&b.q).arg(&src.kc).arg(&src.vc).arg(&mut b.att).arg(&nh).arg(&nkv).arg(&hdi).arg(&self.pos).arg(&window).arg(&ti).launch(cfg) }.map_err(gerr)?;
                 } else {
