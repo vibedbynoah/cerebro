@@ -8,6 +8,7 @@ import { modelFromHash } from "../../lib/routes";
 import { announcement } from "../../lib/tune";
 import { useService } from "../../service/context";
 import type { HardwareProfile, LibraryModel, TuneState } from "../../service/types";
+import { TensorRates } from "./TensorRates";
 import { PhaseStepper, RunPanel } from "./RunPanel";
 import { createTuneSession } from "./session";
 import { TuneSetup, type PickModel } from "./Setup";
@@ -131,6 +132,7 @@ export function TuneScreen(): JSX.Element {
           title={hasRun() ? "Start another tune" : "Start a tune"}
           description="Choose a model and what you will mostly use it for. The workload sets how much text is in view while Cerebro measures, and what counts as fastest."
         >
+          <TensorRates hardware={hardware} />
           <TuneSetup
             session={session}
             models={models}

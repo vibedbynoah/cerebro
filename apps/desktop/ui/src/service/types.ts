@@ -20,6 +20,17 @@ export interface BackendStatus {
 export interface GpuInfo {
   name: string;
   vramTotalGiB: number;
+  /** Measured tensor-core rates (an overclock or an unlock mod shows up here); absent when not measured. */
+  tensor?: TensorInfo | null;
+}
+
+export interface TensorInfo {
+  int8Tops: number;
+  int4Tops: number;
+  f16Tflops: number;
+  /** FP16 into FP32 runs at the full (professional-card) rate: a GeForce card with the limit unlocked. */
+  f16FullRate: boolean;
+  smClockMhz: number | null;
 }
 
 /** One HUD sample: what the status bar shows right now. */

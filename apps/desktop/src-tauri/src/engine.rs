@@ -416,6 +416,29 @@ pub fn scan_library() -> Vec<LibraryModel> {
 pub struct GpuInfo {
     pub name: String,
     pub vram_total_gi_b: f64,
+    /// Its tensor cores' measured rates (overclocks and unlock mods show up here), when measurable.
+    pub tensor: Option<TensorInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TensorInfo {
+    pub int8_tops: f64,
+    pub int4_tops: f64,
+    pub f16_tflops: f64,
+    pub f16_full_rate: bool,
+    pub sm_clock_mhz: Option<u32>,
+}
+
+/// Measured once per run (about a quarter of a second of tensor-core work).
+fn tensor_info() -> Option<TensorInfo> {
+    static ONCE: std::sync::OnceLock<Option<TensorInfo>> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        let r = cerebro_engine::gpu_probe::tensor_rates().map_err(|e| eprintln!("tensor probe: {e}")).ok()?;
+        eprintln!("tensor cores: int8 {:.0} TOPS, fp16->fp32 {:.0} / fp16->fp16 {:.0} TFLOPS, {:?} MHz", r.int8, r.f16_f32acc, r.f16_f16acc, r.sm_clock_mhz);
+        Some(TensorInfo { int8_tops: r.int8, int4_tops: r.int4, f16_tflops: r.f16_f32acc, f16_full_rate: r.fp32_accumulate_unlocked(), sm_clock_mhz: r.sm_clock_mhz })
+    })
+    .clone()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -440,7 +463,7 @@ pub fn hardware() -> HardwareProfile {
     HardwareProfile {
         provenance: "measured",
         cpu: CpuInfo { name: m.cpu_name, cores: physical_cores().unwrap_or(cores), threads: m.cpu_threads },
-        gpu: m.gpus.first().map(|g| GpuInfo { name: g.name.clone(), vram_total_gi_b: g.vram_total as f64 / GIB }),
+        gpu: m.gpus.first().map(|g| GpuInfo { name: g.name.clone(), vram_total_gi_b: g.vram_total as f64 / GIB, tensor: g.name.contains("NVIDIA").then(tensor_info).flatten() }),
         ram_total_gi_b: m.ram_total as f64 / GIB,
     }
 }
@@ -1030,6 +1053,15 @@ impl Engine {
                                     let host = th.lock().unwrap_or_else(|e| e.into_inner()).clone();
                                     let spill_dir = lr.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|d| d.join("spills"));
                                     run_chat(l, &req, &events, &st, &cn, Tooling { host, approvals: &ap, answers: &an, spill_dir }, kvs.as_ref());
+                                    if GPU_FAULT.swap(false, Ordering::SeqCst) {
+                                        // Its CUDA context is unusable after a fault: dropping the
+                                        // session releases it, so the next load starts clean.
+                                        loaded = None;
+                                        set(&st, |s| {
+                                            s.loaded = None;
+                                            s.progress = None;
+                                        });
+                                    }
                                 }
                                 _ => {
                                     events(ChatEvent::Error { message: "Load this model first (Models screen).".into() });
@@ -1726,6 +1758,29 @@ fn review_verdict(v: &str) -> Option<bool> {
     }
 }
 
+/// Set when a reply hit a graphics-card fault; the chat job then unloads the model.
+static GPU_FAULT: AtomicBool = AtomicBool::new(false);
+
+/// A CUDA fault in `e` (an illegal address, a failed or timed-out launch...): flags it and says what
+/// happened in words. Unstable overclocks and undervolts cause these, and so can a bug.
+fn gpu_fault(e: &str) -> Option<String> {
+    const FAULTS: [&str; 8] = [
+        "CUDA_ERROR_ILLEGAL_ADDRESS",
+        "CUDA_ERROR_LAUNCH_FAILED",
+        "CUDA_ERROR_LAUNCH_TIMEOUT",
+        "CUDA_ERROR_ILLEGAL_INSTRUCTION",
+        "CUDA_ERROR_HARDWARE_STACK_ERROR",
+        "CUDA_ERROR_MISALIGNED_ADDRESS",
+        "CUDA_ERROR_ECC_UNCORRECTABLE",
+        "CUDA_ERROR_UNKNOWN",
+    ];
+    let code = FAULTS.iter().find(|c| e.contains(**c))?;
+    GPU_FAULT.store(true, Ordering::SeqCst);
+    Some(format!(
+        "The graphics card faulted while writing ({code}). An unstable overclock or undervolt causes this (so can a bug): if the card is overclocked, lower its clocks. Cerebro unloaded the model to clear the card; load it again to continue, or restart Cerebro if loading fails."
+    ))
+}
+
 fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex<Status>>, cancel: &Arc<AtomicBool>, tooling: Tooling<'_>, kv: Option<&Arc<Mutex<KvStore>>>) {
     use crate::toolcall::{self, Piece, Scanner};
     let (think, think_budget) = thinking(req.native.as_ref());
@@ -2021,7 +2076,8 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
                 stopped = g.stopped;
             }
             Err(e) => {
-                failed = Some(format!("Generation failed: {e}"));
+                let e = e.to_string();
+                failed = Some(gpu_fault(&e).unwrap_or_else(|| format!("Generation failed: {e}")));
                 break;
             }
         }

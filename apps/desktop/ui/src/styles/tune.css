@@ -1543,3 +1543,39 @@
     animation: none !important;
   }
 }
+
+/* The card's measured tensor-core rates (TensorRates). */
+.tensor-rates {
+  margin-bottom: var(--space-4);
+}
+
+.tensor-rates summary {
+  width: fit-content;
+  color: var(--color-text-secondary);
+  font-size: var(--text-small);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+}
+
+.tensor-rates summary:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+.tensor-rates__body {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-4);
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-small);
+}
+
+.tensor-rates__body dt {
+  font-weight: var(--weight-medium);
+}
+
+.tensor-rates__body dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}

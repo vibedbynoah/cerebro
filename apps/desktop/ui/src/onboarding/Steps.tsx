@@ -6,6 +6,7 @@ import { IllustrativeFlag } from "../components/Screen";
 import { Term } from "../components/Term";
 import type { LegalDocId } from "../legal/types";
 import type { HardwareProfile, SettingKey } from "../service/types";
+import { tensorLine } from "../lib/tensor";
 import { useAppState } from "../state";
 import { BrandHero } from "./BrandHero";
 import { TERMS_VERSION } from "./progress";
@@ -98,7 +99,7 @@ export function HardwareStep(props: { hw: HardwareProfile | undefined; state: Sc
         icon: "gpu",
         label: <>Graphics card <Term k="gpu" /></>,
         value: h.gpu?.name ?? "None found",
-        meta: h.gpu ? "Runs the model's heavy maths" : "Models will run on the processor",
+        meta: h.gpu ? (h.gpu.tensor ? tensorLine(h.gpu.tensor) : "Runs the model's heavy maths") : "Models will run on the processor",
       },
       { id: "vram", icon: "bolt", label: <>Graphics memory <Term k="vram" /></>, value: gib(h.gpu?.vramTotalGiB ?? 0), unit: "GiB", meta: "The fastest place for a model" },
       { id: "ram", icon: "memory", label: <>System memory <Term k="ram" /></>, value: gib(h.ramTotalGiB), unit: "GiB", meta: "Holds what does not fit" },
