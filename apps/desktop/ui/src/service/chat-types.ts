@@ -18,7 +18,7 @@ export interface Sampler {
   maxTokens: number;
 }
 
-export const DEFAULT_SAMPLER: Sampler = { temperature: 0.7, topP: 0.95, minP: 0.05, topK: 40, repeatPenalty: 1.05, maxTokens: 4096 };
+export const DEFAULT_SAMPLER: Sampler = { temperature: 0.7, topP: 0.95, minP: 0.05, topK: 40, repeatPenalty: 1.05, maxTokens: 16384 };
 
 export interface ChatRequest {
   modelId: string;

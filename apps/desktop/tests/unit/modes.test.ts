@@ -22,7 +22,7 @@ describe("the Speed <-> Accuracy slider", () => {
     const s = applyMode(1, DEFAULT_PREFS, DEFAULT_SAMPLER);
     expect(s.sampler.temperature).toBe(0);
     expect(s.sampler.repeatPenalty).toBe(1);
-    expect(s.sampler.maxTokens).toBe(1024);
+    expect(s.sampler.maxTokens).toBe(8192);
     const req = buildRequest({ levels: EFFORT_LEVELS, base: s.prefs.base, effort: s.prefs.effort, thinking: s.prefs.thinking, verbosity: s.prefs.verbosity, source: s.prefs.source, addInstructions: s.prefs.addInstructions, memories: [{ id: "m", text: "Likes tea.", scope: "you" }], memoryOn: s.prefs.memoryOn, nativeSupported: true, modelMaxThinking: 32768 });
     expect(req.native?.thinkingBudget).toBe(0);
     expect(req.passes).toBe(0);
@@ -66,6 +66,8 @@ describe("the Speed <-> Accuracy slider", () => {
   it("a stored sampler is re-checked field by field", () => {
     expect(parseSampler(null)).toEqual(DEFAULT_SAMPLER);
     expect(parseSampler("not json")).toEqual(DEFAULT_SAMPLER);
-    expect(parseSampler(JSON.stringify({ temperature: 0, maxTokens: 1024, topK: -3 }))).toEqual({ ...DEFAULT_SAMPLER, temperature: 0, maxTokens: 1024 });
+    // A saved old cap (1,024) moves to the new limit; topK out of range falls back.
+    expect(parseSampler(JSON.stringify({ temperature: 0, maxTokens: 1024, topK: -3 }))).toEqual({ ...DEFAULT_SAMPLER, temperature: 0, maxTokens: 8192 });
+    expect(parseSampler(JSON.stringify({ temperature: 0, maxTokens: 3000 }))).toEqual({ ...DEFAULT_SAMPLER, temperature: 0, maxTokens: 3000 });
   });
 });

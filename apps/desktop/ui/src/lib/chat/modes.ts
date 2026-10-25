@@ -47,19 +47,19 @@ export const MODE_PRESETS: Readonly<Record<Mode, ModePreset>> = {
       "System prompt cut to one line, so less to read before the first word",
       "Memories not added",
       "Greedy decoding: on an NVIDIA card every word is picked on the card, with no round trip per word",
-      "Replies capped at 1,024 tokens",
+      "Replies up to 8,192 tokens",
     ],
     prefs: { effortCustom: null, thinking: "off", effort: "low", verbosity: "brief", source: "native", addInstructions: true, memoryOn: false, orchestrate: false, workers: 3, rounds: 3 },
     base: FASTEST_PROMPT,
-    sampler: { temperature: 0, repeatPenalty: 1, topK: 1, topP: 1, minP: 0, maxTokens: 1024 },
+    sampler: { temperature: 0, repeatPenalty: 1, topK: 1, topP: 1, minP: 0, maxTokens: 8192 },
   },
   2: {
     label: "Fast",
     summary: "Short, direct answers with thinking off and a short system prompt.",
-    changes: ["Thinking off", "A short system prompt", "Brief answers", "Replies capped at 2,048 tokens"],
+    changes: ["Thinking off", "A short system prompt", "Brief answers", "Replies up to 8,192 tokens"],
     prefs: { effortCustom: null, thinking: "off", effort: "low", verbosity: "brief", source: "native", addInstructions: true, memoryOn: true, orchestrate: false, workers: 3, rounds: 3 },
     base: FAST_PROMPT,
-    sampler: { temperature: 0.5, repeatPenalty: 1.05, topK: 40, topP: 0.95, minP: 0.05, maxTokens: 2048 },
+    sampler: { temperature: 0.5, repeatPenalty: 1.05, topK: 40, topP: 0.95, minP: 0.05, maxTokens: 8192 },
   },
   3: {
     label: "Balanced",
@@ -67,7 +67,7 @@ export const MODE_PRESETS: Readonly<Record<Mode, ModePreset>> = {
     changes: ["Thinking Low: up to 1,024 thinking tokens", "Medium effort", "Key facts and numbers checked", "Your memories added"],
     prefs: { effortCustom: null, thinking: "low", effort: "medium", verbosity: "brief", source: "native", addInstructions: true, memoryOn: true, orchestrate: false, workers: 3, rounds: 3 },
     base: DEFAULT_BASE_PROMPT,
-    sampler: { temperature: 0.7, repeatPenalty: 1.05, topK: 40, topP: 0.95, minP: 0.05, maxTokens: 4096 },
+    sampler: { temperature: 0.7, repeatPenalty: 1.05, topK: 40, topP: 0.95, minP: 0.05, maxTokens: 16384 },
   },
   4: {
     label: "Accurate",
@@ -75,7 +75,7 @@ export const MODE_PRESETS: Readonly<Record<Mode, ModePreset>> = {
     changes: ["Thinking High: up to 16,384 thinking tokens", "Extra-high effort", "A detailed prompt for checking every step", "The draft is reviewed once and corrected", "Lower temperature"],
     prefs: { effortCustom: null, thinking: "high", effort: "xhigh", verbosity: "normal", source: "both", addInstructions: true, memoryOn: true, orchestrate: false, workers: 3, rounds: 3 },
     base: ACCURATE_PROMPT,
-    sampler: { temperature: 0.4, repeatPenalty: 1.05, topK: 40, topP: 0.95, minP: 0.05, maxTokens: 8192 },
+    sampler: { temperature: 0.4, repeatPenalty: 1.05, topK: 40, topP: 0.95, minP: 0.05, maxTokens: 16384 },
   },
   5: {
     label: "Maximum",
@@ -88,7 +88,7 @@ export const MODE_PRESETS: Readonly<Record<Mode, ModePreset>> = {
     ],
     prefs: { effortCustom: null, thinking: "max", effort: "max", verbosity: "normal", source: "both", addInstructions: true, memoryOn: true, orchestrate: true, workers: 5, rounds: 3 },
     base: ACCURATE_PROMPT,
-    sampler: { temperature: 0.4, repeatPenalty: 1.05, topK: 40, topP: 0.95, minP: 0.05, maxTokens: 8192 },
+    sampler: { temperature: 0.4, repeatPenalty: 1.05, topK: 40, topP: 0.95, minP: 0.05, maxTokens: 16384 },
   },
 };
 
@@ -136,9 +136,13 @@ export function parseSampler(raw: string | null): Sampler {
     minP: num(v.minP, 0, 1, d.minP),
     topK: int(v.topK, 0, 1000, d.topK),
     repeatPenalty: num(v.repeatPenalty, 0.5, 2, d.repeatPenalty),
-    maxTokens: int(v.maxTokens, 16, 131072, d.maxTokens),
+    // The old level caps (1,024 / 2,048 / 4,096) cut code and long answers off mid-file: a saved
+    // sampler still holding one of them moves to the level's new limit.
+    maxTokens: OLD_CAPS[int(v.maxTokens, 16, 131072, d.maxTokens)] ?? int(v.maxTokens, 16, 131072, d.maxTokens),
   };
 }
+
+const OLD_CAPS: Readonly<Record<number, number>> = { 1024: 8192, 2048: 8192, 4096: 16384 };
 
 export function loadSampler(): Sampler {
   return parseSampler(readPref(SAMPLER_KEY));
