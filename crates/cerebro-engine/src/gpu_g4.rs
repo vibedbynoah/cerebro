@@ -57,6 +57,7 @@ struct L {
 struct F {
     matvec: CudaFunction,
     matvec_k: CudaFunction,
+    matvec_k3: CudaFunction,
     rmsnorm_quant: CudaFunction,
     quant: CudaFunction,
     qkv: CudaFunction,
@@ -162,6 +163,7 @@ impl G4Gpu {
         let f = F {
             matvec: lf("matvec_q8")?,
             matvec_k: lf("matvec_k")?,
+            matvec_k3: lf("matvec_k3")?,
             rmsnorm_quant: lf("rmsnorm_quant")?,
             quant: lf("quantize_q8")?,
             qkv: lf("g4_qkv")?,
@@ -481,6 +483,36 @@ impl G4Gpu {
         Ok(())
     }
 
+    /// Two or three matvecs on the same activations, in one launch when all are K-quant (each `y`
+    /// gets its matrix's rows), else one by one.
+    fn mv_many(s: &CudaStream, f: &F, ms: &mut [(&W, &mut CudaSlice<f32>)], xq: &CudaSlice<i8>, xd: &CudaSlice<f32>) -> Result<(), Error> {
+        if !(2..=3).contains(&ms.len()) || !ms.iter().all(|(m, _)| matches!(m, W::K { .. })) {
+            for (m, y) in ms.iter_mut() {
+                Self::mv(s, f, m, xq, xd, y)?;
+            }
+            return Ok(());
+        }
+        let first: &W = ms[0].0;
+        let W::K { w: w_any, dtype: dt_any, bb: bb_any, cols, .. } = first else { unreachable!("checked") };
+        let cols = *cols as i32;
+        let rows: Vec<i32> = ms.iter().map(|(m, _)| m.rows() as i32).collect();
+        let blocks: u32 = rows.iter().map(|&r| (r as u32).div_ceil(8)).sum();
+        let (zero, n) = (0i32, ms.len());
+        let mut lb = s.launch_builder(&f.matvec_k3);
+        for (i, (m, y)) in ms.iter_mut().enumerate() {
+            let W::K { w, dtype, bb, .. } = *m else { unreachable!("checked") };
+            lb.arg(w).arg(dtype).arg(bb).arg(&mut **y).arg(&rows[i]);
+        }
+        if n == 2 {
+            // No third matrix: a segment of 0 rows, which no block reaches (xd stands in for y).
+            lb.arg(w_any).arg(dt_any).arg(bb_any).arg(xd).arg(&zero);
+        }
+        lb.arg(xq).arg(xd).arg(&cols);
+        let cfg = LaunchConfig { grid_dim: (blocks, 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+        unsafe { lb.launch(cfg) }.map_err(gerr)?;
+        Ok(())
+    }
+
     /// One token at `pos`: `x` its scaled embedding, `tok` its per-layer table rows (scaled on the
     /// GPU). Leaves the soft-capped logits in `logits`.
     pub fn step(&mut self, model: &Model, x: &[f32], tok: &[f32], pos: usize, logits: &mut [f32]) -> Result<(), Error> {
@@ -534,10 +566,10 @@ impl G4Gpu {
             {
                 let l = &self.layers[li];
                 unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&l.attn_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
-                Self::mv(s, f, &l.q, &self.xq, &self.xd, &mut self.q)?;
                 if own {
-                    Self::mv(s, f, l.k.as_ref().expect("k"), &self.xq, &self.xd, &mut self.kb)?;
-                    Self::mv(s, f, l.v.as_ref().expect("v"), &self.xq, &self.xd, &mut self.vb)?;
+                    Self::mv_many(s, f, &mut [(&l.q, &mut self.q), (l.k.as_ref().expect("k"), &mut self.kb), (l.v.as_ref().expect("v"), &mut self.vb)], &self.xq, &self.xd)?;
+                } else {
+                    Self::mv(s, f, &l.q, &self.xq, &self.xd, &mut self.q)?;
                 }
             }
             {
@@ -564,8 +596,7 @@ impl G4Gpu {
             unsafe { s.launch_builder(&f.rms_add).arg(&mut self.x).arg(&self.t).arg(&l.post_attn).arg(&eps).arg(&dim).arg(&unit).launch(one) }.map_err(gerr)?;
             // Feed-forward.
             unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&l.ffn_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
-            Self::mv(s, f, &l.gate, &self.xq, &self.xd, &mut self.g)?;
-            Self::mv(s, f, &l.up, &self.xq, &self.xd, &mut self.u)?;
+            Self::mv_many(s, f, &mut [(&l.gate, &mut self.g), (&l.up, &mut self.u)], &self.xq, &self.xd)?;
             let ff = l.gate.rows() as i32;
             unsafe { s.launch_builder(&f.gelu).arg(&self.g).arg(&self.u).arg(&mut self.xq).arg(&mut self.xd).arg(&ff).launch(blocks(ff as usize)) }.map_err(gerr)?;
             Self::mv(s, f, &l.down, &self.xq, &self.xd, &mut self.t)?;

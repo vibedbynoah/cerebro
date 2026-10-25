@@ -1161,6 +1161,42 @@ extern "C" __global__ void matvec_k(const unsigned char* __restrict__ w, int dty
     if (lane == 0) y[row] = add ? y[row] + sum : sum;
 }
 
+// Up to three K-quant matvecs on the same activations in one launch (q|k|v, gate|up): small
+// matrices share the grid instead of each filling a fraction of it (Gemma 4's 512-row k and v ran
+// at a quarter of the bandwidth of its big matrices). Blocks of `blockDim.x / 32` rows go to segment
+// 0, then 1, then 2; a segment of 0 rows gets none.
+extern "C" __global__ void matvec_k3(const unsigned char* __restrict__ w0, int dt0, int bb0, float* __restrict__ y0, int r0,
+                                     const unsigned char* __restrict__ w1, int dt1, int bb1, float* __restrict__ y1, int r1,
+                                     const unsigned char* __restrict__ w2, int dt2, int bb2, float* __restrict__ y2, int r2,
+                                     const signed char* __restrict__ xq, const float* __restrict__ xd, int cols) {
+    const int rpb = blockDim.x >> 5;
+    const int n0 = (r0 + rpb - 1) / rpb, n1 = (r1 + rpb - 1) / rpb;
+    int b = blockIdx.x;
+    const unsigned char* w = w0;
+    int dtype = dt0, bb = bb0, rows = r0;
+    float* y = y0;
+    if (b >= n0 + n1) {
+        b -= n0 + n1;
+        w = w2; dtype = dt2; bb = bb2; rows = r2; y = y2;
+    } else if (b >= n0) {
+        b -= n0;
+        w = w1; dtype = dt1; bb = bb1; rows = r1; y = y1;
+    }
+    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    int row = b * rpb + warp;
+    if (row >= rows) return;
+    int nb = cols >> 8;
+    int upb = dtype == 14 ? 16 : 8;
+    const unsigned char* wr = w + (size_t)row * nb * bb;
+    float sum = 0.f;
+    for (int u = lane; u < nb * upb; u += 32) {
+        int bk = u / upb;
+        sum += unit_dot(dtype, wr + (size_t)bk * bb, u - bk * upb, xq + bk * 256, xd + bk * 8);
+    }
+    sum = warp_sum(sum);
+    if (lane == 0) y[row] = sum;
+}
+
 // ---- Batched MoE (prompt processing) ------------------------------------------------------------
 
 // Y[i][row] (+)= W[row] . X[r_i] for n tokens, K-quant weights. r_i = idx[i] when idx is given (the
