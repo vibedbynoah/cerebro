@@ -1946,6 +1946,7 @@ impl PortableState {
             est_decode_tps: 0.0,
             drive: crate::placement::drive_of(&m.path),
             notes: vec![first, format!("Kernels picked for this GPU when loading: {}.", self.kernels)],
+            head_on_gpu: false,
         }
     }
 

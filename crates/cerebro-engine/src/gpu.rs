@@ -907,7 +907,7 @@ impl GpuState {
             });
         }
         let output = if split { None } else { Some(up(&[model.output_mat()])?) };
-        let split_head = if split && split_head_on(model) { Some(up(&[model.output_mat()])?) } else { None };
+        let split_head = if split && split_head_on(model) && plan.head_on_gpu { Some(up(&[model.output_mat()])?) } else { None };
         // Tied embeddings reuse the output matrix on the GPU; otherwise upload the table too. In the
         // native layout the row is looked up on the CPU and uploaded (the table stays out of VRAM).
         let host_embed = native.then(|| vec![0f32; c.dim]);
@@ -1070,10 +1070,6 @@ impl GpuState {
     /// Whether `prefill_streamed` can run this model's processor layers (`from..`): attention or
     /// Gated DeltaNet with a dense feed-forward, in formats the GPU converts.
     pub fn can_stream(model: &Model, from: usize) -> bool {
-        // Streamed slots carry no q|k|v biases: such layers read prompts on the processor.
-        if model.layers().iter().any(|l| l.qkv_bias.is_some()) {
-            return false;
-        }
         let ok = |ms: &[&Mat]| ms.iter().all(|m| m.cols % 256 == 0 && gpu_block(m.dtype).is_some()) || ms.iter().all(|m| m.cols % 32 == 0 && m.dtype == DType::Q8_0);
         model.hc.is_none()
             && model.layers()[from..].iter().all(|l| {
@@ -1120,6 +1116,7 @@ impl GpuState {
             dv(|d| &d.norm),
             if l.delta.is_some() { hist } else { none },
             if l.delta.is_some() { state } else { none },
+            l.qkv_bias.as_deref().unwrap_or(none),
         ]
         .into_iter()
         .map(f32_bytes)
@@ -1355,6 +1352,15 @@ impl GpuState {
                     up(fl(buf), norm_off[4 + i], norms[4 + i].len())?;
                 }
             }
+        }
+        // The q|k|v bias (Qwen2.5), added after the fused qkv product like a resident layer's.
+        if norms[10].is_empty() {
+            sl.bias = None;
+        } else {
+            if sl.bias.as_ref().is_none_or(|b| b.len() * 4 < norms[10].len()) {
+                sl.bias = Some(z(norms[10].len() / 4)?);
+            }
+            up(fl(sl.bias.as_ref().expect("made above")), norm_off[10], norms[10].len())?;
         }
         if nkv > 0 {
             up(sl.kc.device_ptr(&c).0, k_off, nkv * 2)?;

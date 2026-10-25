@@ -139,6 +139,8 @@ pub struct Plan {
     pub drive: Drive,
     /// Plain sentences for the user, most important first.
     pub notes: Vec<String>,
+    /// A split puts the output head on the GPU (`ModelCost::split_head` > 0 and it pays).
+    pub head_on_gpu: bool,
 }
 
 /// RAM the drive tier's ring of buffers takes for layers of `biggest` bytes (stream.rs).
@@ -183,6 +185,9 @@ fn gib(b: u64) -> f64 {
 
 /// The plan for a dense model. `force_gpu_layers` (the "GPU layers" switch) overrides the choice,
 /// clamped to what fits.
+/// What a split's GPU head costs per token in synchronisation and transfers, in seconds.
+const HEAD_TRIP_S: f64 = 1.5e-3;
+
 pub fn plan_dense(cost: &ModelCost, m: &Machine, force_gpu_layers: Option<usize>) -> Plan {
     let n = cost.layers.len();
     let budget = m.vram_free.saturating_sub(VRAM_MARGIN);
@@ -192,8 +197,8 @@ pub fn plan_dense(cost: &ModelCost, m: &Machine, force_gpu_layers: Option<usize>
     let full_native = sum(&|l| (if l.native_ok { l.native } else { l.int8 }) + l.kv_gpu, 0..n) + cost.head_native + cost.scratch;
     // In a split the GPU holds layers, their KV and scratch, and the head when `split_head` says so.
     let layer_gpu = |l: &LayerCost| (if l.native_ok { l.native } else { l.int8 }) + l.kv_gpu;
-    let fit_layers = {
-        let mut used = cost.scratch + cost.split_head;
+    let fit = |reserve: u64| {
+        let mut used = cost.scratch + reserve;
         let mut k = 0;
         for l in &cost.layers {
             if used + layer_gpu(l) > budget {
@@ -204,6 +209,16 @@ pub fn plan_dense(cost: &ModelCost, m: &Machine, force_gpu_layers: Option<usize>
         }
         k
     };
+    // The head on the GPU only when the card then holds more of what every token reads, by more
+    // than the extra round trip it costs per token (the residual up after the processor's layers,
+    // the logits back: about 1.5 ms under WDDM, charged as that much RAM reading). Qwen2.5-14B
+    // Q4_K_M on 8 GB, 512 + 64 tokens: head + 37 layers (6.37 GiB of weights) wrote 16.57 tok/s,
+    // 41 layers (6.36 GiB) with the head on the processor 16.96.
+    let weights = |k: usize| sum(&|l| if l.native_ok { l.native } else { l.int8 }, 0..k);
+    let (fit_head, fit_plain) = (fit(cost.split_head), fit(0));
+    let trip = (m.ram_bps * HEAD_TRIP_S) as u64;
+    let head_pays = cost.split_head > 0 && weights(fit_head) + cost.split_head > weights(fit_plain) + trip;
+    let fit_layers = if head_pays { fit_head } else { fit_plain };
     if std::env::var_os("CEREBRO_PLAN_DEBUG").is_some() {
         let g = |b: u64| b as f64 / (1u64 << 30) as f64;
         eprintln!(
@@ -213,7 +228,7 @@ pub fn plan_dense(cost: &ModelCost, m: &Machine, force_gpu_layers: Option<usize>
     }
     let (layout, gpu_layers) = match force_gpu_layers {
         Some(k) if k < n => {
-            let k = k.min(fit_layers);
+            let k = k.min(fit_plain);
             (if k == 0 { Layout::Cpu } else { Layout::Split }, k)
         }
         _ if m.vram_free == 0 => (Layout::Cpu, 0),
@@ -222,14 +237,20 @@ pub fn plan_dense(cost: &ModelCost, m: &Machine, force_gpu_layers: Option<usize>
         _ if fit_layers == 0 => (Layout::Cpu, 0),
         _ => (Layout::Split, fit_layers.min(n.saturating_sub(1))),
     };
+    // What the CPU reads per token: its layers and, unless the GPU holds it, the head. A forced
+    // layer count keeps the head on the GPU while both still fit.
+    let head_on_gpu = layout == Layout::Split
+        && cost.split_head > 0
+        && match force_gpu_layers {
+            Some(k) if k < n => gpu_layers <= fit_head,
+            _ => head_pays,
+        };
     let vram_bytes = match layout {
         Layout::GpuInt8 => full_int8,
         Layout::GpuNative => full_native,
-        Layout::Split => sum(&layer_gpu, 0..gpu_layers) + cost.scratch + cost.split_head,
+        Layout::Split => sum(&layer_gpu, 0..gpu_layers) + cost.scratch + if head_on_gpu { cost.split_head } else { 0 },
         Layout::Cpu => 0,
     };
-    // What the CPU reads per token: its layers and, unless the GPU holds it, the head.
-    let head_on_gpu = layout == Layout::Split && cost.split_head > 0;
     let cpu_weights = match layout {
         Layout::GpuInt8 | Layout::GpuNative => 0,
         _ => sum(&|l| l.native, gpu_layers..n) + if head_on_gpu { 0 } else { cost.head_native },
@@ -283,7 +304,7 @@ pub fn plan_dense(cost: &ModelCost, m: &Machine, force_gpu_layers: Option<usize>
     } else if cpu_weights > 0 {
         notes.push(format!("The processor's share stays in RAM ({:.1} GiB); the {} is read only while loading.", gib(ram_resident), m.drive.label()));
     }
-    Plan { layout, gpu_layers, total_layers: n, vram_bytes, cpu_bytes: cpu_weights, ram_resident, drive_bytes_per_token: from_drive, drive_layers, est_decode_tps: est, drive: m.drive, notes }
+    Plan { layout, gpu_layers, total_layers: n, vram_bytes, cpu_bytes: cpu_weights, ram_resident, drive_bytes_per_token: from_drive, drive_layers, est_decode_tps: est, drive: m.drive, notes, head_on_gpu }
 }
 
 /// The plan for a mixture-of-experts model: attention, router and head on the GPU, experts in RAM,
@@ -325,6 +346,7 @@ pub fn plan_moe(dense_gpu: u64, expert_bytes: u64, active_fraction: f64, m: &Mac
         est_decode_tps: if secs > 0.0 { 1.0 / secs } else { 0.0 },
         drive: m.drive,
         notes,
+        head_on_gpu: false,
     }
 }
 
