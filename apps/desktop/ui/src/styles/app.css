@@ -414,10 +414,8 @@ body {
   padding: var(--space-3) var(--space-2) var(--space-2);
   height: 32px;
   box-sizing: border-box;
-  font-size: 0.6875rem;
-  font-weight: var(--weight-semibold);
-  letter-spacing: var(--tracking-eyebrow);
-  text-transform: uppercase;
+  font-size: 0.75rem;
+  font-weight: var(--weight-medium);
   color: var(--color-text-muted);
   white-space: nowrap;
 }
@@ -790,8 +788,7 @@ body {
   align-items: flex-end;
   justify-content: space-between;
   gap: var(--space-6);
-  padding-bottom: var(--space-8);
-  border-bottom: 1px solid var(--color-border);
+  padding-bottom: var(--space-2);
 }
 
 .screen-header__text {
@@ -814,20 +811,21 @@ body {
   color: var(--color-accent-text);
 }
 
+/* One quiet title per screen, in the interface font (Apple: clarity, deference to content). */
 .screen-title {
   margin: 0;
-  font-family: var(--font-family-display);
-  font-size: var(--text-title);
-  font-weight: 500;
-  line-height: var(--leading-snug);
-  letter-spacing: var(--tracking-headline);
+  font-family: var(--font-family-ui);
+  font-size: 1.625rem;
+  font-weight: var(--weight-semibold);
+  line-height: 1.2;
+  letter-spacing: -0.015em;
   color: var(--color-text-primary);
 }
 
 .screen-lede {
-  margin: var(--space-3) 0 0;
+  margin: var(--space-2) 0 0;
   max-width: 62ch;
-  font-size: 0.9375rem;
+  font-size: 0.875rem;
   line-height: var(--leading-relaxed);
   color: var(--color-text-secondary);
 }
@@ -839,9 +837,9 @@ body {
 }
 
 .section {
-  margin-top: var(--space-10);
+  margin-top: var(--space-8);
   display: grid;
-  gap: var(--space-4);
+  gap: var(--space-3);
 }
 
 .section__head {
@@ -851,7 +849,7 @@ body {
 
 .section__title {
   margin: 0;
-  font-size: 1rem;
+  font-size: 0.9375rem;
   font-weight: var(--weight-semibold);
   letter-spacing: -0.005em;
   color: var(--color-text-primary);
@@ -860,6 +858,7 @@ body {
 .section__desc {
   margin: 0;
   max-width: 68ch;
+  font-size: 0.8125rem;
   color: var(--color-text-secondary);
 }
 

@@ -37,14 +37,14 @@ const ALL_ROUTES: readonly RouteDef[] = [
   { id: "hub", label: "Model Hub", icon: "hub", group: "Run", summary: "Find models that fit this machine and download them. Searching the catalogue uses the network; everything else works offline.", keywords: "download browse catalog gguf" },
   { id: "chat", label: "Chat", icon: "chat", group: "Run", summary: "Talk to a local model. It runs on this computer.", keywords: "conversation prompt assistant agent coding" },
   { id: "models", label: "Models", icon: "models", group: "Run", summary: "The models on this machine and how each one was tuned.", keywords: "library local gguf list" },
-  { id: "cluster", label: "Cluster", icon: "link", group: "Run", summary: "Run one model across your computers over any network link, each running part of it.", keywords: "multiple computers network lan wifi ethernet usb distributed split homelab worker pair" },
-  { id: "tune", label: "Speed tune", icon: "tune", group: "Run", summary: "Measure the fastest settings for a model on this machine. Opened from a model's page; training is on Train.", keywords: "benchmark measure speed optimize flags tune", inSidebar: false },
-  { id: "monitor", label: "Monitor", icon: "activity", group: "Run", summary: "The model and the machine, live: speed, memory, heat, and every request.", keywords: "metrics telemetry live gpu vram temperature requests inspector dashboard stats" },
+  { id: "cluster", label: "Cluster", icon: "link", group: "Extend", summary: "Run one model across your computers over any network link, each running part of it.", keywords: "multiple computers network lan wifi ethernet usb distributed split homelab worker pair" },
+  { id: "tune", label: "Speed tune", icon: "tune", group: "Extend", summary: "Measure the fastest settings for a model on this machine. Opened from a model's page; training is on Train.", keywords: "benchmark measure speed optimize flags tune", inSidebar: false },
+  { id: "monitor", label: "Monitor", icon: "activity", group: "Extend", summary: "The model and the machine, live: speed, memory, heat, and every request.", keywords: "metrics telemetry live gpu vram temperature requests inspector dashboard stats" },
   {
     id: "turbo",
     label: "Turbo",
     icon: "bolt",
-    group: "Run",
+    group: "Extend",
     summary: __DESKTOP__
       ? "Engine speed-ups for this machine, each with a plain explanation, on or off."
       : "Builds tuned to this machine, scheduling and power profiles, each measured before it is kept.",
@@ -61,13 +61,13 @@ const ALL_ROUTES: readonly RouteDef[] = [
     keywords: "picture generate diffusion",
   },
   { id: "documents", label: "Documents", icon: "documents", group: "Create", summary: "Search your own files on this computer, group them in collections, convert them and run the quick tools.", keywords: "rag search files knowledge pdf collections convert quick tools" },
-  { id: "train", label: "Train", icon: "chip", group: "Create", summary: "Fine-tune a model on your own examples and add it to your library.", keywords: "fine-tune finetune lora qlora dataset training adapter" },
-  { id: "tools", label: "Tools", icon: "tools", group: "Extend", summary: "Actions a model may take, each behind your permission.", keywords: "functions actions agent" },
+  { id: "train", label: "Train", icon: "chip", group: "Extend", summary: "Fine-tune a model on your own examples and add it to your library.", keywords: "fine-tune finetune lora qlora dataset training adapter" },
+  { id: "tools", label: "Tools", icon: "tools", group: "Create", summary: "Actions a model may take, each behind your permission.", keywords: "functions actions agent" },
   {
     id: "plugins",
     label: "Plugins",
     icon: "plugins",
-    group: "Extend",
+    group: "Create",
     summary: __DESKTOP__
       ? "Add-ons that give models new abilities (files, git, web, databases), as MCP servers. Adding one needs the network; most then run offline."
       : "Add capabilities. Installing needs a network; installed plugins run offline.",
@@ -77,9 +77,14 @@ const ALL_ROUTES: readonly RouteDef[] = [
   { id: "about", label: "About", icon: "about", group: "System", summary: "What Cerebro does for you, the version on this machine and the documents that come with it.", keywords: "version licence license credits mark logo info help" },
 ];
 
+/** Sidebar and command palette order: the everyday screens first, then making things, then the
+ *  measuring and multi-machine screens, then the app itself. */
+const ORDER: readonly RouteId[] = ["home", "chat", "models", "hub", "images", "documents", "tools", "plugins", "train", "monitor", "cluster", "turbo", "tune", "settings", "about"];
+const ORDERED: readonly RouteDef[] = [...ALL_ROUTES].sort((a, b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id));
+
 /** The desktop build has no separate Plugins screen: plugins there are MCP servers, which Tools
  *  manages, so the two pages were the same. Its old links open Tools. */
-export const ROUTES: readonly RouteDef[] = __DESKTOP__ ? ALL_ROUTES.filter((r) => r.id !== "plugins") : ALL_ROUTES;
+export const ROUTES: readonly RouteDef[] = __DESKTOP__ ? ORDERED.filter((r) => r.id !== "plugins") : ORDERED;
 
 const IDS: ReadonlySet<string> = new Set(ROUTES.map((r) => r.id));
 

@@ -5,6 +5,8 @@ import { hrefFor, ROUTES, type RouteDef, type RouteGroup, type RouteId } from ".
 import { Icon } from "./icons";
 
 const GROUPS: readonly RouteGroup[] = ["Run", "Create", "Extend", "System"];
+/** The heading each group shows; the everyday group needs none (it is named for screen readers). */
+const GROUP_TITLES: Record<RouteGroup, string> = { Run: "Main", Create: "Create", Extend: "Advanced", System: "System" };
 
 /**
  * Collapsible primary navigation. Every entry is a real link (`#/id`). Collapsed, labels stay in the
@@ -87,10 +89,8 @@ export function Sidebar(props: { route: RouteId; collapsed: boolean; onToggle: (
         <For each={GROUPS}>
           {(group) => (
             <div class="nav-group">
-              <p class="nav-group__title" id={`nav-${group}`}>
-                <span class="nav-group__text">
-                  {group}
-                </span>
+              <p class="nav-group__title" classList={{ "sr-only": group === "Run" }} id={`nav-${group}`}>
+                <span class="nav-group__text">{GROUP_TITLES[group]}</span>
               </p>
               <ul class="nav-group__list" aria-labelledby={`nav-${group}`}>
                 <For each={ROUTES.filter((r) => r.group === group && r.inSidebar !== false)}>{(r) => <li>{link(r)}</li>}</For>

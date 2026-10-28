@@ -1323,7 +1323,9 @@ select.input {
 @layer cerebro.focus {
   /* Two-tone box-shadow ring; the transparent outline still draws in forced-colors mode.
      `--focus-ring-companion` lets a component keep its own shadow under the ring. */
-  :is(button, a, input, select, textarea, summary, [tabindex]):focus-visible {
+  /* Not on containers focused by code (tabindex="-1", such as <main> after a page change): a ring
+     around the whole content pane read as a heavy black frame. */
+  :is(button, a, input, select, textarea, summary, [tabindex]:not([tabindex="-1"])):focus-visible {
     outline: 2px solid transparent !important;
     outline-offset: 2px !important;
     box-shadow: var(--focus-ring), var(--focus-ring-companion, 0 0 #0000) !important;

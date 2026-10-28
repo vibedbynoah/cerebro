@@ -1,22 +1,19 @@
 import { Show, type JSX } from "solid-js";
 import { routeById, type RouteId } from "../lib/routes";
-import { Icon } from "./icons";
 
 /**
- * Shared screen scaffolding: one heading tier per level (h1 screen title in Fraunces, h2 section
- * titles in Inter), one spacing rhythm (--space-8 between sections, --space-4 inside cards).
+ * Shared screen scaffolding: one heading tier per level (h1 screen title and h2 section
+ * titles both in the interface font), one spacing rhythm (--space-8 between sections, --space-4 inside cards).
  */
 export function ScreenHeader(props: { route: RouteId; title?: string; lede?: JSX.Element; actions?: JSX.Element }): JSX.Element {
   const def = () => routeById(props.route);
   return (
     <header class="screen-header">
       <div class="screen-header__text">
-        <p class="eyebrow">
-          <Icon name={def().icon} size={14} />
-          {def().label}
-        </p>
         <h1 class="screen-title">{props.title ?? def().label}</h1>
-        <p class="screen-lede">{props.lede ?? def().summary}</p>
+        <Show when={props.lede}>
+          <p class="screen-lede">{props.lede}</p>
+        </Show>
       </div>
       <Show when={props.actions}>
         <div class="screen-header__actions">{props.actions}</div>
