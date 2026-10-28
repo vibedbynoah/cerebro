@@ -308,7 +308,7 @@
 
 .img-gallery__head h2 {
   margin: 0;
-  font-size: var(--text-title);
+  font-size: 0.9375rem; /* a section title, as everywhere */
 }
 
 .img-grid {

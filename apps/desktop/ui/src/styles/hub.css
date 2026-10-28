@@ -299,9 +299,18 @@
   color: var(--color-accent-text);
 }
 
+/* The same heading as every other section (app.css .section__title). */
 .livehub__picks h2 {
-  margin: var(--space-5) 0 var(--space-3);
-  font-size: var(--text-title);
+  margin: var(--space-8) 0 var(--space-2);
+  font-size: 0.9375rem;
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.005em;
+  color: var(--color-text-primary);
+}
+
+.livehub__picks h2 + .livehub__muted {
+  margin-top: 0;
+  font-size: 0.8125rem;
 }
 
 .livehub__pick-grid {

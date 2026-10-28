@@ -46,7 +46,7 @@
 .arena-results__title,
 .arena-board__title {
   margin: 0 0 var(--space-1);
-  font-size: var(--text-title);
+  font-size: 0.9375rem; /* a section title, as everywhere */
 }
 
 .arena-models {
