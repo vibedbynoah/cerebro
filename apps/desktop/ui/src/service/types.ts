@@ -669,6 +669,8 @@ export type HubDownloadEvent =
 export interface HubFileMeta {
   /** Bytes of the whole file. */
   size: number;
+  /** Cerebro Engine runs this architecture (absent from older builds: treated as supported). */
+  supported?: boolean;
   /** `general.architecture`, e.g. "qwen3moe". */
   architecture: string;
   layers: number;

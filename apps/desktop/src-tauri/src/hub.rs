@@ -209,6 +209,8 @@ pub struct HubFileMeta {
     /// Layers that keep a KV cache: all of them, or one in `full_attention_interval` for the
     /// Qwen3.5/3.8 hybrids (the others are Gated DeltaNet with a small fixed state).
     pub attention_layers: u64,
+    /// Cerebro Engine runs this architecture (cerebro_engine::model::ARCHITECTURES).
+    pub supported: bool,
 }
 
 #[derive(Deserialize)]
@@ -507,6 +509,7 @@ fn build_meta(arch: &str, num: impl Fn(&str) -> Option<u64>, size: u64, quant: S
                 _ => layers,
             }
         },
+        supported: cerebro_engine::model::ARCHITECTURES.contains(&arch),
     }
 }
 

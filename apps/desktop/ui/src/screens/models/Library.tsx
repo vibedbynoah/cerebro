@@ -448,10 +448,13 @@ function Row(props: { model: LibraryModel; index: number; fit: FitClass; active:
           tabindex={-1}
           aria-busy={busy() ? "true" : undefined}
           aria-label={loaded() ? `Unload ${props.model.name} ${props.model.quant}` : `Load ${props.model.name} ${props.model.quant}`}
+          // An architecture the engine does not run yet cannot be loaded; the row says so.
+          disabled={props.model.supported === false && !loaded()}
+          title={props.model.supported === false ? "Cerebro Engine does not run this architecture yet." : undefined}
           onClick={() => void (loaded() ? store.unload(props.model.id) : store.load(props.model.id, null))}
         >
           <Spinner />
-          <span class="btn__label">{loaded() ? "Unload" : (download() ?? "Load")}</span>
+          <span class="btn__label">{loaded() ? "Unload" : props.model.supported === false ? "Not supported yet" : (download() ?? "Load")}</span>
         </button>
       </span>
     </div>

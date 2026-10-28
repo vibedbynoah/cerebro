@@ -487,6 +487,11 @@ export function LiveHub(): JSX.Element {
                               <Show when={f.parts.length > 1}>
                                 <span class="livehub__file-note">{f.parts.length} parts, one download</span>
                               </Show>
+                              <Show when={metas()[f.path]?.supported === false}>
+                                <span class="livehub__file-note" data-tone="warn">
+                                  Cerebro Engine does not run the {metas()[f.path]?.architecture} architecture yet
+                                </span>
+                              </Show>
                               <Show when={isRec()}>
                                 <span class="livehub__rec-badge">
                                   <Icon name="check" size={12} />
