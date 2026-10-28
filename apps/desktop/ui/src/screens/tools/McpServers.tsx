@@ -51,6 +51,7 @@ export function McpServers(): JSX.Element {
   const [chosen, setChosen] = createSignal<McpCatalogueEntry | null>(null);
   const [chosenEnv, setChosenEnv] = createSignal<Record<string, string>>({});
   let formCard: HTMLFormElement | undefined;
+  let customDetails: HTMLDetailsElement | undefined;
 
   const [selectedTool, setSelectedTool] = createSignal("");
   const [callArgs, setCallArgs] = createSignal("{}");
@@ -190,7 +191,54 @@ export function McpServers(): JSX.Element {
     setAddName(entry.id);
     setAddCommand(entry.install.command);
     setAddArgs(entry.install.args.join(" "));
+    if (customDetails) customDetails.open = true;
     formCard?.scrollIntoView({ block: "start" });
+  };
+
+  // One-click add from the catalogue: keys typed into a card (entry id -> variable -> value), the
+  // card currently asking for them, and the entry being added.
+  const [cardKeys, setCardKeys] = createSignal<Record<string, Record<string, string>>>({});
+  const [askingKeys, setAskingKeys] = createSignal<string | null>(null);
+  const [adding, setAdding] = createSignal<string | null>(null);
+  const isPlaceholder = (arg: string) => /^<[^>]+>$/.test(arg);
+  const isAdded = (entry: McpCatalogueEntry) => Boolean(config()?.mcpServers[entry.id]);
+
+  /** Adds a catalogue server and starts it: no form. A server that needs keys first shows their
+   *  fields on its card; a folder argument gets the first workspace folder, else Documents. */
+  const addFromCatalogue = async (entry: McpCatalogueEntry) => {
+    if (!("command" in entry.install)) return;
+    const current = config();
+    if (!current || adding()) return;
+    const keys = cardKeys()[entry.id] ?? {};
+    const missing = entry.env.filter((k) => !(keys[k.name] ?? "").trim());
+    if (missing.length > 0) {
+      setAskingKeys(entry.id);
+      queueMicrotask(() => document.getElementById(`mcp-card-key-${entry.id}-${missing[0]!.name}`)?.focus());
+      return;
+    }
+    setAdding(entry.id);
+    try {
+      let folder: string | null = null;
+      if (entry.install.args.some(isPlaceholder)) {
+        folder = (await service.builtinFoldersGet().catch((): string[] => []))[0] ?? (await service.documentsDir().catch(() => null));
+        if (!folder) {
+          chooseFromCatalogue(entry);
+          notify(`${entry.name} needs a folder`, "Enter the folder in the form below, then add it.", "warning");
+          return;
+        }
+      }
+      const args = entry.install.args.map((a) => (isPlaceholder(a) ? folder! : a));
+      let name = entry.id;
+      for (let i = 2; current.mcpServers[name]; i++) name = `${entry.id}-${i}`;
+      const env = Object.fromEntries(entry.env.map((k) => [k.name, keys[k.name]!.trim()]));
+      await save({ mcpServers: { ...current.mcpServers, [name]: { command: entry.install.command, args, env, disabled: false } } });
+      setAskingKeys(null);
+      notify(`${entry.name} added`, folder ? `It works inside ${folder}.` : "Its tools now appear in the tool list.", "success");
+    } catch (e) {
+      notify(`${entry.name} was not added`, errMessage(e), "error");
+    } finally {
+      setAdding(null);
+    }
   };
 
   const clearChosen = () => {
@@ -344,8 +392,7 @@ export function McpServers(): JSX.Element {
         <div class="mcp__browse" data-testid="mcp-catalogue">
           <h3 class="mcp__form-title">Browse servers</h3>
           <p class="hint">
-            Real servers from the official MCP project and their vendors. "Add" fills the form below with the command and the keys that server
-            needs.
+            Servers from the official MCP project and their vendors. Add starts a server at once; servers that need a key ask for it on their card.
           </p>
           <fieldset class="segmented segmented--sm mcp__source">
             <legend class="sr-only">Where to look</legend>
@@ -433,6 +480,33 @@ export function McpServers(): JSX.Element {
                   </div>
                   <p class="mcp__card-desc">{entry.description}</p>
                   <code class="mcp__command mcp__card-command">{installText(entry)}</code>
+                  <Show when={askingKeys() === entry.id && entry.env.length > 0}>
+                    <div class="mcp__card-keys" data-testid={`mcp-card-keys-${entry.id}`}>
+                      <For each={entry.env}>
+                        {(key) => (
+                          <div class="mcp__field">
+                            <label for={`mcp-card-key-${entry.id}-${key.name}`}>{key.label}</label>
+                            <input
+                              id={`mcp-card-key-${entry.id}-${key.name}`}
+                              class="input"
+                              type={key.secret ? "password" : "text"}
+                              autocomplete={key.secret ? "new-password" : "off"}
+                              placeholder={key.name}
+                              value={cardKeys()[entry.id]?.[key.name] ?? ""}
+                              onInput={(e) => {
+                                const value = e.currentTarget.value;
+                                setCardKeys((all) => ({ ...all, [entry.id]: { ...(all[entry.id] ?? {}), [key.name]: value } }));
+                              }}
+                              onKeyDown={(e) => e.key === "Enter" && void addFromCatalogue(entry)}
+                            />
+                            <a class="hint mcp__key-link" href={key.url} target="_blank" rel="noopener noreferrer nofollow">
+                              {new URL(key.url).hostname}
+                            </a>
+                          </div>
+                        )}
+                      </For>
+                    </div>
+                  </Show>
                   <div class="mcp__card-actions">
                     <a class="text-link" href={entry.homepage} target="_blank" rel="noopener noreferrer nofollow" aria-label={`${entry.name} homepage`}>
                       Homepage
@@ -441,8 +515,14 @@ export function McpServers(): JSX.Element {
                       when={"command" in entry.install}
                       fallback={<span class="hint">Signs in through your browser (OAuth), which Cerebro does not support yet.</span>}
                     >
-                      <button class="btn btn--tertiary btn--sm" type="button" aria-label={`Add ${entry.name}`} onClick={() => chooseFromCatalogue(entry)}>
-                        Add
+                      <button
+                        class="btn btn--secondary btn--sm"
+                        type="button"
+                        aria-label={`Add ${entry.name}`}
+                        disabled={isAdded(entry) || adding() === entry.id}
+                        onClick={() => void addFromCatalogue(entry)}
+                      >
+                        {isAdded(entry) ? "Added" : adding() === entry.id ? "Adding…" : "Add"}
                       </button>
                     </Show>
                   </div>
@@ -452,8 +532,9 @@ export function McpServers(): JSX.Element {
           </ul>
         </div>
 
+        <details class="mcp__custom" ref={customDetails}>
+        <summary>Add a custom server</summary>
         <form class="mcp__form" onSubmit={addServer} ref={formCard}>
-          <h3 class="mcp__form-title">Add a server</h3>
           <fieldset class="segmented segmented--sm" aria-describedby="mcp-add-note">
             <legend class="sr-only">How the server runs</legend>
             <For each={ADD_KINDS}>
@@ -559,6 +640,7 @@ export function McpServers(): JSX.Element {
             Add server
           </button>
         </form>
+        </details>
 
         <details class="mcp__advanced">
           <summary>Advanced: edit mcp.json</summary>

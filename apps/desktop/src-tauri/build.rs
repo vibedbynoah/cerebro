@@ -100,6 +100,8 @@ const COMMANDS: &[&str] = &[
     "chat_tool_answer",
     "builtin_tools",
     "builtin_folders_get",
+    "open_external",
+    "documents_dir",
     "builtin_folders_set",
     "mcp_server_get",
     "mcp_server_enable",

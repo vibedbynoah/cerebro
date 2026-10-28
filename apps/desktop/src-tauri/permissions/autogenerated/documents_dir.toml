@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-documents-dir"
+description = "Enables the documents_dir command without any pre-configured scope."
+commands.allow = ["documents_dir"]
+
+[[permission]]
+identifier = "deny-documents-dir"
+description = "Denies the documents_dir command without any pre-configured scope."
+commands.deny = ["documents_dir"]

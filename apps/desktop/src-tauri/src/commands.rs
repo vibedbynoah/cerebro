@@ -1466,6 +1466,34 @@ pub fn builtin_tools() -> serde_json::Value {
     crate::builtin_tools::tools_json()
 }
 
+/// Opens an https:// address in the system browser (model pages, MCP server homepages). The
+/// window has no shell or opener permission, so links come through here; the address is checked
+/// again (isolation/index.js checks it first): https only, a plain host name, no spaces, quotes or
+/// control characters. It goes to the platform's URL handler as one argument, never through a shell.
+#[tauri::command(async)]
+pub fn open_external(url: String) -> Result<(), String> {
+    let host_ok = url.strip_prefix("https://").and_then(|rest| rest.split(['/', '?', '#']).next()).is_some_and(|h| !h.is_empty() && h.len() <= 253 && h.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'));
+    let chars_ok = url.len() <= 2048 && !url.chars().any(|c| c.is_whitespace() || c.is_control() || matches!(c, '"' | '\'' | '<' | '>' | '`' | '\\' | '^' | '|'));
+    if !host_ok || !chars_ok {
+        return Err("Only https:// web addresses open in the browser.".into());
+    }
+    #[cfg(windows)]
+    let r = std::process::Command::new("rundll32.exe").args(["url.dll,FileProtocolHandler", &url]).spawn();
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg(&url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let r = std::process::Command::new("xdg-open").arg(&url).spawn();
+    r.map(|_| ()).map_err(|e| format!("The browser could not be opened: {e}"))
+}
+
+/// The user's Documents folder (the folder MCP file servers get when added in one click), else the
+/// home folder; None when neither is known.
+#[tauri::command(async)]
+pub fn documents_dir() -> Option<String> {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(std::path::PathBuf::from)?;
+    [home.join("Documents"), home.join("OneDrive").join("Documents"), home.clone()].into_iter().find(|p| p.is_dir()).map(|p| p.display().to_string())
+}
+
 /// The workspace folders the built-in tools may touch, as display strings.
 #[tauri::command(async)]
 pub fn builtin_folders_get(folders: FoldersState<'_>) -> Vec<String> {

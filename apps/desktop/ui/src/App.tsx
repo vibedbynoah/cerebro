@@ -132,6 +132,22 @@ function Shell(props: { platform: Platform; onRunSetup: () => void }): JSX.Eleme
     onCleanup(() => window.removeEventListener("cerebro:open-guide", open));
   });
 
+  const linkService = useService();
+  // External links (Hugging Face pages, MCP server homepages) open in the system browser: the
+  // desktop window cannot navigate away or open windows of its own, so a plain link did nothing.
+  onMount(() => {
+    const onClick = (e: MouseEvent) => {
+      if (e.defaultPrevented || e.button !== 0) return;
+      const a = (e.target as Element | null)?.closest?.("a[href]");
+      const href = a?.getAttribute("href") ?? "";
+      if (!/^https:\/\//i.test(href)) return;
+      e.preventDefault();
+      linkService.openExternal(href).catch((err: unknown) => notify("Link not opened", err instanceof Error ? err.message : String(err), "warning"));
+    };
+    document.addEventListener("click", onClick);
+    onCleanup(() => document.removeEventListener("click", onClick));
+  });
+
   const commands = createMemo<PaletteCommand[]>(() => [
     ...ROUTES.map((r) => ({
       id: `go-${r.id}`,

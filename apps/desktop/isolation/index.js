@@ -48,6 +48,7 @@ const ALLOWED = new Set([
   "mcp_tools",
   "builtin_tools",
   "builtin_folders_get",
+  "documents_dir",
   "trainer_status",
   "local_api_get",
   "local_api_rotate_key",
@@ -378,6 +379,9 @@ const WITH_ARGS = {
   chat_tool_answer: (p) =>
     isPlain(p) && hasOnlyKeys(p, ["id", "answer"]) && typeof p.id === "string" && /^t\d{1,16}-\d{1,3}$/.test(p.id) && isPlain(p.answer) && JSON.stringify(p.answer).length <= 65536,
   chat_tool_decide: (p) => isPlain(p) && hasOnlyKeys(p, ["id", "allow"]) && typeof p.id === "string" && /^t\d{1,16}-\d{1,3}$/.test(p.id) && typeof p.allow === "boolean",
+  // https only, a plain host, no spaces, quotes or control characters (checked again in Rust).
+  open_external: (p) =>
+    isPlain(p) && hasOnlyKeys(p, ["url"]) && typeof p.url === "string" && p.url.length <= 2048 && /^https:\/\/[A-Za-z0-9.-]+(?:[/?#][^\s"'<>`\\^|]*)?$/.test(p.url),
   builtin_folders_set: (p) =>
     isPlain(p) && hasOnlyKeys(p, ["folders"]) && Array.isArray(p.folders) && p.folders.length <= 32 && p.folders.every((f) => typeof f === "string" && f.length > 0 && f.length <= 1024),
   remote_revoke: (p) => isPlain(p) && hasOnlyKeys(p, ["id"]) && typeof p.id === "string" && /^(\*|[A-Za-z0-9_-]{1,32})$/.test(p.id),

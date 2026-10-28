@@ -99,7 +99,8 @@ export function estimateFit(
 
 export type FitClass = "vram" | "partial" | "too-large" | "unknown";
 
-/** The library's fit column: whole model in VRAM, split across VRAM and RAM, or too large for both.
+/** The library's fit column: whole model in VRAM, split across VRAM and RAM, or larger than both
+ *  (the engine then reads the rest from the drive as it runs).
  *  `unknown` when this machine was not detected: no estimate is ever made for an invented machine. */
 export function fitClass(model: Pick<LibraryModel, "sizeGiB">, hw: Pick<HardwareProfile, "gpu" | "ramTotalGiB"> | null): FitClass {
   if (!hw) return "unknown";
@@ -112,6 +113,6 @@ export function fitClass(model: Pick<LibraryModel, "sizeGiB">, hw: Pick<Hardware
 export const FIT_LABELS: Readonly<Record<FitClass, string>> = {
   vram: "Fits in graphics memory",
   partial: "Partial offload",
-  "too-large": "Too large",
+  "too-large": "Reads from the drive",
   unknown: "Unknown",
 };

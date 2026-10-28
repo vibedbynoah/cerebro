@@ -368,6 +368,58 @@ fn group_files(entries: &[(String, u64)]) -> Vec<HubFile> {
     out
 }
 
+/// A shared shard published once for every build of a repository (DeepSeek V4.1's Engram tables:
+/// "...-Engram-IQ4_NL.gguf", loaded as the last shard of each build). Not a model on its own.
+fn is_companion(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    name.contains("engram") && split_key(path).is_none()
+}
+
+/// The declared part count of a split file's key ("prefix-of-00006" -> 6).
+fn declared_parts(key: &str) -> Option<usize> {
+    key.rsplit_once("-of-").and_then(|(_, n)| n.parse().ok())
+}
+
+/// The file names a split build lacks, given its present parts ("x-00001-of-00006.gguf" ...).
+fn missing_parts(parts: &[String]) -> Vec<String> {
+    let Some(key) = parts.first().and_then(|p| split_key(p)) else { return Vec::new() };
+    let Some(n) = declared_parts(&key) else { return Vec::new() };
+    let prefix = key.rsplit_once("-of-").map_or(key.as_str(), |(p, _)| p);
+    (1..=n).map(|i| format!("{prefix}-{i:05}-of-{n:05}.gguf")).filter(|name| !parts.contains(name)).collect()
+}
+
+/// Splits that lack exactly one part take the repository's companion file as that part (its size
+/// counted, its file downloaded with theirs); the companion is not offered on its own.
+fn attach_companions(mut files: Vec<HubFile>) -> Vec<HubFile> {
+    let companions: Vec<HubFile> = files.iter().filter(|f| f.parts.len() == 1 && is_companion(&f.path)).cloned().collect();
+    if companions.len() != 1 {
+        return files;
+    }
+    let c = &companions[0];
+    files.retain(|f| f.path != c.path);
+    for f in &mut files {
+        if missing_parts(&f.parts).len() == 1 {
+            f.size += c.size;
+            f.parts.push(c.path.clone());
+        }
+    }
+    files
+}
+
+/// After a download: a split whose one missing part is the companion gets that part as a hard
+/// link to it (same folder, no second copy of the data), so the model opens from its first part.
+fn link_companion(repo: &str, parts: &[String]) -> Result<(), String> {
+    let Some(comp) = parts.iter().find(|p| is_companion(p)) else { return Ok(()) };
+    let split: Vec<String> = parts.iter().filter(|p| !is_companion(p)).cloned().collect();
+    let missing = missing_parts(&split);
+    let [name] = missing.as_slice() else { return Ok(()) };
+    let (src, dst) = (local_path(repo, comp), local_path(repo, name));
+    if dst.exists() {
+        return Ok(());
+    }
+    std::fs::hard_link(&src, &dst).map_err(|e| format!("The shared part could not be linked as {name}: {e}"))
+}
+
 pub fn files(repo: &str) -> Result<Vec<HubFile>, String> {
     if !valid_repo(repo) {
         return Err("That is not a Hugging Face repository name.".into());
@@ -388,7 +440,7 @@ pub fn files(repo: &str) -> Result<Vec<HubFile>, String> {
             (e.path.clone(), size)
         })
         .collect();
-    let mut out = group_files(&entries);
+    let mut out = attach_companions(group_files(&entries));
     for f in &mut out {
         f.downloaded = f.parts.iter().all(|p| local_path(repo, p).exists());
     }
@@ -650,6 +702,9 @@ pub fn download(repo: &str, file: &str, parts: &[String], total: u64, events: &C
         drop(out);
         std::fs::rename(&tmp, &dest).map_err(|_| "Could not finish the model file.".to_owned())?;
     }
+    if !pipeline {
+        link_companion(repo, parts)?;
+    }
     // An image model is its folder; a GGUF model its first file.
     let first = if pipeline { models_dir().join(repo.replace('/', "__")) } else { local_path(repo, &parts[0]) }.to_string_lossy().into_owned();
     let _ = events.send(DownloadEvent::Progress { done: total.max(done_all), total, bytes_per_sec: done_all as f64 / t0.elapsed().as_secs_f64().max(1e-3) });
@@ -660,6 +715,25 @@ pub fn download(repo: &str, file: &str, parts: &[String], total: u64, events: &C
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shared_engram_file_becomes_the_missing_last_part_of_each_build() {
+        let f = |p: &str, size: u64| (p.to_owned(), size);
+        let mut entries: Vec<(String, u64)> = (1..=5).map(|i| f(&format!("DS-IQ1_M-{i:05}-of-00006.gguf"), 10)).collect();
+        entries.extend((1..=5).map(|i| f(&format!("DS-IQ2_XS-{i:05}-of-00006.gguf"), 20)));
+        entries.push(f("DS-Engram-IQ4_NL.gguf", 100));
+        let out = attach_companions(group_files(&entries));
+        assert_eq!(out.len(), 2, "the Engram file is not offered on its own");
+        for b in &out {
+            assert_eq!(b.parts.len(), 6);
+            assert!(b.parts.contains(&"DS-Engram-IQ4_NL.gguf".to_owned()));
+        }
+        assert_eq!(out.iter().find(|b| b.path.contains("IQ1_M")).map(|b| b.size), Some(150));
+        assert_eq!(missing_parts(&(1..=5).map(|i| format!("DS-IQ1_M-{i:05}-of-00006.gguf")).collect::<Vec<_>>()), vec!["DS-IQ1_M-00006-of-00006.gguf".to_owned()]);
+        // An ordinary repository is unchanged.
+        let plain = attach_companions(group_files(&[f("m-Q4_K_M.gguf", 5)]));
+        assert_eq!(plain.len(), 1);
+    }
 
     #[test]
     fn names_are_checked() {

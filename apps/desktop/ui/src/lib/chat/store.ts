@@ -426,15 +426,11 @@ export function parseMemories(raw: string | null): Memory[] {
   }
 }
 
-export const DEFAULT_MEMORIES: Memory[] = [
-  { id: "m-seed-1", text: "Works mostly in Rust and TypeScript.", scope: "you" },
-  { id: "m-seed-2", text: "Prefers short answers with the command or code first.", scope: "you" },
-  { id: "m-seed-3", text: "Cerebro project: Windows first, everything offline.", scope: "project" },
-];
-
+/** Memories start empty: only what the user tells Cerebro to remember is kept. Earlier builds seeded
+ *  three example facts (ids "m-seed-N"); they are dropped when read back. */
 export function loadMemories(): Memory[] {
   const raw = readPref(MEMORIES_KEY);
-  return raw === null ? DEFAULT_MEMORIES.map((m) => ({ ...m })) : parseMemories(raw);
+  return raw === null ? [] : parseMemories(raw).filter((m) => !m.id.startsWith("m-seed-"));
 }
 
 export function saveMemories(list: readonly Memory[]): void {

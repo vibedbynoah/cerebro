@@ -299,6 +299,8 @@ export function createDesktopService(local: CerebroService): CerebroService {
     // Built-in tools: specs in the same shape as mcp_tools; the folder list is saved by the app.
     builtinTools: () => invoke<McpTool[]>("builtin_tools"),
     builtinFoldersGet: () => invoke<string[]>("builtin_folders_get"),
+    openExternal: (url) => invoke<void>("open_external", { url }),
+    documentsDir: () => invoke<string | null>("documents_dir"),
     builtinFoldersSet: (folders) => invoke<string[]>("builtin_folders_set", { folders }),
 
     trainerStatus: () => invoke<TrainerStatus>("trainer_status"),

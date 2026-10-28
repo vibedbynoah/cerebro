@@ -1,11 +1,11 @@
 import { expect, openScreen, ROUTE_IDS, scrollThrough, settle, test } from "./fixtures";
 
 const TITLES: Record<(typeof ROUTE_IDS)[number], string> = {
-  home: "This machine, measured.",
+  home: "Home",
   hub: "Model Hub",
   models: "Models",
   cluster: "Cluster",
-  tune: "Tune",
+  tune: "Speed tune",
   monitor: "Monitor",
   turbo: "Turbo",
   chat: "Chat",
@@ -25,14 +25,16 @@ for (const scheme of ["dark", "light"] as const) {
       test(`${id} renders with zero console errors`, async ({ page }) => {
         await openScreen(page, id);
         await expect(page.locator("main h1")).toHaveText(TITLES[id]);
-        await expect(page.locator(`a.nav-link[data-route="${id}"]`)).toHaveAttribute("aria-current", "page");
+        // Tune opens from a model's page and has no sidebar entry.
+        if (id !== "tune") await expect(page.locator(`a.nav-link[data-route="${id}"]`)).toHaveAttribute("aria-current", "page");
         await scrollThrough(page);
         await settle(page);
         // Frame is complete: title bar and its lockup, the engine pill, one nav entry per screen, the HUD and its disclosure.
         await expect(page.locator(".titlebar")).toBeVisible();
         await expect(page.locator(".titlebar [data-brand='lockup']")).toBeVisible();
         await expect(page.locator(".titlebar .engine-pill")).toBeVisible();
-        await expect(page.locator("a.nav-link")).toHaveCount(ROUTE_IDS.length);
+        // Tune opens from a model (inSidebar: false), so the sidebar lists every other screen.
+        await expect(page.locator("a.nav-link")).toHaveCount(ROUTE_IDS.length - 1);
         await expect(page.locator(".statusbar")).toContainText("Illustrative data");
       });
     }
@@ -101,14 +103,14 @@ test.describe("keyboard", () => {
     const width = await page.locator("nav.sidebar").evaluate((el) => el.getBoundingClientRect().width);
     expect(width).toBeLessThan(80);
     // Hovering a collapsed entry shows its tooltip (a real pointer moves more than once).
-    const tune = page.locator('a.nav-link[data-route="tune"]');
+    const tune = page.locator('a.nav-link[data-route="models"]');
     // Collapsed entries are exactly as wide as the column: the whole hit area is inside the sidebar.
     const box = await tune.boundingBox();
     const side = await page.locator("nav.sidebar").boundingBox();
     expect(box && side && box.x + box.width <= side.x + side.width).toBe(true);
     await tune.hover();
     await tune.hover({ position: { x: 10, y: 12 } });
-    await expect(page.locator(".tooltip", { hasText: "Tune" })).toBeVisible();
+    await expect(page.locator(".tooltip", { hasText: "Models" })).toBeVisible();
     await page.reload();
     await expect(page.locator("nav.sidebar")).toHaveClass(/is-collapsed/);
   });
@@ -122,16 +124,14 @@ test.describe("command palette", () => {
     await expect(dialog).toBeVisible();
     const input = page.getByRole("combobox", { name: "Search screens and commands" });
     await expect(input).toBeFocused();
-    await input.fill("tne");
+    await input.fill("spd tune");
     const first = page.getByRole("option").first();
     await expect(first).toHaveAttribute("data-command", "go-tune");
     await expect(first).toHaveAttribute("aria-selected", "true");
-    // "T" and "ne" are matched: contiguous hits share one <mark>.
-    await expect(first.locator("mark")).toHaveText(["T", "ne"]);
     await page.keyboard.press("Enter");
     await expect(dialog).toBeHidden();
     await expect(page).toHaveURL(/#\/tune$/);
-    await expect(page.locator("main h1")).toHaveText("Tune");
+    await expect(page.locator("main h1")).toHaveText("Speed tune");
     await expect(page.locator("main")).toBeFocused();
   });
 

@@ -153,6 +153,8 @@ pub fn run() -> Result<(), tauri::Error> {
             commands::chat_tool_answer,
             commands::builtin_tools,
             commands::builtin_folders_get,
+            commands::open_external,
+            commands::documents_dir,
             commands::builtin_folders_set,
             commands::mcp_server_get,
             commands::mcp_server_enable,

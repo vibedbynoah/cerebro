@@ -77,7 +77,7 @@ test("hardware detection fails: setup still runs, says so, and lists every model
   await expect(page.locator(".summary")).toContainText("Not checked");
   await expect(page.locator(".finish-payoff")).toContainText("gpt-oss-20b");
   await primary(page).click();
-  await expect(page.locator("main h1")).toHaveText("This machine, measured.");
+  await expect(page.locator("main h1")).toHaveText("Home");
   expect((await stored(page))?.model).toBe(chosen);
 });
 
@@ -113,7 +113,7 @@ test("the model list fails: setup says so plainly and still finishes, with no mo
   await toTermsAndFinish(page);
   await expect(page.locator(".summary")).toContainText("None yet");
   await primary(page).click();
-  await expect(page.locator("main h1")).toHaveText("This machine, measured.");
+  await expect(page.locator("main h1")).toHaveText("Home");
   expect((await stored(page))?.model).toBeNull();
 });
 
@@ -131,7 +131,7 @@ test("if setup itself breaks, a fallback still offers the terms and Accept, and 
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.getByRole("button", { name: "Accept and open Cerebro" }).click();
-  await expect(page.locator("main h1")).toHaveText("This machine, measured.");
+  await expect(page.locator("main h1")).toHaveText("Home");
   const record = await page.evaluate((key) => window.localStorage.getItem(key), ONBOARDING_KEY);
   expect(JSON.parse(record ?? "null")).toEqual({ v: 1, completed: true, termsVersion: TERMS_VERSION, model: null });
 });
@@ -153,7 +153,7 @@ test("on the model step, Down then Enter picks the second model and continues", 
   await expect(step(page, "terms")).toBeVisible();
   await page.getByRole("button", { name: "Accept and continue" }).click();
   await primary(page).click();
-  await expect(page.locator("main h1")).toHaveText("This machine, measured.");
+  await expect(page.locator("main h1")).toHaveText("Home");
   expect((await stored(page))?.model).toBe(chosen);
 });
 
@@ -178,7 +178,7 @@ test("a stored model that no longer loads is never written back; Decide later st
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Accept and continue" }).click();
   await primary(page).click();
-  await expect(page.locator("main h1")).toHaveText("This machine, measured.");
+  await expect(page.locator("main h1")).toHaveText("Home");
   expect((await stored(page))?.model).toBeNull();
 
   // Visiting the model step: the stale id is replaced by the best fit, and Decide later stores null.
@@ -199,7 +199,7 @@ test("a stored model that no longer loads is never written back; Decide later st
   await toTermsAndFinish(page);
   await expect(page.locator(".finish-payoff")).toContainText("No first model yet");
   await primary(page).click();
-  await expect(page.locator("main h1")).toHaveText("This machine, measured.");
+  await expect(page.locator("main h1")).toHaveText("Home");
   expect((await stored(page))?.model).toBeNull();
 });
 

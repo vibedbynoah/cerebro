@@ -43,7 +43,8 @@ export function fitOf(sizeGiB: number, vramGiB: number, ramGiB: number): { label
   if (vramGiB > 0 && need <= vramGiB * 0.92) return { label: "In graphics memory", tone: "good" };
   if (need <= vramGiB * 0.92 + ramGiB * 0.7) return { label: vramGiB > 0 ? "Graphics + system memory" : "In system memory", tone: vramGiB > 0 ? "ok" : "slow" };
   if (need <= ramGiB * 0.9 + vramGiB) return { label: "Tight: most of system memory", tone: "slow" };
-  return { label: "Too large for this computer", tone: "no" };
+  // Still downloadable and runnable: the engine reads what memory cannot hold from the drive.
+  return { label: "Larger than memory: reads from the drive", tone: "no" };
 }
 
 /** True for an Unsloth Dynamic quant: "UD-" in the quant label or in the file name. */

@@ -1,7 +1,7 @@
 import { expect, openScreen, test } from "./fixtures";
 
 test.describe("MCP server catalogue", () => {
-  test("searching the catalogue and adding a server puts it in the server list", async ({ page }) => {
+  test("searching the catalogue and one click on Add starts the server", async ({ page }) => {
     await openScreen(page, "tools");
     const panel = page.getByTestId("mcp-catalogue");
     await panel.scrollIntoViewIfNeeded();
@@ -13,19 +13,25 @@ test.describe("MCP server catalogue", () => {
     await expect(panel.getByTestId("mcp-catalogue-count")).toHaveText(/^1 of \d+ servers$/);
 
     await panel.getByRole("button", { name: "Add DuckDuckGo" }).click();
-    await expect(page.getByLabel("Server name")).toHaveValue("duckduckgo");
-    await expect(page.getByLabel("Server command")).toHaveValue("uvx");
-    await expect(page.getByLabel("Server arguments, quoted parts stay together")).toHaveValue("duckduckgo-mcp-server");
-    await expect(page.getByTestId("mcp-catalogue-keys")).toContainText("needs no keys");
-
-    await page.getByRole("button", { name: "Add server" }).click();
     const server = page.getByTestId("mcp-server-duckduckgo");
     await expect(server).toBeVisible();
     await expect(server.locator("code")).toHaveText("uvx duckduckgo-mcp-server");
     await expect(server).toContainText("running");
+    await expect(panel.getByRole("button", { name: "Add DuckDuckGo" })).toHaveText("Added");
   });
 
-  test("category chips filter the grid, and a server that needs a key shows secret fields", async ({ page }) => {
+  test("a folder argument gets the workspace folder or Documents, with no form", async ({ page }) => {
+    await openScreen(page, "tools");
+    const panel = page.getByTestId("mcp-catalogue");
+    await panel.scrollIntoViewIfNeeded();
+    await page.getByLabel("Search servers").fill("filesystem");
+    await panel.getByRole("button", { name: "Add Filesystem" }).click();
+    const server = page.getByTestId("mcp-server-filesystem");
+    await expect(server).toBeVisible();
+    await expect(server.locator("code")).not.toContainText("<folder");
+  });
+
+  test("category chips filter the grid, and a server that needs a key asks for it on its card", async ({ page }) => {
     await openScreen(page, "tools");
     const panel = page.getByTestId("mcp-catalogue");
     await panel.scrollIntoViewIfNeeded();
@@ -38,11 +44,14 @@ test.describe("MCP server catalogue", () => {
     await page.getByLabel("Search servers").fill("sentry");
     await panel.getByRole("button", { name: "Add Sentry" }).click();
 
-    const token = page.getByLabel("Access token");
+    const keys = panel.getByTestId("mcp-card-keys-sentry");
+    const token = keys.getByLabel("Access token");
     await expect(token).toHaveAttribute("type", "password");
-    await expect(page.getByTestId("mcp-catalogue-keys")).toContainText("From the catalogue");
+    await expect(token).toBeFocused();
+    await expect(page.getByTestId("mcp-server-sentry")).toHaveCount(0);
 
-    await page.getByRole("button", { name: "Clear" }).click();
-    await expect(page.getByTestId("mcp-catalogue-keys")).toHaveCount(0);
+    await token.fill("sntrys_test_token");
+    await panel.getByRole("button", { name: "Add Sentry" }).click();
+    await expect(page.getByTestId("mcp-server-sentry")).toBeVisible();
   });
 });

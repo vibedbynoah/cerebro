@@ -32,7 +32,7 @@ export interface RouteDef {
   inSidebar?: false;
 }
 
-export const ROUTES: readonly RouteDef[] = [
+const ALL_ROUTES: readonly RouteDef[] = [
   { id: "home", label: "Home", icon: "home", group: "Run", summary: "What is loaded, how fast it runs and what is protecting it.", keywords: "overview dashboard start" },
   { id: "hub", label: "Model Hub", icon: "hub", group: "Run", summary: "Find models that fit this machine and download them. Searching the catalogue uses the network; everything else works offline.", keywords: "download browse catalog gguf" },
   { id: "chat", label: "Chat", icon: "chat", group: "Run", summary: "Talk to a local model. It runs on this computer.", keywords: "conversation prompt assistant agent coding" },
@@ -77,6 +77,10 @@ export const ROUTES: readonly RouteDef[] = [
   { id: "about", label: "About", icon: "about", group: "System", summary: "What Cerebro does for you, the version on this machine and the documents that come with it.", keywords: "version licence license credits mark logo info help" },
 ];
 
+/** The desktop build has no separate Plugins screen: plugins there are MCP servers, which Tools
+ *  manages, so the two pages were the same. Its old links open Tools. */
+export const ROUTES: readonly RouteDef[] = __DESKTOP__ ? ALL_ROUTES.filter((r) => r.id !== "plugins") : ALL_ROUTES;
+
 const IDS: ReadonlySet<string> = new Set(ROUTES.map((r) => r.id));
 
 export function isRouteId(value: string): value is RouteId {
@@ -94,6 +98,7 @@ export function routeById(id: RouteId): RouteDef {
 export function parseHash(hash: string): RouteId {
   const match = /^#\/([a-z]+)\/?(?:\?[^#?]*)?$/.exec(hash);
   const id = match?.[1];
+  if (__DESKTOP__ && id === "plugins") return "tools";
   return id !== undefined && isRouteId(id) ? id : "home";
 }
 

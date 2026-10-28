@@ -10,7 +10,7 @@ import { useService } from "../service/context";
 import { createLiveStats } from "../service/live";
 import { useAppState } from "../state";
 
-// Quick actions, the daily spotlight, first steps, news and recent activity load after first paint.
+// Quick actions and recent activity load after first paint.
 const Discover = lazy(() => import("./home/Discover").then((m) => ({ default: m.Discover })));
 
 export function Home(): JSX.Element {
@@ -36,22 +36,13 @@ export function Home(): JSX.Element {
 
   return (
     <div class="screen">
-      <ScreenHeader
-        route="home"
-        title="This machine, measured."
-        lede={
-          <>
-            The fastest safe configuration for each model, measured on this computer instead of guessed, running with its protections on and served on{" "}
-            <Term k="loopback" /> only.
-          </>
-        }
-      />
+      <ScreenHeader route="home" title="Home" />
 
-      <Discover tuned={tuned() !== undefined} models={data()?.models.length ?? 0} />
+      <Discover />
       <Show when={data()}>
         {(d) => (
           <>
-            <Section id="now" title="Right now" description="The model that is loaded and what it is using.">
+            <Section id="now" title="Now">
               <div class="tile-grid">
                 <Show when={live()} fallback={<TilePlaceholder count={2} />}>
                   {(s) => (

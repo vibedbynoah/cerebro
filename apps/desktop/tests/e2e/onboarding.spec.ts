@@ -82,12 +82,12 @@ test("a fresh profile walks the whole setup by keyboard and lands in the app, re
   await page.locator("#onb-step-title").focus();
   await page.keyboard.press("Enter");
 
-  await expect(page.locator("main h1")).toHaveText("This machine, measured.");
+  await expect(page.locator("main h1")).toHaveText("Home");
   await expect(page.locator("main")).toBeFocused();
   expect(JSON.parse((await stored(page)) ?? "null")).toEqual({ v: 1, completed: true, termsVersion: TERMS_VERSION, model: chosen });
 
   await page.reload();
-  await expect(page.locator("main h1")).toHaveText("This machine, measured.");
+  await expect(page.locator("main h1")).toHaveText("Home");
   await expect(page.locator(".onb")).toHaveCount(0);
 });
 
@@ -153,7 +153,7 @@ test("Escape skips to the terms; Back and the step rail move around; finishing i
   await primary(page).click();
   await expect(step(page, "finish")).toBeVisible();
   await primary(page).click();
-  await expect(page.locator("main h1")).toHaveText("This machine, measured.");
+  await expect(page.locator("main h1")).toHaveText("Home");
   const record = JSON.parse((await stored(page)) ?? "null") as { completed: boolean; termsVersion: string };
   expect(record.completed).toBe(true);
   expect(record.termsVersion).toBe(TERMS_VERSION);
@@ -169,7 +169,7 @@ test("new terms reopen setup at the terms step only, with a notice", async ({ pa
   await expect(page.locator(".onb-changed")).toContainText("The terms changed");
   await page.getByRole("button", { name: "Accept and continue" }).click();
   await primary(page).click();
-  await expect(page.locator("main h1")).toHaveText("This machine, measured.");
+  await expect(page.locator("main h1")).toHaveText("Home");
 });
 
 test("a malformed or tampered record just shows setup again", async ({ page }) => {

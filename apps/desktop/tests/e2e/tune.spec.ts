@@ -37,7 +37,7 @@ const statusLine = (page: Page) => page.locator(".screen--tune > [role='status']
 async function startTune(page: Page, mocks: string[], model: string, profile: "chat" | "coding" | "long-docs"): Promise<void> {
   const query = mocks.map((m) => `mock=${m}`).join("&");
   await page.goto(`/${query ? `?${query}` : ""}#/tune`);
-  await expect(page.locator("main h1")).toHaveText("Tune");
+  await expect(page.locator("main h1")).toHaveText("Speed tune");
   await page.locator(`.pick-card[data-model="${model}"]`).click();
   await page.locator(`.pick-card[data-profile="${profile}"]`).click();
   await page.getByRole("button", { name: "Start tune" }).click();
@@ -254,7 +254,7 @@ test.describe("cancel, resume and leaving", () => {
     await expect(page.locator(".winner")).toBeVisible({ timeout: 25_000 });
     await expect(page.locator(".winner--enter")).toHaveCount(1);
     await page.getByRole("link", { name: "Home" }).first().click();
-    await expect(page.locator("main h1")).not.toHaveText("Tune");
+    await expect(page.locator("main h1")).not.toHaveText("Speed tune");
     await page.getByRole("link", { name: "Tune" }).first().click();
     await expect(page.locator(".winner")).toBeVisible();
     await expect(page.locator(".winner--enter")).toHaveCount(0);
@@ -289,7 +289,7 @@ test.describe("cancel, resume and leaving", () => {
   test("a tune that finishes while another screen is open says so in one toast", async ({ page }) => {
     await startTune(page, ["fast-tune"], SMALL.id, "chat");
     await page.getByRole("link", { name: "Home" }).first().click();
-    await expect(page.locator("main h1")).not.toHaveText("Tune");
+    await expect(page.locator("main h1")).not.toHaveText("Speed tune");
     const toast = page.locator(".toast", { hasText: "Tune finished" });
     await expect(toast).toBeVisible({ timeout: 25_000 });
     await expect(toast).toContainText(SMALL.name);

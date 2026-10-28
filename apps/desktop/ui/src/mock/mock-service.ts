@@ -1039,6 +1039,8 @@ export function createMockService(options: MockServiceOptions = {}): CerebroServ
 
     builtinTools: () => later(0, () => MOCK_BUILTIN_TOOLS.map((t) => ({ ...t }))),
     builtinFoldersGet: () => later(0, () => [...folders]),
+    openExternal: (url) => later(0, () => void window.open(url, "_blank", "noopener,noreferrer")),
+    documentsDir: () => later(0, () => "C:\\Users\\demo\\Documents"),
     builtinFoldersSet: (list) =>
       later(0, () => {
         if (!Array.isArray(list) || list.length > 32 || !list.every((f) => typeof f === "string" && f.length > 0 && f.length <= 1024)) throw new TypeError("Invalid workspace folders");

@@ -103,6 +103,8 @@
     "allow-chat-tool-answer",
     "allow-builtin-tools",
     "allow-builtin-folders-get",
+    "allow-open-external",
+    "allow-documents-dir",
     "allow-builtin-folders-set",
     "allow-mcp-server-get",
     "allow-mcp-server-enable",

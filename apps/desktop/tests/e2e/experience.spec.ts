@@ -86,7 +86,7 @@ test.describe("during setup", () => {
     await expect(step(page, "finish")).toBeVisible();
     await expect(page.locator(".summary")).toContainText("Beginner");
     await primary(page).click();
-    await expect(page.locator("main h1")).toHaveText("This machine, measured.");
+    await expect(page.locator("main h1")).toHaveText("Home");
     expect(await pref(page, EXPERIENCE_KEY)).toBe("beginner");
     expect(JSON.parse((await pref(page, SETUP_CONFIG_KEY)) ?? "null")).toMatchObject({ modelId: "gemma-4-12b-it", quantId: "gemma-4-12b-it--ud-q4-k-xl", contextLength: 32768, gpuLayers: 48 });
   });
@@ -200,7 +200,7 @@ test.describe("during setup", () => {
     await expect(page.locator(".summary")).toContainText("Advanced");
     await expect(page.locator(".summary")).toContainText("16K context");
     await primary(page).click();
-    await expect(page.locator("main h1")).toHaveText("This machine, measured.");
+    await expect(page.locator("main h1")).toHaveText("Home");
     expect(await pref(page, EXPERIENCE_KEY)).toBe("advanced");
     expect(JSON.parse((await pref(page, SETUP_CONFIG_KEY)) ?? "null")).toMatchObject({ quantId: "gemma-4-12b-it--ud-q4-k-xl", contextLength: 16384, temperature: 1 });
   });
@@ -220,7 +220,7 @@ test.describe("during setup", () => {
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "Accept and continue" }).click();
     await primary(page).click();
-    await expect(page.locator("main h1")).toHaveText("This machine, measured.");
+    await expect(page.locator("main h1")).toHaveText("Home");
 
     // Run setup again: Advanced is still chosen and the stored plan is the starting point.
     await page.goto("/#/settings");
@@ -306,7 +306,7 @@ test.describe("after setup", () => {
   test("Tune hides raw flags in Beginner and shows them in Advanced", async ({ page }) => {
     await page.addInitScript(([k]) => window.localStorage.setItem(k, "beginner"), [EXPERIENCE_KEY] as const);
     await page.goto("/?mock=fast-tune&mock=tune-hold-screen#/tune");
-    await expect(page.locator("main h1")).toHaveText("Tune");
+    await expect(page.locator("main h1")).toHaveText("Speed tune");
     await page.locator('.pick-card[data-model="qwen3-coder-30b-a3b-q4km"]').click();
     await page.locator('.pick-card[data-profile="chat"]').click();
     await page.getByRole("button", { name: "Start tune" }).click();

@@ -518,7 +518,7 @@ export function LiveHub(): JSX.Element {
                                       <Show when={p()?.error}>
                                         <span class="livehub__err">{p()!.error}</span>
                                       </Show>
-                                      <button class={`btn ${isRec() ? "btn--primary" : "btn--secondary"}`} type="button" disabled={blocked() || fit().tone === "no"} onClick={() => start(repo()!, f)}>
+                                      <button class={`btn ${isRec() ? "btn--primary" : "btn--secondary"}`} type="button" disabled={blocked()} onClick={() => start(repo()!, f)}>
                                         {p()?.error ? "Resume" : "Download"}
                                       </button>
                                     </>

@@ -123,8 +123,10 @@ test.describe("chat", () => {
     await waitDone(page);
     await page.getByRole("button", { name: "Memory" }).click();
     await expect(page.locator(".memory__text").last()).toHaveValue("I use an RTX 3070 Ti laptop.");
+    // Only what the user asked to remember is kept: nothing is seeded.
+    await expect(page.locator(".memory__text")).toHaveCount(1);
     await page.getByRole("button", { name: /^Forget: I use an RTX/ }).click();
-    await expect(page.locator(".memory__text")).toHaveCount(3);
+    await expect(page.locator(".memory__text")).toHaveCount(0);
     await page.getByRole("textbox", { name: "New memory" }).fill("Likes dark mode.");
     await page.getByRole("button", { name: "Add", exact: true }).click();
     await expect(page.locator(".memory__text").last()).toHaveValue("Likes dark mode.");

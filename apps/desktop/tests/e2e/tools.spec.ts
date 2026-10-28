@@ -76,6 +76,7 @@ test.describe("MCP servers", () => {
   test("the Add form saves a web address server and shows it running", async ({ page }) => {
     await openScreen(page, "tools");
     const mcp = page.getByTestId("mcp-servers");
+    await mcp.getByText("Add a custom server").click();
     await mcp.getByRole("radio", { name: "Web address" }).click();
     await expect(mcp.getByLabel("Server command")).toHaveCount(0);
     await mcp.getByLabel("Server name").fill("webdocs");
@@ -90,6 +91,7 @@ test.describe("MCP servers", () => {
   test("a web address without http(s) is refused", async ({ page }) => {
     await openScreen(page, "tools");
     const mcp = page.getByTestId("mcp-servers");
+    await mcp.getByText("Add a custom server").click();
     await mcp.getByRole("radio", { name: "Web address" }).click();
     await mcp.getByLabel("Server name").fill("badweb");
     await mcp.getByLabel("Server address").fill("example.com/mcp");

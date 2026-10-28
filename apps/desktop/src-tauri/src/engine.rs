@@ -164,9 +164,11 @@ fn walk(dir: &Path, depth: usize, max: usize, out: &mut Vec<PathBuf>) {
         } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("gguf")) {
             let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
             // Vision projectors are paired with their model, not listed; only the first part of a
-            // split model is opened (the reader follows the rest).
+            // split model is opened (the reader follows the rest). A shared shard such as DeepSeek
+            // V4.1's Engram tables is part of each build, not a model of its own.
             let split_tail = name.contains("-of-") && !name.contains("-00001-of-");
-            if !name.starts_with("mmproj") && !split_tail {
+            let companion = name.contains("engram") && !name.contains("-of-");
+            if !name.starts_with("mmproj") && !split_tail && !companion {
                 out.push(p);
             }
         }

@@ -221,6 +221,10 @@ export interface CerebroService {
   // user added on the Tools screen. Empty folder list means every built-in tool refuses. ----
   builtinTools(): Promise<McpTool[]>;
   builtinFoldersGet(): Promise<string[]>;
+  /** Opens an https:// address in the system browser (the window itself never navigates away). */
+  openExternal(url: string): Promise<void>;
+  /** The user's Documents folder (else home): the folder file servers get when added in one click. */
+  documentsDir(): Promise<string | null>;
   /** Validates, saves and returns the new list; rejects when a path does not exist or is not a folder. */
   builtinFoldersSet(folders: string[]): Promise<string[]>;
 

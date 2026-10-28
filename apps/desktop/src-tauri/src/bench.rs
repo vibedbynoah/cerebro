@@ -748,6 +748,7 @@ mod tests {
             est_decode_tps: 12.0,
             drive: cerebro_engine::placement::Drive::Nvme,
             notes: vec!["20 of 40 layers on the graphics card.".to_owned()],
+            head_on_gpu: false,
         };
         let p = placement_of("split", Some(&plan), 20, 40);
         assert_eq!(p.choice, "split");
