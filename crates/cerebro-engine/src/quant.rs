@@ -699,6 +699,76 @@ unsafe fn dot_q8_0_q8_avx2(row: &[u8], a: &QAct) -> f32 {
 /// IQ4_NL row (32-value blocks: f16 scale, 16 bytes of 4-bit indices into a fixed table of 16 int8
 /// values) times the per-32 int8 activations. Unsloth Dynamic files use IQ4_NL for expert down
 /// projections and large lookup tables.
+/// IQ4_XS row (256-value blocks of 136 bytes: f16 scale, 16 bits of sub-scale high bits, 4 bytes of
+/// 4-bit sub-scale low bits, 128 bytes of 4-bit indices into the IQ4_NL table) times the per-32
+/// int8 activations. Each 32-value sub-block is laid out like an IQ4_NL block (low nibbles are
+/// values 0-15, high nibbles 16-31) with weight d * (6-bit scale - 32). Without this kernel the
+/// format fell back to dequantising every row to floats, several times slower.
+pub fn dot_iq4xs_q8(row: &[u8], a: &QAct) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 support was checked at run time just above.
+            return unsafe { dot_iq4xs_q8_avx2(row, a) };
+        }
+    }
+    let kv = &crate::iq_tables::KVALUES_IQ4NL;
+    let mut s = 0f32;
+    for (bi, blk) in row.chunks_exact(136).enumerate() {
+        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+        let sh = u16::from_le_bytes([blk[2], blk[3]]);
+        for ib in 0..8 {
+            let k = bi * 8 + ib;
+            let qs = &blk[8 + 16 * ib..8 + 16 * ib + 16];
+            let x = &a.q[k * 32..k * 32 + 32];
+            let mut acc = 0i32;
+            for j in 0..16 {
+                acc += kv[(qs[j] & 0xf) as usize] as i32 * x[j] as i32 + kv[(qs[j] >> 4) as usize] as i32 * x[j + 16] as i32;
+            }
+            s += d * iq4xs_scale(blk, sh, ib) as f32 * a.d[k] * acc as f32;
+        }
+    }
+    s
+}
+
+/// Sub-block `ib`'s scale of an IQ4_XS block, centred: 6 bits (4 low, 2 high) minus 32.
+#[inline(always)]
+fn iq4xs_scale(blk: &[u8], sh: u16, ib: usize) -> i32 {
+    (((blk[4 + ib / 2] >> (4 * (ib % 2))) & 0xf) as i32 | ((((sh >> (2 * ib)) & 3) as i32) << 4)) - 32
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_iq4xs_q8_avx2(row: &[u8], a: &QAct) -> f32 {
+    use std::arch::x86_64::*;
+    let values = _mm_loadu_si128(crate::iq_tables::KVALUES_IQ4NL.as_ptr() as *const __m128i);
+    let m4 = _mm_set1_epi8(0x0f);
+    let ones = _mm256_set1_epi16(1);
+    let mut acc = _mm256_setzero_ps();
+    for (bi, blk) in row.chunks_exact(136).enumerate() {
+        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+        let sh = u16::from_le_bytes([blk[2], blk[3]]);
+        for ib in 0..8 {
+            let k = bi * 8 + ib;
+            let q4 = _mm_loadu_si128(blk.as_ptr().add(8 + 16 * ib) as *const __m128i);
+            let lo = _mm_shuffle_epi8(values, _mm_and_si128(q4, m4));
+            let hi = _mm_shuffle_epi8(values, _mm_and_si128(_mm_srli_epi16(q4, 4), m4));
+            let w = _mm256_set_m128i(hi, lo);
+            let x = _mm256_loadu_si256(a.q.as_ptr().add(k * 32) as *const __m256i);
+            let aw = _mm256_sign_epi8(w, w);
+            let sx = _mm256_sign_epi8(x, w);
+            let p32 = _mm256_madd_epi16(_mm256_maddubs_epi16(aw, sx), ones);
+            let wd = d * iq4xs_scale(blk, sh, ib) as f32;
+            acc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(p32), _mm256_set1_ps(wd * *a.d.get_unchecked(k)), acc);
+        }
+    }
+    let hi = _mm256_extractf128_ps(acc, 1);
+    let s = _mm_add_ps(hi, _mm256_castps256_ps128(acc));
+    let s = _mm_add_ps(s, _mm_movehl_ps(s, s));
+    let s = _mm_add_ss(s, _mm_shuffle_ps(s, s, 1));
+    _mm_cvtss_f32(s)
+}
+
 pub fn dot_iq4nl_q8(row: &[u8], a: &QAct) -> f32 {
     #[cfg(target_arch = "x86_64")]
     {
@@ -2233,6 +2303,16 @@ mod iq_tests {
         }
         let (x, qa) = acts(512);
         close(dot_iq4nl_q8(&row, &qa), dot_row(DType::IQ4NL, &row, &x));
+    }
+
+    #[test]
+    fn iq4xs_integer_dot_tracks_the_float_dot() {
+        let mut row = rand_bytes(136 * 4, 13);
+        for b in 0..4 {
+            row[b * 136..b * 136 + 2].copy_from_slice(&0x2400u16.to_le_bytes());
+        }
+        let (x, qa) = acts(1024);
+        close(dot_iq4xs_q8(&row, &qa), dot_row(DType::IQ4XS, &row, &x));
     }
 
     #[test]

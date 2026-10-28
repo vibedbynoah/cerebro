@@ -224,7 +224,9 @@ impl Model {
         let has_hc = g.u64(&k("hyper_connection.count")).is_ok();
         let attn_gate = g.tensors.iter().any(|(k, t)| k.starts_with("blk.") && k.ends_with(".attn_q.weight") && t.rows() == 2 * n_head * head_dim);
         let cfg = Config {
-            n_layer: g.u64(&k("block_count"))? as usize,
+            // Multi-token-prediction heads (`nextn_predict_layers`, e.g. Qwen3.8 MTP builds) are stored
+            // as the last blocks; they draft extra tokens and are not part of the forward pass.
+            n_layer: (g.u64(&k("block_count"))? as usize).saturating_sub(g.u64(&k("nextn_predict_layers")).map_or(0, |v| v as usize)),
             dim,
             // Mixture-of-experts files may give only the experts' size.
             ffn: g.u64(&k("feed_forward_length")).map(|v| v as usize).unwrap_or(0),
@@ -1187,6 +1189,7 @@ pub(crate) fn dot_any(dt: DType, row: &[u8], x: &[f32], qa: &QAct) -> f32 {
         DType::Q8_0 => dot_q8_0_q8(row, qa),
         DType::Q4K | DType::Q5K | DType::Q6K => dot_k_q8(dt, row, qa),
         DType::IQ4NL => crate::quant::dot_iq4nl_q8(row, qa),
+        DType::IQ4XS if qa.q.len() % 256 == 0 => crate::quant::dot_iq4xs_q8(row, qa),
         DType::IQ2S => crate::quant::dot_iq2s_k8(row, qa).unwrap_or_else(|| dot_row(dt, row, x)),
         DType::IQ2XXS => crate::quant::dot_iq2xxs_k8(row, qa).unwrap_or_else(|| dot_row(dt, row, x)),
         DType::IQ3XXS => crate::quant::dot_iq3xxs_k8(row, qa).unwrap_or_else(|| dot_row(dt, row, x)),
