@@ -1955,8 +1955,8 @@ impl Session {
         if force_layers == Some(0) {
             return Err(Error::Unsupported("no layers on the graphics card (chosen when loading)".into()));
         }
-        // Hyper-connections (qwen4exp) have no GPU kernels yet; shared experts and DeltaNet MoE
-        // layers run on the card with the routed experts split between it and the processor.
+        // Shared experts, DeltaNet and hyper-connection MoE layers run on the card with the routed
+        // experts split between it and the processor.
         if m.g4.is_some() {
             // Gemma 4: the whole model on the card (gpu_g4.rs); the processor keeps no cache.
             let g = crate::gpu_g4::G4Gpu::load(m, max_ctx)?;
@@ -1965,7 +1965,9 @@ impl Session {
             s.g4gpu = Some(g);
             return Ok(s);
         }
-        if m.hc.is_some() {
+        // Hyper-connections run on the card in the mixture-of-experts path (gpu.rs GHc); a dense
+        // model with them would need its batched path extended first.
+        if m.hc.is_some() && m.cfg.n_expert == 0 {
             return Err(Error::Unsupported("this model's layer types run on the processor for now".into()));
         }
         let mut g = crate::gpu::GpuState::load_with(m, max_ctx, force_layers)?;

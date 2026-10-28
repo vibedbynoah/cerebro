@@ -152,6 +152,12 @@ struct Funcs {
     scatter_add: CudaFunction,
     add_inplace: CudaFunction,
     shared_gate_add: CudaFunction,
+    hc_start: CudaFunction,
+    hc_norm: CudaFunction,
+    hc_lo_quant: CudaFunction,
+    hc_out: CudaFunction,
+    hc_inject: CudaFunction,
+    hc_combine: CudaFunction,
     add_bias: CudaFunction,
     attn_tiled: CudaFunction,
 }
@@ -209,6 +215,10 @@ struct ExpMat {
     cols: usize,
     /// Bytes of one expert on the GPU.
     bytes: usize,
+    /// Padding (see load_moe): the file's rows of this matrix (the rest of `rows` are zero), and
+    /// the file's bytes per row when each row is widened with zero blocks (0: not widened).
+    src_rows: usize,
+    src_row: usize,
 }
 
 /// VRAM expert cache and per-layer MoE scratch for hybrid decoding.
@@ -282,6 +292,32 @@ impl MoeGpu {
         [one(&m.gate), one(&m.up), one(&m.down)]
     }
 
+    /// Whether a layer's experts are padded in their slots (load_moe), so they are copied row by row.
+    fn padded(kinds: &[ExpMat; 3]) -> bool {
+        kinds.iter().any(|k| k.src_row > 0 || k.src_rows != k.rows)
+    }
+
+    /// One expert in its slot's layout: each part in the GPU's format, gate and up with zero rows up
+    /// to the padded hidden size, down rows widened with zero blocks (see load_moe).
+    fn expert_gpu(model: &Model, li: usize, e: usize, kinds: &[ExpMat; 3]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(kinds.iter().map(|k| k.bytes).sum());
+        for ((dt, src), k) in Self::expert_bytes(model, li, e).into_iter().zip(kinds) {
+            let b = to_gpu_layout(dt, src);
+            let start = out.len();
+            if k.src_row > 0 {
+                let dst_row = k.bytes / k.rows;
+                for r in b.chunks_exact(k.src_row) {
+                    out.extend_from_slice(r);
+                    out.resize(out.len() + dst_row - k.src_row, 0);
+                }
+            } else {
+                out.extend_from_slice(&b);
+            }
+            out.resize(start + k.bytes, 0);
+        }
+        out
+    }
+
     /// The file byte ranges of one expert (gate, up, down).
     fn expert_ranges(model: &Model, li: usize, e: usize) -> [(usize, usize); 3] {
         let Ffn::Moe(m) = &model.layers()[li].ffn else { unreachable!() };
@@ -304,11 +340,19 @@ impl MoeGpu {
             }
         }
         let mut off = slot * self.slot_bytes;
-        for (dt, src) in Self::expert_bytes(model, li, e) {
-            let bytes = to_gpu_layout(dt, src);
-            let mut view = self.pool.slice_mut(off..off + bytes.len());
-            stream.memcpy_htod(&bytes, &mut view).map_err(gerr)?;
-            off += bytes.len();
+        match self.kinds[li].as_ref().filter(|k| Self::padded(k)) {
+            Some(k) => {
+                let bytes = Self::expert_gpu(model, li, e, k);
+                stream.memcpy_htod(&bytes, &mut self.pool.slice_mut(off..off + bytes.len())).map_err(gerr)?;
+            }
+            None => {
+                for (dt, src) in Self::expert_bytes(model, li, e) {
+                    let bytes = to_gpu_layout(dt, src);
+                    let mut view = self.pool.slice_mut(off..off + bytes.len());
+                    stream.memcpy_htod(&bytes, &mut view).map_err(gerr)?;
+                    off += bytes.len();
+                }
+            }
         }
         self.owner[slot] = key;
         self.slot_of[key] = Some(slot as u32);
@@ -360,6 +404,125 @@ pub const SPEC_MAX: usize = 16;
 const CHUNK: usize = 512;
 /// Positions per split-K attention block.
 const SPLIT: usize = 256;
+
+/// A hyper-connection mixer on the GPU (hc.rs `Mix`).
+struct GMix {
+    norm: CudaSlice<f32>,
+    down: GMat,
+    up: GMat,
+    /// The streams' injection weights (hc rows of hc x dim); None for the output mixer.
+    inject: Option<CudaSlice<f32>>,
+}
+
+#[derive(Clone, Copy)]
+enum Mixer {
+    Attn(usize),
+    Ffn(usize),
+    Head,
+}
+
+/// Hyper-connections (qwen4exp; hc.rs) on the GPU: the mixers and token-batched buffers (up to
+/// CHUNK tokens x hc streams x dim). Each block reads the mixer's output and adds its own output
+/// into a zeroed `x`, which `combine` then adds to every stream.
+struct GHc {
+    hc: usize,
+    rank: usize,
+    attn: Vec<GMix>,
+    ffn: Vec<GMix>,
+    head: GMix,
+    /// The residual streams; the normed streams; the mixer's gates, low-rank activation and
+    /// injection weights; the block input (T x dim) and the quantised wide and low-rank vectors.
+    xh: CudaSlice<f32>,
+    xn: CudaSlice<f32>,
+    gate: CudaSlice<f32>,
+    lo: CudaSlice<f32>,
+    inj: CudaSlice<f32>,
+    h: CudaSlice<f32>,
+    wq: CudaSlice<i8>,
+    wd: CudaSlice<f32>,
+    rq: CudaSlice<i8>,
+    rd: CudaSlice<f32>,
+    /// The n-gram embedding layer runs on the processor (its table stays on disk): its layer, its
+    /// state (convolution history), a host copy of the streams, and the tokens so far.
+    ple_layer: Option<usize>,
+    ple: Option<crate::hc::HcState>,
+    host: Vec<f32>,
+    toks: Vec<u32>,
+    /// The position being written (decode).
+    pos: usize,
+}
+
+type MatMul<'a> = &'a dyn Fn(&GMat, &CudaSlice<i8>, &CudaSlice<f32>, &mut CudaSlice<f32>) -> Result<(), Error>;
+
+impl GHc {
+    fn blocks(n: usize) -> LaunchConfig {
+        LaunchConfig { grid_dim: ((n as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }
+    }
+
+    /// Every stream of the first `t` tokens starts as the token's embedding (`x`, T x dim).
+    fn start(&mut self, s: &CudaStream, f: &Funcs, x: &CudaSlice<f32>, t: usize, dim: usize) -> Result<(), Error> {
+        let (hc, d, n) = (self.hc as i32, dim as i32, (t * self.hc * dim) as i32);
+        unsafe { s.launch_builder(&f.hc_start).arg(&mut self.xh).arg(x).arg(&hc).arg(&d).arg(&n).launch(Self::blocks(n as usize)) }.map_err(gerr)?;
+        Ok(())
+    }
+
+    /// The mixer `which` over the first `t` tokens: the block input into `h` (T x dim) and, for a
+    /// block's mixer, the injection weights. `mm` multiplies a matrix over the T tokens.
+    #[allow(clippy::too_many_arguments)]
+    fn mix(&mut self, s: &CudaStream, f: &Funcs, which: Mixer, t: usize, dim: usize, eps: f32, mm: MatMul<'_>) -> Result<(), Error> {
+        let GHc { hc, rank, attn, ffn, head, xh, xn, gate, lo, inj, h, wq, wd, rq, rd, .. } = self;
+        let mx = match which {
+            Mixer::Attn(li) => &attn[li],
+            Mixer::Ffn(li) => &ffn[li],
+            Mixer::Head => &*head,
+        };
+        let (hc, rank, wide) = (*hc, *rank, *hc * dim);
+        let di = dim as i32;
+        let grid = LaunchConfig { grid_dim: (hc as u32, t as u32, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 };
+        unsafe { s.launch_builder(&f.hc_norm).arg(&*xh).arg(&mx.norm).arg(&mut *xn).arg(&di).arg(&eps).launch(grid) }.map_err(gerr)?;
+        let nw = (t * wide) as i32;
+        unsafe { s.launch_builder(&f.quant).arg(&*xn).arg(&mut *wq).arg(&mut *wd).arg(&nw).launch(Self::blocks(t * wide)) }.map_err(gerr)?;
+        mm(&mx.down, wq, wd, lo)?;
+        let (nr, inv) = ((t * rank) as i32, 1.0f32 / hc as f32);
+        unsafe { s.launch_builder(&f.hc_lo_quant).arg(&*lo).arg(&mut *rq).arg(&mut *rd).arg(&inv).arg(&nr).launch(Self::blocks(t * rank)) }.map_err(gerr)?;
+        mm(&mx.up, rq, rd, gate)?;
+        let (hci, nd) = (hc as i32, (t * dim) as i32);
+        unsafe { s.launch_builder(&f.hc_out).arg(&*xn).arg(&*gate).arg(&mut *h).arg(&hci).arg(&di).arg(&nd).launch(Self::blocks(t * dim)) }.map_err(gerr)?;
+        if let Some(w) = &mx.inject {
+            let wi = wide as i32;
+            unsafe { s.launch_builder(&f.hc_inject).arg(w).arg(&*xn).arg(&mut *inj).arg(&wi).launch(grid) }.map_err(gerr)?;
+        }
+        Ok(())
+    }
+
+    /// Adds the block's output `y` (T x dim) to every stream with the last mixer's weights.
+    fn combine(&mut self, s: &CudaStream, f: &Funcs, y: &CudaSlice<f32>, t: usize, dim: usize) -> Result<(), Error> {
+        let (hc, d, n) = (self.hc as i32, dim as i32, (t * self.hc * dim) as i32);
+        unsafe { s.launch_builder(&f.hc_combine).arg(&mut self.xh).arg(y).arg(&self.inj).arg(&hc).arg(&d).arg(&n).launch(Self::blocks(n as usize)) }.map_err(gerr)?;
+        Ok(())
+    }
+
+    /// The n-gram embedding layer for the first `t` tokens (positions pos0..), on the processor:
+    /// the streams come down, each token adds its hashed rows and convolution in order, and go back.
+    fn ple(&mut self, s: &Arc<CudaStream>, model: &Model, pos0: usize, t: usize, dim: usize, eps: f32) -> Result<(), Error> {
+        let (Some(hm), Some(st)) = (model.hc.as_ref(), self.ple.as_mut()) else { return Ok(()) };
+        let Some(p) = hm.ple.as_ref() else { return Ok(()) };
+        let wide = self.hc * dim;
+        s.memcpy_dtoh(&self.xh.slice(0..t * wide), &mut self.host[..t * wide]).map_err(gerr)?;
+        s.synchronize().map_err(gerr)?;
+        for i in 0..t {
+            let pos = pos0 + i;
+            let tok = self.toks.get(pos).copied().unwrap_or(0);
+            let prev: Vec<Option<u32>> = (1..p.ngram).map(|k| pos.checked_sub(k).and_then(|j| self.toks.get(j)).map(|&tk| if tk & 0x8000_0000 != 0 { p.image } else { tk })).collect();
+            st.xh.copy_from_slice(&self.host[i * wide..(i + 1) * wide]);
+            st.token = if tok & 0x8000_0000 != 0 { u32::MAX } else { tok };
+            st.ple(model, p, self.hc, dim, eps, &prev);
+            self.host[i * wide..(i + 1) * wide].copy_from_slice(&st.xh);
+        }
+        s.memcpy_htod(&self.host[..t * wide], &mut self.xh.slice_mut(0..t * wide)).map_err(gerr)?;
+        Ok(())
+    }
+}
 
 struct Batch {
     x: CudaSlice<f32>,
@@ -424,6 +587,8 @@ struct Shape {
     sec: i32,
     /// YaRN's scale on rotated q and k (1 at the trained context; Model::extend_context).
     msc: f32,
+    /// The DeltaNet output gate is sigmoid(z) instead of silu(z) (qwen4exp).
+    delta_sig: i32,
 }
 
 /// An image prompt being read on the GPU (`Session::feed_parts`): rotary (time, height, width)
@@ -512,6 +677,8 @@ pub struct GpuState {
     /// Split models: what the processor's layers stream through for prompt batches (made on first
     /// use; see `prefill_streamed`).
     pipe: Option<Pipe>,
+    /// Hyper-connection models (qwen4exp): mixers and residual streams.
+    hc: Option<GHc>,
 }
 
 /// Split prefill: the processor's layers pass through two GPU slots. The host copies a layer into
@@ -801,6 +968,12 @@ impl GpuState {
             scatter_add: lf("scatter_add")?,
             add_inplace: lf("add_inplace")?,
             shared_gate_add: lf("shared_gate_add")?,
+            hc_start: lf("hc_start")?,
+            hc_norm: lf("hc_norm")?,
+            hc_lo_quant: lf("hc_lo_quant")?,
+            hc_out: lf("hc_out")?,
+            hc_inject: lf("hc_inject")?,
+            hc_combine: lf("hc_combine")?,
             add_bias: lf("add_bias_b")?,
             attn_tiled: lf("attn_prefill_tiled")?,
         };
@@ -890,13 +1063,14 @@ impl GpuState {
             };
             let attn = delta.is_none();
             layers.push(GLayer {
-                attn_norm: stream.clone_htod(&l.attn_norm).map_err(gerr)?,
+                // Hyper-connection models norm inside their mixers and keep no block norms.
+                attn_norm: stream.clone_htod(if l.attn_norm.is_empty() { &[0.0f32][..] } else { &l.attn_norm }).map_err(gerr)?,
                 qkv,
                 o,
                 delta,
                 q_norm: l.q_norm.as_deref().map(|v| stream.clone_htod(v)).transpose().map_err(gerr)?,
                 k_norm: l.k_norm.as_deref().map(|v| stream.clone_htod(v)).transpose().map_err(gerr)?,
-                ffn_norm: stream.clone_htod(&l.ffn_norm).map_err(gerr)?,
+                ffn_norm: stream.clone_htod(if l.ffn_norm.is_empty() { &[0.0f32][..] } else { &l.ffn_norm }).map_err(gerr)?,
                 gu,
                 down,
                 router,
@@ -912,6 +1086,19 @@ impl GpuState {
         // native layout the row is looked up on the CPU and uploaded (the table stays out of VRAM).
         let host_embed = native.then(|| vec![0f32; c.dim]);
         let embed = if model.tied() || native { None } else { Some(up(&[model.embed_mat()])?) };
+        let hc_mixers = match model.hc.as_ref() {
+            Some(hm) => {
+                let mut mixer = |m: &crate::hc::Mix| -> Result<GMix, Error> {
+                    let inject = if m.inject.is_empty() { None } else { Some(stream.clone_htod(&m.inject).map_err(gerr)?) };
+                    Ok(GMix { norm: stream.clone_htod(&m.norm).map_err(gerr)?, down: up(&[&m.down])?, up: up(&[&m.up])?, inject })
+                };
+                let attn = hm.attn.iter().map(&mut mixer).collect::<Result<Vec<_>, _>>()?;
+                let ffn = hm.ffn.iter().map(&mut mixer).collect::<Result<Vec<_>, _>>()?;
+                let head = mixer(&hm.head)?;
+                Some((attn, ffn, head))
+            }
+            None => None,
+        };
         let attn_layers = model.layers()[..n_gpu].iter().filter(|l| l.delta.is_none()).count();
         vram += attn_layers * 2 * max_ctx * kvd * 2;
         let dsh = c.ssm.map(|ss| DeltaShape { nk: ss.nk, dk: ss.dk, nv: ss.nv, dv: ss.dv, kc: ss.conv, inter: ss.inter });
@@ -957,6 +1144,35 @@ impl GpuState {
             sxd: z(CHUNK * sffn / 32)?,
             sout: z(if sffn > 0 { CHUNK * c.dim } else { 0 })?,
         };
+        let hcg = match (hc_mixers, model.hc.as_ref()) {
+            (Some((attn, ffn, head)), Some(hm)) => {
+                let (hc, rank, wide) = (hm.hc, hm.rank, hm.hc * c.dim);
+                vram += CHUNK * (3 * wide * 4 + rank * 4 + hc * 4 + c.dim * 4 + wide + wide / 8 + rank + rank / 8);
+                Some(GHc {
+                    hc,
+                    rank,
+                    attn,
+                    ffn,
+                    head,
+                    xh: z(CHUNK * wide)?,
+                    xn: z(CHUNK * wide)?,
+                    gate: z(CHUNK * wide)?,
+                    lo: z(CHUNK * rank)?,
+                    inj: z(CHUNK * hc)?,
+                    h: z(CHUNK * c.dim)?,
+                    wq: stream.alloc_zeros::<i8>(CHUNK * wide).map_err(gerr)?,
+                    wd: z(CHUNK * wide / 32)?,
+                    rq: stream.alloc_zeros::<i8>(CHUNK * rank).map_err(gerr)?,
+                    rd: z(CHUNK * rank / 32)?,
+                    ple_layer: hm.ple.as_ref().map(|p| p.layer),
+                    ple: hm.ple.as_ref().map(|_| crate::hc::HcState::new(hm, c.dim)),
+                    host: vec![0f32; CHUNK * wide],
+                    toks: Vec::new(),
+                    pos: 0,
+                })
+            }
+            _ => None,
+        };
         // Everything uploaded so far is read from VRAM only; free its RAM for the CPU-side weights.
         // A split keeps the CPU's layers and the head (and the embeddings, looked up on the CPU).
         {
@@ -997,7 +1213,7 @@ impl GpuState {
         if let Some(m) = &moe {
             vram += m.owner.len() * m.slot_bytes;
         }
-        let sh = Shape { dim: c.dim, ffn: c.ffn, n_head: c.n_head, n_kv: c.n_kv, hd: c.head_dim, vocab: c.vocab, eps: c.eps, base: c.rope_base, rd: c.rope_dim, gate: c.attn_gate, delta: dsh, sec: c.rope_sections.map_or(0, |s| s.iter().enumerate().map(|(i, &v)| (v.min(255) as i32) << (8 * i)).fold(0, |a, b| a | b)), msc: model.rope_mscale() };
+        let sh = Shape { dim: c.dim, ffn: c.ffn, n_head: c.n_head, n_kv: c.n_kv, hd: c.head_dim, vocab: c.vocab, eps: c.eps, base: c.rope_base, rd: c.rope_dim, gate: c.attn_gate, delta: dsh, sec: c.rope_sections.map_or(0, |s| s.iter().enumerate().map(|(i, &v)| (v.min(255) as i32) << (8 * i)).fold(0, |a, b| a | b)), msc: model.rope_mscale(), delta_sig: c.delta_sigmoid as i32 };
         let ctx_pin = ctx.clone();
         let rope = stream.clone_htod(model.inv_freq()).map_err(gerr)?;
         let spec = if split || c.n_expert > 0 || c.ssm.is_some() { None } else { Some(z(SPEC_MAX * c.vocab)?) };
@@ -1046,6 +1262,7 @@ impl GpuState {
             // SAFETY: a plain host buffer, read only after the stream is synchronized.
             host_x: if split { Some(unsafe { ctx_pin.alloc_pinned::<f32>(c.dim) }.map_err(gerr)?) } else { None },
             pipe: None,
+            hc: hcg,
         })
     }
 
@@ -1418,7 +1635,7 @@ impl GpuState {
         unsafe { s.launch_builder(&f.delta_rule).arg(&*row).arg(&ld).arg(&ch).arg(&nk).arg(&dk).arg(&nv).arg(&dv).arg(&dl.a).arg(&dl.dt_bias).arg(&mut dl.state).arg(&mut *out).arg(&ldo).arg(&ti).arg(&inter).launch(rule_cfg) }.map_err(gerr)?;
         let zoff = ch;
         let gn_cfg = LaunchConfig { grid_dim: (d.nv as u32, t as u32, 1), block_dim: (d.dv as u32, 1, 1), shared_mem_bytes: 0 };
-        unsafe { s.launch_builder(&f.delta_gnorm).arg(&mut *out).arg(&ldo).arg(&*row).arg(&ld).arg(&zoff).arg(&dl.norm).arg(&dv).arg(&sh.eps).launch(gn_cfg) }.map_err(gerr)?;
+        unsafe { s.launch_builder(&f.delta_gnorm).arg(&mut *out).arg(&ldo).arg(&*row).arg(&ld).arg(&zoff).arg(&dl.norm).arg(&dv).arg(&sh.eps).arg(&sh.delta_sig).launch(gn_cfg) }.map_err(gerr)?;
         Ok(())
     }
 
@@ -1439,6 +1656,12 @@ impl GpuState {
 
     /// Clears every DeltaNet state (a new sequence).
     pub fn reset_recurrent(&mut self) -> Result<(), Error> {
+        if let Some(h) = self.hc.as_mut() {
+            h.toks.clear();
+            if let Some(p) = h.ple.as_mut() {
+                p.reset();
+            }
+        }
         for l in &mut self.layers {
             if let Some(d) = l.delta.as_mut() {
                 self.stream.memset_zeros(&mut d.hist).map_err(gerr)?;
@@ -1512,6 +1735,14 @@ pub fn plan_for(model: &Model, max_ctx: usize, vram_free: u64, force_layers: Opt
             }
             let out = model.output_mat();
             dense += native_bytes(out).unwrap_or(int8_bytes(out));
+            if let Some(hm) = model.hc.as_ref() {
+                // Hyper-connections: every mixer's projections, norms and injection weights, and
+                // the token-batched streams (see GHc).
+                let mixes = hm.attn.iter().chain(&hm.ffn).chain(std::iter::once(&hm.head));
+                dense += mixes.map(|m| int8_bytes(&m.down) + int8_bytes(&m.up) + 4 * (m.norm.len() + m.inject.len()) as u64).sum::<u64>();
+                let wide = (hm.hc * c.dim) as u64;
+                dense += CHUNK as u64 * (3 * wide * 4 + wide + wide / 8 + hm.rank as u64 * 5 + c.dim as u64 * 4);
+            }
             return Ok(plan_moe(dense, experts, c.n_used as f64 / c.n_expert.max(1) as f64, &mach));
         }
         if !gpu_kernels {
@@ -1584,16 +1815,29 @@ impl GpuState {
     /// saved expert profile, or evenly across layers when there is none.
     fn load_moe(ctx: &Arc<CudaContext>, stream: &Arc<CudaStream>, model: &Model) -> Result<MoeGpu, Error> {
         let c = &model.cfg;
-        let em = |mat: &Mat| -> Option<ExpMat> {
+        // An expert hidden size that is not a whole number of 256-value groups (Qwen3.8-Flash-Next:
+        // 640, its down projections in 32-value IQ4_NL blocks) is padded on the GPU to the next
+        // multiple of 256: zero rows in gate and up (silu(0) * 0 = 0) and zero blocks (scale 0) at
+        // the end of each down row, so the results are unchanged. Unpadded, no expert of such a
+        // model could be cached and most of the card stayed empty.
+        let eff = c.expert_ffn.next_multiple_of(256);
+        let em = |mat: &Mat, down: bool| -> Option<ExpMat> {
             let (bb, dtype) = gpu_block(mat.dtype)?;
             let rows = mat.rows / c.n_expert;
-            (mat.cols % 256 == 0).then_some(ExpMat { dtype, bb: bb as i32, rows, cols: mat.cols, bytes: rows * mat.cols / 256 * bb })
+            if !down && mat.cols % 256 == 0 {
+                return Some(ExpMat { dtype, bb: bb as i32, rows: eff, cols: mat.cols, bytes: eff * mat.cols / 256 * bb, src_rows: rows, src_row: 0 });
+            }
+            if down && mat.cols % 256 == 0 {
+                return Some(ExpMat { dtype, bb: bb as i32, rows, cols: mat.cols, bytes: rows * mat.cols / 256 * bb, src_rows: rows, src_row: 0 });
+            }
+            (down && mat.dtype == DType::IQ4NL && mat.cols % 32 == 0 && mat.cols.next_multiple_of(256) == eff)
+                .then_some(ExpMat { dtype, bb: bb as i32, rows, cols: eff, bytes: rows * eff / 256 * bb, src_rows: rows, src_row: mat.row_bytes })
         };
         let kinds: Vec<Option<[ExpMat; 3]>> = model
             .layers()
             .iter()
             .map(|l| match &l.ffn {
-                Ffn::Moe(m) => Some([em(&m.gate)?, em(&m.up)?, em(&m.down)?]),
+                Ffn::Moe(m) => Some([em(&m.gate, false)?, em(&m.up, false)?, em(&m.down, true)?]),
                 Ffn::Dense { .. } => None,
             })
             .collect();
@@ -1617,7 +1861,7 @@ impl GpuState {
                 counts = v;
             }
         }
-        let (k, eff, dim) = (c.n_used, c.expert_ffn, c.dim);
+        let (k, dim) = (c.n_used, c.dim);
         let z = |n: usize| stream.alloc_zeros::<f32>(n).map_err(gerr);
         let mut mg = MoeGpu {
             ne: c.n_expert,
@@ -1834,10 +2078,25 @@ impl GpuState {
             let (qs, ds, _, _) = self.embed.as_ref().or(self.output.as_ref()).expect("embedding table").q8();
             unsafe { s.launch_builder(&f.embed).arg(qs).arg(ds).arg(&self.tok).arg(&mut self.x).arg(&dim).launch(blocks(sh.dim)) }.map_err(gerr)?;
         }
+        if let Some(h) = self.hc.as_mut() {
+            h.start(s, f, &self.x, 1, sh.dim)?;
+        }
         let group = (sh.n_head / sh.n_kv) as i32;
         let scale = 1.0f32 / (sh.hd as f32).sqrt();
         for (li, l) in self.layers.iter_mut().enumerate() {
-            unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&l.attn_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
+            if let Some(h) = self.hc.as_mut() {
+                // Hyper-connections: the mixer's output is the block's input; the block's output
+                // collects in a zeroed x for the streams.
+                if h.ple_layer == Some(li) {
+                    let pos = h.pos;
+                    h.ple(s, model, pos, 1, sh.dim, eps)?;
+                }
+                h.mix(s, f, Mixer::Attn(li), 1, sh.dim, eps, &|m, xq, xd, y| Self::matvec(s, f, m, xq, xd, y, false))?;
+                unsafe { s.launch_builder(&f.quant).arg(&h.h).arg(&mut self.xq).arg(&mut self.xd).arg(&dim).launch(blocks(sh.dim)) }.map_err(gerr)?;
+                s.memset_zeros(&mut self.x).map_err(gerr)?;
+            } else {
+                unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&l.attn_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
+            }
             if let Some(dl) = l.delta.as_mut() {
                 // Gated DeltaNet: fused projection, the recurrent core, output projection.
                 Self::matvec(s, f, &l.qkv, &self.xq, &self.xd, &mut self.qkv, false)?;
@@ -1935,18 +2194,35 @@ impl GpuState {
             unsafe { s.launch_builder(&f.quant).arg(&self.att).arg(&mut self.xq).arg(&mut self.xd).arg(&qd).launch(blocks(sh.n_head * sh.hd)) }.map_err(gerr)?;
             Self::matvec(s, f, &l.o, &self.xq, &self.xd, &mut self.x, true)?;
             }
+            if let Some(h) = self.hc.as_mut() {
+                h.combine(s, f, &self.x, 1, sh.dim)?;
+                h.mix(s, f, Mixer::Ffn(li), 1, sh.dim, eps, &|m, xq, xd, y| Self::matvec(s, f, m, xq, xd, y, false))?;
+                unsafe { s.launch_builder(&f.quant).arg(&h.h).arg(&mut self.xq).arg(&mut self.xd).arg(&dim).launch(blocks(sh.dim)) }.map_err(gerr)?;
+                s.memset_zeros(&mut self.x).map_err(gerr)?;
+            }
             if let (Some(gu), Some(down)) = (&l.gu, &l.down) {
-                unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&l.ffn_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
+                if self.hc.is_none() {
+                    unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&l.ffn_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
+                }
                 Self::matvec(s, f, gu, &self.xq, &self.xd, &mut self.gu, false)?;
                 unsafe { s.launch_builder(&f.silu_mul_quant).arg(&self.gu).arg(&mut self.xq).arg(&mut self.xd).arg(&ffn).launch(blocks(sh.ffn)) }.map_err(gerr)?;
                 Self::matvec(s, f, down, &self.xq, &self.xd, &mut self.x, true)?;
+                if let Some(h) = self.hc.as_mut() {
+                    h.combine(s, f, &self.x, 1, sh.dim)?;
+                }
                 continue;
             }
             // Mixture of experts: route on the GPU, then cached experts on the GPU and the rest on the
             // CPU at the same time.
             let mo = self.moe.as_mut().expect("MoE state");
             let router = l.router.as_ref().expect("router");
-            unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&l.ffn_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&mut mo.h).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
+            match self.hc.as_ref() {
+                // The mixer's output (already in xq/xd) is also the router's and the CPU experts' input.
+                Some(h) => s.memcpy_dtod(&h.h.slice(0..sh.dim), &mut mo.h).map_err(gerr)?,
+                None => {
+                    unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&l.ffn_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&mut mo.h).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
+                }
+            }
             if let Some(se) = &l.shared {
                 // The shared expert on its own buffers (the routed experts still read xq).
                 let b = &mut self.b;
@@ -2019,6 +2295,9 @@ impl GpuState {
             mo.cpu_pin.as_mut_slice().map_err(gerr)?.copy_from_slice(&mo.cpu_out);
             s.memcpy_htod(&mo.cpu_pin, &mut mo.cpu).map_err(gerr)?;
             unsafe { s.launch_builder(&f.moe_combine).arg(&mut self.x).arg(&mo.eo).arg(&mo.sel).arg(&k).arg(&mo.cpu).arg(&dim).launch(blocks(sh.dim)) }.map_err(gerr)?;
+            if let Some(h) = self.hc.as_mut() {
+                h.combine(s, f, &self.x, 1, sh.dim)?;
+            }
         }
         let Some(output) = &self.output else {
             // Split: the CPU takes the activation from here.
@@ -2026,7 +2305,13 @@ impl GpuState {
             s.memcpy_dtoh(&self.x, hx).map_err(gerr)?;
             return Ok(());
         };
-        unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&self.out_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
+        if let Some(h) = self.hc.as_mut() {
+            // The output mixer is the final norm.
+            h.mix(s, f, Mixer::Head, 1, sh.dim, eps, &|m, xq, xd, y| Self::matvec(s, f, m, xq, xd, y, false))?;
+            unsafe { s.launch_builder(&f.quant).arg(&h.h).arg(&mut self.xq).arg(&mut self.xd).arg(&dim).launch(blocks(sh.dim)) }.map_err(gerr)?;
+        } else {
+            unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&self.out_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
+        }
         Self::matvec(s, f, output, &self.xq, &self.xd, &mut self.logits, false)?;
         let vocab = sh.vocab as i32;
         unsafe { s.launch_builder(&f.argmax).arg(&self.logits).arg(&vocab).arg(&mut self.next).arg(&mut self.tok).arg(&mut self.pos).launch(one) }.map_err(gerr)?;
@@ -2081,6 +2366,11 @@ impl GpuState {
         self.stream.memcpy_htod(&[pos as i32, self.rope_shift], &mut self.pos).map_err(gerr)?;
         if let Some(row) = self.host_embed.as_mut() {
             model.embed_into(token, row);
+        }
+        if let Some(h) = self.hc.as_mut() {
+            h.toks.resize(pos, 0);
+            h.toks.push(token);
+            h.pos = pos;
         }
         self.run(model)?;
         if let Some(o) = out {
@@ -2264,6 +2554,11 @@ impl GpuState {
                 s.memcpy_htod(row, &mut b.x.slice_mut(o..o + sh.dim)).map_err(gerr)?;
             }
         }
+        if let Some(h) = self.hc.as_mut() {
+            h.toks.resize(pos0, 0);
+            h.toks.extend_from_slice(toks);
+            h.start(s, f, &b.x, t, sh.dim)?;
+        }
         let use_tab = tab.is_some();
         let norm_cfg = LaunchConfig { grid_dim: (t as u32, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
         let kmm = |w: &cudarc::driver::CudaView<u8>, dtype: i32, bb: i32, xq: &CudaSlice<i8>, xd: &CudaSlice<f32>, idx: Option<&cudarc::driver::CudaView<i32>>, n: usize, y: &mut cudarc::driver::CudaViewMut<f32>, ystride: usize, rows: usize, cols: usize, add: bool| -> Result<(), Error> {
@@ -2304,7 +2599,19 @@ impl GpuState {
         let row = qd + 2 * sh.n_kv * sh.hd;
         for li in 0..self.layers.len() {
             let l = &mut self.layers[li];
-            unsafe { s.launch_builder(&f.norm_b).arg(&b.x).arg(&l.attn_norm).arg(&mut b.xq).arg(&mut b.xd).arg(&dim).arg(&eps).arg(&null_f).launch(norm_cfg) }.map_err(gerr)?;
+            if let Some(h) = self.hc.as_mut() {
+                // Hyper-connections: the mixer's output is the block's input; the block's output
+                // collects in a zeroed x for the streams.
+                if h.ple_layer == Some(li) {
+                    h.ple(s, model, pos0, t, sh.dim, eps)?;
+                }
+                h.mix(s, f, Mixer::Attn(li), t, sh.dim, eps, &|m, xq, xd, y| dense(m, xq, xd, y, gmat_rows(m), false))?;
+                let n = (t * sh.dim) as i32;
+                unsafe { s.launch_builder(&f.quant).arg(&h.h).arg(&mut b.xq).arg(&mut b.xd).arg(&n).launch(LaunchConfig { grid_dim: ((n as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
+                s.memset_zeros(&mut b.x).map_err(gerr)?;
+            } else {
+                unsafe { s.launch_builder(&f.norm_b).arg(&b.x).arg(&l.attn_norm).arg(&mut b.xq).arg(&mut b.xd).arg(&dim).arg(&eps).arg(&null_f).launch(norm_cfg) }.map_err(gerr)?;
+            }
             if let Some(dl) = l.delta.as_mut() {
                 // Gated DeltaNet over the chunk (as in the dense prefill).
                 dense(&l.qkv, &b.xq, &b.xd, &mut b.qkv, gmat_rows(&l.qkv), false)?;
@@ -2349,7 +2656,17 @@ impl GpuState {
             // Router for every token.
             let mo = self.moe.as_mut().expect("MoE state");
             let router = l.router.as_ref().expect("router");
-            unsafe { s.launch_builder(&f.norm_b).arg(&b.x).arg(&l.ffn_norm).arg(&mut b.xq).arg(&mut b.xd).arg(&dim).arg(&eps).arg(&mut mo.bh).launch(norm_cfg) }.map_err(gerr)?;
+            if let Some(h) = self.hc.as_mut() {
+                h.combine(s, f, &b.x, t, sh.dim)?;
+                h.mix(s, f, Mixer::Ffn(li), t, sh.dim, eps, &|m, xq, xd, y| dense(m, xq, xd, y, gmat_rows(m), false))?;
+                let n = (t * sh.dim) as i32;
+                unsafe { s.launch_builder(&f.quant).arg(&h.h).arg(&mut b.xq).arg(&mut b.xd).arg(&n).launch(LaunchConfig { grid_dim: ((n as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
+                // The router and the CPU experts read the block input too.
+                s.memcpy_dtod(&h.h.slice(0..t * sh.dim), &mut mo.bh.slice_mut(0..t * sh.dim)).map_err(gerr)?;
+                s.memset_zeros(&mut b.x).map_err(gerr)?;
+            } else {
+                unsafe { s.launch_builder(&f.norm_b).arg(&b.x).arg(&l.ffn_norm).arg(&mut b.xq).arg(&mut b.xd).arg(&dim).arg(&eps).arg(&mut mo.bh).launch(norm_cfg) }.map_err(gerr)?;
+            }
             let (ne, k) = (mo.ne as i32, mo.k as i32);
             {
                 let tab = mo.slot_tab.slice(li * mo.ne..(li + 1) * mo.ne);
@@ -2424,7 +2741,17 @@ impl GpuState {
                     // Streamed expert: copy it into the next ring slot (host side, then DMA on the
                     // copy stream once the slot's previous expert has been computed).
                     let ring = (slot < 0).then(|| (-1 - slot) as usize % RING);
-                    if let Some(r) = ring {
+                    if let Some(r) = ring.filter(|_| mo.kinds[li].as_ref().is_some_and(MoeGpu::padded)) {
+                        let k = mo.kinds[li].as_ref().expect("checked");
+                        let bytes = MoeGpu::expert_gpu(model, li, e, k);
+                        mo.ring_host[r].as_mut_slice().map_err(gerr)?[..bytes.len()].copy_from_slice(&bytes);
+                        if let Some(ev) = &mo.ring_done[r] {
+                            mo.copy.wait(ev).map_err(gerr)?;
+                        }
+                        mo.copy.memcpy_htod(&mo.ring_host[r], &mut mo.ring_dev.slice_mut(r * sb..(r + 1) * sb)).map_err(gerr)?;
+                        let arrived = mo.copy.record_event(None).map_err(gerr)?;
+                        s.wait(&arrived).map_err(gerr)?;
+                    } else if let Some(r) = ring {
                         {
                             // Parallel copy into the pinned slot (one thread copies ~10 GB/s; the
                             // memory bus allows several times that).
@@ -2500,10 +2827,18 @@ impl GpuState {
                 let n = (t * sh.dim) as i32;
                 unsafe { s.launch_builder(&f.add_inplace).arg(&mut b.x).arg(&mo.bcpu).arg(&n).launch(LaunchConfig { grid_dim: ((n as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
             }
+            if let Some(h) = self.hc.as_mut() {
+                h.combine(s, f, &b.x, t, sh.dim)?;
+            }
             let _ = ti;
         }
         // Logits for the last token.
-        {
+        if let Some(h) = self.hc.as_mut() {
+            // The output mixer is the final norm.
+            h.mix(s, f, Mixer::Head, t, sh.dim, eps, &|m, xq, xd, y| dense(m, xq, xd, y, gmat_rows(m), false))?;
+            let last = h.h.slice((t - 1) * sh.dim..t * sh.dim);
+            unsafe { s.launch_builder(&f.quant).arg(&last).arg(&mut self.xq).arg(&mut self.xd).arg(&dim).launch(LaunchConfig { grid_dim: ((sh.dim as u32).div_ceil(256), 1, 1), block_dim: (256, 1, 1), shared_mem_bytes: 0 }) }.map_err(gerr)?;
+        } else {
             let last = b.x.slice((t - 1) * sh.dim..t * sh.dim);
             let one = LaunchConfig { grid_dim: (1, 1, 1), block_dim: (1024, 1, 1), shared_mem_bytes: 0 };
             unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&last).arg(&self.out_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;

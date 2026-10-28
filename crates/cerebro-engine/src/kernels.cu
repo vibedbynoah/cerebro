@@ -1482,16 +1482,18 @@ extern "C" __global__ void delta_rule(const float* __restrict__ row, int ld, int
     for (int i = ty; i < dk; i += 4) st[(size_t)i * dv + j] = S[i * 32 + tx];
 }
 
-// Gated RMSNorm of each value head's output: o = rmsnorm(o) * w * silu(z). Grid (nv, T), block dv.
+// Gated RMSNorm of each value head's output: o = rmsnorm(o) * w * silu(z), or sigmoid(z) when `sig`
+// is set (qwen4exp). Grid (nv, T), block dv.
 extern "C" __global__ void delta_gnorm(float* __restrict__ out, int ldo, const float* __restrict__ row, int ld, int zoff,
-                                       const float* __restrict__ w, int dv, float eps) {
+                                       const float* __restrict__ w, int dv, float eps, int sig) {
     __shared__ float red[32];
     int h = blockIdx.x, t = blockIdx.y, j = threadIdx.x;
     float* o = out + (size_t)t * ldo + (size_t)h * dv;
     float x = o[j];
     float r = rsqrtf(block_sum(x * x, red) / dv + eps);
     float z = row[(size_t)t * ld + zoff + h * dv + j];
-    o[j] = x * r * w[j] * (z / (1.f + __expf(-z)));
+    float g = 1.f / (1.f + __expf(-z));
+    o[j] = x * r * w[j] * (sig ? g : z * g);
 }
 
 // Gated attention input: rows [q_h | gate_h per head (2*qd) | k (kvd) | v (kvd)] become rows
@@ -1971,4 +1973,71 @@ extern "C" __global__ void __launch_bounds__(256) g4_attn_t(const float* __restr
         for (int j = 0; j < 16; ++j)
             if (j < per) o[lane + 32 * j] = acc[k][j] * il;
     }
+}
+
+// ---- Hyper-connections (qwen4exp; hc.rs) ---------------------------------------------------------
+// The residual is hc streams of dim values per token: xh is T x hc x dim. Before each block a mixer
+// normalises every stream, gates it through a low-rank projection and averages the streams into the
+// block's input; the block's output is added back to every stream with its own weight.
+
+// Every stream starts as the token's embedding: xh[t][c] = x[t]. n = T * hc * dim.
+extern "C" __global__ void hc_start(float* __restrict__ xh, const float* __restrict__ x, int hc, int dim, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    xh[i] = x[(size_t)(i / (hc * dim)) * dim + i % dim];
+}
+
+// xn[t][c] = RMSNorm(xh[t][c]) * w[c] (w: hc x dim). Grid (hc, T); block 256.
+extern "C" __global__ void hc_norm(const float* __restrict__ xh, const float* __restrict__ w, float* __restrict__ xn, int dim, float eps) {
+    __shared__ float red[32];
+    int c = blockIdx.x, t = blockIdx.y, hc = gridDim.x;
+    const float* src = xh + ((size_t)t * hc + c) * dim;
+    float* dst = xn + ((size_t)t * hc + c) * dim;
+    float ss = 0.f;
+    for (int i = threadIdx.x; i < dim; i += blockDim.x) ss += src[i] * src[i];
+    float r = rsqrtf(block_sum(ss, red) / dim + eps);
+    const float* ww = w + (size_t)c * dim;
+    for (int i = threadIdx.x; i < dim; i += blockDim.x) dst[i] = src[i] * r * ww[i];
+}
+
+// silu(lo / hc), quantised per 32 for the up projection. n = T * rank (rank a multiple of 32).
+extern "C" __global__ void hc_lo_quant(const float* __restrict__ lo, signed char* __restrict__ xq, float* __restrict__ xd, float inv_hc, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if ((i & ~31) >= n) return;
+    float x = i < n ? lo[i] * inv_hc : 0.f;
+    quant32(i < n ? x / (1.f + __expf(-x)) : 0.f, xq, xd, i, threadIdx.x & 31);
+}
+
+// The block's input: out[t][i] = mean over streams of xn[t][c][i] * sigmoid(gate[t][c][i]). n = T * dim.
+extern "C" __global__ void hc_out(const float* __restrict__ xn, const float* __restrict__ gate, float* __restrict__ out, int hc, int dim, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    int t = i / dim, j = i % dim;
+    float s = 0.f;
+    for (int c = 0; c < hc; ++c) {
+        size_t k = ((size_t)t * hc + c) * dim + j;
+        s += xn[k] / (1.f + __expf(-gate[k]));
+    }
+    out[i] = s / hc;
+}
+
+// Injection weights: inj[t][c] = w[c] . xn[t], w being hc rows of hc x dim. Grid (hc, T); block 256.
+extern "C" __global__ void hc_inject(const float* __restrict__ w, const float* __restrict__ xn, float* __restrict__ inj, int wide) {
+    __shared__ float red[32];
+    int c = blockIdx.x, t = blockIdx.y, hc = gridDim.x;
+    const float* a = w + (size_t)c * wide;
+    const float* b = xn + (size_t)t * wide;
+    float s = 0.f;
+    for (int i = threadIdx.x; i < wide; i += blockDim.x) s += a[i] * b[i];
+    s = block_sum(s, red);
+    if (threadIdx.x == 0) inj[t * hc + c] = s;
+}
+
+// The block's output y (T x dim) into every stream: xh[t][c] += y[t] * 2 sigmoid(inj[t][c] / hc). n = T * hc * dim.
+extern "C" __global__ void hc_combine(float* __restrict__ xh, const float* __restrict__ y, const float* __restrict__ inj, int hc, int dim, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    int wide = hc * dim, t = i / wide, c = (i % wide) / dim;
+    float w = 2.f / (1.f + __expf(-inj[t * hc + c] / hc));
+    xh[i] += y[(size_t)t * dim + i % dim] * w;
 }
