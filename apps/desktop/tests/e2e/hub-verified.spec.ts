@@ -66,7 +66,7 @@ for (const scheme of ["dark", "light"] as const) {
       // The recommended file is the one the page downloads.
       await rec.getByRole("button", { name: /Download the recommended file/ }).click();
       await expect(row.getByRole("progressbar")).toBeVisible();
-      await expect(row).toContainText("In your library", { timeout: 10_000 });
+      await expect(row).toContainText("In the library", { timeout: 10_000 });
     });
 
     test("is accessible", async ({ page }) => {

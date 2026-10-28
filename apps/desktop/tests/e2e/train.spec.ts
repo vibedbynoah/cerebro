@@ -28,7 +28,7 @@ test.describe("train", () => {
     await expect(run.locator(".train-figures")).toContainText("12 / 12");
     await expect(run.getByRole("progressbar", { name: "Training steps" })).toHaveAttribute("aria-valuenow", "12");
     await expect(run.locator(".train-models")).toContainText("unsloth.Q4_K_M.gguf");
-    await expect(page.getByText("support bot is in your model library.")).toBeVisible();
+    await expect(page.getByText("support bot is in the model library.")).toBeVisible();
   });
 
   test("the form names each problem before anything starts", async ({ page }) => {

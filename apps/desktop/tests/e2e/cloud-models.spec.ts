@@ -21,7 +21,7 @@ test.describe("cloud models", () => {
 
     await page.goto("/#/chat");
     const select = page.getByRole("combobox", { name: "Model" });
-    await expect(select.locator("optgroup[label='Cloud (your API keys)'] option")).toHaveCount(3);
+    await expect(select.locator("optgroup[label='Cloud (API keys)'] option")).toHaveCount(3);
     await select.selectOption({ label: "example-large · OpenAI" });
     await expect(page.getByTestId("cloud-badge")).toHaveText("Sent to OpenAI");
   });

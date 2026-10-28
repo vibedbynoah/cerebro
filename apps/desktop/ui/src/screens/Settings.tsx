@@ -34,7 +34,7 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
   const pickLevel = (l: ExperienceLevel) => {
     if (l === level()) return;
     setLevel(l);
-    notify(`${LEVEL_LABELS[l]} view`, "Every value you set is kept.", "success");
+    notify(`${LEVEL_LABELS[l]} view`, "Every value set is kept.", "success");
   };
   const [legal, setLegal] = createSignal<LegalDocId | null>(null);
   const [info] = createResource(() => props.platform.appInfo());
@@ -131,7 +131,7 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
         </p>
       </Section>
 
-      <Section id="experience" title="Experience level" description="How much of the engine you see. The speed and the protections are the same at both levels.">
+      <Section id="experience" title="Experience level" description="How much of the engine is shown. Speed and protections are the same at both levels.">
         <fieldset class="segmented" aria-describedby="level-note">
           <legend class="sr-only">Experience level</legend>
           <For each={["beginner", "advanced"] as const}>
@@ -210,7 +210,7 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
 
       <ChatSettings />
 
-      <Section id="protections" title="Protections" description="On by default. You can turn any of them off; nothing else changes when you do.">
+      <Section id="protections" title="Protections" description="On by default. Each can be turned off without changing anything else.">
         {group("protections")}
       </Section>
 
@@ -228,7 +228,7 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
 
       <WorkspaceFolders />
 
-      <Section id="config-file" title="Configuration file" description="Every setting above as one JSON file you can edit, back up or copy to another computer. Conversations, memories and keys are not included.">
+      <Section id="config-file" title="Configuration file" description="Every setting above as one JSON file to edit, back up or copy to another computer. Conversations, memories and keys are not included.">
         <div class="settings-row">
           <button type="button" class="btn btn--secondary" data-press onClick={doExport}>
             <Icon name="download" size={16} />
@@ -242,7 +242,7 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
         </div>
       </Section>
 
-      <Section id="setup" title="First-run setup" description="Walk through the experience level, the hardware check, a first model and its load settings, the protections and the terms again. Nothing changes until you choose.">
+      <Section id="setup" title="First-run setup" description="Walk through the experience level, the hardware check, a first model and its load settings, the protections and the terms again. Nothing changes until a choice is made.">
         <button type="button" class="btn btn--secondary" data-press onClick={() => props.onRunSetup()}>
           Run setup again
         </button>

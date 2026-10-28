@@ -31,7 +31,7 @@ test.describe("/ commands", () => {
     await expect(page.getByTestId("speed-mode")).toHaveText("Fastest");
     await box(page).fill("/sped 3");
     await box(page).press("Enter");
-    await expect(page.getByRole("alert")).toContainText("Did you mean /speed?");
+    await expect(page.getByRole("alert")).toContainText("Closest: /speed.");
     await box(page).fill("/help");
     await box(page).press("Enter");
     await expect(page.getByTestId("command-help")).toBeVisible();

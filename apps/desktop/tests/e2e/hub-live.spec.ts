@@ -27,7 +27,7 @@ test.describe("the live Model Hub", () => {
     await expect(row).toContainText("Q4_K_M");
     await row.getByRole("button", { name: "Download" }).click();
     await expect(row.getByRole("progressbar")).toBeVisible();
-    await expect(row).toContainText("In your library", { timeout: 10_000 });
+    await expect(row).toContainText("In the library", { timeout: 10_000 });
     await page.getByRole("button", { name: "Back to recommendations" }).click();
     await expect(page.getByRole("heading", { name: "Recommended for this computer" })).toBeVisible();
   });

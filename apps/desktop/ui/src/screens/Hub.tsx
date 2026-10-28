@@ -135,7 +135,7 @@ export function ModelHub(): JSX.Element {
         description={
           <>
             Ranked by how each fits this machine's memory. Each <Term k="quant">quantised</Term> file is compared by how close it stays to the original weights (<Term k="klDiv" />) per GiB, with
-            its writing speed here. Nothing downloads until you choose a file.
+            its writing speed here. Nothing downloads until a file is chosen.
           </>
         }
       >

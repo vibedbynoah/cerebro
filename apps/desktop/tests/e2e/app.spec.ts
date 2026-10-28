@@ -86,7 +86,7 @@ test.describe("keyboard", () => {
     await openScreen(page, "home");
     await page.locator('a.nav-link[data-route="home"]').focus();
     await page.keyboard.press("ArrowDown");
-    await expect(page.locator('a.nav-link[data-route="hub"]')).toBeFocused();
+    await expect(page.locator('a.nav-link[data-route="chat"]')).toBeFocused();
     await page.keyboard.press("End");
     await expect(page.locator('a.nav-link[data-route="about"]')).toBeFocused();
     await page.keyboard.press("ArrowDown");

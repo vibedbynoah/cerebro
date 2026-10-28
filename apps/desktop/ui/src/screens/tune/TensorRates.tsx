@@ -18,7 +18,7 @@ export function TensorRates(props: { hardware: Accessor<HardwareProfile | null> 
           <dl class="tensor-rates__body">
             <dt>INT8</dt>
             <dd>
-              {Math.round(t().int8Tops)} TOPS <span class="hint">reads your prompts (the fastest these model files allow)</span>
+              {Math.round(t().int8Tops)} TOPS <span class="hint">reads prompts (the fastest these model files allow)</span>
             </dd>
             <dt>INT4</dt>
             <dd>

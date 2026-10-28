@@ -341,7 +341,7 @@ export function Arena(props: { models: LibraryModel[]; active?: boolean }): JSX.
         <div class="arena-setup__head">
           <div>
             <h2 class="arena-setup__title">Compare answers</h2>
-            <p class="hint">Pick two to four models, ask one prompt, then vote for the answer you prefer.</p>
+            <p class="hint">Two to four models answer one prompt; the better answer gets the vote.</p>
           </div>
           <Show when={!__DESKTOP__}>
             <IllustrativeFlag />
@@ -397,7 +397,7 @@ export function Arena(props: { models: LibraryModel[]; active?: boolean }): JSX.
             </select>
           </label>
           <div class="arena-blind">
-            <SettingSwitch id="arena-blind" label="Blind mode" note="Hide model names until you vote. Names appear after." checked={blind()} disabled={running()} onChange={setBlind} />
+            <SettingSwitch id="arena-blind" label="Blind mode" note="Hide model names until the vote." checked={blind()} disabled={running()} onChange={setBlind} />
           </div>
         </div>
 
@@ -479,7 +479,7 @@ export function Arena(props: { models: LibraryModel[]; active?: boolean }): JSX.
               <div class="arena-results__actions">
                 <Show when={!revealed()}>
                   <span class="chip" data-tone="neutral">
-                    Names hidden until you vote
+                    Names hidden until the vote
                   </span>
                 </Show>
                 <Show when={current().stopped}>
@@ -601,7 +601,7 @@ export function Arena(props: { models: LibraryModel[]; active?: boolean }): JSX.
             <h2 class="arena-board__title" id="arena-board-title">
               Leaderboard
             </h2>
-            <p class="hint">Elo ratings from your votes here. They are a ranking aid, not an accuracy score.</p>
+            <p class="hint">Elo ratings from votes here: a ranking aid, not an accuracy score.</p>
           </div>
           <label class="arena-field arena-field--compact">
             <span class="sr-only">Leaderboard category</span>

@@ -10,8 +10,8 @@ type Phase = "listening" | "hearing" | "transcribing" | "thinking" | "speaking" 
 
 const LABELS: Readonly<Record<Phase, string>> = {
   listening: "Listening…",
-  hearing: "Hearing you…",
-  transcribing: "Writing down what you said…",
+  hearing: "Listening…",
+  transcribing: "Transcribing…",
   thinking: "Thinking…",
   speaking: "Speaking",
   error: "Voice mode stopped",

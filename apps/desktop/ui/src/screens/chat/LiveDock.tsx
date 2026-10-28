@@ -163,7 +163,7 @@ export function LiveDock(props: {
             </button>
           </Show>
         </div>
-        <p class="dock__note">{props.hasPreset ? "This model has its own settings: they come back whenever you pick it." : "Saved settings come back whenever you pick this model."}</p>
+        <p class="dock__note">{props.hasPreset ? "This model has its own settings, restored whenever it is picked." : "Saved settings are restored whenever this model is picked."}</p>
       </section>
 
       <Show when={model()}>

@@ -49,7 +49,7 @@ export const MCP_CATALOGUE: readonly McpCatalogueEntry[] = [
     id: "filesystem",
     name: "Filesystem",
     category: "Files",
-    description: "Read, write and search files, but only inside folders you allow.",
+    description: "Read, write and search files, but only inside allowed folders.",
     install: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "<folder to allow>"] },
     env: [],
     risk: "write",
@@ -781,7 +781,7 @@ export const MCP_CATALOGUE: readonly McpCatalogueEntry[] = [
     id: "google-workspace",
     name: "Google Workspace",
     category: "Productivity",
-    description: "Gmail, Drive and Calendar through your own Google Cloud OAuth credentials.",
+    description: "Gmail, Drive and Calendar through a Google Cloud OAuth client of one's own.",
     install: { command: "uvx", args: ["workspace-mcp", "--tools", "gmail", "drive", "calendar"] },
     env: [
       {

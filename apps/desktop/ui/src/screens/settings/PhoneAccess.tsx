@@ -138,7 +138,7 @@ export function PhoneAccess(): JSX.Element {
       setView(await service.remoteEnable(on));
       notify(
         on ? "Phone access is on" : "Phone access is off",
-        on ? "Paired phones can reach Cerebro again." : "Paired phones cannot connect until you turn it back on.",
+        on ? "Paired phones can reach Cerebro again." : "Paired phones cannot connect until it is turned back on.",
         "success",
       );
     } catch (e) {
@@ -256,10 +256,10 @@ export function PhoneAccess(): JSX.Element {
         {(value) => (
           <div class="phone__generated">
             <code class="mono phone__generated-value">{value()}</code>
-            <button class="btn btn--tertiary btn--sm" type="button" onClick={() => void copy(value(), "Type it into the password fields on your phone.")}>
+            <button class="btn btn--tertiary btn--sm" type="button" onClick={() => void copy(value(), "Type it into the password fields on the phone.")}>
               Copy
             </button>
-            <p class="hint">Shown here only until you set it.</p>
+            <p class="hint">Shown here only until it is set.</p>
           </div>
         )}
       </Show>
@@ -270,7 +270,7 @@ export function PhoneAccess(): JSX.Element {
     <Section
       id="phone"
       title="Phone access"
-      description="Check on your model from your phone over your own Wi-Fi. Nothing is reachable from the internet."
+      description="Watch and use the model from a phone over the local Wi-Fi. Nothing is reachable from the internet."
     >
       <div class="phone" data-testid="phone-access">
         <div class="phone__status-row">
@@ -304,7 +304,7 @@ export function PhoneAccess(): JSX.Element {
         <SettingSwitch
           id="phone-enabled"
           label="Phone access"
-          note="A small server listens on this computer only, on your own network. Off is a real off: no port is open."
+          note="A small server listens on this computer only, on the local network. Off is a real off: no port is open."
           checked={view()?.enabled ?? false}
           disabled={!view()?.passwordSet}
           onChange={(on) => void toggle(on)}
@@ -348,7 +348,7 @@ export function PhoneAccess(): JSX.Element {
                       </button>
                     </div>
                     <p class="hint">
-                      Your phone will warn about the certificate the first time; it is made on this computer. Fingerprint:{" "}
+                      The phone warns about the certificate the first time; it is made on this computer. Fingerprint:{" "}
                       <span class="mono">{view()?.fingerprint ?? "not available yet"}</span>
                     </p>
                     <p class="hint">Windows may ask to allow Cerebro on private networks. Allow it for private networks only.</p>
@@ -395,19 +395,19 @@ export function PhoneAccess(): JSX.Element {
               note="Off: the phone only sees status and can stop a reply."
               checked={view()?.allowChat ?? false}
               onChange={(on) =>
-                void saveOptions({ allowChat: on }, on ? "Chat from the phone is on" : "Chat from the phone is off", on ? "Your phone can start and send replies." : "Your phone can only watch and stop a reply.")
+                void saveOptions({ allowChat: on }, on ? "Chat from the phone is on" : "Chat from the phone is off", on ? "The phone can start and send replies." : "The phone can only watch and stop a reply.")
               }
             />
             <SettingSwitch
               id="phone-tailscale"
               label="Also allow Tailscale addresses"
-              note="Lets your phone reach this computer through your own Tailscale network."
+              note="Lets a phone reach this computer through a Tailscale network."
               checked={view()?.allowTailscale ?? false}
               onChange={(on) =>
                 void saveOptions(
                   { allowTailscale: on },
                   on ? "Tailscale addresses allowed" : "Tailscale addresses not allowed",
-                  on ? "Cerebro also answers on your Tailscale address." : "Cerebro answers on your local network only.",
+                  on ? "Cerebro also answers on its Tailscale address." : "Cerebro answers on the local network only.",
                 )
               }
             />
@@ -440,7 +440,7 @@ export function PhoneAccess(): JSX.Element {
                   void saveOptions(
                     { sessionDays: days },
                     "Idle timeout saved",
-                    days === 0 ? "Phones stay signed in until you revoke them." : `Phones are signed out after ${days} idle ${days === 1 ? "day" : "days"}.`,
+                    days === 0 ? "Phones stay signed in until revoked." : `Phones are signed out after ${days} idle ${days === 1 ? "day" : "days"}.`,
                   );
                 }}
               />
@@ -457,7 +457,7 @@ export function PhoneAccess(): JSX.Element {
 
 /**
  * Sharing over the internet: a Cloudflare quick tunnel to this page's server. The public link is
- * new each time; whoever opens it also needs the one-time sign-in link and your password.
+ * new each time; whoever opens it also needs the one-time sign-in link and the password.
  */
 function InternetShare(props: { running: boolean; passwordSet: boolean }): JSX.Element {
   const service = useService();
@@ -485,8 +485,8 @@ function InternetShare(props: { running: boolean; passwordSet: boolean }): JSX.E
     <div class="phone__internet card">
       <h3 class="phone__internet-title">Share over the internet</h3>
       <p class="hint">
-        A public link through a Cloudflare tunnel, so you (or someone you trust) can chat with this computer's model from anywhere. Whoever opens it still needs the one-time sign-in link and your password; wrong
-        passwords lock it for a while. The link changes every time and stops working when you stop sharing or close Cerebro.
+        A public link through a Cloudflare tunnel for chatting with this computer's model from anywhere. Whoever opens it still needs the one-time sign-in link and the password; wrong
+        passwords lock it for a while. The link changes every time and stops working when sharing stops or Cerebro closes.
       </p>
       <Show
         when={link()}

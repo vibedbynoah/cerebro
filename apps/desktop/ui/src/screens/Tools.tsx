@@ -120,7 +120,7 @@ export function Tools(): JSX.Element {
     if (v === "ask") setPending(call);
     else {
       record(call, v === "allow" ? "auto-allowed" : "auto-denied");
-      notify(v === "allow" ? "Ran without asking" : "Denied by your rule", summarize(call.preview), v === "allow" ? "info" : "warning");
+      notify(v === "allow" ? "Ran without asking" : "Denied by a rule", summarize(call.preview), v === "allow" ? "info" : "warning");
     }
   };
   const decide = (d: Decision) => {
@@ -148,7 +148,7 @@ export function Tools(): JSX.Element {
         <p class="notice" role="status">
           <Icon name="info" size={18} />
           <span>
-            Permission prompts are off: tools run without asking, except those you set to Deny. <a class="text-link" href={hrefFor("settings")}>Settings</a>
+            Permission prompts are off: tools run without asking, except those set to Deny. <a class="text-link" href={hrefFor("settings")}>Settings</a>
           </span>
         </p>
       </Show>
@@ -156,7 +156,7 @@ export function Tools(): JSX.Element {
         <p class="notice" role="status">
           <Icon name="offline" size={18} />
           <span>
-            Offline mode is on: Fetch web page refuses until you turn it off. <a class="text-link" href={hrefFor("settings")}>Settings</a>
+            Offline mode is on: Fetch web page refuses until it is turned off. <a class="text-link" href={hrefFor("settings")}>Settings</a>
           </span>
         </p>
       </Show>
@@ -174,7 +174,7 @@ export function Tools(): JSX.Element {
           </For>
         </fieldset>
         <p class="hint" data-testid="preset-note">
-          {PRESETS.find((x) => x.id === presetOf(policy()))?.note ?? "Custom: your own mix of rules."}
+          {PRESETS.find((x) => x.id === presetOf(policy()))?.note ?? "Custom: a mix of rules."}
         </p>
         <label class="tools-access">
           <span>Access</span>
@@ -204,7 +204,7 @@ export function Tools(): JSX.Element {
         </fieldset>
       </Section>
 
-      <Section id="tool-rules" title="Tools" description={__DESKTOP__ ? "Cerebro's built-in tools and every tool your MCP servers offer. Change any rule; Default follows the setting above." : "Built-in tools and tools from installed plugins. Change any rule; Default follows the setting above."}>
+      <Section id="tool-rules" title="Tools" description={__DESKTOP__ ? "Cerebro's built-in tools and every tool the MCP servers offer. Default follows the setting above." : "Built-in tools and tools from installed plugins. Change any rule; Default follows the setting above."}>
         <table class="tools-table">
           <thead>
             <tr>

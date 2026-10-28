@@ -21,7 +21,7 @@ test.describe("local API", () => {
     await card.getByRole("switch", { name: "Allow the local network" }).click({ force: true });
     await expect(card).toContainText("http://192.168.1.20:47812/v1");
     await card.getByRole("switch", { name: "Require the key" }).click({ force: true });
-    await expect(card.getByRole("alert")).toHaveText("Anyone on your network can use this computer's model without a key.");
+    await expect(card.getByRole("alert")).toHaveText("Anyone on this network can use this computer's model without a key.");
     await expect(page.getByTestId("local-api-key-value")).toHaveCount(0);
     await expect(page.getByTestId("local-api-snippet")).toContainText('api_key="not-needed"');
   });

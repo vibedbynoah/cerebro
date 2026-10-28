@@ -223,7 +223,7 @@ function AssistantMessage(props: {
         <Markdown text={m().text} />
       </Show>
       <Show when={m().sources.length}>
-        <ul class="msg__sources" role="list" aria-label="Passages from your documents">
+        <ul class="msg__sources" role="list" aria-label="Passages from documents">
           <For each={m().sources}>
             {(s) => (
               <li>

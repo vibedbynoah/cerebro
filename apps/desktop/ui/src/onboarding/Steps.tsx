@@ -30,7 +30,7 @@ export function WelcomeStep(): JSX.Element {
   const plan: Array<{ icon: IconName; title: string; text: string }> = [
     { icon: "chip", title: "Check this machine", text: "Processor, graphics card and memory." },
     { icon: "models", title: "Pick a first model", text: "Ranked by how well it fits here." },
-    { icon: "security", title: "Review what protects you", text: "All on by default, all yours to change." },
+    { icon: "security", title: "Review the protections", text: "All on by default, each one adjustable." },
   ];
   return (
     <div class="onb-welcome">
@@ -40,7 +40,7 @@ export function WelcomeStep(): JSX.Element {
           Welcome to Cerebro
         </p>
         <h1 class="onb-title onb-title--display" id="onb-step-title" tabindex="-1" aria-describedby="onb-step-count">
-          Your models, measured on this machine.
+          Models, measured on this machine.
         </h1>
         <p class="onb-lede">
           Cerebro measures the fastest safe configuration for each model on this computer instead of guessing, runs it with its protections on, and serves it on{" "}
@@ -284,7 +284,7 @@ export function ModelStep(props: {
               fallback={
                 <span class="rec-legend__item">
                   <Icon name="info" size={14} />
-                  This machine could not be read, so these are listed unranked. Tune measures whichever you pick after download.
+                  This machine could not be read, so these are listed unranked. Tune measures the chosen one after download.
                 </span>
               }
             >
@@ -371,7 +371,7 @@ export function ModelStep(props: {
                   </span>
                 </span>
                 <span class="rec__why" id="rec-later-why">
-                  {loadable().length > 0 ? "Finish setup without a model and choose one in Model Hub." : "No model in the catalog fits this machine yet. Add your own GGUF file later in Model Hub."}
+                  {loadable().length > 0 ? "Finish setup without a model and choose one in Model Hub." : "No model in the catalog fits this machine yet. A GGUF file can be added later in Model Hub."}
                 </span>
               </span>
               <span class="rec__radio" aria-hidden="true" />
@@ -413,7 +413,7 @@ export function PrivacyStep(): JSX.Element {
     {
       icon: "offline",
       title: "Works without a network",
-      body: () => <>Chat, tuning, document search and the API run on this computer. Only the network features you use make a network request.</>,
+      body: () => <>Chat, tuning, document search and the API run on this computer. Only network features in use make a network request.</>,
       keys: null,
     },
     {
@@ -454,7 +454,7 @@ export function PrivacyStep(): JSX.Element {
     {
       icon: "offline",
       title: "Works without a network",
-      body: () => <>Chat, the Monitor, document search and every engine switch run on this computer. Downloads and the network features you use need a connection.</>,
+      body: () => <>Chat, the Monitor, document search and every engine switch run on this computer. Downloads and network features need a connection.</>,
       keys: null,
     },
     {
@@ -466,13 +466,13 @@ export function PrivacyStep(): JSX.Element {
     {
       icon: "check",
       title: "Tools ask first",
-      body: () => <>Before a model uses a tool, such as reading a file through an MCP server, Cerebro shows what it will do and waits for you.</>,
+      body: () => <>Before a model uses a tool, such as reading a file through an MCP server, Cerebro shows what it will do and waits for approval.</>,
       keys: ["permissionPrompts"],
     },
     {
       icon: "monitor",
       title: "Phone access is off",
-      body: () => <>Checking on the model from your phone needs a password and a QR code, and only works on your own network. It stays off until you set it up in Settings.</>,
+      body: () => <>Phone access needs a password and a QR code, and only works on the local network. It stays off until set up in Settings.</>,
       keys: null,
     },
   ];
@@ -509,7 +509,7 @@ export function PrivacyStep(): JSX.Element {
       </ul>
       <p class="hint onb-note">
         <Icon name="settings" size={14} />
-        On by default. Each one can be switched off in Settings; nothing else changes when you do.
+        On by default. Each one can be switched off in Settings without changing anything else.
       </p>
     </div>
   );
@@ -520,9 +520,9 @@ export function PrivacyStep(): JSX.Element {
 export function TermsStep(props: { accepted: boolean; changed: boolean; onOpen: (doc: LegalDocId) => void }): JSX.Element {
   const points: Array<{ icon: IconName; title: string; text: string }> = [
     { icon: "info", title: "Provided as is.", text: "Cerebro is free, open-source software under the Apache-2.0 licence, with no warranty of any kind." },
-    { icon: "tools", title: "You answer for what you run.", text: "You are responsible for the models you use, the plugins you install and everything they generate." },
-    { icon: "documents", title: "Model licences apply.", text: "Each model has its own licence from its publisher, and its terms apply whenever you use it. Some limit commercial use." },
-    { icon: "lock", title: "Your data stays here.", text: "No accounts, no telemetry. Data leaves this computer only when you use a network feature." },
+    { icon: "tools", title: "Responsibility stays with the user.", text: "The user is responsible for the models used, the plugins installed and everything they generate." },
+    { icon: "documents", title: "Model licences apply.", text: "Each model has its own licence from its publisher, and its terms apply whenever it is used. Some limit commercial use." },
+    { icon: "lock", title: "Data stays here.", text: "No accounts, no telemetry. Data leaves this computer only through a network feature." },
   ];
   const docs: Array<{ id: LegalDocId; label: string }> = [
     { id: "terms", label: "Full terms" },
@@ -535,7 +535,7 @@ export function TermsStep(props: { accepted: boolean; changed: boolean; onOpen: 
       <Show when={props.changed}>
         <p class="notice onb-changed" role="note">
           <Icon name="info" size={18} />
-          <span>The terms changed since you last accepted them. This is the new summary; nothing else about your setup changes.</span>
+          <span>The terms changed since they were last accepted. This is the new summary; nothing else about the setup changes.</span>
         </p>
       </Show>
       <ol class="terms">
@@ -615,7 +615,7 @@ export function FinishStep(props: {
       </div>
       {/* The one line that matters: what to do next with what was chosen. */}
       <p class="finish-payoff">
-        <Show when={picked()} fallback={<>No first model yet. Pick one in Model Hub whenever you are ready; Tune measures it on this machine.</>}>
+        <Show when={picked()} fallback={<>No first model yet. Model Hub has one when needed; Tune measures it on this machine.</>}>
           {(r) => (
             <>
               <strong>{r().model.name}</strong>
@@ -725,7 +725,7 @@ export function FinishStep(props: {
       <p class="hint onb-note">
         <Icon name="info" size={14} />
         <span>
-          A model has to be on this computer before it can be tuned: download it in Model Hub when you are online, or add a <Term k="gguf" /> file you already have.
+          A model has to be on this computer before it can be tuned: download it in Model Hub when online, or add a <Term k="gguf" /> file already on disk.
         </span>
       </p>
     </div>

@@ -252,7 +252,7 @@ test.describe("load panel", () => {
     await expect(btn).toHaveText(/Reload/);
     await expect(page.locator(".drawer__caption")).toContainText("reload to apply");
     await btn.click();
-    await expect(page.locator(".toast").filter({ hasText: `${TUNED_MOE.name} loaded` })).toContainText("with your settings");
+    await expect(page.locator(".toast").filter({ hasText: `${TUNED_MOE.name} loaded` })).toContainText("with the saved settings");
     await expect(btn).toHaveText(/Loaded · Unload/);
     await expect(page.locator(".loaded-item")).toContainText("custom");
   });
@@ -293,7 +293,7 @@ test.describe("load panel", () => {
     await picker.selectOption({ label: "Quiet fans" });
     await expect(page.getByLabel("Threads", { exact: true })).toHaveValue("4");
     await page.locator(".drawer__load-btn").click();
-    await expect(page.locator(".toast").filter({ hasText: `${UNTUNED.name} loaded` })).toContainText("with your settings");
+    await expect(page.locator(".toast").filter({ hasText: `${UNTUNED.name} loaded` })).toContainText("with the saved settings");
     await expect(page.locator(".loaded-item")).toContainText("custom");
   });
 });
@@ -355,7 +355,7 @@ test.describe("tweaks and load settings agree", () => {
     await page.locator(".lfield", { hasText: "Flash attention" }).locator("label", { hasText: "Auto" }).click();
 
     await page.locator(".drawer__load-btn").click();
-    await expect(page.locator(".toast").filter({ hasText: `${UNTUNED.name} loaded` })).toContainText("with your settings");
+    await expect(page.locator(".toast").filter({ hasText: `${UNTUNED.name} loaded` })).toContainText("with the saved settings");
     await expect(page.locator(".loaded-item")).toContainText("custom");
   });
 

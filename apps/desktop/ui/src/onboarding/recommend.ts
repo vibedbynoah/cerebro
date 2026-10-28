@@ -76,12 +76,12 @@ function why(model: CatalogModel, fit: Fit, hw: HardwareProfile): string {
   const vram = hw.gpu ? gib(hw.gpu.vramTotalGiB) : null;
   switch (fit) {
     case "gpu":
-      return `Fits entirely in your ${vram ?? "available"} of video memory, with room for context. Cerebro measures whether the defaults are already the fastest setting here.`;
+      return `Fits entirely in the ${vram ?? "available"} of video memory, with room for context. Cerebro measures whether the defaults are already the fastest setting here.`;
     case "moe-offload":
-      return `Larger than your video memory, but only ${model.activeParams ?? "a few"} of its parameters work per token, so reading system memory costs it less. Tuning matters most here; Cerebro measures it.`;
+      return `Larger than video memory, but only ${model.activeParams ?? "a few"} of its parameters work per token, so reading system memory costs it less. Tuning matters most here; Cerebro measures it.`;
     case "split":
       return hw.gpu
-        ? "Larger than your video memory and dense, so every token also reads system memory, which is slower. Cerebro measures what that costs after download."
+        ? "Larger than video memory and dense, so every token also reads system memory, which is slower. Cerebro measures what that costs after download."
         : "No graphics card the engine can use was found, so it runs on the processor from system memory. Cerebro measures what that costs after download.";
     case "too-large":
       return `Needs about ${gib(model.sizeGiB)}, more than this machine's video and system memory can spare together. It would not load here.`;

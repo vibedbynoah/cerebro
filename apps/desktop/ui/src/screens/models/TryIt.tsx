@@ -127,7 +127,7 @@ export function VisionTry(props: { model: LibraryModel }): JSX.Element {
               </span>
             }
           >
-            {(src) => <img class="dropzone__img" src={src()} alt={`Your image: ${fileName()}`} />}
+            {(src) => <img class="dropzone__img" src={src()} alt={`Image: ${fileName()}`} />}
           </Show>
         </label>
         <Show when={error()}>
@@ -192,7 +192,7 @@ export function SpeechToTextTry(props: { model: LibraryModel }): JSX.Element {
         <h3 class="try__title">Record and transcribe</h3>
         <IllustrativeFlag />
       </div>
-      <p class="try__text">Say a sentence; the model writes it down. Runs in its own engine, so your chat model stays loaded.</p>
+      <p class="try__text">Say a sentence; the model writes it down. Runs in its own engine, so the chat model stays loaded.</p>
       <div class="try__row">
         <Show
           when={phase() === "recording"}
@@ -220,14 +220,14 @@ export function SpeechToTextTry(props: { model: LibraryModel }): JSX.Element {
       </div>
       <p class="hint">
         <Icon name="info" size={16} />
-        The browser preview simulates the microphone; the desktop app records from your default input.
+        The browser preview simulates the microphone; the desktop app records from the default input.
       </p>
       <Output busy={phase() === "working"} output={output()} busyText="Transcribing…" />
     </div>
   );
 }
 
-const DEFAULT_SENTENCE = "Cerebro runs this voice on your own computer.";
+const DEFAULT_SENTENCE = "Cerebro runs this voice on this computer.";
 
 export function TextToSpeechTry(props: { model: LibraryModel }): JSX.Element {
   const service = useService();

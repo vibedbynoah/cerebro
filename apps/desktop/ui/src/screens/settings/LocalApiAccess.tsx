@@ -108,7 +108,7 @@ export function LocalApiAccess(): JSX.Element {
   const toggle = async (on: boolean) => {
     try {
       setView(await service.localApiEnable(on));
-      notify(on ? "Local API is on" : "Local API is off", on ? "Apps can now use the loaded model." : "No app can use it until you turn it back on.", "success");
+      notify(on ? "Local API is on" : "Local API is off", on ? "Apps can now use the loaded model." : "No app can use it until it is turned back on.", "success");
     } catch (e) {
       notify("Could not change the local API", errMessage(e), "error");
     }
@@ -155,7 +155,7 @@ export function LocalApiAccess(): JSX.Element {
           </p>
         </div>
 
-        <SettingSwitch id="local-api-enabled" label="Local API" note="Off until you turn it on. Requests run one at a time on the loaded model." checked={view()?.enabled ?? false} onChange={(on) => void toggle(on)} />
+        <SettingSwitch id="local-api-enabled" label="Local API" note="Off until turned on. Requests run one at a time on the loaded model." checked={view()?.enabled ?? false} onChange={(on) => void toggle(on)} />
 
         <Show when={view()?.enabled}>
           <div class="mcpsrv__card">
@@ -164,20 +164,20 @@ export function LocalApiAccess(): JSX.Element {
             <SettingSwitch
               id="local-api-lan"
               label="Allow the local network"
-              note="Other devices on your home or office network can connect too. Never the internet."
+              note="Other devices on the local network can connect too. Never the internet."
               checked={view()?.allowLan ?? false}
               onChange={(on) => void setOption({ allowLan: on })}
             />
             <SettingSwitch
               id="local-api-switch"
               label="Let apps load models"
-              note="A request naming another model in your library loads it, replacing the one loaded now."
+              note="A request naming another model in the library loads it, replacing the one loaded now."
               checked={view()?.allowModelSwitch ?? true}
               onChange={(on) => void setOption({ allowModelSwitch: on })}
             />
             <Show when={view()?.allowLan && !view()?.requireKey}>
               <p class="hint mcpsrv__warn" role="alert">
-                Anyone on your network can use this computer's model without a key.
+                Anyone on this network can use this computer's model without a key.
               </p>
             </Show>
             <Show when={(view()?.lanUrls.length ?? 0) > 0}>
@@ -198,7 +198,7 @@ export function LocalApiAccess(): JSX.Element {
                   <button class="btn btn--tertiary btn--sm" type="button" onClick={() => setRevealed((r) => !r)}>
                     {revealed() ? "Hide" : "Show"}
                   </button>
-                  <button class="btn btn--tertiary btn--sm" type="button" onClick={() => void copy(view()?.key ?? "", "Paste it into the app you are connecting.")}>
+                  <button class="btn btn--tertiary btn--sm" type="button" onClick={() => void copy(view()?.key ?? "", "Paste it into the app being connected.")}>
                     Copy
                   </button>
                   <button class="btn btn--secondary btn--sm" type="button" onClick={() => void rotate()}>
@@ -230,7 +230,7 @@ export function LocalApiAccess(): JSX.Element {
                 Copy
               </button>
               <Show when={!revealed() && view()?.requireKey}>
-                <p class="hint">The example holds the key, so it stays hidden until you press Show. Copy works without showing it.</p>
+                <p class="hint">The example holds the key, so it stays hidden until Show is pressed. Copy works without showing it.</p>
               </Show>
             </div>
           </div>

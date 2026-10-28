@@ -12,7 +12,7 @@ type App = (typeof APPS)[number];
 const TOOLS: Array<{ name: string; desc: string }> = [
   { name: "generate", desc: "write text with the loaded model" },
   { name: "chat", desc: "reply to a conversation" },
-  { name: "list_models", desc: "models in your library" },
+  { name: "list_models", desc: "models in the library" },
   { name: "load_model", desc: "load one" },
   { name: "status", desc: "speed, memory and what the engine is doing" },
 ];
@@ -119,7 +119,7 @@ export function McpServerAccess(): JSX.Element {
       setView(await service.mcpServerEnable(on));
       notify(
         on ? "MCP server is on" : "MCP server is off",
-        on ? "Other apps on this computer can connect with the token below." : "No app can connect until you turn it back on.",
+        on ? "Other apps on this computer can connect with the token below." : "No app can connect until it is turned back on.",
         "success",
       );
     } catch (e) {
@@ -163,7 +163,7 @@ export function McpServerAccess(): JSX.Element {
     <Section
       id="mcp-server"
       title="Use Cerebro from other apps"
-      description="Other programs on this computer can use your local models through MCP, including VS Code and Cursor. The server listens on 127.0.0.1 only, so other devices cannot connect."
+      description="Other programs on this computer can use the local models through MCP, including VS Code and Cursor. The server listens on 127.0.0.1 only, so other devices cannot connect."
     >
       <div class="mcpsrv" data-testid="mcp-server-access">
         <div class="mcpsrv__status-row">
@@ -195,7 +195,7 @@ export function McpServerAccess(): JSX.Element {
                 <button
                   class="btn btn--tertiary btn--sm"
                   type="button"
-                  onClick={() => void copy(view()?.token ?? "", "Paste it into the app you are connecting.")}
+                  onClick={() => void copy(view()?.token ?? "", "Paste it into the app being connected.")}
                 >
                   Copy
                 </button>
@@ -248,7 +248,7 @@ export function McpServerAccess(): JSX.Element {
                 Copy
               </button>
               <Show when={!revealed()}>
-                <p class="hint">The snippet stays hidden until you press Show — or copy it without showing.</p>
+                <p class="hint">The snippet stays hidden until Show is pressed; Copy works without showing it.</p>
               </Show>
             </div>
           </div>

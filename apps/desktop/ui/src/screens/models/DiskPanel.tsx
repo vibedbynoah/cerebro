@@ -80,7 +80,7 @@ export function DiskPanel(): JSX.Element {
         </button>
       </div>
       <p class="disk__how">
-        Files are matched by their <Term k="sha256" /> fingerprint, not their names. Deduplicating keeps the copy you choose and turns the others on the same drive into{" "}
+        Files are matched by their <Term k="sha256" /> fingerprint, not their names. Deduplicating keeps the chosen copy and turns the others on the same drive into{" "}
         <Term k="hardLink">hard links</Term>, so every app keeps working. Undo turns them back into separate files.
       </p>
       <Show when={report.state === "errored"}>
@@ -148,7 +148,7 @@ function CountGiB(props: { gib: number }): JSX.Element {
 /** The copy in a sentence, e.g. "the copy in another app's folder". */
 function copyName(source: DuplicateCopy["source"]): string {
   if (source === "cerebro") return "Cerebro's copy";
-  if (source === "other") return "the copy in your folder";
+  if (source === "other") return "the copy in this folder";
   return "the copy in another app's folder";
 }
 

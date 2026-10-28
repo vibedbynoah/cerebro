@@ -24,7 +24,7 @@ describe("the quant chooser", () => {
     const files = [file("UD-Q4_K_XL", 5), file("UD-Q8_0", 9), file("UD-Q2_K", 2)];
     const pick = recommendQuant(files, machine(8, 32));
     expect(pick?.file.quant).toBe("UD-Q4_K_XL");
-    expect(pick?.why).toBe("UD-Q4_K_XL: the best quality that runs entirely on your 8 GB graphics card.");
+    expect(pick?.why).toBe("UD-Q4_K_XL: the best quality that runs entirely on this 8 GB graphics card.");
   });
 
   it("never picks a full-precision file that only fits split with the processor", () => {
@@ -50,7 +50,7 @@ describe("the quant chooser", () => {
     const files = [file("Q4_K_M", 4.6), file("Q8_0", 12), file("IQ2_XXS", 2)];
     const pick = recommendQuant(files, machine(8, 32));
     expect(pick?.file.quant).toBe("Q4_K_M");
-    expect(pick?.why).toMatch(/your 8 GB graphics card/);
+    expect(pick?.why).toMatch(/this 8 GB graphics card/);
   });
 
   it("recommends the smallest file when nothing fits, and says it will be slow", () => {

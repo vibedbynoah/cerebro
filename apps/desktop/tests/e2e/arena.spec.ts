@@ -64,7 +64,7 @@ test.describe("arena", () => {
     await compare(page, prompt);
 
     // Blind by default: the answer card says so, but no model name appears.
-    await expect(page.getByText("Names hidden until you vote")).toBeVisible();
+    await expect(page.getByText("Names hidden until the vote")).toBeVisible();
     await expect(page.locator(".arena-reply__model")).toHaveCount(0);
     await expect(page.locator(".arena-reply__body")).toHaveCount(2);
     for (const body of await page.locator(".arena-reply__body").all()) await expect(body).not.toBeEmpty();

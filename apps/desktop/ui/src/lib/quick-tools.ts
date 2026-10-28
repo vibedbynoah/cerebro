@@ -66,7 +66,7 @@ export const QUICK_TOOLS: readonly QuickToolDef[] = [
     id: "extract",
     name: "Extract",
     command: "extract",
-    blurb: "The fields you name, as a table or as JSON.",
+    blurb: "The named fields, as a table or as JSON.",
     input: "text-and-fields",
     inputLabel: "Text to read",
     needs: "text",

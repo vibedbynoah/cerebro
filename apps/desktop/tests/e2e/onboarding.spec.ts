@@ -17,7 +17,7 @@ async function openSetup(page: Page): Promise<void> {
 
 test("a fresh profile walks the whole setup by keyboard and lands in the app, remembered", async ({ page }) => {
   await openSetup(page);
-  await expect(page.locator("h1")).toHaveText("Your models, measured on this machine.");
+  await expect(page.locator("h1")).toHaveText("Models, measured on this machine.");
   await expect(page).toHaveTitle("Welcome · Set up Cerebro");
   // No app chrome yet: no sidebar, no palette trigger.
   await expect(page.locator("nav.sidebar")).toHaveCount(0);

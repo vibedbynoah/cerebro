@@ -130,7 +130,7 @@ export function TweakStudio(props: { model: LibraryModel; detail: ModelDetail })
             </h3>
             <IllustrativeFlag />
           </div>
-          <p class="studio-card__desc">From Cerebro's quirks list for the {props.model.family} family. Each one is off until you switch it on.</p>
+          <p class="studio-card__desc">From Cerebro's quirks list for the {props.model.family} family. Each one is off until switched on.</p>
           <div class="settings-card fix-list">
             <For each={props.detail.quirks}>
               {(q) => (

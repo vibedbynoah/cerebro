@@ -17,7 +17,7 @@ export function About(props: { platform: Platform }): JSX.Element {
 
   const promises: Array<{ icon: IconName; title: string; text: JSX.Element }> = [
     { icon: "tune", title: "Measured, not guessed", text: "Every model gets the fastest configuration that passes Cerebro's checks on this machine. Sometimes that is the defaults, and Cerebro says so." },
-    { icon: "security", title: "Protected by default", text: "Integrity check before every start, process-tree cleanup, a clean environment. Each protection is yours to switch off." },
+    { icon: "security", title: "Protected by default", text: "Integrity check before every start, process-tree cleanup, a clean environment. Each protection can be switched off." },
     {
       icon: "offline",
       title: "Local by default",
@@ -51,7 +51,7 @@ export function About(props: { platform: Platform }): JSX.Element {
         </div>
       </section>
 
-      <Section id="what" title="What you get">
+      <Section id="what" title="What is included">
         <ul class="about-promises">
           <For each={promises}>
             {(p) => (
@@ -98,7 +98,7 @@ export function About(props: { platform: Platform }): JSX.Element {
         </figure>
       </Section>
 
-      <Section id="documents" title="Documents" description="The terms you accepted, how Cerebro treats your data, and the licences of everything it ships.">
+      <Section id="documents" title="Documents" description="The accepted terms, how Cerebro treats data, and the licences of everything it ships.">
         <div class="about-docs">
           <For each={LEGAL_DOCS}>
             {(d) => (

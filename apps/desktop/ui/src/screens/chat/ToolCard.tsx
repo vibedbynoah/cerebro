@@ -14,8 +14,8 @@ const TRUNCATE_AT = 2000;
 
 function chipLabel(state: ToolActivity["state"]): string {
   switch (state) {
-    case "approval": return "Waiting for you";
-    case "question": return "Question for you";
+    case "approval": return "Waiting for approval";
+    case "question": return "Question";
     case "plan": return "Plan to review";
     case "running": return "Running";
     case "done": return "Done";
@@ -111,7 +111,7 @@ function QuestionForm(props: { id: string; questions: Question[]; onAnswer: (a: 
               class="input toolcard__other"
               type="text"
               aria-label={q().options.length ? `Another answer to: ${q().question}` : `Answer to: ${q().question}`}
-              placeholder={q().options.length ? "Or type another answer" : "Your answer"}
+              placeholder={q().options.length ? "Or type another answer" : "Answer"}
               value={other()[i]}
               onInput={(e) => {
                 const v = e.currentTarget.value;

@@ -80,7 +80,7 @@ export function CloudModels(): JSX.Element {
   };
 
   return (
-    <Section id="cloud-models" title="Cloud models" description="Use models you already pay for elsewhere, with your own API key or plan. Sign-up and billing happen on the provider's site. Chats with these models go from this computer straight to the provider over the internet; your local models stay on this computer.">
+    <Section id="cloud-models" title="Cloud models" description="Models paid for elsewhere, used with their own API key or plan. Sign-up and billing happen on the provider's site. Chats with these models go from this computer straight to the provider over the internet; local models stay on this computer.">
       <div class="cloud" data-testid="cloud-models">
         <Show when={(providers() ?? []).length}>
           <ul class="cloud__list">
@@ -143,7 +143,7 @@ export function CloudModels(): JSX.Element {
                 </label>
                 <label>
                   <span>API key {p().hasKey ? "(leave empty to keep the stored one)" : ""}</span>
-                  <input type="password" class="mono" autocomplete="off" value={key()} maxLength={400} onInput={(e) => setKey(e.currentTarget.value)} placeholder={p().hasKey ? "Stored" : "Paste your key"} />
+                  <input type="password" class="mono" autocomplete="off" value={key()} maxLength={400} onInput={(e) => setKey(e.currentTarget.value)} placeholder={p().hasKey ? "Stored" : "Paste the key"} />
                 </label>
               </div>
               <Show when={preset()}>

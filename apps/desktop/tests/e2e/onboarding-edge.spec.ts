@@ -165,7 +165,7 @@ test("each radio is named by model and fit only, and described by its reason and
   await expect(step(page, "model")).toBeVisible();
   const first = page.getByRole("radio").first();
   await expect(first).toHaveAccessibleName("Gemma-4-12B-it Best fit Fits in graphics memory");
-  await expect(first).toHaveAccessibleDescription(/^Fits entirely in your .* 6\.9 GiB$/);
+  await expect(first).toHaveAccessibleDescription(/^Fits entirely in the .* 6\.9 GiB$/);
 });
 
 test("a stored model that no longer loads is never written back; Decide later stores none", async ({ page }) => {

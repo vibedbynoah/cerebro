@@ -111,7 +111,7 @@ export function Composer(props: {
       }
       const unknown = unknownCommand(t);
       if (unknown) {
-        setError(`There is no /${unknown} command. Did you mean /${closest(unknown)}? Type /help for the list.`);
+        setError(`There is no /${unknown} command. Closest: /${closest(unknown)}. /help lists them all.`);
         return;
       }
     }
@@ -433,7 +433,7 @@ export function ChatSettings(props: {
         </span>
       </div>
       <p class="composer__hint composer__hint--mode" id="mode-note">
-        {props.mode ? `${MODE_PRESETS[props.mode].summary} ${MODE_PRESETS[props.mode].changes.join(". ")}.` : "Custom: you changed one of the settings in Fine-tune by hand. Move the slider to pick a level again."}
+        {props.mode ? `${MODE_PRESETS[props.mode].summary} ${MODE_PRESETS[props.mode].changes.join(". ")}.` : "Custom: a Fine-tune setting was changed by hand. Moving the slider picks a level again."}
       </p>
       <details class="composer__more" open={readPref(FINE_TUNE_KEY) !== "closed"} on:toggle={(e) => writePref(FINE_TUNE_KEY, e.currentTarget.open ? "open" : "closed")}>
         <summary class="composer__more-summary">
@@ -503,11 +503,11 @@ export function ChatSettings(props: {
                       <input type="checkbox" checked={props.prefs.orchestrate} onChange={(e) => props.setPrefs({ orchestrate: e.currentTarget.checked })} />
                       <span>Shared ledger (several instances)</span>
                     </label>
-                    <label class="composer__check" title="Lets the model read files, search and call your MCP tools.">
+                    <label class="composer__check" title="Lets the model read files, search and call MCP tools.">
                       <input type="checkbox" checked={props.prefs.toolsOn} onChange={(e) => props.setPrefs({ toolsOn: e.currentTarget.checked })} data-testid="tools-on" />
                       <span>Tools</span>
                     </label>
-                    <label class="composer__check" title="What you asked it to remember about you.">
+                    <label class="composer__check" title="Facts saved with /remember.">
                       <input type="checkbox" checked={props.prefs.memoryOn} onChange={(e) => props.setPrefs({ memoryOn: e.currentTarget.checked })} />
                       <span>Memories</span>
                     </label>
@@ -530,7 +530,7 @@ export function ChatSettings(props: {
               <input type="checkbox" checked={!props.prefs.addInstructions} onChange={(e) => props.setPrefs({ addInstructions: !e.currentTarget.checked })} />
               <span>No added prompt</span>
             </label>
-            <label class="composer__check" title="The model looks around without changing anything, then shows you a plan to approve.">
+            <label class="composer__check" title="The model looks around without changing anything, then shows a plan for approval.">
               <input type="checkbox" checked={props.prefs.planMode} onChange={(e) => props.setPrefs({ planMode: e.currentTarget.checked })} />
               <span>Plan first</span>
             </label>
@@ -560,7 +560,7 @@ export function ChatSettings(props: {
                 </button>
               </span>
             </Show>
-            <label class="composer__check" title="Answer from your own documents: the passages that match each message are added to the request.">
+            <label class="composer__check" title="Answers from local documents: matching passages are added to each request.">
               <input type="checkbox" checked={props.docsOn} onChange={(e) => props.onDocs(e.currentTarget.checked)} />
               <span>Use my documents</span>
             </label>

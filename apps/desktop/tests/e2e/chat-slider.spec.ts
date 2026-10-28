@@ -46,7 +46,7 @@ test.describe("the Speed <-> Accuracy slider", () => {
     await openFineTune(page);
     await page.locator('input[name="effort"][value="high"]').check({ force: true });
     await expect(level(page)).toHaveText("Custom");
-    await expect(page.locator("#mode-note")).toContainText("you changed one of the settings in Fine-tune by hand");
+    await expect(page.locator("#mode-note")).toContainText("a Fine-tune setting was changed by hand");
     await slider(page).fill("4");
     await expect(level(page)).toHaveText("Accurate");
   });

@@ -113,10 +113,10 @@ export function recommendQuant(files: readonly QuantFile[], hw: HardwareProfile 
   // better trade), unless the repository has nothing else.
   const floor = list.some((f) => bitsOf(f.quant) >= 3) ? 3 : 0;
   const onCard = best((f) => tone(f) === "good" && bitsOf(f.quant) <= cap && bitsOf(f.quant) >= floor);
-  if (onCard) return { file: onCard, why: `${onCard.quant}: the best quality that runs entirely on your ${gpu} GB graphics card.`, slow: false };
+  if (onCard) return { file: onCard, why: `${onCard.quant}: the best quality that runs entirely on this ${gpu} GB graphics card.`, slow: false };
   const split = best((f) => tone(f) === "ok" && bitsOf(f.quant) >= 4 && bitsOf(f.quant) <= 5);
   if (split) {
-    const where = gpu > 0 ? `your ${gpu} GB graphics card and ${ram} GB of memory together` : `your ${ram} GB of memory`;
+    const where = gpu > 0 ? `this ${gpu} GB graphics card and ${ram} GB of memory together` : `this machine's ${ram} GB of memory`;
     return { file: split, why: `${split.quant}: fits ${where}; larger files would run much slower here.`, slow: false };
   }
   const small = best((f) => tone(f) !== "no" && bitsOf(f.quant) <= 4);

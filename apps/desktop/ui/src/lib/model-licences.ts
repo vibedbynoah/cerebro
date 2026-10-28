@@ -21,13 +21,13 @@ export interface ModelLicence {
 const APACHE: ModelLicence = {
   name: "Apache-2.0",
   commercial: "yes",
-  summary: "Commercial use is allowed. Keep the licence and notice if you share the model.",
+  summary: "Commercial use is allowed. The licence and notice stay with the model when it is shared.",
 };
 
 const MIT: ModelLicence = {
   name: "MIT",
   commercial: "yes",
-  summary: "Commercial use is allowed. Keep the copyright and licence notice if you share it.",
+  summary: "Commercial use is allowed. The copyright and licence notice stay with it when it is shared.",
 };
 
 const GEMMA: ModelLicence = {
@@ -69,7 +69,7 @@ const OPENRAIL: ModelLicence = {
 const UNKNOWN: ModelLicence = {
   name: "Check the model card",
   commercial: "unknown",
-  summary: "The licence is on the model's page. Read it before you download: it decides whether commercial use is allowed.",
+  summary: "The licence is on the model's page. It decides whether commercial use is allowed; worth reading before downloading.",
 };
 
 /** Tags Hugging Face publishers use, mapped to the same plain answers. */

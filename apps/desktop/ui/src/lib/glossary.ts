@@ -9,7 +9,7 @@ export const GLOSSARY = {
   },
   vram: {
     term: "VRAM",
-    text: "Video memory: the memory on your graphics card. The more of a model that fits in it, the faster the model usually runs.",
+    text: "Video memory: the memory on the graphics card. The more of a model that fits in it, the faster the model usually runs.",
   },
   backend: {
     term: "backend",
@@ -17,7 +17,7 @@ export const GLOSSARY = {
   },
   loopback: {
     term: "loopback",
-    text: "127.0.0.1, an address only this computer can reach. Other devices on your network cannot connect to it.",
+    text: "127.0.0.1, an address only this computer can reach. Other devices on the network cannot connect to it.",
   },
   quant: {
     term: "quantization",
@@ -41,11 +41,11 @@ export const GLOSSARY = {
   },
   api: {
     term: "OpenAI-compatible API",
-    text: "A local web address that speaks the same request format as OpenAI's API, so existing tools can use your local model instead.",
+    text: "A local web address that speaks the same request format as OpenAI's API, so existing tools can use the local model instead.",
   },
   rag: {
     term: "RAG",
-    text: "Retrieval-augmented generation: the model first looks up the most relevant passages in your documents, then answers using them.",
+    text: "Retrieval-augmented generation: the model first looks up the most relevant passages in local documents, then answers using them.",
   },
   quality: {
     term: "quality",
@@ -73,7 +73,7 @@ export const GLOSSARY = {
   },
   context: {
     term: "context length",
-    text: "How many tokens the model can keep in view at once: your messages, its replies and any documents. More context needs more memory.",
+    text: "How many tokens the model can keep in view at once: the messages, its replies and any documents. More context needs more memory.",
   },
   offload: {
     term: "GPU layers",
@@ -113,7 +113,7 @@ export const GLOSSARY = {
   },
   prefill: {
     term: "prompt reading",
-    text: "Also called prefill: how fast the model reads your message and any documents before it starts to reply, in tokens per second.",
+    text: "Also called prefill: how fast the model reads the message and any documents before it starts to reply, in tokens per second.",
   },
   decode: {
     term: "writing speed",
@@ -165,11 +165,11 @@ export const GLOSSARY = {
   },
   noiseMargin: {
     term: "noise margin",
-    text: "No two runs of the same settings measure exactly alike. A candidate must beat the automatic settings by more than this (3%) to replace them, so a lucky run never changes your settings.",
+    text: "No two runs of the same settings measure exactly alike. A candidate must beat the automatic settings by more than this (3%) to replace them, so a lucky run never changes the settings.",
   },
   depth: {
     term: "working depth",
-    text: "How much text is already in the model's view while it writes, in tokens. Writing slows as this grows, so Cerebro measures at the depth your kind of work actually reaches.",
+    text: "How much text is already in the model's view while it writes, in tokens. Writing slows as this grows, so Cerebro measures at the depth the chosen kind of work actually reaches.",
   },
   pcie: {
     term: "PCIe",
@@ -197,7 +197,7 @@ export const GLOSSARY = {
   },
   channel: {
     term: "release channel",
-    text: "Stable features are on for everyone. Beta and Experimental features are newer optimisations you can switch on or off per feature; Experimental ones may change between versions.",
+    text: "Stable features are on for everyone. Beta and Experimental features are newer optimisations that switch on or off per feature; Experimental ones may change between versions.",
   },
 } as const;
 

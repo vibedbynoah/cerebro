@@ -116,7 +116,7 @@ function ImagesDesktop(): JSX.Element {
     reader.onload = () => {
       const src = String(reader.result);
       // Shown as the current picture; the next instruction edits it.
-      setResults((r) => [{ dataUrl: src, path: "", seed: 0, seconds: 0, width: size(), height: size(), prompt: `Your image: ${file.name}` }, ...r].slice(0, 24));
+      setResults((r) => [{ dataUrl: src, path: "", seed: 0, seconds: 0, width: size(), height: size(), prompt: `Image: ${file.name}` }, ...r].slice(0, 24));
     };
     reader.readAsDataURL(file);
   };
@@ -135,7 +135,7 @@ function ImagesDesktop(): JSX.Element {
   };
   return (
     <div class="screen images">
-      <ScreenHeader route="images" lede="Describe a picture; it is made on this computer, with its seed so you can make it again." />
+      <ScreenHeader route="images" lede="Describe a picture; it is made on this computer and keeps its seed for remaking it." />
       <Show
         when={models().length > 0}
         fallback={
@@ -145,7 +145,7 @@ function ImagesDesktop(): JSX.Element {
               title="Add an image model"
               lede="Image Studio runs Stable Diffusion 2.x-family models in the diffusers folder layout, such as SD-Turbo. Put the model's folder under C:\models or Cerebro's models folder and it appears here."
               features={[
-                { icon: "images", title: "Text to image", text: "Describe a picture; it is drawn locally with the seed shown so you can make it again." },
+                { icon: "images", title: "Text to image", text: "Describe a picture; it is drawn locally with its seed shown for remaking it." },
                 { icon: "lock", title: "On this computer", text: "Prompts and images never leave it." },
                 { icon: "gpu", title: "One step", text: "SD-Turbo makes a 512 x 512 image in a single step." },
               ]}
@@ -234,7 +234,7 @@ function ImagesDesktop(): JSX.Element {
               {(m) => (
                 <div class="img-licence">
                   <LicenceNote licence={licenceForModel(m().name)} />
-                  <p class="hint">The licence also covers the images you make with this model. Check it before you publish or sell them.</p>
+                  <p class="hint">The licence also covers images made with this model; check it before publishing or selling them.</p>
                 </div>
               )}
             </Show>
@@ -247,11 +247,11 @@ function ImagesDesktop(): JSX.Element {
             <Show when={service.editImage}>
               <label class="btn btn--tertiary btn--sm img-upload">
                 <Icon name="upload" size={14} />
-                Edit your own image
+                Edit an image
                 <input type="file" accept="image/png,image/jpeg,image/webp" class="sr-only" onChange={(e) => upload(e.currentTarget.files?.[0])} />
               </label>
             </Show>
-            <Show when={current()} fallback={<p class="img-stage__empty">{busy() ? "Making the image on this computer…" : "Your image appears here."}</p>}>
+            <Show when={current()} fallback={<p class="img-stage__empty">{busy() ? "Making the image on this computer…" : "The image appears here."}</p>}>
               {(g) => (
                 <figure class="img-result">
                   <img class="img-art" src={g().dataUrl} alt={g().prompt} width={g().width} height={g().height} />
@@ -566,7 +566,7 @@ function ImageStudioPreview(): JSX.Element {
           </Show>
           <div class="img-licence">
             <LicenceNote licence={licenceForModel(model().name)} />
-            <p class="hint">The licence also covers the images you make with this model. Check it before you publish or sell them.</p>
+            <p class="hint">The licence also covers images made with this model; check it before publishing or selling them.</p>
           </div>
           <div class="img-go">
             <Show
@@ -588,7 +588,7 @@ function ImageStudioPreview(): JSX.Element {
         </form>
 
         <section class="img-stage card" aria-label="Result">
-          <Show when={current()} fallback={<p class="img-stage__empty">Your image appears here, refining step by step as it is made.</p>}>
+          <Show when={current()} fallback={<p class="img-stage__empty">The image appears here, refining step by step.</p>}>
             {(item) => (
               <figure class="img-result">
                 <Art item={item()} progress={progress() ?? 1} />
@@ -629,7 +629,7 @@ function ImageStudioPreview(): JSX.Element {
           </fieldset>
         </div>
         <ul class="img-grid" role="list">
-          <For each={shown()} fallback={<li class="hint">{gallery().length ? "No favourites yet." : "Images you make are kept here, on this computer."}</li>}>
+          <For each={shown()} fallback={<li class="hint">{gallery().length ? "No favourites yet." : "Images are kept here, on this computer."}</li>}>
             {(g) => (
               <li class="img-tile" data-fav={g.favourite}>
                 <Art item={g} progress={1} small />

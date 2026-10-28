@@ -157,7 +157,7 @@ export const PHASE_IDS: readonly TunePhase[] = ["probe", "screen", "measure", "q
 export const PHASES: Readonly<Record<TunePhase, PhaseMeta>> = {
   probe: { label: "Probe", text: "Read the graphics card, its free video memory and the backend build." },
   screen: { label: "Screen", text: "Try each candidate briefly. The first repetition is always discarded." },
-  measure: { label: "Measure", text: "Three numbers per survivor: prompt reading, writing from empty, and writing at your working depth." },
+  measure: { label: "Measure", text: "Three numbers per survivor: prompt reading, writing from empty, and writing at the working depth." },
   quality: { label: "Quality gate", text: "Compare each faster candidate's answers with the engine's automatic settings. A setting that hurts them is rejected." },
   soak: { label: "Soak", text: "Run the fastest remaining candidate under sustained load. Free video memory must hold steady over the final third." },
   decide: { label: "Lock in", text: "Keep the fastest configuration that passed every check, or the automatic settings if nothing beat it." },

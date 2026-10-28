@@ -52,7 +52,7 @@ export const SETTINGS_META: readonly SettingMeta[] = [
     key: "blockLocalFetch",
     group: "protections",
     label: "Keep web fetches off this network",
-    note: "A model fetching a web page may not reach this computer, your router or other devices on your network.",
+    note: "A model fetching a web page may not reach this computer, the router or other devices on the network.",
     limits: "Does not filter what public websites a model can read.",
   },
   {
@@ -74,13 +74,13 @@ export const SETTINGS_META: readonly SettingMeta[] = [
     group: "protections",
     label: "Keep long chats ready",
     note: "Saves a long chat's reading of its history to disk, so returning to it continues instantly.",
-    limits: "Uses up to 8 GB in your app data folder; the oldest are removed first.",
+    limits: "Uses up to 8 GB in the app data folder; the oldest are removed first.",
   },
   {
     key: "loopbackOnly",
     group: "protections",
     label: "API on loopback only",
-    note: "Serves the API on 127.0.0.1. Off lets other devices on your network connect to it.",
+    note: "Serves the API on 127.0.0.1. Off lets other devices on the network connect to it.",
     term: "loopback",
     limits: "Any program on this computer can still reach a loopback address.",
     desktop: false,
@@ -101,7 +101,7 @@ export const SETTINGS_META: readonly SettingMeta[] = [
     key: "allowPluginInstalls",
     group: "network",
     label: "Plugin installs",
-    note: "Lets you install plugins when a network is available.",
+    note: "Allows plugin installs when a network is available.",
     desktop: false,
   },
 ];

@@ -116,7 +116,7 @@ export function ModelsProvider(props: { children: JSX.Element }): JSX.Element {
       try {
         const now = await service.loadModel(id, params);
         setLoaded(now);
-        const how = m.kind !== "text" && m.kind !== "vision" ? "in its own engine" : params ? "with your settings" : m.tunedParams ? "with its tuned settings" : "with starting settings";
+        const how = m.kind !== "text" && m.kind !== "vision" ? "in its own engine" : params ? "with the saved settings" : m.tunedParams ? "with its tuned settings" : "with starting settings";
         // Where it went (desktop): the planner's first note, e.g. "31 of 40 layers on the GPU…".
         const where = now.find((l) => l.id === id)?.placement?.notes[0];
         notify(`${m.name} loaded`, `${m.quant}, ${how}.${where ? ` ${where}` : ""}`, "success");

@@ -303,7 +303,7 @@ export function Chat(): JSX.Element {
       notify("Always allowed", `${tool.name} from ${tool.server} now runs without asking. Change it on the Tools screen.`, "success");
     }
     void service.chatToolDecide(id, decision !== "deny").then((ok) => {
-      if (!ok) notify("That request already ended", "The reply stopped before your answer arrived.", "info");
+      if (!ok) notify("That request already ended", "The reply stopped before the answer arrived.", "info");
     });
   };
 
@@ -314,7 +314,7 @@ export function Chat(): JSX.Element {
       notify("Plan approved", "Plan first is off; the model carries the plan out now.", "success");
     }
     void service.chatToolAnswer(id, answer as Record<string, unknown>).then((ok) => {
-      if (!ok) notify("That request already ended", "The reply stopped before your answer arrived.", "info");
+      if (!ok) notify("That request already ended", "The reply stopped before the answer arrived.", "info");
     });
   };
 
@@ -398,7 +398,7 @@ export function Chat(): JSX.Element {
                 if (i >= 0) m.tools[i] = t;
                 else m.tools.push(t);
               });
-              if (e.state === "approval") notify("A tool needs your approval", `${e.name} from ${e.server}. Answer in the chat.`, "info");
+              if (e.state === "approval") notify("A tool needs approval", `${e.name} from ${e.server}. Answer in the chat.`, "info");
               if (e.state === "question") notify("The model has a question", "Answer it in the chat.", "info");
               if (e.state === "plan") notify("A plan is ready", "Approve it, or say what to change, in the chat.", "info");
               if (e.state === "done" || e.state === "denied" || e.state === "error")
@@ -686,7 +686,7 @@ export function Chat(): JSX.Element {
   const docsNote = createMemo(() => {
     const c = cloudOf();
     if (!docsPrefs().on || !c) return "";
-    return `Your passages are sent to ${c.provider}, with your own API key.`;
+    return `Passages are sent to ${c.provider} with the configured API key.`;
   });
 
   /** Opens a passage of the user's documents in the Documents screen. */
@@ -820,29 +820,29 @@ export function Chat(): JSX.Element {
         if (!q) {
           const on = !docsPrefs().on;
           setDocsPrefs({ on });
-          return notify(on ? "Using your documents" : "Not using your documents", on ? `${docs.length} indexed file${docs.length === 1 ? "" : "s"} can be searched. /docs <name> searches one collection, folder or tag.` : "Chat answers without your documents.");
+          return notify(on ? "Using documents" : "Not using documents", on ? `${docs.length} indexed file${docs.length === 1 ? "" : "s"} can be searched. /docs <name> searches one collection, folder or tag.` : "Chat answers without documents.");
         }
         if (q === "off" || q === "no") {
           setDocsPrefs({ on: false });
-          return notify("Not using your documents");
+          return notify("Not using documents");
         }
         const collection = collections.find((c) => c.name.toLowerCase() === q);
         if (collection) {
           setDocsPrefs({ on: true, scope: scopeKey({ kind: "collection", id: collection.id }) });
-          return notify(`Using your documents: ${collection.name}`);
+          return notify(`Using documents: ${collection.name}`);
         }
         const folder = docFolderNames(docs).find((f) => f.toLowerCase() === q);
         if (folder) {
           setDocsPrefs({ on: true, scope: scopeKey({ kind: "folder", name: folder }) });
-          return notify(`Using your documents: the folder ${folder}`);
+          return notify(`Using documents: the folder ${folder}`);
         }
         const tag = docTagNames(docs).find((t) => t.toLowerCase() === q);
         if (tag) {
           setDocsPrefs({ on: true, scope: scopeKey({ kind: "tag", name: tag }) });
-          return notify(`Using your documents: the tag ${tag}`);
+          return notify(`Using documents: the tag ${tag}`);
         }
         setDocsPrefs({ on: true, scope: "all" });
-        return notify("No collection, folder or tag with that name", "Searching all your documents instead. Give a file a folder or a tag on the Documents screen.", "warning");
+        return notify("No collection, folder or tag with that name", "Searching all documents instead. Folders and tags are set on the Documents screen.", "warning");
       }
       case "summarise":
       case "translate":
@@ -1186,7 +1186,7 @@ export function Chat(): JSX.Element {
                 <optgroup label="On this computer">
                   <For each={models()}>{(m) => <option value={m.id}>{m.name}</option>}</For>
                 </optgroup>
-                <optgroup label="Cloud (your API keys)">
+                <optgroup label="Cloud (API keys)">
                   <For each={cloudModels()}>{(m) => <option value={m.id}>{`${m.name} · ${m.provider}`}</option>}</For>
                 </optgroup>
               </Show>
@@ -1194,7 +1194,7 @@ export function Chat(): JSX.Element {
           </label>
           <Show when={cloudOf()}>
             {(c) => (
-              <span class="chat-head__cloud" title={`This chat is sent to ${c().provider} over the internet with your API key.`} data-testid="cloud-badge">
+              <span class="chat-head__cloud" title={`This chat is sent to ${c().provider} over the internet with the configured API key.`} data-testid="cloud-badge">
                 <Icon name="online" size={14} /> Sent to {c().provider}
               </span>
             )}
@@ -1393,17 +1393,17 @@ export function Chat(): JSX.Element {
               onSavePreset={() => {
                 savePreset(modelId(), prefs(), sampler());
                 setPresetIds(new Set(Object.keys(loadPresets())));
-                notify("Saved for this model", "These settings come back whenever you pick it.", "success");
+                notify("Saved for this model", "These settings return whenever this model is picked.", "success");
               }}
               onClearPreset={() => {
                 removePreset(modelId());
                 setPresetIds(new Set(Object.keys(loadPresets())));
-                notify("Forgotten", "This model uses your general settings again.");
+                notify("Forgotten", "This model uses the general settings again.");
               }}
               onUnload={() => {
                 const id = modelId();
                 void service.unloadModel(id).then(
-                  () => notify("Model unloaded", "Its memory is free. It loads again with your next message."),
+                  () => notify("Model unloaded", "Its memory is free. It loads again with the next message."),
                   (e: unknown) => notify("Could not unload", e instanceof Error ? e.message : undefined, "error"),
                 );
               }}
@@ -1545,7 +1545,7 @@ function MemoryPanel(props: {
           {(m) => (
             <li class="memory__item" data-scope={m.scope}>
               <span class="chip" data-tone="neutral">
-                {m.scope === "you" ? "You" : "Project"}
+                {m.scope === "you" ? "Personal" : "Project"}
               </span>
               <input
                 class="memory__text"
@@ -1587,7 +1587,7 @@ function PromptPanel(props: { prefs: ChatPrefs; setPrefs: (p: Partial<ChatPrefs>
   return (
     <div class="prompt-panel">
       <label class="prompt-panel__label" for="base-prompt">
-        Your system prompt
+        System prompt
       </label>
       <textarea id="base-prompt" class="prompt-panel__base" rows="4" maxlength="8000" value={props.prefs.base} onChange={(e) => props.setPrefs({ base: e.currentTarget.value })} />
       <div class="prompt-panel__row">

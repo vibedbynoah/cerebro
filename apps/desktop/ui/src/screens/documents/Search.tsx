@@ -24,7 +24,7 @@ export function DocumentsSearch(props: { docs: readonly Doc[]; opened: { docId: 
     <>
       <Show when={openedPassage()}>
         {(text) => (
-          <Section id="doc-opened" title="Opened from Chat" description="The passage your last answer used.">
+          <Section id="doc-opened" title="Opened from Chat" description="The passage the last answer used.">
             <article class="doc-hit card">
               <div class="doc-hit__head">
                 <Icon name="documents" size={16} />

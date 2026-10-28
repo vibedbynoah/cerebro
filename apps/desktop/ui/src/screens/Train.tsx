@@ -83,7 +83,7 @@ export function Train(): JSX.Element {
       await service.trainerStart(j, (ev) => setRun((r) => applyTrainEvent(r, ev)));
       const r = run();
       if (r.phase !== "done") setRun({ ...r, phase: "done" });
-      notify(r.stopped ? "Training stopped" : "Training finished", r.models.length ? `${j.name} is in your model library.` : "The adapter was saved.", r.stopped ? "warning" : "success");
+      notify(r.stopped ? "Training stopped" : "Training finished", r.models.length ? `${j.name} is in the model library.` : "The adapter was saved.", r.stopped ? "warning" : "success");
     } catch (ex) {
       setRun((r) => ({ ...r, phase: "failed", error: String(ex).replace(/^Error: /, "") }));
       notify("Training failed", String(ex).replace(/^Error: /, ""), "error");
@@ -142,7 +142,7 @@ export function Train(): JSX.Element {
         </Show>
       </Section>
 
-      <Section id="train-job" title="New fine-tune" description="Teach a model your own examples. The result is a new model in your library that runs like any other.">
+      <Section id="train-job" title="New fine-tune" description="Teaches a model custom examples. The result is a new model in the library that runs like any other.">
         <form class="train-form" onSubmit={(e) => void start(e)} novalidate>
           <label class="train-field">
             <span>Name</span>
@@ -227,7 +227,7 @@ export function Train(): JSX.Element {
           <details class="train-advanced" open>
             <summary>More settings</summary>
             <div class="train-grid">
-              <NumField label="Epochs" value={job().epochs} step="0.1" err={err("epochs")} onInput={(v) => patch({ epochs: v })} rec={1} why="Passes over your examples. 1 to 3: more follows them more closely but can start repeating them word for word." />
+              <NumField label="Epochs" value={job().epochs} step="0.1" err={err("epochs")} onInput={(v) => patch({ epochs: v })} rec={1} why="Passes over the examples. 1 to 3: more follows them more closely but can start repeating them word for word." />
               <NumField label="Learning rate" value={job().lr} step="0.00001" err={err("lr")} onInput={(v) => patch({ lr: v })} rec={2e-4} why="How big each correction is. 0.0002 suits LoRA and QLoRA; try 0.00005 if the loss jumps around." />
               <NumField label="LoRA rank" value={job().rank} err={err("rank")} onInput={(v) => patch({ rank: v })} rec={16} why="How much the adapter can learn. 16 for most datasets; 32 to 64 for large ones, at more memory." />
               <NumField label="LoRA alpha" value={job().alpha} err={err("alpha")} onInput={(v) => patch({ alpha: v })} rec={job().rank} why="How strongly the adapter changes the model. Usually equal to the rank." />

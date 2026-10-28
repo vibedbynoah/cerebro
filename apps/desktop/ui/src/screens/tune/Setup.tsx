@@ -162,7 +162,7 @@ export function TuneSetup(props: {
           <span class="pick__step mono" aria-hidden="true">
             2
           </span>
-          What you will use it for
+          Main use
         </legend>
         <div class="pick__grid pick__grid--profiles">
           <For each={PROFILE_IDS}>

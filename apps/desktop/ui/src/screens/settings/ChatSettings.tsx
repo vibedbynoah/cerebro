@@ -137,7 +137,7 @@ export function ChatSettings(): JSX.Element {
         </div>
       </Section>
 
-      <Section id="system-prompt" title="System prompt" description="What every chat starts with. You can send it alone, with nothing added.">
+      <Section id="system-prompt" title="System prompt" description="What every chat starts with. It can be sent alone, with nothing added.">
         <label class="settings-field settings-field--wide">
           <span>Base system prompt</span>
           <textarea rows="3" maxlength="8000" value={prefs().base} onChange={(e) => setPrefs({ base: e.currentTarget.value })} />
@@ -145,7 +145,7 @@ export function ChatSettings(): JSX.Element {
         <SettingSwitch
           id="add-instructions"
           label="Add Cerebro's instructions"
-          note="Verbosity, effort and memory text are appended to your prompt. Off sends your prompt alone."
+          note="Verbosity, effort and memory text are appended to the prompt. Off sends the prompt alone."
           checked={prefs().addInstructions}
           onChange={(v) => setPrefs({ addInstructions: v })}
         />

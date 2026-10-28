@@ -29,13 +29,13 @@ export const BUILTIN_SERVER = "cerebro";
 const builtinKey = (tool: string): string => `${BUILTIN_SERVER}/${tool}`;
 
 export const TOOLS: readonly ToolDef[] = [
-  { id: builtinKey("read_file"), name: "Read file", source: "built-in", risk: "read", description: "Reads a file you point it at." },
+  { id: builtinKey("read_file"), name: "Read file", source: "built-in", risk: "read", description: "Reads a file at a given path." },
   { id: builtinKey("list_directory"), name: "List folder", source: "built-in", risk: "read", description: "Lists the files in a folder." },
   { id: builtinKey("search_files"), name: "Search files", source: "built-in", risk: "read", description: "Searches file contents in a folder." },
   { id: builtinKey("edit_file"), name: "Edit file", source: "built-in", risk: "write", description: "Changes a file, shown as a diff first." },
   { id: builtinKey("write_file"), name: "Create file", source: "built-in", risk: "write", description: "Creates a new file." },
-  { id: builtinKey("run_command"), name: "Run command", source: "built-in", risk: "run", description: "Runs a terminal command in a folder you choose." },
-  { id: builtinKey("run_tests"), name: "Run tests", source: "built-in", risk: "run", description: "Runs your project's test command." },
+  { id: builtinKey("run_command"), name: "Run command", source: "built-in", risk: "run", description: "Runs a terminal command in a chosen folder." },
+  { id: builtinKey("run_tests"), name: "Run tests", source: "built-in", risk: "run", description: "Runs the project's test command." },
   { id: builtinKey("fetch_url"), name: "Fetch web page", source: "built-in", risk: "network", description: "Downloads one web page. Off while offline mode is on." },
   { id: builtinKey("generate_image"), name: "Generate image", source: "built-in", risk: "write", description: "Makes an image with a local image model and saves it." },
 ];
@@ -48,9 +48,9 @@ export type Access = "read-only" | "workspace" | "full";
 export const ACCESS: readonly Access[] = ["read-only", "workspace", "full"];
 export const ACCESS_LABELS: Readonly<Record<Access, string>> = { "read-only": "Read only", workspace: "Workspace folders", full: "Full access" };
 export const ACCESS_NOTES: Readonly<Record<Access, string>> = {
-  "read-only": "Tools can read inside your workspace folders. Nothing can be changed and no command runs.",
-  workspace: "Tools can read and change files inside your workspace folders. Commands start there, but are not confined to them by Windows.",
-  full: "Tools can read and change any file your Windows account can.",
+  "read-only": "Tools can read inside the workspace folders. Nothing can be changed and no command runs.",
+  workspace: "Tools can read and change files inside the workspace folders. Commands start there, but are not confined to them by Windows.",
+  full: "Tools can read and change any file this Windows account can.",
 };
 
 export interface Policy {
@@ -128,8 +128,8 @@ const all = (keys: readonly string[], r: Rule): Record<string, Rule> => Object.f
 
 export const PRESETS: readonly Preset[] = [
   { id: "read-only", label: "Read only", note: "The model looks but never changes anything.", access: "read-only", defaultRule: "deny", rules: { ...all(READS, "always"), ...all(WRITES, "deny"), [RUN]: "deny", [NET]: "ask" } },
-  { id: "ask", label: "Ask before changes", note: "Reading is free; every change, command and web fetch asks you first.", access: "workspace", defaultRule: "ask", rules: { ...all(READS, "always"), ...all(WRITES, "ask"), [RUN]: "ask", [NET]: "ask" } },
-  { id: "auto-edit", label: "Auto-edit", note: "Files in your workspace folders change without asking; commands and web fetches still ask.", access: "workspace", defaultRule: "ask", rules: { ...all(READS, "always"), ...all(WRITES, "always"), [RUN]: "ask", [NET]: "ask" } },
+  { id: "ask", label: "Ask before changes", note: "Reading is free; every change, command and web fetch asks first.", access: "workspace", defaultRule: "ask", rules: { ...all(READS, "always"), ...all(WRITES, "ask"), [RUN]: "ask", [NET]: "ask" } },
+  { id: "auto-edit", label: "Auto-edit", note: "Files in the workspace folders change without asking; commands and web fetches still ask.", access: "workspace", defaultRule: "ask", rules: { ...all(READS, "always"), ...all(WRITES, "always"), [RUN]: "ask", [NET]: "ask" } },
   { id: "full-auto", label: "Full auto", note: "Everything runs without asking, anywhere on this computer.", access: "full", defaultRule: "always", rules: { ...all(READS, "always"), ...all(WRITES, "always"), [RUN]: "always", [NET]: "always" } },
 ];
 
@@ -195,7 +195,7 @@ export interface ToolCall {
 }
 
 export const SAMPLE_CALLS: readonly ToolCall[] = [
-  { id: "call-cmd", toolId: builtinKey("run_command"), preview: { kind: "command", cwd: "C:\\Users\\you\\code\\app", command: "cargo test --workspace" } },
+  { id: "call-cmd", toolId: builtinKey("run_command"), preview: { kind: "command", cwd: "C:\\Users\\name\\code\\app", command: "cargo test --workspace" } },
   {
     id: "call-diff",
     toolId: builtinKey("edit_file"),

@@ -49,7 +49,7 @@ export function DocumentsConvert(): JSX.Element {
       <Section
         id="doc-convert"
         title="Convert"
-        description="Turn a file into Markdown or plain text, on this computer. The result is saved where you pick it."
+        description="Turn a file into Markdown or plain text, on this computer. The result is saved to the chosen place."
       >
         <ul class="doc-formats" role="list">
           {CONVERT_FORMATS.map((f) => (

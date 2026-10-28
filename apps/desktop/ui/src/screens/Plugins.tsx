@@ -254,7 +254,7 @@ function PluginsPreview(): JSX.Element {
             <ul>
               <For each={p().permissions}>{(a) => <li>{a}</li>}</For>
             </ul>
-            <p class="hint">{p().offline ? "Runs offline once installed." : "Uses the network for what it does."} Each action still goes through your tool rules.</p>
+            <p class="hint">{p().offline ? "Runs offline once installed." : "Uses the network for what it does."} Each action still goes through the tool rules.</p>
             <p class="hint">Third-party plugins are their authors' responsibility. Cerebro checks the manifest and signature, not what the code does.</p>
             <Show when={!isInstalled(p().id)} fallback={<span class="plug-enabled"><Icon name="check" size={14} /> Installed</span>}>
               <button type="button" class="btn btn--primary" onClick={() => install(p())} data-press>

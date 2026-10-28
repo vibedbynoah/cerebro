@@ -118,7 +118,7 @@ export function TuneScreen(): JSX.Element {
             title={runTitle()}
             description={
               session.view.status === "running"
-                ? "Live from the tune. You can leave this screen; it keeps measuring and picks up here when you return."
+                ? "Live from the tune. It keeps measuring after leaving this screen and shows here on return."
                 : session.view.status === "done"
                   ? "Every candidate, what it measured, and what was kept."
                   : "Everything it measured before it stopped."
@@ -130,7 +130,7 @@ export function TuneScreen(): JSX.Element {
         <Section
           id="setup"
           title={hasRun() ? "Start another tune" : "Start a tune"}
-          description="Choose a model and what you will mostly use it for. The workload sets how much text is in view while Cerebro measures, and what counts as fastest."
+          description="A model and its main use. The workload sets how much text is in view while Cerebro measures, and what counts as fastest."
         >
           <TensorRates hardware={hardware} />
           <TuneSetup

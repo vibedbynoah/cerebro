@@ -64,7 +64,7 @@ export const MODE_PRESETS: Readonly<Record<Mode, ModePreset>> = {
   3: {
     label: "Balanced",
     summary: "The default: the model thinks first (up to 1,024 tokens) where it supports it, and checks key facts and numbers. Much more often right on multi-step problems, and many times slower than Fast.",
-    changes: ["Thinking Low: up to 1,024 thinking tokens", "Medium effort", "Key facts and numbers checked", "Your memories added"],
+    changes: ["Thinking Low: up to 1,024 thinking tokens", "Medium effort", "Key facts and numbers checked", "Saved memories added"],
     prefs: { effortCustom: null, thinking: "low", effort: "medium", verbosity: "brief", source: "native", addInstructions: true, memoryOn: true, orchestrate: false, workers: 3, rounds: 3 },
     base: DEFAULT_BASE_PROMPT,
     sampler: { temperature: 0.7, repeatPenalty: 1.05, topK: 40, topP: 0.95, minP: 0.05, maxTokens: 16384 },

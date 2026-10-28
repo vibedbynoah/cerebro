@@ -21,7 +21,7 @@ const CATEGORIES = [...new Set(MCP_CATALOGUE.map((e) => e.category))];
 const installText = (entry: McpCatalogueEntry): string =>
   "url" in entry.install ? entry.install.url : [entry.install.command, ...entry.install.args].join(" ");
 
-/** MCP servers: configure, monitor and try the servers that give your models tools (screens/Tools.tsx, id="mcp"). */
+/** MCP servers: configure, monitor and try the servers that give models tools (screens/Tools.tsx, id="mcp"). */
 export function McpServers(): JSX.Element {
   const service = useService();
   const errMessage = (e: unknown): string => (e instanceof Error ? e.message : "Unknown error");
@@ -344,13 +344,13 @@ export function McpServers(): JSX.Element {
     <Section
       id="mcp"
       title="MCP servers"
-      description="Give your models tools: files, git, search, databases and more. Servers run on this machine; each tool call still follows your rules below."
+      description="Tools for models: files, git, search, databases and more. Servers run on this machine; every tool call follows the rules below."
     >
       <div class="mcp" data-testid="mcp-servers">
         <ul class="mcp__servers">
           <For
             each={config() ? Object.entries(config()!.mcpServers) : []}
-            fallback={<li class="hint">No servers yet. Add one below to give your models tools.</li>}
+            fallback={<li class="hint">No servers yet.</li>}
           >
             {([name, server]) => {
               const state = () => stateFor(name, server.disabled);
@@ -456,7 +456,7 @@ export function McpServers(): JSX.Element {
                 : registry.error
                   ? String((registry.error as Error)?.message ?? registry.error)
                   : registryQuery() === null
-                    ? "Every server published to the official MCP registry. Registry servers are not checked by Cerebro: read each one's page before you add it."
+                    ? "Every server published to the official MCP registry. Registry servers are not checked by Cerebro; each one's page is worth reading before adding it."
                     : `${browseResults().length} servers from the registry`}
             </Show>
           </p>
@@ -513,7 +513,7 @@ export function McpServers(): JSX.Element {
                     </a>
                     <Show
                       when={"command" in entry.install}
-                      fallback={<span class="hint">Signs in through your browser (OAuth), which Cerebro does not support yet.</span>}
+                      fallback={<span class="hint">Signs in through a browser (OAuth), which Cerebro does not support yet.</span>}
                     >
                       <button
                         class="btn btn--secondary btn--sm"

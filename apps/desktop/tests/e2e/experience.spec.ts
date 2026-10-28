@@ -63,7 +63,7 @@ test.describe("during setup", () => {
 
   test("Beginner: Cerebro sets every value from the hardware check, explains each, and shows no raw flags", async ({ page }) => {
     await toConfigure(page, "beginner");
-    await expect(page.locator("#onb-step-title")).toHaveText("Cerebro set this up for you.");
+    await expect(page.locator("#onb-step-title")).toHaveText("Cerebro set this up.");
     const plan = page.locator(".plan__item");
     await expect(plan).toHaveCount(5);
     await expect(page.locator('.plan__item[data-field="quantId"] .plan__value')).toHaveText("UD-Q4_K_XL, 6.9 GiB");

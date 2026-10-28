@@ -50,9 +50,9 @@ export function DocumentsTools(): JSX.Element {
       return { id: here.find((m) => m.kind === "vision")?.id ?? null, missing: "No vision model is loaded. Load one from the Models screen, then run this again." };
     }
     if (need === "speech-in") {
-      return { id: here.find((m) => m.kind === "stt")?.id ?? lib.find((m) => m.kind === "stt")?.id ?? null, missing: "No speech-to-text model is in your library. Add one from the Model Hub." };
+      return { id: here.find((m) => m.kind === "stt")?.id ?? lib.find((m) => m.kind === "stt")?.id ?? null, missing: "No speech-to-text model is in the library. Add one from the Model Hub." };
     }
-    return { id: here.find((m) => m.kind === "tts")?.id ?? lib.find((m) => m.kind === "tts")?.id ?? null, missing: "No speech model is in your library. Add one from the Model Hub." };
+    return { id: here.find((m) => m.kind === "tts")?.id ?? lib.find((m) => m.kind === "tts")?.id ?? null, missing: "No speech model is in the library. Add one from the Model Hub." };
   };
 
   return (

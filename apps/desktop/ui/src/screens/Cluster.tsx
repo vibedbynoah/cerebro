@@ -94,9 +94,9 @@ export function Cluster(): JSX.Element {
 
   return (
     <div class="screen cluster">
-      <ScreenHeader route="cluster" lede="Run one model across your computers: each one runs part of its layers. Any network link works: Wi-Fi, Ethernet, or a USB network cable between two computers." />
+      <ScreenHeader route="cluster" lede="One model across several computers: each one runs part of its layers. Any network link works: Wi-Fi, Ethernet, or a USB network cable between two computers." />
 
-      <Section id="share" title="Share this computer" description="Another Cerebro on your network can then run part of a model here. Nothing listens until you start sharing, and only a computer with the pairing code can connect.">
+      <Section id="share" title="Share this computer" description="Another Cerebro on the network can then run part of a model here. Nothing listens until this is start sharing, and only a computer with the pairing code can connect.">
         <Show
           when={share()?.sharing}
           fallback={

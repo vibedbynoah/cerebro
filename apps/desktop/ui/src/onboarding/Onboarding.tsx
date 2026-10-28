@@ -463,7 +463,7 @@ export function Onboarding(props: { platform: Platform; record: OnboardingRecord
                 Switch to {LEVEL_LABELS[otherLevel(app.level())]}
               </button>
               <span class="sr-only" id="onb-level-now">
-                {`Now ${LEVEL_LABELS[app.level()]}. Nothing you chose is lost.`}
+                {`Now ${LEVEL_LABELS[app.level()]}. Earlier choices are kept.`}
               </span>
             </div>
             <span class="onb-progress" data-at={step()} aria-hidden="true">

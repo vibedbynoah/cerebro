@@ -31,7 +31,7 @@ const LEVEL_POINTS: Readonly<Record<ExperienceLevel, { icon: IconName; lede: str
   beginner: {
     icon: "bolt",
     lede: "Cerebro sets everything up from the hardware check and explains each choice in plain words.",
-    points: ["Picks the model file, context, offload, KV cache and sampler for you", "No raw flags; every term explained where it appears", "Starts on the Stable optimisation channel"],
+    points: ["Picks the model file, context, offload, KV cache and sampler automatically", "No raw flags; every term explained where it appears", "Starts on the Stable optimisation channel"],
   },
   advanced: {
     icon: "sliders",
@@ -46,7 +46,7 @@ export function LevelStep(props: { eyebrow: string; level: ExperienceLevel; onSe
       <StepHeader
         eyebrow={props.eyebrow}
         icon="settings"
-        title="How much do you want to see?"
+        title="How much detail to show"
         lede="Both get the same measured speed and the same protections. Switch any time: at the bottom of every setup step, and later in Settings."
       />
       <fieldset class="level-pick">
@@ -120,11 +120,11 @@ export function ConfigureStep(props: {
       <StepHeader
         eyebrow={props.eyebrow}
         icon={beginner() ? "bolt" : "sliders"}
-        title={beginner() ? "Cerebro set this up for you." : "Every load setting, in view."}
+        title={beginner() ? "Cerebro set this up." : "Every load setting, in view."}
         wide
         lede={
           beginner()
-            ? "Chosen from the hardware check for the model you picked. Nothing to do here; each choice is explained below."
+            ? "Chosen from the hardware check for the picked model. Nothing to do here; each choice is explained below."
             : "Starting from the automatic plan. Change anything; the backend flags below follow every edit."
         }
       />
@@ -133,7 +133,7 @@ export function ConfigureStep(props: {
         fallback={
           <p class="notice rec-notice" role="note">
             <Icon name="info" size={18} />
-            <span>No first model chosen, so there is nothing to set yet. Cerebro sets it up the same way when you add a model.</span>
+            <span>No first model chosen, so there is nothing to set yet. Cerebro sets it up the same way when a model is added.</span>
           </p>
         }
       >
@@ -180,11 +180,11 @@ function BeginnerPlan(props: { model: CatalogModel; hw: HardwareProfile | undefi
   const why = (): string => {
     switch (place()) {
       case "gpu":
-        return "The closest to the original weights that fits in your graphics memory with room for context.";
+        return "The closest to the original weights that fits in graphics memory with room for context.";
       case "moe-offload":
         return "The closest to the original that fits across video and system memory with room to spare.";
       case "split":
-        return "The closest to the original that still leaves a quarter of your memory free.";
+        return "The closest to the original that still leaves a quarter of memory free.";
       case "cpu":
         return "Small enough to run on the processor at a usable speed.";
     }

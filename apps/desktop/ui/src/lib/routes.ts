@@ -37,7 +37,7 @@ const ALL_ROUTES: readonly RouteDef[] = [
   { id: "hub", label: "Model Hub", icon: "hub", group: "Run", summary: "Find models that fit this machine and download them. Searching the catalogue uses the network; everything else works offline.", keywords: "download browse catalog gguf" },
   { id: "chat", label: "Chat", icon: "chat", group: "Run", summary: "Talk to a local model. It runs on this computer.", keywords: "conversation prompt assistant agent coding" },
   { id: "models", label: "Models", icon: "models", group: "Run", summary: "The models on this machine and how each one was tuned.", keywords: "library local gguf list" },
-  { id: "cluster", label: "Cluster", icon: "link", group: "Extend", summary: "Run one model across your computers over any network link, each running part of it.", keywords: "multiple computers network lan wifi ethernet usb distributed split homelab worker pair" },
+  { id: "cluster", label: "Cluster", icon: "link", group: "Extend", summary: "One model across several computers over any network link, each running part of it.", keywords: "multiple computers network lan wifi ethernet usb distributed split homelab worker pair" },
   { id: "tune", label: "Speed tune", icon: "tune", group: "Extend", summary: "Measure the fastest settings for a model on this machine. Opened from a model's page; training is on Train.", keywords: "benchmark measure speed optimize flags tune", inSidebar: false },
   { id: "monitor", label: "Monitor", icon: "activity", group: "Extend", summary: "The model and the machine, live: speed, memory, heat, and every request.", keywords: "metrics telemetry live gpu vram temperature requests inspector dashboard stats" },
   {
@@ -56,13 +56,13 @@ const ALL_ROUTES: readonly RouteDef[] = [
     icon: "images",
     group: "Create",
     summary: __DESKTOP__
-      ? "Make images on this computer, with the seed kept so you can make one again."
+      ? "Images made on this computer, each with its seed kept so it can be made again."
       : "Generate and edit images with local models.",
     keywords: "picture generate diffusion",
   },
-  { id: "documents", label: "Documents", icon: "documents", group: "Create", summary: "Search your own files on this computer, group them in collections, convert them and run the quick tools.", keywords: "rag search files knowledge pdf collections convert quick tools" },
-  { id: "train", label: "Train", icon: "chip", group: "Extend", summary: "Fine-tune a model on your own examples and add it to your library.", keywords: "fine-tune finetune lora qlora dataset training adapter" },
-  { id: "tools", label: "Tools", icon: "tools", group: "Create", summary: "Actions a model may take, each behind your permission.", keywords: "functions actions agent" },
+  { id: "documents", label: "Documents", icon: "documents", group: "Create", summary: "Local files: search, collections, conversion and quick tools.", keywords: "rag search files knowledge pdf collections convert quick tools" },
+  { id: "train", label: "Train", icon: "chip", group: "Extend", summary: "Fine-tunes a model on custom examples and adds it to the library.", keywords: "fine-tune finetune lora qlora dataset training adapter" },
+  { id: "tools", label: "Tools", icon: "tools", group: "Create", summary: "Actions a model may take, each behind a permission rule.", keywords: "functions actions agent" },
   {
     id: "plugins",
     label: "Plugins",
@@ -73,8 +73,8 @@ const ALL_ROUTES: readonly RouteDef[] = [
       : "Add capabilities. Installing needs a network; installed plugins run offline.",
     keywords: "extensions addons install",
   },
-  { id: "settings", label: "Settings", icon: "settings", group: "System", summary: "Theme, protections and network features. You can change all of it.", keywords: "preferences options config theme" },
-  { id: "about", label: "About", icon: "about", group: "System", summary: "What Cerebro does for you, the version on this machine and the documents that come with it.", keywords: "version licence license credits mark logo info help" },
+  { id: "settings", label: "Settings", icon: "settings", group: "System", summary: "Theme, protections and network features.", keywords: "preferences options config theme" },
+  { id: "about", label: "About", icon: "about", group: "System", summary: "Features, version and the documents that ship with Cerebro.", keywords: "version licence license credits mark logo info help" },
 ];
 
 /** Sidebar and command palette order: the everyday screens first, then making things, then the

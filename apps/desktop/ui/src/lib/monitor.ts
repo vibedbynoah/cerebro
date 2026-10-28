@@ -121,7 +121,7 @@ export function pillView(live: MetricsLive | null, reachable: boolean): PillView
     case "generating":
       return { tone: "generating", text: ok(live.decodeTps) ? `Generating ${F1.format(live.decodeTps)} tok/s` : "Generating", queued };
     case "waiting":
-      return { tone: "loading", text: "Waiting for your approval", queued };
+      return { tone: "loading", text: "Waiting for approval", queued };
     case "tool":
       return { tone: "reading", text: "Running a tool", queued };
     default:
@@ -144,7 +144,7 @@ export function stateView(live: MetricsLive, last: RequestSummary | undefined): 
     return { label: `Downloading ${d.what}`, detail: `${num(d.doneBytes / 2 ** 20)} of ${num(d.totalBytes / 2 ** 20)} MB, once, for this model's placement`, progress: p, progressLabel: `Downloaded ${Math.floor(p)}%` };
   }
   if (live.state === "loading") return { label: "Loading model", detail: "Reading the model file into memory", progress: 0, progressLabel: "Loading" };
-  if (live.state === "waiting") return { label: "Waiting for you", detail: "A tool call needs your approval in Chat", progress: 0, progressLabel: "Waiting" };
+  if (live.state === "waiting") return { label: "Waiting for approval", detail: "A tool call needs approval in Chat", progress: 0, progressLabel: "Waiting" };
   if (live.state === "tool") return { label: "Running a tool", detail: "The model asked for a tool; its result goes back to the model", progress: 0, progressLabel: "Tool" };
   if (live.state === "reading") {
     const p = pct(live.promptRead, live.promptTotal);

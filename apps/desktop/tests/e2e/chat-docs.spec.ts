@@ -24,7 +24,7 @@ test.describe("answering from your documents", () => {
     await openChat(page);
     await box(page).fill("/docs ");
     await box(page).press("Enter");
-    await expect(page.getByText("Using your documents")).toBeVisible();
+    await expect(page.getByText("Using documents")).toBeVisible();
     await openFineTune(page);
     await expect(docsSwitch(page)).toBeChecked();
 
@@ -57,7 +57,7 @@ test.describe("answering from your documents", () => {
     await expect(docsSwitch(page)).toBeChecked();
     await box(page).fill("/docs off");
     await box(page).press("Enter");
-    await expect(page.getByText("Not using your documents")).toBeVisible();
+    await expect(page.getByText("Not using documents")).toBeVisible();
     await expect(docsSwitch(page)).not.toBeChecked();
   });
 });

@@ -121,7 +121,7 @@ export function Metadata(props: { model: LibraryModel; entries: GgufEntry[]; cop
   return (
     <div class="meta">
       <p class="meta__intro">
-        <Term k="ggufMeta" /> stored in <span class="mono">{props.model.file}</span>. Edits are checked as you type and written to a copy; the original is never opened for writing.
+        <Term k="ggufMeta" /> stored in <span class="mono">{props.model.file}</span>. Edits are checked while typing and written to a copy; the original is never opened for writing.
       </p>
 
       <Show when={copy()}>

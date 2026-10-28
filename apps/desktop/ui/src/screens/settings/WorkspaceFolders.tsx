@@ -63,7 +63,7 @@ export function WorkspaceFolders(): JSX.Element {
         <Show when={folders()} fallback={<p class="hint">Loading folders…</p>}>
           {(list) => (
             <ul class="folders__list">
-              <For each={list()} fallback={<li class="hint">No folders yet. The built-in tools refuse every path until you add one.</li>}>
+              <For each={list()} fallback={<li class="hint">No folders yet. The built-in tools refuse every path until one is added.</li>}>
                 {(folder) => (
                   <li class="folders__item">
                     <code class="folders__path">{folder}</code>
@@ -79,7 +79,7 @@ export function WorkspaceFolders(): JSX.Element {
         <form class="folders__form" onSubmit={add}>
           <label class="folders__field">
             <span>Folder path</span>
-            <input class="input" aria-label="Workspace folder path" value={draft()} onInput={(e) => setDraft(e.currentTarget.value)} placeholder="C:\Users\you\code" />
+            <input class="input" aria-label="Workspace folder path" value={draft()} onInput={(e) => setDraft(e.currentTarget.value)} placeholder="C:\Users\name\code" />
           </label>
           <button class="btn btn--primary btn--sm" type="submit" disabled={saving()}>
             Add folder

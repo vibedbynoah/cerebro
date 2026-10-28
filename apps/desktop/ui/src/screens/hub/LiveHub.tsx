@@ -509,7 +509,7 @@ export function LiveHub(): JSX.Element {
                             <td class="livehub__action">
                               <Show
                                 when={!f.downloaded && !p()?.path}
-                                fallback={<span class="livehub__ok"><Icon name="check" size={16} /> In your library</span>}
+                                fallback={<span class="livehub__ok"><Icon name="check" size={16} /> In the library</span>}
                               >
                                 <Show
                                   when={p() && !p()!.error}

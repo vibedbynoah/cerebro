@@ -118,7 +118,7 @@ export function abilitiesOf(id: string, tags: readonly string[]): Ability[] {
 export function fitBadge(sizeGiB: number, vramGiB: number, ramGiB: number): { label: string; tone: "good" | "ok" | "slow" | "no" } {
   // About 1.2 GiB above the file for the cache and buffers at a normal context.
   const need = sizeGiB + 1.2;
-  if (vramGiB > 0 && need <= vramGiB) return { label: "Fits your graphics card", tone: "good" };
+  if (vramGiB > 0 && need <= vramGiB) return { label: "Fits the graphics card", tone: "good" };
   if (need <= vramGiB + ramGiB * 0.7) return vramGiB > 0 ? { label: "Fits with part on the processor", tone: "ok" } : { label: "Runs on the processor", tone: "slow" };
   return { label: "Too big for this computer", tone: "no" };
 }
