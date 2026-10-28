@@ -5,15 +5,14 @@ import { routeById, type RouteId } from "../lib/routes";
  * Shared screen scaffolding: one heading tier per level (h1 screen title and h2 section
  * titles both in the interface font), one spacing rhythm (--space-8 between sections, --space-4 inside cards).
  */
+/** Every screen opens with its title alone (and its actions): the same quiet header everywhere.
+ *  `lede` is accepted for older call sites and not shown; sections carry the explanations. */
 export function ScreenHeader(props: { route: RouteId; title?: string; lede?: JSX.Element; actions?: JSX.Element }): JSX.Element {
   const def = () => routeById(props.route);
   return (
     <header class="screen-header">
       <div class="screen-header__text">
         <h1 class="screen-title">{props.title ?? def().label}</h1>
-        <Show when={props.lede}>
-          <p class="screen-lede">{props.lede}</p>
-        </Show>
       </div>
       <Show when={props.actions}>
         <div class="screen-header__actions">{props.actions}</div>
