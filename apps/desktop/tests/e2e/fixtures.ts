@@ -86,6 +86,11 @@ export async function openScreen(page: Page, id: RouteIdE2E): Promise<void> {
   await expect(page.locator("main h1")).toBeVisible();
   await page.evaluate(() => document.fonts.ready);
   await expect(page.locator(".statusbar [data-hud='speed']")).toBeVisible();
+  // Settings starts with only General open; tests reach any setting directly.
+  if (id === "settings") {
+    const closed = page.locator("details[data-group]:not([open]) > summary");
+    for (let n = await closed.count(); n > 0; n--) await closed.first().click();
+  }
 }
 
 /** Scrolls <main> through its full height so every scroll-triggered reveal and count-up fires. */
@@ -114,10 +119,33 @@ export async function openSettings(page: Page): Promise<void> {
   await expect(page.getByTestId("speed-mode")).toBeVisible();
 }
 
-/** Turns on "Let the model use tools" (off by default) in Chat's Settings tab. */
+/** Settings with every group open (only General starts open). */
+export async function gotoSettings(page: Page): Promise<void> {
+  await page.goto("/#/settings");
+  await expect(page.locator("details[data-group]").first()).toBeAttached();
+  const closed = page.locator("details[data-group]:not([open]) > summary");
+  for (let n = await closed.count(); n > 0; n--) await closed.first().click();
+}
+
+/** Opens the composer's + menu: uploads, tools, plan first, documents and memories. */
+export async function openPlus(page: Page): Promise<void> {
+  const menu = page.getByRole("dialog", { name: "Add files, tools and context" });
+  if (!(await menu.isVisible().catch(() => false))) await page.getByRole("button", { name: "Add files, tools and context" }).click();
+  await expect(menu).toBeVisible();
+}
+
+/** Closes the composer's + menu (it stays open while switches are flipped). */
+export async function closePlus(page: Page): Promise<void> {
+  const menu = page.getByRole("dialog", { name: "Add files, tools and context" });
+  if (await menu.isVisible().catch(() => false)) await page.getByRole("button", { name: "Add files, tools and context" }).click();
+  await expect(menu).toBeHidden();
+}
+
+/** Turns on tools (off by default) in the composer's + menu. */
 export async function enableTools(page: Page): Promise<void> {
-  await openFineTune(page);
+  await openPlus(page);
   await page.getByTestId("tools-on").check();
+  await closePlus(page);
 }
 
 export async function openFineTune(page: Page): Promise<void> {

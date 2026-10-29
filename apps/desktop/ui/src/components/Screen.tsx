@@ -1,4 +1,6 @@
 import { Show, type JSX } from "solid-js";
+import { readPref, writePref } from "../lib/storage";
+import { Icon } from "./icons";
 import { routeById, type RouteId } from "../lib/routes";
 
 /**
@@ -34,6 +36,34 @@ export function Section(props: { title: string; description?: JSX.Element; child
       </div>
       {props.children}
     </section>
+  );
+}
+
+/**
+ * A large, collapsible group of related sections: a title, one line on what is inside, then the
+ * sections themselves (each a smaller titled block). Open or closed is remembered per viewer;
+ * a search can open it (`data-group`).
+ */
+export function Group(props: { id: string; title: string; summary: string; defaultOpen?: boolean; children: JSX.Element }): JSX.Element {
+  const key = `cerebro-group-${props.id}`;
+  const stored = readPref(key);
+  return (
+    <details
+      class="group"
+      id={props.id}
+      data-group
+      open={stored === null ? (props.defaultOpen ?? false) : stored === "1"}
+      onToggle={(e) => writePref(key, e.currentTarget.open ? "1" : "0")}
+    >
+      <summary class="group__head">
+        <span class="group__text">
+          <span class="group__title">{props.title}</span>
+          <span class="group__summary">{props.summary}</span>
+        </span>
+        <Icon name="chevron" size={16} />
+      </summary>
+      <div class="group__body">{props.children}</div>
+    </details>
   );
 }
 

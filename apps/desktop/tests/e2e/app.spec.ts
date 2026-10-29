@@ -26,15 +26,16 @@ for (const scheme of ["dark", "light"] as const) {
         await openScreen(page, id);
         await expect(page.locator("main h1")).toHaveText(TITLES[id]);
         // Tune opens from a model's page and has no sidebar entry.
-        if (id !== "tune") await expect(page.locator(`a.nav-link[data-route="${id}"]`)).toHaveAttribute("aria-current", "page");
+        if (id !== "tune" && id !== "tools") await expect(page.locator(`a.nav-link[data-route="${id}"]`)).toHaveAttribute("aria-current", "page");
         await scrollThrough(page);
         await settle(page);
         // Frame is complete: title bar and its lockup, the engine pill, one nav entry per screen, the HUD and its disclosure.
         await expect(page.locator(".titlebar")).toBeVisible();
         await expect(page.locator(".titlebar [data-brand='lockup']")).toBeVisible();
         await expect(page.locator(".titlebar .engine-pill")).toBeVisible();
-        // Tune opens from a model (inSidebar: false), so the sidebar lists every other screen.
-        await expect(page.locator("a.nav-link")).toHaveCount(ROUTE_IDS.length - 1);
+        // Tune opens from a model and Tools from Chat's + menu (inSidebar: false); the sidebar lists
+        // every other screen.
+        await expect(page.locator("a.nav-link")).toHaveCount(ROUTE_IDS.length - 2);
         await expect(page.locator(".statusbar")).toContainText("Illustrative data");
       });
     }
@@ -72,12 +73,14 @@ test.describe("keyboard", () => {
       await page.keyboard.press("Tab");
       const ring = await page.evaluate(() => {
         const el = document.activeElement as HTMLElement | null;
-        if (!el || el === document.body) return "none";
+        // Past the page's last stop focus leaves the document: the walk is complete.
+        if (!el || el === document.body) return "end";
         const own = getComputedStyle(el).boxShadow;
         // Ark's switch focuses a hidden input and rings its visible control instead.
         const control = el.closest(".switch")?.querySelector(".switch__control");
         return own !== "none" ? own : control ? getComputedStyle(control).boxShadow : "none";
       });
+      if (ring === "end") break;
       expect(ring, `focus ring on tab stop ${i + 1}`).not.toBe("none");
     }
   });
@@ -362,6 +365,7 @@ test("still works with Object.prototype frozen (Tauri freezePrototype)", async (
   await page.keyboard.press("Enter");
   await expect(page.locator("main h1")).toHaveText("Settings");
   await expect(page.getByRole("dialog")).toBeHidden();
+  await page.locator("#g-privacy > summary").click();
   await page.getByRole("switch", { name: "Offline mode" }).click({ force: true });
   await expect(page.locator(".toast")).toContainText("Offline mode on");
 });

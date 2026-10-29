@@ -121,8 +121,9 @@ export function ModelsProvider(props: { children: JSX.Element }): JSX.Element {
         const where = now.find((l) => l.id === id)?.placement?.notes[0];
         notify(`${m.name} loaded`, `${m.quant}, ${how}.${where ? ` ${where}` : ""}`, "success");
         return true;
-      } catch {
-        notify(`${m.name} did not load`, "Nothing changed. Check the load settings and try again.", "error");
+      } catch (e) {
+        if (String(e).includes("stopped")) notify(`${m.name} was not loaded`, "Loading stopped.");
+        else notify(`${m.name} did not load`, "Nothing changed. Check the load settings and try again.", "error");
         return false;
       } finally {
         mark(id, false);

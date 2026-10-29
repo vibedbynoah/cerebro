@@ -1,6 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
-import { expect, openFineTune, settle, test, enableTools } from "./fixtures";
+import { closePlus, expect, openPlus, settle, test, enableTools } from "./fixtures";
 
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"];
 
@@ -9,8 +9,9 @@ async function send(page: Page, text: string, plan = false): Promise<void> {
   await expect(page.locator(".chat-head__model select option").first()).toBeAttached();
   await enableTools(page);
   // Plan first is a saved preference: set it either way.
-  await openFineTune(page);
-  await page.getByRole("checkbox", { name: "Plan first" }).setChecked(plan);
+  await openPlus(page);
+  await page.getByRole("switch", { name: "Plan first" }).setChecked(plan);
+  await closePlus(page);
   const box = page.getByRole("textbox", { name: "Message" });
   await box.fill(text);
   await box.press("Enter");
@@ -51,7 +52,8 @@ test.describe("agent tools in chat", () => {
     await expect(plan).toHaveAttribute("data-state", "plan", { timeout: 10_000 });
     await expect(plan.locator(".toolcard__plan-body")).toContainText("Return an error from load()");
     await plan.getByRole("button", { name: "Approve plan" }).click();
-    await expect(page.getByRole("checkbox", { name: "Plan first" })).not.toBeChecked();
+    await openPlus(page);
+    await expect(page.getByRole("switch", { name: "Plan first" })).not.toBeChecked();
     await expect(page.locator(".msg--bot").last()).toContainText("Starting with step 1", { timeout: 10_000 });
   });
 
@@ -61,7 +63,8 @@ test.describe("agent tools in chat", () => {
     await expect(plan).toHaveAttribute("data-state", "plan", { timeout: 10_000 });
     await plan.getByRole("textbox", { name: "What should change in the plan" }).fill("skip the Settings screen");
     await plan.getByRole("button", { name: "Keep planning" }).click();
-    await expect(page.getByRole("checkbox", { name: "Plan first" })).toBeChecked();
+    await openPlus(page);
+    await expect(page.getByRole("switch", { name: "Plan first" })).toBeChecked();
     await expect(page.locator(".msg--bot").last()).toContainText("Revising the plan: skip the Settings screen", { timeout: 10_000 });
   });
 
@@ -71,7 +74,9 @@ test.describe("agent tools in chat", () => {
     await card.getByRole("radio", { name: "Postgres" }).check({ timeout: 10_000 });
     await card.getByRole("button", { name: "Send answer" }).click();
     await expect(card).toHaveAttribute("data-state", "done");
-    await page.locator('a.nav-link[data-route="tools"]').click();
+    // Tools opens from the composer's + menu.
+    await openPlus(page);
+    await page.getByRole("link", { name: "Manage tools and servers" }).click();
     await expect(page.locator(".tools-log li").first()).toContainText("Which database should the app use?");
     await expect(page.locator(".tools-log li").first().locator(".chip")).toHaveText("Ran");
   });

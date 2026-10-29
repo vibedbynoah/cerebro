@@ -678,6 +678,8 @@ pub async fn cloud_models_list(provider: crate::cloud::Provider, api_key: Option
 pub fn chat_stop(engine: State<'_, Engine>) {
     crate::cloud::cancel();
     engine.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    // Also stops a prompt still being read, at its next chunk (the engine checks between chunks).
+    cerebro_engine::STOP.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Times this machine's processor settings on the loaded model (Turbo screen), streaming each

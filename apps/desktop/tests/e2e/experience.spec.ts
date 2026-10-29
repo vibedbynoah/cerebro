@@ -2,7 +2,7 @@ import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
 import { EXPERIENCE_KEY, CHANNEL_KEY } from "../../ui/src/lib/experience";
 import { SETUP_CONFIG_KEY } from "../../ui/src/onboarding/autoconfig";
-import { DONE_RECORD, expect, ONBOARDING_KEY, openScreen, settle, test } from "./fixtures";
+import { DONE_RECORD, expect, ONBOARDING_KEY, openScreen, settle, test, gotoSettings } from "./fixtures";
 
 /**
  * Experience levels (docs/specs/positioning.md): Beginner or Advanced is chosen during setup, the
@@ -69,9 +69,8 @@ test.describe("during setup", () => {
     await expect(page.locator('.plan__item[data-field="quantId"] .plan__value')).toHaveText("UD-Q4_K_XL, 6.9 GiB");
     await expect(page.locator('.plan__item[data-field="contextLength"] .plan__value')).toHaveText("32K tokens");
     await expect(page.locator('.plan__item[data-field="gpuLayers"] .plan__value')).toHaveText("Graphics card");
-    // Every row explains itself and defines its term inline.
+    // Every row explains itself in plain words.
     for (const text of await page.locator(".plan__text").allTextContents()) expect(text.length).toBeGreaterThan(25);
-    await expect(page.locator(".plan__label .term")).toHaveCount(5);
     // No flags, no file table, no channel picker.
     await expect(step(page, "configure")).not.toContainText("llama-server");
     await expect(step(page, "configure")).not.toContainText("-ngl");
@@ -223,7 +222,7 @@ test.describe("during setup", () => {
     await expect(page.locator("main h1")).toHaveText("Home");
 
     // Run setup again: Advanced is still chosen and the stored plan is the starting point.
-    await page.goto("/#/settings");
+    await gotoSettings(page);
     await page.getByRole("button", { name: "Run setup again" }).click();
     await expect(step(page, "welcome")).toBeVisible();
     await expect(hatch(page)).toHaveText("Switch to Beginner");

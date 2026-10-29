@@ -82,11 +82,7 @@ export function Size(props: { gib: number }): JSX.Element {
 }
 
 /** The publisher folder a file came from, when its path shows one. */
-export function publisherOf(m: LibraryModel): string | null {
-  const parts = m.path.split("\\");
-  if (m.source === "cerebro" || m.source === "lmstudio") return parts[5] ?? null;
-  return null;
-}
+export { publisherOf } from "../../lib/model-label";
 
 /** "8K", "32K", "1M": a context length the way the panel and tables label it. */
 export function contextLabel(tokens: number): string {

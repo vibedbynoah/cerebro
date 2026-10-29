@@ -4,8 +4,10 @@ test("a model's saved settings come back when it is picked again", async ({ page
   await page.goto("/#/chat");
   const select = page.getByRole("combobox", { name: "Model" });
   await expect(select.locator("option").nth(1)).toBeAttached();
-  const first = await select.locator("option").nth(0).getAttribute("value");
-  const second = await select.locator("option").nth(1).getAttribute("value");
+  // The model the picker starts on, and another one.
+  const first = await select.inputValue();
+  const values = await select.locator("option:not([disabled])").evaluateAll((os) => os.map((o) => (o as HTMLOptionElement).value));
+  const second = values.find((v) => v !== first);
   await page.getByRole("button", { name: /^Live panel/ }).click();
   const dock = page.getByTestId("live-dock");
   await dock.getByRole("slider", { name: /Speed or accuracy/ }).fill("1");

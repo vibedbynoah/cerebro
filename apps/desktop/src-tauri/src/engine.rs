@@ -57,6 +57,10 @@ pub struct LibraryModel {
     /// Whether Cerebro Engine can run this file's architecture today.
     pub supported: bool,
     pub arch_name: String,
+    /// What the file needs before it can run, when it is one part of a model whose other parts are
+    /// not on disk (a shared Engram table without its main weights). Shown on the row instead of
+    /// a Load button.
+    pub missing: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -167,7 +171,8 @@ fn walk(dir: &Path, depth: usize, max: usize, out: &mut Vec<PathBuf>) {
             // split model is opened (the reader follows the rest). A shared shard such as DeepSeek
             // V4.1's Engram tables is part of each build, not a model of its own.
             let split_tail = name.contains("-of-") && !name.contains("-00001-of-");
-            let companion = name.contains("engram") && !name.contains("-of-");
+            // A shared shard whose builds are all missing is listed, so the row can say what to get.
+            let companion = name.contains("engram") && !name.contains("-of-") && has_first_part(p.parent());
             if !name.starts_with("mmproj") && !split_tail && !companion {
                 out.push(p);
             }
@@ -175,12 +180,21 @@ fn walk(dir: &Path, depth: usize, max: usize, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Whether a folder holds the first part of a split model ("…-00001-of-0000N.gguf").
+fn has_first_part(dir: Option<&Path>) -> bool {
+    dir.and_then(|d| std::fs::read_dir(d).ok()).is_some_and(|rd| rd.flatten().any(|e| e.file_name().to_string_lossy().to_lowercase().contains("-00001-of-")))
+}
+
 /// GGUF `general.file_type` to the quant label people use.
 fn file_type_name(t: u64) -> &'static str {
     match t {
         0 => "F32",
         1 => "F16",
+        2 => "Q4_0",
+        3 => "Q4_1",
         7 => "Q8_0",
+        8 => "Q5_0",
+        9 => "Q5_1",
         10 => "Q2_K",
         11 => "Q3_K_S",
         12 => "Q3_K_M",
@@ -192,6 +206,8 @@ fn file_type_name(t: u64) -> &'static str {
         18 => "Q6_K",
         19 => "IQ2_XXS",
         20 => "IQ2_XS",
+        21 => "Q2_K_S",
+        22 => "IQ3_XS",
         23 => "IQ3_XXS",
         24 => "IQ1_S",
         25 => "IQ4_NL",
@@ -204,6 +220,22 @@ fn file_type_name(t: u64) -> &'static str {
         32 => "BF16",
         _ => "other",
     }
+}
+
+/// The quant label a file name carries ("Bonsai-27B-Q1_0.gguf" -> Q1_0, "…-UD-Q4_K_XL-00001-of-00002"
+/// -> UD-Q4_K_XL), when it has one: finer than `general.file_type`, which has no entry for newer
+/// formats (Q1_0, MXFP4) or for Unsloth's dynamic quants.
+fn quant_from_name(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_string_lossy().into_owned();
+    let tokens: Vec<&str> = stem.split(['-', '.']).collect();
+    let is_quant = |t: &str| {
+        let u = t.to_ascii_uppercase();
+        let core = u.strip_prefix('I').unwrap_or(&u);
+        matches!(u.as_str(), "BF16" | "F16" | "F32" | "MXFP4" | "MXFP4_MOE") || (core.starts_with('Q') && core[1..].chars().next().is_some_and(|c| c.is_ascii_digit()) && core.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+    };
+    let i = tokens.iter().rposition(|t| is_quant(t))?;
+    let q = tokens[i].to_ascii_uppercase();
+    Some(if i > 0 && tokens[i - 1].eq_ignore_ascii_case("UD") { format!("UD-{q}") } else { q })
 }
 
 /// Architectures Cerebro Engine runs. qwen35 is the Qwen3.5/3.8 hybrid (Gated DeltaNet + gated attention).
@@ -324,7 +356,7 @@ fn describe(path: &Path, source: &'static str) -> Option<LibraryModel> {
     // A metadata-edited copy (gguf_edit.rs) is its own model; its name says so.
     let name = if crate::gguf_edit::is_copy(path) { format!("{name} (edited)") } else { name };
     let params = g.str("general.size_label").map(str::to_owned).unwrap_or_default();
-    let quant = g.u64("general.file_type").map(file_type_name).unwrap_or("other").to_owned();
+    let quant = quant_from_name(path).unwrap_or_else(|| g.u64("general.file_type").map(file_type_name).unwrap_or("other").to_owned());
     let family = g.str("general.basename").map(str::to_owned).unwrap_or_else(|| arch.clone());
     let projector = crate::vision_input::find_projector(path, dim, g.str("general.basename").unwrap_or(""));
     let kept = crate::tune_screen::kept(&id_of(path));
@@ -374,6 +406,9 @@ fn describe(path: &Path, source: &'static str) -> Option<LibraryModel> {
         tune_result: kept.as_ref().map(|k| k.result.clone()),
         projector,
         supported: SUPPORTED_ARCHS.contains(&arch.as_str()),
+        missing: arch.ends_with("-engram").then(|| {
+            "This file is the shared Engram table, the last part of each build. The main weights (parts 1 to 5 of a build: IQ1_M 121 GB, IQ2_XXS 138 GB or IQ2_XS 155 GB) are a separate download from the same repository in the Hub.".to_owned()
+        }),
         arch_name: arch,
     })
 }
@@ -976,6 +1011,7 @@ impl Engine {
                                 s.loaded = None;
                                 s.activity = "loading";
                             });
+                            cerebro_engine::STOP.store(false, Ordering::SeqCst);
                             let r = load(&model, ctx, gpu_layers);
                             let msg = match r {
                                 Ok(l) => {
@@ -988,6 +1024,7 @@ impl Engine {
                                     });
                                     Ok(())
                                 }
+                                Err(_) if cerebro_engine::stop_requested() => Err("Loading was stopped.".to_owned()),
                                 Err(e) => Err(e),
                             };
                             set(&st, |s| s.activity = "idle");
@@ -1043,6 +1080,7 @@ impl Engine {
                         }
                         Job::Chat { req, events, reply } => {
                             cn.store(false, Ordering::SeqCst);
+                            cerebro_engine::STOP.store(false, Ordering::SeqCst);
                             match loaded.as_mut() {
                                 Some(l) if l.info.id == req.model_id && l.llama.is_some() => {
                                     crate::llama_backend::reply(l.llama.as_ref().expect("checked"), &req, &events);
@@ -1288,7 +1326,11 @@ impl Engine {
         rx.recv().map_err(|_| "The engine stopped during the check.".to_owned())?
     }
 
+    /// Unloads the model, at any time: a load in progress stops at its next layer and a reply at
+    /// its next chunk or token, then the model leaves memory.
     pub fn unload(&self) -> Result<(), String> {
+        self.cancel.store(true, Ordering::SeqCst);
+        cerebro_engine::STOP.store(true, Ordering::SeqCst);
         let (reply, rx) = channel();
         self.send(Job::Unload { reply })?;
         rx.recv().map_err(|_| "The engine stopped while unloading.".to_owned())
@@ -2076,6 +2118,11 @@ fn run_chat(l: &mut Loaded, req: &ChatRequest, events: &ChatSink, st: &Arc<Mutex
                 decode_ms += g.total_ms - g.ttft_ms;
                 prefill_tps = g.prefill_tps;
                 stopped = g.stopped;
+            }
+            // Stopped while reading the prompt: an ordinary stop, not a failure.
+            Err(cerebro_engine::Error::Stopped) => {
+                stopped = true;
+                break;
             }
             Err(e) => {
                 let e = e.to_string();

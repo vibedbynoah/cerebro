@@ -242,7 +242,7 @@ export function parsePrefs(raw: string | null): ChatPrefs {
   };
 }
 
-function parseCustom(v: unknown): CustomEffort | null {
+export function parseCustom(v: unknown): CustomEffort | null {
   if (!v || typeof v !== "object") return null;
   const o = v as Record<string, unknown>;
   if (typeof o.instruction !== "boolean" || typeof o.selfReview !== "boolean" || typeof o.freshCheck !== "boolean") return null;

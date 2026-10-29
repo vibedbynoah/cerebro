@@ -1,3 +1,4 @@
+import { modelLabel } from "../lib/model-label";
 import "../styles/images.css";
 import { createMemo, createResource, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { useService } from "../service/context";
@@ -170,7 +171,7 @@ function ImagesDesktop(): JSX.Element {
             <label class="img-field">
               <span>Model</span>
               <select value={model()?.id ?? ""} onChange={(e) => setModelId(e.currentTarget.value)}>
-                <For each={models()}>{(m) => <option value={m.id}>{m.name}</option>}</For>
+                <For each={models()}>{(m) => <option value={m.id}>{modelLabel(m)}</option>}</For>
               </select>
             </label>
             <label class="img-field">

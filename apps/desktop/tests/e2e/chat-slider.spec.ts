@@ -34,7 +34,7 @@ test.describe("the Speed <-> Accuracy slider", () => {
     await openSettings(page);
     await slider(page).fill("5");
     await expect(level(page)).toHaveText("Maximum");
-    await expect(page.locator(".composer__check").filter({ hasText: "Orchestrate" }).locator("input")).toBeChecked();
+    await expect(page.locator(".composer__check").filter({ hasText: "Shared ledger" }).locator("input")).toBeChecked();
     await expect(page.getByTestId("orchestrate-workers")).toHaveText("5");
     await expect(page.locator('input[name="effort"][value="max"]')).toBeChecked();
   });

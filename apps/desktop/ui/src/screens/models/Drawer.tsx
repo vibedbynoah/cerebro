@@ -171,15 +171,16 @@ function DrawerBody(props: { model: LibraryModel }): JSX.Element {
               class="btn btn--primary drawer__load-btn"
               data-press
               data-sweep
-              disabled={errorCount() > 0}
+              disabled={errorCount() > 0 && !busy()}
               aria-busy={busy() ? "true" : undefined}
               aria-describedby={`${id}-caption`}
-              onClick={doLoad}
+              // While it loads, the same button stops the load.
+              onClick={() => (busy() ? void store.unload(m().id) : doLoad())}
             >
               <Spinner />
               <span class="btn__label">
-                <Icon name={loaded() ? "refresh" : "bolt"} size={16} />
-                {loaded() ? "Reload" : "Load"}
+                <Icon name={busy() ? "stop" : loaded() ? "refresh" : "bolt"} size={16} />
+                {busy() ? "Cancel" : loaded() ? "Reload" : "Load"}
               </span>
             </button>
           </Show>

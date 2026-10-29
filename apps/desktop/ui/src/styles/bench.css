@@ -33,12 +33,23 @@
   gap: var(--space-3);
 }
 
+/* Label, control and hint rows line up across the fields (subgrid); the button sits on the
+   controls' row. */
 .bench-setup {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: var(--space-4);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(200px, 300px) auto;
+  grid-template-rows: auto auto auto;
+  align-items: start;
+  column-gap: var(--space-4);
+  row-gap: var(--space-1);
   padding: var(--space-4);
+}
+
+.bench-setup > .bench-field,
+.bench-setup > .bench-setup__actions {
+  grid-row: span 3;
+  display: grid;
+  grid-template-rows: subgrid;
 }
 
 .bench-field {
@@ -71,12 +82,8 @@
   box-shadow: var(--focus-ring);
 }
 
-.bench-field--model {
-  flex: 1 1 340px;
-}
-
-.bench-field--placement {
-  flex: 0 1 280px;
+.bench-field > .hint {
+  margin: 0;
 }
 
 .bench-field--compact {
@@ -85,14 +92,20 @@
 }
 
 .bench-setup__actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
+  align-content: start;
+}
+
+.bench-setup__actions > .btn {
+  grid-row: 2;
+}
+
+.bench-setup__actions > .btn + .btn {
+  grid-row: 3;
 }
 
 .bench-setup__note {
-  flex: 1 1 100%;
-  margin: 0;
+  grid-column: 1 / -1;
+  margin: var(--space-2) 0 0;
 }
 
 .bench-progress {
@@ -471,11 +484,16 @@
 
 @media (max-width: 900px) {
   .bench-setup {
-    align-items: stretch;
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .bench-field--model {
-    flex-basis: 100%;
+  .bench-setup > .bench-setup__actions {
+    grid-row: auto;
+    grid-template-rows: none;
+  }
+
+  .bench-setup__spacer {
+    display: none;
   }
 }
 

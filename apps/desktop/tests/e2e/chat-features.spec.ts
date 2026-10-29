@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { readFile } from "node:fs/promises";
 import type { Page } from "@playwright/test";
-import { expect, settle, test } from "./fixtures";
+import { expect, settle, test, gotoSettings } from "./fixtures";
 
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"];
 
@@ -119,7 +119,7 @@ test.describe("chat search", () => {
 
   test("Ctrl+Shift+F searches every chat from another screen", async ({ page }) => {
     await seedChats(page, chats);
-    await page.goto("/#/settings");
+    await gotoSettings(page);
     await expect(page.locator("main h1")).toHaveText("Settings");
 
     await page.keyboard.press("Control+Shift+F");

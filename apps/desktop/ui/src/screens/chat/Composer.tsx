@@ -5,6 +5,7 @@ import { MODE_PRESETS, MODES, type Mode } from "../../lib/chat/modes";
 import { customOf, EFFORT_LABELS, EFFORTS, THINKING_LABELS, THINKING_NOTES, THINKINGS, VERBOSITIES, VERBOSITY_LABELS, type ChatPrefs, type CustomEffort, type Effort, type EffortLevel } from "../../lib/chat/prompt";
 import type { Attachment } from "../../lib/chat/store";
 import { readPref, writePref } from "../../lib/storage";
+import { hrefFor } from "../../lib/routes";
 
 /** Whether the composer's fine controls were left open; they start folded away. */
 const FINE_TUNE_KEY = "cerebro-chat-fine-tune";
@@ -88,6 +89,28 @@ export function Composer(props: {
   const [error, setError] = createSignal("");
   let area!: HTMLTextAreaElement;
   let fileInput!: HTMLInputElement;
+  // The + menu: uploads, tools and what the reply may draw on, at the bottom like other chat apps.
+  const [plusOpen, setPlusOpen] = createSignal(false);
+  let plusWrap: HTMLDivElement | undefined;
+  const closePlus = (e: Event) => {
+    if (e instanceof KeyboardEvent ? e.key === "Escape" : !plusWrap?.contains(e.target as Node)) setPlusOpen(false);
+  };
+  createEffect(() => {
+    if (!plusOpen()) return;
+    document.addEventListener("pointerdown", closePlus);
+    document.addEventListener("keydown", closePlus);
+    onCleanup(() => {
+      document.removeEventListener("pointerdown", closePlus);
+      document.removeEventListener("keydown", closePlus);
+    });
+  });
+  /** What is switched on, shown beside the + as chips that turn it off again. */
+  const chips = () =>
+    [
+      props.prefs.toolsOn && { id: "tools", label: "Tools", off: () => props.setPrefs({ toolsOn: false }) },
+      props.docsOn && { id: "docs", label: "Documents", off: () => props.onDocs(false) },
+      props.prefs.planMode && { id: "plan", label: "Plan first", off: () => props.setPrefs({ planMode: false }) },
+    ].filter((c): c is { id: string; label: string; off: () => void } => Boolean(c));
   let recStart = 0;
   let wave: ReturnType<typeof setInterval> | undefined;
   onCleanup(() => clearInterval(wave));
@@ -344,9 +367,74 @@ export function Composer(props: {
         />
         <div class="composer__buttons">
           <input ref={fileInput} type="file" multiple hidden onChange={(e) => e.currentTarget.files && void addFiles(e.currentTarget.files)} />
-          <button class="icon-btn" type="button" aria-label="Attach files or images" onClick={() => fileInput.click()}>
-            <Icon name="upload" size={18} />
-          </button>
+          <div class="plus" ref={plusWrap}>
+            <button class="icon-btn" type="button" aria-label="Add files, tools and context" aria-haspopup="true" aria-expanded={plusOpen()} onClick={() => setPlusOpen((o) => !o)}>
+              <Icon name="plus" size={18} />
+            </button>
+            <Show when={plusOpen()}>
+              <div class="plus__menu card" role="dialog" aria-label="Add files, tools and context">
+                <button
+                  type="button"
+                  class="plus__item"
+                  onClick={() => {
+                    setPlusOpen(false);
+                    fileInput.click();
+                  }}
+                >
+                  <Icon name="upload" size={16} />
+                  <span>Upload files or images</span>
+                </button>
+                <p class="plus__group">Tools</p>
+                <label class="plus__item plus__toggle" title="Lets the model read files, search and call MCP tools.">
+                  <Icon name="tools" size={16} />
+                  <span>Tools</span>
+                  <input type="checkbox" role="switch" checked={props.prefs.toolsOn} onChange={(e) => props.setPrefs({ toolsOn: e.currentTarget.checked })} data-testid="tools-on" />
+                </label>
+                <label class="plus__item plus__toggle" title="The model looks around without changing anything, then shows a plan for approval.">
+                  <Icon name="sliders" size={16} />
+                  <span>Plan first</span>
+                  <input type="checkbox" role="switch" checked={props.prefs.planMode} onChange={(e) => props.setPrefs({ planMode: e.currentTarget.checked })} />
+                </label>
+                <a class="plus__item" href={hrefFor("tools")} onClick={() => setPlusOpen(false)}>
+                  <Icon name="settings" size={16} />
+                  <span>Manage tools and servers</span>
+                </a>
+                <p class="plus__group">Context</p>
+                <label class="plus__item plus__toggle" title="Answers from local documents: matching passages are added to each request.">
+                  <Icon name="documents" size={16} />
+                  <span>Use documents</span>
+                  <input type="checkbox" role="switch" checked={props.docsOn} onChange={(e) => props.onDocs(e.currentTarget.checked)} />
+                </label>
+                <Show when={props.docsOn}>
+                  <label class="plus__sub composer__select">
+                    <span>Search</span>
+                    <select value={props.docsScope} onChange={(e) => props.onDocsScope(e.currentTarget.value)} aria-describedby="docs-note">
+                      <For each={props.docsScopes}>{(sc) => <option value={sc.key}>{sc.label}</option>}</For>
+                    </select>
+                  </label>
+                  <Show when={props.docsNote}>
+                    <p class="plus__note composer__hint" id="docs-note">
+                      {props.docsNote}
+                    </p>
+                  </Show>
+                </Show>
+                <label class="plus__item plus__toggle" title="Facts saved with /remember.">
+                  <Icon name="memory" size={16} />
+                  <span>Memories</span>
+                  <input type="checkbox" role="switch" checked={props.prefs.memoryOn} onChange={(e) => props.setPrefs({ memoryOn: e.currentTarget.checked })} />
+                </label>
+              </div>
+            </Show>
+          </div>
+          <For each={chips()}>
+            {(c) => (
+              <button type="button" class="plus__chip" data-chip={c.id} aria-label={`Turn off ${c.label}`} title={`Turn off ${c.label}`} onClick={() => c.off()}>
+                {c.label}
+                <Icon name="close" size={12} />
+              </button>
+            )}
+          </For>
+          <span class="composer__spacer" />
           <button
             class="icon-btn mic"
             type="button"
@@ -503,14 +591,6 @@ export function ChatSettings(props: {
                       <input type="checkbox" checked={props.prefs.orchestrate} onChange={(e) => props.setPrefs({ orchestrate: e.currentTarget.checked })} />
                       <span>Shared ledger (several instances)</span>
                     </label>
-                    <label class="composer__check" title="Lets the model read files, search and call MCP tools.">
-                      <input type="checkbox" checked={props.prefs.toolsOn} onChange={(e) => props.setPrefs({ toolsOn: e.currentTarget.checked })} data-testid="tools-on" />
-                      <span>Tools</span>
-                    </label>
-                    <label class="composer__check" title="Facts saved with /remember.">
-                      <input type="checkbox" checked={props.prefs.memoryOn} onChange={(e) => props.setPrefs({ memoryOn: e.currentTarget.checked })} />
-                      <span>Memories</span>
-                    </label>
                   </>
                 );
               })()}
@@ -529,10 +609,6 @@ export function ChatSettings(props: {
             <label class="composer__check">
               <input type="checkbox" checked={!props.prefs.addInstructions} onChange={(e) => props.setPrefs({ addInstructions: !e.currentTarget.checked })} />
               <span>No added prompt</span>
-            </label>
-            <label class="composer__check" title="The model looks around without changing anything, then shows a plan for approval.">
-              <input type="checkbox" checked={props.prefs.planMode} onChange={(e) => props.setPrefs({ planMode: e.currentTarget.checked })} />
-              <span>Plan first</span>
             </label>
             <Show when={props.prefs.orchestrate}>
               <span class="stepper">
@@ -559,23 +635,6 @@ export function ChatSettings(props: {
                   <Icon name="chevron" size={14} />
                 </button>
               </span>
-            </Show>
-            <label class="composer__check" title="Answers from local documents: matching passages are added to each request.">
-              <input type="checkbox" checked={props.docsOn} onChange={(e) => props.onDocs(e.currentTarget.checked)} />
-              <span>Use my documents</span>
-            </label>
-            <Show when={props.docsOn}>
-              <label class="composer__select">
-                <span>Search</span>
-                <select value={props.docsScope} onChange={(e) => props.onDocsScope(e.currentTarget.value)} aria-describedby="docs-note">
-                  <For each={props.docsScopes}>{(s) => <option value={s.key}>{s.label}</option>}</For>
-                </select>
-              </label>
-            </Show>
-            <Show when={props.docsOn && props.docsNote}>
-              <p class="composer__hint" id="docs-note">
-                {props.docsNote}
-              </p>
             </Show>
             <button class="btn btn--tertiary btn--sm" type="button" onClick={() => props.onOpenPrompt()} data-press>
               <Icon name="code" size={14} />

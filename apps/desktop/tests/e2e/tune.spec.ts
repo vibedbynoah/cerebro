@@ -1,6 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
-import { expect, settle, test } from "./fixtures";
+import { expect, settle, test, gotoSettings } from "./fixtures";
 
 const MOE = { id: "qwen3-coder-30b-a3b-q4km", name: "Qwen3-Coder-30B-A3B-Instruct" };
 const SMALL = { id: "gemma-4-e4b-q4km", name: "Gemma-4-E4B-it" };
@@ -308,7 +308,7 @@ test.describe("cancel, resume and leaving", () => {
   });
 
   test("with the integrity check switched off, the probe says it was skipped", async ({ page }) => {
-    await page.goto("/#/settings");
+    await gotoSettings(page);
     const sw = page.getByRole("switch", { name: /integrity/i });
     await expect(sw).toBeChecked();
     await sw.click({ force: true });

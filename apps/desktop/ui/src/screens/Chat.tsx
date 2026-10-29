@@ -1,3 +1,4 @@
+import { modelLabel } from "../lib/model-label";
 import "../styles/chat.css";
 import { batch, createEffect, createMemo, createResource, createSignal, For, on, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { createStore, produce } from "solid-js/store";
@@ -74,13 +75,25 @@ export function Chat(): JSX.Element {
   const [library] = createResource(() => service.listLibrary().catch(() => [] as LibraryModel[]));
   // Models the engine can run; ones it cannot are listed (and explained) on the Models screen.
   const models = createMemo(() => (library() ?? []).filter((m) => (m.kind === "text" || m.kind === "vision") && m.supported !== false));
+  /** The library's chat models by family, families and models in name order. */
+  const modelFamilies = createMemo(() => {
+    const by = new Map<string, LibraryModel[]>();
+    // Every chat model on disk, the ones that cannot run yet included (greyed, with the reason).
+    const all = (library() ?? []).filter((m) => m.kind === "text" || m.kind === "vision");
+    for (const m of all.sort((a, b) => modelLabel(a).localeCompare(modelLabel(b)))) {
+      const f = m.family || "Other";
+      by.set(f, [...(by.get(f) ?? []), m]);
+    }
+    return [...by.entries()].sort(([a], [b]) => a.localeCompare(b));
+  });
   const [modelId, setModelId] = createSignal<string>("");
   // Start on the model that is already in memory, so the first message needs no load.
   const [loadedNow] = createResource(() => service.listLoaded().catch(() => []));
   createEffect(() => {
     if (modelId() || !models().length || loadedNow.loading) return;
     const inMemory = loadedNow()?.find((l) => l.slot === "llm" && models().some((m) => m.id === l.id));
-    setModelId(inMemory?.id ?? models()[0]!.id);
+    const first = modelFamilies().flatMap(([, list]) => list).find((m) => m.supported !== false && !m.missing);
+    setModelId(inMemory?.id ?? first?.id ?? models()[0]!.id);
   });
   const model = () => models().find((m) => m.id === modelId());
   // A model's own saved settings come back when it is picked (lib/chat/presets.ts).
@@ -1182,10 +1195,22 @@ export function Chat(): JSX.Element {
           <label class="chat-head__model">
             <span class="sr-only">Model</span>
             <select value={modelId()} onChange={(e) => setModelId(e.currentTarget.value)} aria-label="Model">
-              <Show when={cloudModels().length} fallback={<For each={models()}>{(m) => <option value={m.id}>{m.name}</option>}</For>}>
-                <optgroup label="On this computer">
-                  <For each={models()}>{(m) => <option value={m.id}>{m.name}</option>}</For>
-                </optgroup>
+              {/* Grouped by family, each with its quant and publisher, so variants are told apart. */}
+              <For each={modelFamilies()}>
+                {([family, list]) => (
+                  <optgroup label={family}>
+                    <For each={list}>
+                      {(m) => (
+                        <option value={m.id} disabled={m.supported === false || Boolean(m.missing)} title={m.missing ?? undefined}>
+                          {modelLabel(m)}
+                          {m.missing ? " (parts missing)" : m.supported === false ? " (not supported yet)" : ""}
+                        </option>
+                      )}
+                    </For>
+                  </optgroup>
+                )}
+              </For>
+              <Show when={cloudModels().length}>
                 <optgroup label="Cloud (API keys)">
                   <For each={cloudModels()}>{(m) => <option value={m.id}>{`${m.name} · ${m.provider}`}</option>}</For>
                 </optgroup>

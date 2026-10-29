@@ -409,6 +409,16 @@ function Row(props: { model: LibraryModel; index: number; fit: FitClass; active:
           <span aria-hidden="true">·</span>
           <span>{pub() ?? SOURCE_LABELS[props.model.source]}</span>
         </span>
+        <Show when={props.model.missing}>
+          {(why) => (
+            <span class="lib-missing">
+              {why()}{" "}
+              <a class="text-link" href={hrefFor("hub")}>
+                Open the Hub
+              </a>
+            </span>
+          )}
+        </Show>
       </span>
       <span role="gridcell" class="lib-cell num mono">
         <Size gib={props.model.sizeGiB} />
@@ -447,14 +457,15 @@ function Row(props: { model: LibraryModel; index: number; fit: FitClass; active:
           data-press
           tabindex={-1}
           aria-busy={busy() ? "true" : undefined}
-          aria-label={loaded() ? `Unload ${props.model.name} ${props.model.quant}` : `Load ${props.model.name} ${props.model.quant}`}
+          aria-label={busy() && !loaded() ? `Stop loading ${props.model.name} ${props.model.quant}` : loaded() ? `Unload ${props.model.name} ${props.model.quant}` : `Load ${props.model.name} ${props.model.quant}`}
           // An architecture the engine does not run yet cannot be loaded; the row says so.
-          disabled={props.model.supported === false && !loaded()}
-          title={props.model.supported === false ? "Cerebro Engine does not run this architecture yet." : undefined}
-          onClick={() => void (loaded() ? store.unload(props.model.id) : store.load(props.model.id, null))}
+          disabled={(props.model.supported === false || Boolean(props.model.missing)) && !loaded()}
+          title={props.model.missing ?? (props.model.supported === false ? "Cerebro Engine does not run this architecture yet." : undefined)}
+          // While it loads, the same button stops the load.
+          onClick={() => void (loaded() || busy() ? store.unload(props.model.id) : store.load(props.model.id, null))}
         >
           <Spinner />
-          <span class="btn__label">{loaded() ? "Unload" : props.model.supported === false ? "Not supported yet" : (download() ?? "Load")}</span>
+          <span class="btn__label">{busy() && !loaded() ? "Cancel" : loaded() ? "Unload" : props.model.missing ? "Parts missing" : props.model.supported === false ? "Not supported yet" : (download() ?? "Load")}</span>
         </button>
       </span>
     </div>

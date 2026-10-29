@@ -9,7 +9,7 @@ import { SavedChats } from "./settings/SavedChats";
 import { WorkspaceFolders } from "./settings/WorkspaceFolders";
 import { exportConfig, importConfig } from "../lib/config-file";
 import { Icon, type IconName } from "../components/icons";
-import { ScreenHeader, Section } from "../components/Screen";
+import { Group, ScreenHeader, Section } from "../components/Screen";
 import { SettingSwitch } from "../components/SettingSwitch";
 import { LegalDialog } from "../legal/LegalDialog";
 import { LEGAL_DOCS, type LegalDocId } from "../legal/types";
@@ -68,10 +68,19 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
   createEffect(() => {
     const q = query().toLowerCase().trim();
     let shown = 0;
-    root.querySelectorAll<HTMLElement>(":scope > section.section").forEach((sec) => {
-      const hit = !q || (sec.textContent ?? "").toLowerCase().includes(q);
-      sec.style.display = hit ? "" : "none";
-      if (hit) shown++;
+    root.querySelectorAll<HTMLDetailsElement>("details[data-group]").forEach((g) => {
+      let any = false;
+      g.querySelectorAll<HTMLElement>("section.section").forEach((sec) => {
+        const hit = !q || (sec.textContent ?? "").toLowerCase().includes(q);
+        sec.style.display = hit ? "" : "none";
+        if (hit) {
+          shown++;
+          any = true;
+        }
+      });
+      g.style.display = any ? "" : "none";
+      // A search opens every group with a match, so no hit is hidden inside a closed one.
+      if (q && any) g.open = true;
     });
     setMatches(shown);
   });
@@ -107,6 +116,7 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
         </span>
       </div>
 
+      <Group id="g-general" title="General" summary="Theme, experience level and optimisation channel" defaultOpen>
       <Section id="appearance" title="Appearance">
         <fieldset class="segmented" aria-describedby="theme-note">
           <legend class="sr-only">Theme</legend>
@@ -208,8 +218,14 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
         </div>
       </Section>
 
-      <ChatSettings />
+      </Group>
 
+      <Group id="g-chat" title="Chat" summary="Default prompt, saved chats and cloud models">
+        <ChatSettings />
+        <CloudModels />
+      </Group>
+
+      <Group id="g-privacy" title="Privacy and protections" summary="Process protections, network features and the folders tools may use">
       <Section id="protections" title="Protections" description="On by default. Each can be turned off without changing anything else.">
         {group("protections")}
       </Section>
@@ -218,16 +234,16 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
         {group("network")}
       </Section>
 
-      <CloudModels />
+        <WorkspaceFolders />
+      </Group>
 
-      <PhoneAccess />
+      <Group id="g-connections" title="Connections" summary="The local API, Cerebro as an MCP server, and phone access">
+        <LocalApiAccess />
+        <McpServerAccess />
+        <PhoneAccess />
+      </Group>
 
-      <McpServerAccess />
-
-      <LocalApiAccess />
-
-      <WorkspaceFolders />
-
+      <Group id="g-system" title="Backup and setup" summary="Export or import settings, run setup again, version and documents">
       <Section id="config-file" title="Configuration file" description="Every setting above as one JSON file to edit, back up or copy to another computer. Conversations, memories and keys are not included.">
         <div class="settings-row">
           <button type="button" class="btn btn--secondary" data-press onClick={doExport}>
@@ -276,6 +292,7 @@ export function Settings(props: { theme: ThemeController; platform: Platform; on
           <Icon name="arrowRight" size={14} />
         </a>
       </Section>
+      </Group>
       <LegalDialog doc={legal()} onSelect={setLegal} onClose={() => setLegal(null)} />
     </div>
   );

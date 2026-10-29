@@ -1,3 +1,4 @@
+import { modelLabel } from "../../lib/model-label";
 import "../../styles/bench.css";
 import { createEffect, createMemo, createResource, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { Icon } from "../../components/icons";
@@ -394,17 +395,13 @@ export function BenchmarkLab(): JSX.Element {
           <span>Model</span>
           <select value={modelId()} onChange={(event) => setModelId(event.currentTarget.value)} disabled={active()}>
             <For each={models()}>
-              {(m) => (
-                <option value={m.id}>
-                  {m.name} · {m.quant}
-                </option>
-              )}
+              {(m) => <option value={m.id}>{modelLabel(m)}</option>}
             </For>
           </select>
           <Show when={selectedModel()} fallback={<span class="hint">No supported text model was found. Add one on the Models screen.</span>}>
             {(m) => (
               <span class="hint">
-                {m().quant} · {m().params || "size not reported"} · {m().sizeGiB.toFixed(1)} GiB · holds {m().contextMax.toLocaleString()} tokens
+                {[m().params, `${m().sizeGiB.toFixed(1)} GiB`, `holds ${m().contextMax.toLocaleString()} tokens`].filter(Boolean).join(" · ")}
               </span>
             )}
           </Show>
@@ -421,6 +418,7 @@ export function BenchmarkLab(): JSX.Element {
           <span class="hint">{PLACEMENT_NOTES[placement()]}</span>
         </label>
         <div class="bench-setup__actions">
+          <span class="bench-setup__spacer" aria-hidden="true" />
           <button class="btn btn--primary" type="submit" disabled={!selectedModel() || active()} data-press data-testid="bench-run">
             <Icon name="bolt" size={15} />
             {active() ? "Measuring…" : "Run benchmark"}

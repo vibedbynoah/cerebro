@@ -1,3 +1,4 @@
+import { publisherOf } from "../../lib/model-label";
 import "../../styles/arena.css";
 import { createEffect, createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { Icon } from "../../components/icons";
@@ -374,7 +375,7 @@ export function Arena(props: { models: LibraryModel[]; active?: boolean }): JSX.
                   <span class="arena-model__text">
                     <span class="arena-model__name">{model.name}</span>
                     <span class="arena-model__meta">
-                      {model.quant} · {model.params || "size not reported"}
+                      {[model.quant, publisherOf(model), model.params].filter((x) => x && x !== "other").join(" · ")}
                     </span>
                   </span>
                 </label>

@@ -1,11 +1,11 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, scrollThrough, settle, test } from "./fixtures";
+import { expect, scrollThrough, settle, test, gotoSettings } from "./fixtures";
 
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"];
 
 test.describe("local API", () => {
   test("off by default; on shows the address, the key stays hidden until shown, and every protection is a switch", async ({ page }) => {
-    await page.goto("/#/settings");
+    await gotoSettings(page);
     const card = page.getByTestId("local-api");
     await card.scrollIntoViewIfNeeded();
     await expect(page.getByTestId("local-api-status")).toHaveText("Off");
@@ -27,7 +27,7 @@ test.describe("local API", () => {
   });
 
   test("has no accessibility violations when on", async ({ page }) => {
-    await page.goto("/#/settings");
+    await gotoSettings(page);
     const card = page.getByTestId("local-api");
     await card.scrollIntoViewIfNeeded();
     await card.getByRole("switch", { name: "Local API" }).click({ force: true });

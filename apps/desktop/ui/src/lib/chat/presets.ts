@@ -1,6 +1,6 @@
 import type { Sampler } from "../../service/chat-types";
 import { readPref, writePref } from "../storage";
-import type { ChatPrefs } from "./prompt";
+import { parseCustom, THINKINGS, type ChatPrefs } from "./prompt";
 import { parseSampler } from "./modes";
 
 /**
@@ -12,7 +12,8 @@ import { parseSampler } from "./modes";
 export const PRESETS_KEY = "cerebro-model-presets";
 
 export interface ModelPreset {
-  prefs: Pick<ChatPrefs, "effort" | "verbosity" | "source" | "addInstructions" | "base" | "memoryOn" | "orchestrate" | "workers" | "rounds">;
+  /** Thinking and a custom effort are optional: presets saved before they were kept lack them. */
+  prefs: Pick<ChatPrefs, "effort" | "verbosity" | "source" | "addInstructions" | "base" | "memoryOn" | "orchestrate" | "workers" | "rounds"> & Partial<Pick<ChatPrefs, "thinking" | "effortCustom">>;
   sampler: Sampler;
   savedAt: number;
 }
@@ -33,7 +34,19 @@ function valid(v: unknown): ModelPreset | null {
   const rounds = int(p.rounds, 1, 8);
   if (workers === null || rounds === null) return null;
   return {
-    prefs: { effort: p.effort as ChatPrefs["effort"], verbosity: p.verbosity as ChatPrefs["verbosity"], source: p.source as ChatPrefs["source"], addInstructions: p.addInstructions, base: p.base, memoryOn: p.memoryOn, orchestrate: p.orchestrate, workers, rounds },
+    prefs: {
+      effort: p.effort as ChatPrefs["effort"],
+      verbosity: p.verbosity as ChatPrefs["verbosity"],
+      source: p.source as ChatPrefs["source"],
+      addInstructions: p.addInstructions,
+      base: p.base,
+      memoryOn: p.memoryOn,
+      orchestrate: p.orchestrate,
+      workers,
+      rounds,
+      ...((THINKINGS as readonly unknown[]).includes(p.thinking) ? { thinking: p.thinking as ChatPrefs["thinking"] } : {}),
+      ...("effortCustom" in p ? { effortCustom: parseCustom(p.effortCustom) } : {}),
+    },
     sampler: parseSampler(JSON.stringify(o.sampler ?? {})),
     savedAt: typeof o.savedAt === "number" ? o.savedAt : 0,
   };
@@ -57,8 +70,8 @@ export function loadPresets(): Record<string, ModelPreset> {
 
 export function savePreset(modelId: string, prefs: ChatPrefs, sampler: Sampler): void {
   const all = loadPresets();
-  const { effort, verbosity, source, addInstructions, base, memoryOn, orchestrate, workers, rounds } = prefs;
-  all[modelId] = { prefs: { effort, verbosity, source, addInstructions, base, memoryOn, orchestrate, workers, rounds }, sampler, savedAt: Date.now() };
+  const { effort, effortCustom, thinking, verbosity, source, addInstructions, base, memoryOn, orchestrate, workers, rounds } = prefs;
+  all[modelId] = { prefs: { effort, effortCustom, thinking, verbosity, source, addInstructions, base, memoryOn, orchestrate, workers, rounds }, sampler, savedAt: Date.now() };
   writePref(PRESETS_KEY, JSON.stringify(all));
 }
 

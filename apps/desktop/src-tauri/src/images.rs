@@ -75,6 +75,7 @@ pub fn describe(dir: &Path, source: &'static str, id: String) -> Option<LibraryM
         projector: None,
         supported,
         arch_name: "stable-diffusion".into(),
+        missing: None,
     })
 }
 

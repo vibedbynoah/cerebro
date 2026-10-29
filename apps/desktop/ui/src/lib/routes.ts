@@ -62,7 +62,7 @@ const ALL_ROUTES: readonly RouteDef[] = [
   },
   { id: "documents", label: "Documents", icon: "documents", group: "Create", summary: "Local files: search, collections, conversion and quick tools.", keywords: "rag search files knowledge pdf collections convert quick tools" },
   { id: "train", label: "Train", icon: "chip", group: "Extend", summary: "Fine-tunes a model on custom examples and adds it to the library.", keywords: "fine-tune finetune lora qlora dataset training adapter" },
-  { id: "tools", label: "Tools", icon: "tools", group: "Create", summary: "Actions a model may take, each behind a permission rule.", keywords: "functions actions agent" },
+  { id: "tools", label: "Tools", icon: "tools", group: "Create", summary: "Actions a model may take, each behind a permission rule.", keywords: "functions actions agent mcp servers", inSidebar: false },
   {
     id: "plugins",
     label: "Plugins",

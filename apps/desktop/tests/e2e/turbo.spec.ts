@@ -1,5 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, openScreen, scrollThrough, settle, test } from "./fixtures";
+import { expect, openScreen, scrollThrough, settle, test, gotoSettings } from "./fixtures";
 
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"];
 
@@ -30,7 +30,7 @@ test.describe("turbo", () => {
   });
 
   test("beginner sees only the profile picker", async ({ page }) => {
-    await page.goto("/#/settings");
+    await gotoSettings(page);
     await page.locator("label.segmented__option", { hasText: "Beginner" }).click();
     await openScreen(page, "turbo");
     await expect(page.getByTestId("turbo-beginner")).toBeVisible();

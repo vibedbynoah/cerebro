@@ -57,6 +57,7 @@ test.describe("plugins", () => {
   test("with offline mode on, catalogue installs explain why and file installs still work", async ({ page }) => {
     await open(page);
     await page.getByRole("link", { name: "Settings" }).first().click();
+    await page.locator("#g-privacy > summary").click();
     await page.locator('[data-setting="setting-offlineMode"]').click();
     await page.getByRole("link", { name: "Plugins" }).first().click();
     await expect(page.locator(".notice")).toContainText("Offline");

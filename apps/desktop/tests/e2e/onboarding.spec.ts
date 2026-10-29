@@ -1,6 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
-import { DONE_RECORD, expect, ONBOARDING_KEY, settle, test, TERMS_VERSION } from "./fixtures";
+import { DONE_RECORD, expect, ONBOARDING_KEY, settle, test, TERMS_VERSION, gotoSettings } from "./fixtures";
 
 // Every test here starts from a profile that has never finished first-run setup.
 test.use({ onboarded: false });
@@ -219,7 +219,7 @@ test("the full Terms, Privacy and Licenses open in place from the bundle, by key
 
 test("setup can be run again from Settings and from the command palette", async ({ page }) => {
   await page.addInitScript(([key, record]) => window.localStorage.getItem(key) ?? window.localStorage.setItem(key, record), [ONBOARDING_KEY, DONE_RECORD] as const);
-  await page.goto("/#/settings");
+  await gotoSettings(page);
   await expect(page.locator("main h1")).toHaveText("Settings");
   await page.getByRole("button", { name: "Run setup again" }).click();
   await expect(step(page, "welcome")).toBeVisible();
@@ -235,7 +235,7 @@ test("setup can be run again from Settings and from the command palette", async 
 
 test("legal documents are also reachable from Settings", async ({ page }) => {
   await page.addInitScript(([key, record]) => window.localStorage.setItem(key, record), [ONBOARDING_KEY, DONE_RECORD] as const);
-  await page.goto("/#/settings");
+  await gotoSettings(page);
   await page.locator(".about__doc", { hasText: "Licenses" }).click();
   await expect(page.getByRole("dialog").getByRole("heading", { level: 2 })).toHaveText("Licenses");
 });

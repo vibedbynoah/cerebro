@@ -2325,3 +2325,78 @@ body {
 /* Chat dock: the experts heatmap. */
 .heatmap { display: grid; gap: var(--space-2); }
 .heatmap canvas { display: block; width: 100%; border-radius: 6px; }
+
+/* ---- Groups: large collapsible blocks of related sections (Screen.tsx Group) ---- */
+.group {
+  margin-top: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-1);
+}
+
+.group + .group {
+  margin-top: var(--space-3);
+}
+
+.group__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  cursor: pointer;
+  list-style: none;
+  border-radius: var(--radius-lg);
+}
+
+.group__head::-webkit-details-marker {
+  display: none;
+}
+
+.group__head:hover {
+  background: var(--color-surface-2);
+}
+
+.group__head:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.group__text {
+  display: grid;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.group__title {
+  font-size: 0.9375rem;
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.group__summary {
+  font-size: 0.8125rem;
+  color: var(--color-text-secondary);
+}
+
+.group__head > .icon {
+  flex: none;
+  color: var(--color-text-muted);
+  transform: rotate(-90deg);
+  transition: transform var(--duration-fast) var(--ease-standard);
+}
+
+.group[open] > .group__head > .icon {
+  transform: none;
+}
+
+.group__body {
+  padding: 0 var(--space-5) var(--space-5);
+  border-top: 1px solid var(--color-border);
+}
+
+/* Inside a group, sections are the smaller blocks: closer together, no reveal offset. */
+.group__body > .section,
+.group__body > * > .section {
+  margin-top: var(--space-5);
+}

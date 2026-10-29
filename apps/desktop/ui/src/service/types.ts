@@ -300,6 +300,8 @@ export interface LibraryModel extends Omit<ModelSummary, "defaultsTps" | "tunedT
   projector: { file: string; sizeGiB: number } | null;
   /** False when the engine cannot run its architecture yet (desktop); absent means it can. */
   supported?: boolean;
+  /** What must be downloaded before the file can run (one part of a model without the rest). */
+  missing?: string | null;
 }
 
 /** Engine slot a loaded model occupies. */

@@ -1,11 +1,11 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, settle, test } from "./fixtures";
+import { expect, settle, test, gotoSettings } from "./fixtures";
 
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"];
 
 test.describe("cloud models", () => {
   test("add a provider: a bad key says why, a good key lists models, the chosen ones appear in Chat with a badge", async ({ page }) => {
-    await page.goto("/#/settings");
+    await gotoSettings(page);
     const panel = page.getByTestId("cloud-models");
     await panel.getByRole("combobox", { name: "Add a provider" }).selectOption("openai");
     await expect(panel.getByRole("link", { name: /Create one on OpenAI's site/ })).toHaveAttribute("href", "https://platform.openai.com/api-keys");
@@ -27,7 +27,7 @@ test.describe("cloud models", () => {
   });
 
   test("Settings panel is accessible", async ({ page }) => {
-    await page.goto("/#/settings");
+    await gotoSettings(page);
     await page.getByTestId("cloud-models").getByRole("combobox", { name: "Add a provider" }).selectOption("anthropic");
     await settle(page);
     const r = await new AxeBuilder({ page }).withTags(TAGS).include("[data-testid=cloud-models]").analyze();

@@ -378,7 +378,8 @@ export function Onboarding(props: { platform: Platform; record: OnboardingRecord
         </nav>
 
         <main class="onb-stage" id="main" tabindex="-1" aria-labelledby="onb-step-title">
-          <div class="onb-scroll" ref={scroller}>
+          {/* Focusable so the step scrolls by keyboard when it holds no controls (axe: scrollable-region-focusable). */}
+          <div class="onb-scroll" ref={scroller} tabindex="0">
             <div class="backdrop-grid onb-scroll__grid" aria-hidden="true" />
             <Switch>
               <Match when={stepId() === "welcome"}>

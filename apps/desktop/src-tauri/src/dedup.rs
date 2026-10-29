@@ -524,6 +524,7 @@ mod tests {
             projector: None,
             supported: true,
             arch_name: "qwen3".to_owned(),
+            missing: None,
         }
     }
 

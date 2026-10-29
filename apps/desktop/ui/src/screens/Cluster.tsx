@@ -1,3 +1,4 @@
+import { modelLabel } from "../lib/model-label";
 import "../styles/cluster.css";
 import { createMemo, createResource, createSignal, For, Show, type JSX } from "solid-js";
 import { Icon } from "../components/icons";
@@ -104,7 +105,7 @@ export function Cluster(): JSX.Element {
               <label class="cluster__field">
                 <span>Model to share</span>
                 <select value={pickShare()} onChange={(e) => setShareModel(e.currentTarget.value)} disabled={!models().length}>
-                  <For each={models()}>{(m) => <option value={m.id}>{m.name}</option>}</For>
+                  <For each={models()}>{(m) => <option value={m.id}>{modelLabel(m)}</option>}</For>
                 </select>
               </label>
               <button type="button" class="btn btn--primary" onClick={() => void startShare()} disabled={busy() || !models().length}>
@@ -179,7 +180,7 @@ export function Cluster(): JSX.Element {
             <label class="cluster__field">
               <span>Model</span>
               <select value={pickUse()} onChange={(e) => setUseModel(e.currentTarget.value)}>
-                <For each={models()}>{(m) => <option value={m.id}>{m.name}</option>}</For>
+                <For each={models()}>{(m) => <option value={m.id}>{modelLabel(m)}</option>}</For>
               </select>
             </label>
             <label class="cluster__field">

@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { expect, openFineTune, test } from "./fixtures";
+import { expect, openPlus, test } from "./fixtures";
 
 async function openChat(page: Page): Promise<void> {
   await page.goto("/?mock=fast-chat#/chat");
@@ -7,12 +7,12 @@ async function openChat(page: Page): Promise<void> {
 }
 
 const box = (page: Page) => page.getByRole("textbox", { name: "Message" });
-const docsSwitch = (page: Page) => page.getByRole("checkbox", { name: "Use my documents" });
+const docsSwitch = (page: Page) => page.getByRole("switch", { name: "Use documents" });
 
 test.describe("answering from your documents", () => {
   test("the documents are off until the user asks for them", async ({ page }) => {
     await openChat(page);
-    await openFineTune(page);
+    await openPlus(page);
     await expect(docsSwitch(page)).not.toBeChecked();
     await box(page).fill("how many days of annual leave?");
     await box(page).press("Enter");
@@ -25,7 +25,7 @@ test.describe("answering from your documents", () => {
     await box(page).fill("/docs ");
     await box(page).press("Enter");
     await expect(page.getByText("Using documents")).toBeVisible();
-    await openFineTune(page);
+    await openPlus(page);
     await expect(docsSwitch(page)).toBeChecked();
 
     await box(page).fill("how many days of annual leave?");
@@ -53,11 +53,12 @@ test.describe("answering from your documents", () => {
     await openChat(page);
     await box(page).fill("/docs ");
     await box(page).press("Enter");
-    await openFineTune(page);
+    await openPlus(page);
     await expect(docsSwitch(page)).toBeChecked();
     await box(page).fill("/docs off");
     await box(page).press("Enter");
     await expect(page.getByText("Not using documents")).toBeVisible();
+    await openPlus(page);
     await expect(docsSwitch(page)).not.toBeChecked();
   });
 });
