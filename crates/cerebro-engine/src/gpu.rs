@@ -674,6 +674,10 @@ pub struct GpuState {
     host_x: Option<PinnedHostSlice<f32>>,
     /// Split models: the output head, run after the processor's layers (`head_split`).
     split_head: Option<GMat>,
+    /// The split head's bytes in the GPU layout (dtype, block bytes, rows, cols), kept when the plan
+    /// planned into the spill allowance: the head's VRAM copy is dropped while a prompt is read (it
+    /// is needed only at the last position) and uploaded again for the reply.
+    head_src: Option<(Vec<u8>, i32, i32, usize, usize)>,
     /// Split models: what the processor's layers stream through for prompt batches (made on first
     /// use; see `prefill_streamed`).
     pipe: Option<Pipe>,
@@ -1013,7 +1017,18 @@ impl GpuState {
             0
         };
         let free = (free + extra + spill + crate::placement::VRAM_MARGIN as usize).saturating_sub(crate::placement::vram_reserve(total as u64) as usize);
-        let plan = plan_for(model, max_ctx, free as u64, force_layers)?;
+        let mut plan = plan_for(model, max_ctx, free as u64, force_layers)?;
+        // With the spill allowance the head goes on the card too: it gives up its VRAM while a
+        // prompt is read (head_src, evict_head) and the prompt's slots give theirs while the reply
+        // is written. Qwen2.5-14B, 44 layers: 20.4 -> 24.8 tok/s writing (the head's 0.64 GB no
+        // longer read by the processor every token).
+        // Only a K-quant head (it can be uploaded again) no larger than the allowance: Qwen3.8-27B's
+        // 1 GB head took prompt reading from 351 to 11 tok/s.
+        let out = model.output_mat();
+        let head_fits = gpu_block(out.dtype).is_some() && out.rows * out.row_bytes <= spill;
+        if spill > 0 && head_fits && plan.layout == crate::placement::Layout::Split && split_head_on(model) {
+            plan.head_on_gpu = true;
+        }
         if plan.layout == crate::placement::Layout::Cpu {
             return Err(Error::Unsupported(plan.notes.join(" ")));
         }
@@ -1092,6 +1107,14 @@ impl GpuState {
         }
         let output = if split { None } else { Some(up(&[model.output_mat()])?) };
         let split_head = if split && split_head_on(model) && plan.head_on_gpu { Some(up(&[model.output_mat()])?) } else { None };
+        let head_src = match (&split_head, spill > 0) {
+            (Some(GMat::K { cols, .. }), true) => {
+                let m = model.output_mat();
+                let (bb, dtype) = gpu_block(m.dtype).expect("a K-quant head");
+                Some((to_gpu_layout(m.dtype, g.bytes_at(m.offset, m.rows * m.row_bytes)), dtype, bb as i32, m.rows, *cols))
+            }
+            _ => None,
+        };
         // Tied embeddings reuse the output matrix on the GPU; otherwise upload the table too. In the
         // native layout the row is looked up on the CPU and uploaded (the table stays out of VRAM).
         let host_embed = native.then(|| vec![0f32; c.dim]);
@@ -1231,6 +1254,7 @@ impl GpuState {
             out_norm: stream.clone_htod(model.out_norm()).map_err(gerr)?,
             output,
             split_head,
+            head_src,
             embed,
             host_embed,
             x: z(c.dim)?,
@@ -1278,7 +1302,34 @@ impl GpuState {
 
     /// Split models with the head on the GPU: the final norm and the head over `x` (the residual after
     /// the processor's layers) into `logits`. Ok(false) when the head stays on the processor.
+    /// Drops the split head's VRAM copy while a prompt is read, when it can be uploaded again
+    /// (`head_src`): its space goes to the prompt's buffers.
+    pub fn evict_head(&mut self) {
+        if self.head_src.is_some() && self.split_head.is_some() {
+            let _ = self.stream.synchronize();
+            self.split_head = None;
+        }
+    }
+
     pub fn head_split(&mut self, x: &[f32], logits: &mut [f32]) -> Result<bool, Error> {
+        if self.split_head.is_none() {
+            if let Some((bytes, dtype, bb, rows, cols)) = &self.head_src {
+                // The prompt's streaming slots go first, so the head lands in VRAM and not in the
+                // shared memory the driver falls back to. Only their VRAM: the page-locked host
+                // side stays, and the slots are made again on the next prompt's first layer.
+                self.stream.synchronize().map_err(gerr)?;
+                if let Some(p) = self.pipe.as_mut() {
+                    p.copy.synchronize().map_err(gerr)?;
+                    p.slots = [None, None];
+                    p.raw = [None, None];
+                    p.raw6 = [None, None];
+                    p.gdelta = [None, None];
+                    p.freed = [None, None];
+                }
+                let w = self.stream.clone_htod(bytes).map_err(gerr)?;
+                self.split_head = Some(GMat::K { parts: vec![KPart { w, dtype: *dtype, bb: *bb, rows: *rows }], cols: *cols });
+            }
+        }
         let Some(head) = self.split_head.as_ref() else { return Ok(false) };
         let s = &self.stream;
         let f = &self.f;

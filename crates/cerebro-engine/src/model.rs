@@ -1775,6 +1775,7 @@ impl Session {
         }
         #[cfg(feature = "cuda")]
         if let Some(from) = self.gpu.as_ref().filter(|g| g.is_split()).map(|g| g.gpu_layers()) {
+            self.gpu.as_mut().expect("gpu").evict_head();
             // Split: each chunk through the GPU's layers, then the same chunk through the CPU's.
             let mut xs = Vec::new();
             // The CPU's batched path covers plain dense layers; hybrids go token by token.
