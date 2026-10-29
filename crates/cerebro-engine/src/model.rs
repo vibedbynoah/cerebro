@@ -2440,11 +2440,22 @@ impl Session {
             if g.is_split() {
                 // The GPU's layers, then the CPU's layers and the output head here.
                 let from = g.gpu_layers();
+                let t0 = Instant::now();
                 if let Err(e) = g.step_split(m, token, pos, &mut self.x) {
                     panic!("GPU step failed: {e}");
                 }
+                let t1 = Instant::now();
+                let before = self.prof;
                 self.layers_from(m, from, pos);
+                let t2 = Instant::now();
                 self.split_head(m);
+                // CEREBRO_SPLIT_PROF: where one written token's time goes.
+                static PROF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                if *PROF.get_or_init(|| std::env::var_os("CEREBRO_SPLIT_PROF").is_some()) {
+                    let ms = |a: Instant, b: Instant| (b - a).as_secs_f64() * 1e3;
+                    let parts: Vec<String> = self.prof.iter().zip(before).map(|(a, b)| format!("{:.2}", (a - b) * 1e3)).collect();
+                    eprintln!("split token: gpu {:.2} ms, cpu layers {:.2} ms, head {:.2} ms, stages [{}]", ms(t0, t1), ms(t1, t2), ms(t2, Instant::now()), parts.join(" "));
+                }
                 self.tokens.push(token);
                 return;
             }

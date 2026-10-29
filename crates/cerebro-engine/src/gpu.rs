@@ -1281,8 +1281,23 @@ impl GpuState {
         let mut lb = s.launch_builder(&f.rmsnorm_quant);
         lb.arg(&self.x).arg(&self.out_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f);
         unsafe { lb.arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
+        static PROF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let prof = *PROF.get_or_init(|| std::env::var_os("CEREBRO_SPLIT_PROF").is_some());
+        let t0 = std::time::Instant::now();
+        if prof {
+            s.synchronize().map_err(gerr)?;
+        }
+        let t1 = std::time::Instant::now();
         Self::matvec(s, f, head, &self.xq, &self.xd, &mut self.logits, false)?;
+        if prof {
+            s.synchronize().map_err(gerr)?;
+        }
+        let t2 = std::time::Instant::now();
         s.memcpy_dtoh(&self.logits, &mut logits[..self.sh.vocab]).map_err(gerr)?;
+        if prof {
+            let ms = |a: std::time::Instant, b: std::time::Instant| (b - a).as_secs_f64() * 1e3;
+            eprintln!("split head: upload+norm {:.2} ms, matvec {:.2} ms ({:?}), logits back {:.2} ms", ms(t0, t1), ms(t1, t2), std::mem::discriminant(head), ms(t2, std::time::Instant::now()));
+        }
         Ok(true)
     }
 
