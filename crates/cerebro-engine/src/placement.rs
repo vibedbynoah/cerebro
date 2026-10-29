@@ -187,6 +187,33 @@ pub fn vram_reserve(total: u64) -> u64 {
     (total / 16).max(VRAM_MARGIN)
 }
 
+/// How far a dense split may plan past free VRAM on Windows, where the driver pages idle GPU
+/// allocations to shared system memory instead of failing them ("sysmem fallback"). The buffers
+/// only prompt reading uses (the streamed-layer slots, conversion scratch) sit idle while a reply
+/// is written, so they are what gets paged, and the layers read every token stay in VRAM.
+/// The prompt slots grow with the layer, so the allowance shrinks with it: 3/32 of the card times
+/// (167 MB / layer bytes)^3. Measured on an 8 GB RTX 3070 Ti, 512-token prompt:
+/// - Qwen2.5-14B Q4_K_M (167 MB layers): 768 MB put 44 layers on the card instead of 40 (19.3
+///   instead of 15.5 tok/s writing, 923 instead of 869 reading); 1 GB put 46 there but reading fell
+///   to 436 as the slots themselves were paged; 1.5 GB thrashed.
+/// - Qwen3.8-27B Q4_K_M (245 MB layers): 256 MB gave 29 layers instead of 28 (4.57 instead of 4.06
+///   writing, 357 instead of 349 reading); 512 MB dropped reading to 111.
+/// `CEREBRO_SPILL_MB` sets it outright.
+pub fn spill_allowance(total: u64, layer_bytes: u64) -> u64 {
+    if let Some(mb) = std::env::var("CEREBRO_SPILL_MB").ok().and_then(|v| v.parse::<u64>().ok()) {
+        return mb << 20;
+    }
+    if !cfg!(windows) || SPILL_OFF.load(std::sync::atomic::Ordering::Relaxed) || layer_bytes == 0 {
+        return 0;
+    }
+    let r = (167e6 / layer_bytes as f64).min(1.0);
+    (total as f64 * 3.0 / 32.0 * r * r * r) as u64
+}
+
+/// Set when a load with the spill allowance failed (a driver with sysmem fallback turned off), so
+/// the retry plans within VRAM.
+pub static SPILL_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn gib(b: u64) -> f64 {
     b as f64 / (1u64 << 30) as f64
 }

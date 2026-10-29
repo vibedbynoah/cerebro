@@ -583,7 +583,12 @@ impl Model {
             .par_iter()
             .map(|m| {
                 let src = self.gguf.bytes_at(m.offset, m.rows * m.row_bytes);
-                let p = if m.dtype == DType::Q4K { crate::quant::repack_q4k_x8(src, m.rows, m.cols) } else { crate::quant::repack_q8_0_x8(src, m.rows, m.cols) };
+                let p = match m.dtype {
+                    DType::Q4K => crate::quant::repack_q4k_x8(src, m.rows, m.cols),
+                    // Half precision is read as Q8_0 (a BF16 output head: 2.5 GB -> 1.3 GB per token).
+                    DType::BF16 | DType::F16 => crate::quant::repack_q8_0_x8(&crate::quant::half_rows_to_q8_0(src, m.dtype, m.rows, m.cols), m.rows, m.cols),
+                    _ => crate::quant::repack_q8_0_x8(src, m.rows, m.cols),
+                };
                 (m.offset, Arc::new(p))
             })
             .collect();
@@ -1359,7 +1364,7 @@ fn read_kv_header(m: &Model, r: &mut dyn std::io::Read) -> Result<(usize, usize)
 /// Whether `m` has an interleaved processor layout (Q8_0 and Q4_K, rows in eights).
 fn packable(m: &Mat) -> bool {
     m.rows % 8 == 0 && match m.dtype {
-        DType::Q8_0 => m.cols % 32 == 0,
+        DType::Q8_0 | DType::BF16 | DType::F16 => m.cols % 32 == 0,
         DType::Q4K => m.cols % 256 == 0,
         _ => false,
     }
@@ -1987,7 +1992,14 @@ impl Session {
         if m.hc.is_some() && m.cfg.n_expert == 0 {
             return Err(Error::Unsupported("this model's layer types run on the processor for now".into()));
         }
-        let mut g = crate::gpu::GpuState::load_with(m, max_ctx, force_layers)?;
+        let mut g = match crate::gpu::GpuState::load_with(m, max_ctx, force_layers) {
+            // Planned past free VRAM and the driver refused (sysmem fallback off): plan within it.
+            Err(e) if !matches!(e, Error::Stopped) && cfg!(windows) && !crate::placement::SPILL_OFF.swap(true, std::sync::atomic::Ordering::Relaxed) => {
+                eprintln!("loading with the spill allowance failed ({e}); planning within VRAM");
+                crate::gpu::GpuState::load_with(m, max_ctx, force_layers)?
+            }
+            r => r?,
+        };
         if let Err(e) = g.prepare_graph(m) {
             eprintln!("decode graph not prepared ahead: {e}");
         }
@@ -2470,8 +2482,16 @@ impl Session {
         if let Some(s) = self.hcs.as_mut() {
             s.token = token;
         }
+        let (t0, before) = (Instant::now(), self.prof);
         self.layers_from(m, 0, pos);
+        let t1 = Instant::now();
         self.head(m);
+        // CEREBRO_SPLIT_PROF on a processor-only session: the same breakdown, for comparison.
+        static PROF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *PROF.get_or_init(|| std::env::var_os("CEREBRO_SPLIT_PROF").is_some()) {
+            let parts: Vec<String> = self.prof.iter().zip(before).map(|(a, b)| format!("{:.2}", (a - b) * 1e3)).collect();
+            eprintln!("cpu token: layers {:.2} ms, head {:.2} ms, stages [{}]", (t1 - t0).as_secs_f64() * 1e3, t1.elapsed().as_secs_f64() * 1e3, parts.join(" "));
+        }
         self.tokens.push(token);
     }
 

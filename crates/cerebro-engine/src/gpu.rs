@@ -1004,7 +1004,15 @@ impl GpuState {
             eprintln!("vram: free {:.2} of {:.2} GiB after the context and kernels", free as f64 / (1u64 << 30) as f64, total as f64 / (1u64 << 30) as f64);
         }
         // The plan keeps VRAM_MARGIN itself; together a sixteenth of the card stays free.
-        let free = (free + extra + crate::placement::VRAM_MARGIN as usize).saturating_sub(crate::placement::vram_reserve(total as u64) as usize);
+        // Dense splits may also plan into the spill allowance (placement::spill_allowance); MoE
+        // models size their expert cache from what is actually free (load_moe).
+        let spill = if c.n_expert == 0 {
+            let layer_bytes: usize = g.tensors.values().filter(|t| t.name.starts_with("blk.")).map(|t| t.size).sum::<usize>() / c.n_layer.max(1);
+            crate::placement::spill_allowance(total as u64, layer_bytes as u64) as usize
+        } else {
+            0
+        };
+        let free = (free + extra + spill + crate::placement::VRAM_MARGIN as usize).saturating_sub(crate::placement::vram_reserve(total as u64) as usize);
         let plan = plan_for(model, max_ctx, free as u64, force_layers)?;
         if plan.layout == crate::placement::Layout::Cpu {
             return Err(Error::Unsupported(plan.notes.join(" ")));

@@ -734,6 +734,29 @@ pub fn dot_iq4xs_q8(row: &[u8], a: &QAct) -> f32 {
     s
 }
 
+/// BF16 or F16 rows (`rows` x `cols`, cols a multiple of 32) as Q8_0 blocks: an f16 scale (the
+/// block's largest magnitude / 127) and 32 int8 values each, the layout the interleaved processor
+/// kernels read. Halves the bytes a half-precision matrix costs per token.
+pub fn half_rows_to_q8_0(src: &[u8], dt: DType, rows: usize, cols: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rows * cols / 32 * 34);
+    let mut v = [0f32; 32];
+    for r in 0..rows {
+        let row = &src[r * cols * 2..(r + 1) * cols * 2];
+        for b in 0..cols / 32 {
+            for (i, x) in v.iter_mut().enumerate() {
+                let h = u16::from_le_bytes([row[(b * 32 + i) * 2], row[(b * 32 + i) * 2 + 1]]);
+                *x = if dt == DType::BF16 { f32::from_bits((h as u32) << 16) } else { f16_to_f32(h) };
+            }
+            let amax = v.iter().fold(0f32, |a, x| a.max(x.abs()));
+            let d = amax / 127.0;
+            let inv = if d > 0.0 { 1.0 / d } else { 0.0 };
+            out.extend_from_slice(&to_f16(d).to_le_bytes());
+            out.extend(v.iter().map(|x| (x * inv).round().clamp(-127.0, 127.0) as i8 as u8));
+        }
+    }
+    out
+}
+
 /// BF16 row times f32 activations (a BF16 value is the top half of an f32). Models such as
 /// DavidAU's Qwen3.8-27B keep their output head in BF16: 2.5 GB read every token, which the generic
 /// one-value-at-a-time path turned into 0.9 tok/s.
@@ -2375,6 +2398,19 @@ mod iq_tests {
         }
         let (x, qa) = acts(512);
         close(dot_iq4nl_q8(&row, &qa), dot_row(DType::IQ4NL, &row, &x));
+    }
+
+    #[test]
+    fn half_rows_become_close_q8_0_rows() {
+        let cols = 64;
+        let w: Vec<f32> = (0..cols).map(|i| ((i * 29 % 31) as f32 - 15.0) * 0.03).collect();
+        let x: Vec<f32> = (0..cols).map(|i| ((i * 17 % 13) as f32 - 6.0) * 0.1).collect();
+        let bf: Vec<u8> = w.iter().flat_map(|v| ((v.to_bits() >> 16) as u16).to_le_bytes()).collect();
+        let q = half_rows_to_q8_0(&bf, DType::BF16, 1, cols);
+        assert_eq!(q.len(), cols / 32 * 34);
+        let want = dot_bf16(&bf, &x);
+        let got = dot_row(DType::Q8_0, &q, &x);
+        assert!((got - want).abs() < 0.02 * want.abs().max(1.0), "q8_0 {got} vs bf16 {want}");
     }
 
     #[test]
