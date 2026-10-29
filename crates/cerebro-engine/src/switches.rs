@@ -297,7 +297,7 @@ fn registry() -> &'static [Switch] {
                 kind: Kind::Toggle,
                 channel: Channel::Beta,
                 applies: Applies::Reload,
-                beginner: "Two cases where llama.cpp is measured faster than Cerebro's engine today: a model too big for an NVIDIA card (split between the card and the processor), and AMD or Intel graphics, including graphics built into the processor. Cerebro uses llama.cpp for those. The first time it downloads the official release (about 650 MB for NVIDIA, 35 MB for other cards).",
+                beginner: "AMD or Intel graphics, including graphics built into the processor, run llama.cpp's Vulkan build, which is measured faster there than Cerebro's portable backend today. NVIDIA cards always run Cerebro's own engine, whole or split. The first time it downloads the official release (about 35 MB).",
                 advanced: "Split plans on NVIDIA run the CUDA build with the planner's GPU layer count; with no NVIDIA card, a graphics card the portable backend would use runs the Vulkan build (all layers it holds). The app starts llama-server on 127.0.0.1 and streams over its OpenAI-compatible API; downloads are checked against the SHA-256 GitHub publishes. Off: Cerebro's engine runs everything.",
                 // Measured on an i9-12900H: split prompt reading 0.05-0.12x and Iris Xe prompt reading
                 // 0.05-0.14x of llama.cpp.
