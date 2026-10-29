@@ -64,7 +64,7 @@ struct F {
     attn: CudaFunction,
     combine: CudaFunction,
     gelu: CudaFunction,
-    rms_add: CudaFunction,
+    rms_add_q: CudaFunction,
     ple: CudaFunction,
     softcap: CudaFunction,
     // Prompt batches.
@@ -142,6 +142,11 @@ pub struct G4Gpu {
     pub vram_bytes: usize,
     /// The token's kernels, recorded once and replayed (about 840 launches a token otherwise).
     graph: Option<CudaGraph>,
+    /// Page-locked landing place for each step's logits: a copy into pageable memory is
+    /// synchronous and staged under Windows' driver model (262K logits, 1 MB, every token).
+    host_logits: PinnedF32,
+    /// The same for a step's inputs: embedding, per-layer rows, then the position's bits.
+    host_in: PinnedF32,
     b: Option<B>,
 }
 
@@ -170,7 +175,7 @@ impl G4Gpu {
             attn: lf("g4_attn_partial")?,
             combine: lf("g4_attn_combine")?,
             gelu: lf("g4_gelu_mul_quant")?,
-            rms_add: lf("g4_rms_add")?,
+            rms_add_q: lf("g4_rms_add_quant")?,
             ple: lf("g4_ple_prep")?,
             softcap: lf("g4_softcap")?,
             k_to_q8: lf("k_to_q8")?,
@@ -245,7 +250,11 @@ impl G4Gpu {
         let hd_max = hd_swa.max(hd_full);
         let ff = model.layers().iter().map(|l| if let Ffn::Dense { gate, .. } = &l.ffn { gate.rows } else { 0 }).max().unwrap_or(c.ffn);
         let widest = c.dim.max(g4.n_head * hd_max).max(ff);
-        let splits = SPLITS.min(max_ctx.div_ceil(CHUNK)).max(1);
+        // Half the splits for contexts up to 8K: each split then does twice the keys, and the 256
+        // blocks of 32 splits were mostly overhead at short contexts (E4B, 656-token context: 79.1
+        // -> 81.4 tok/s writing). Longer contexts keep 32 to spread the keys over the GPU.
+        let cap = if max_ctx <= 8192 { SPLITS / 2 } else { SPLITS };
+        let splits = cap.min(max_ctx.div_ceil(CHUNK)).max(1);
         let z = |n: usize| s.alloc_zeros::<f32>(n.max(1)).map_err(gerr);
         let output = up(model.output_mat())?;
         let ple_proj = up(&g4.ple_proj)?;
@@ -307,6 +316,8 @@ impl G4Gpu {
             max_ctx,
             vram_bytes: vram,
             graph: None,
+            host_logits: PinnedF32::new(c.vocab)?,
+            host_in: PinnedF32::new(c.dim + c.n_layer * g4.ple + 1)?,
             b,
             output,
             ple_proj,
@@ -330,8 +341,9 @@ impl G4Gpu {
             W::K { rows, cols, .. } | W::Q8 { rows, cols, .. } => (*rows, *cols),
         };
         let (k8q, k8d) = k8;
-        if let (W::K { w, dtype: 12, .. }, None) = (m, std::env::var_os("CEREBRO_NO_MMQ")) {
-            // Q4_K straight from its blocks: no int8 copy.
+        // Q4_K straight from its blocks (no int8 copy) only with CEREBRO_MMQ set: converting to int8
+        // for the int8 tensor-core GEMM read prompts faster (E4B Q4_K_M, 512 tokens: 2692 -> 2821).
+        if let (W::K { w, dtype: 12, .. }, Some(_)) = (m, std::env::var_os("CEREBRO_MMQ")) {
             let (ri, ci, ti, add) = (rows as i32, cols as i32, t as i32, 0i32);
             // 128 tokens a block once a prompt is long enough to fill it.
             let (k, bn, th) = if t >= 128 { (&mma[4], 128u32, 256u32) } else { (&mma[3], 64, 128) };
@@ -521,9 +533,25 @@ impl G4Gpu {
             return Err(Error::Request("context full".into()));
         }
         let s = self.s.clone();
-        s.memcpy_htod(x, &mut self.x).map_err(gerr)?;
-        s.memcpy_htod(tok, &mut self.tok).map_err(gerr)?;
-        s.memcpy_htod(&[pos as i32], &mut self.pos).map_err(gerr)?;
+        {
+            use cudarc::driver::DevicePtrMut;
+            let (nx, nt) = (x.len(), tok.len());
+            let h = self.host_in.as_mut_slice();
+            h[..nx].copy_from_slice(x);
+            h[nx..nx + nt].copy_from_slice(tok);
+            h[nx + nt] = f32::from_bits(pos as i32 as u32);
+            let cs = s.cu_stream();
+            // SAFETY: page-locked source ranges sized above; the step synchronises the stream
+            // before the buffer is written again.
+            unsafe {
+                let (d, _g) = self.x.device_ptr_mut(&s);
+                cudarc::driver::result::memcpy_htod_async(d, &h[..nx], cs).map_err(gerr)?;
+                let (d, _g) = self.tok.device_ptr_mut(&s);
+                cudarc::driver::result::memcpy_htod_async(d, &h[nx..nx + nt], cs).map_err(gerr)?;
+                let (d, _g) = self.pos.device_ptr_mut(&s);
+                cudarc::driver::result::memcpy_htod_async(d, &h[nx + nt..nx + nt + 1], cs).map_err(gerr)?;
+            }
+        }
         if self.graph.is_none() && std::env::var_os("CEREBRO_NO_GRAPH").is_none() {
             s.begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED).map_err(gerr)?;
             let r = self.enqueue(model);
@@ -536,8 +564,14 @@ impl G4Gpu {
             None => self.enqueue(model)?,
         }
         let vocab = model.cfg.vocab;
-        s.memcpy_dtoh(&self.logits, &mut logits[..vocab]).map_err(gerr)?;
+        {
+            use cudarc::driver::DevicePtr;
+            let (src, _guard) = self.logits.device_ptr(&s);
+            // SAFETY: host_logits holds vocab floats; the stream is synchronised before they are read.
+            unsafe { cudarc::driver::result::memcpy_dtoh_async(self.host_logits.as_mut_slice(), src, s.cu_stream()) }.map_err(gerr)?;
+        }
         s.synchronize().map_err(gerr)?;
+        logits[..vocab].copy_from_slice(&self.host_logits.as_mut_slice()[..vocab]);
         Ok(())
     }
 
@@ -566,7 +600,10 @@ impl G4Gpu {
             let hdi = hd as i32;
             {
                 let l = &self.layers[li];
-                unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&l.attn_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
+                // Layers after the first got this input from the previous layer's last kernel.
+                if li == 0 {
+                    unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&l.attn_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
+                }
                 if own {
                     Self::mv_many(s, f, &mut [(&l.q, &mut self.q), (l.k.as_ref().expect("k"), &mut self.kb), (l.v.as_ref().expect("v"), &mut self.vb)], &self.xq, &self.xd)?;
                 } else {
@@ -594,16 +631,14 @@ impl G4Gpu {
             unsafe { s.launch_builder(&f.quant).arg(&self.att).arg(&mut self.xq).arg(&mut self.xd).arg(&qd).launch(blocks(qd as usize)) }.map_err(gerr)?;
             Self::mv(s, f, &l.o, &self.xq, &self.xd, &mut self.t)?;
             let unit = 1.0f32;
-            unsafe { s.launch_builder(&f.rms_add).arg(&mut self.x).arg(&self.t).arg(&l.post_attn).arg(&eps).arg(&dim).arg(&unit).launch(one) }.map_err(gerr)?;
-            // Feed-forward.
-            unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&l.ffn_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
+            // The attention block's residual, then the feed-forward's normed input.
+            unsafe { s.launch_builder(&f.rms_add_q).arg(&mut self.x).arg(&self.t).arg(&l.post_attn).arg(&eps).arg(&dim).arg(&unit).arg(&l.ffn_norm).arg(&mut self.xq).arg(&mut self.xd).launch(one) }.map_err(gerr)?;
             Self::mv_many(s, f, &mut [(&l.gate, &mut self.g), (&l.up, &mut self.u)], &self.xq, &self.xd)?;
             let ff = l.gate.rows() as i32;
             unsafe { s.launch_builder(&f.gelu).arg(&self.g).arg(&self.u).arg(&mut self.xq).arg(&mut self.xd).arg(&ff).launch(blocks(ff as usize)) }.map_err(gerr)?;
             Self::mv(s, f, &l.down, &self.xq, &self.xd, &mut self.t)?;
-            unsafe { s.launch_builder(&f.rms_add).arg(&mut self.x).arg(&self.t).arg(&l.post_ffn).arg(&eps).arg(&dim).arg(&unit).launch(one) }.map_err(gerr)?;
-            // Per-layer input.
-            unsafe { s.launch_builder(&f.quant).arg(&self.x).arg(&mut self.xq).arg(&mut self.xd).arg(&dim).launch(blocks(c.dim)) }.map_err(gerr)?;
+            // The feed-forward's residual, then x itself quantised for the per-layer input gate.
+            unsafe { s.launch_builder(&f.rms_add_q).arg(&mut self.x).arg(&self.t).arg(&l.post_ffn).arg(&eps).arg(&dim).arg(&unit).arg(&null_f).arg(&mut self.xq).arg(&mut self.xd).launch(one) }.map_err(gerr)?;
             Self::mv(s, f, &l.inp_gate, &self.xq, &self.xd, &mut self.pg)?;
             {
                 let pl = self.pl.slice(li * g4.ple..(li + 1) * g4.ple);
@@ -611,14 +646,47 @@ impl G4Gpu {
             }
             Self::mv(s, f, &l.proj, &self.xq, &self.xd, &mut self.t)?;
             let sc = l.out_scale;
-            unsafe { s.launch_builder(&f.rms_add).arg(&mut self.x).arg(&self.t).arg(&l.post_norm).arg(&eps).arg(&dim).arg(&sc).launch(one) }.map_err(gerr)?;
+            // The layer's residual, then the next layer's normed attention input (the output
+            // norm's after the last layer).
+            let next = self.layers.get(li + 1).map_or(&self.out_norm, |n| &n.attn_norm);
+            let l = &self.layers[li];
+            unsafe { s.launch_builder(&f.rms_add_q).arg(&mut self.x).arg(&self.t).arg(&l.post_norm).arg(&eps).arg(&dim).arg(&sc).arg(next).arg(&mut self.xq).arg(&mut self.xd).launch(one) }.map_err(gerr)?;
         }
-        unsafe { s.launch_builder(&f.rmsnorm_quant).arg(&self.x).arg(&self.out_norm).arg(&mut self.xq).arg(&mut self.xd).arg(&null_f).arg(&dim).arg(&eps).launch(one) }.map_err(gerr)?;
         Self::mv(s, f, &self.output, &self.xq, &self.xd, &mut self.logits)?;
         if g4.softcap > 0.0 {
             let n = c.vocab as i32;
             unsafe { s.launch_builder(&f.softcap).arg(&mut self.logits).arg(&n).arg(&g4.softcap).launch(blocks(c.vocab)) }.map_err(gerr)?;
         }
         Ok(())
+    }
+}
+
+/// Page-locked host floats (cuMemHostAlloc), freed on drop. Plain pointer and length, so copies
+/// into it carry none of the event bookkeeping of cudarc's pinned slices.
+struct PinnedF32 {
+    ptr: *mut f32,
+    len: usize,
+}
+
+// SAFETY: owned memory, used by one session at a time.
+unsafe impl Send for PinnedF32 {}
+
+impl PinnedF32 {
+    fn new(len: usize) -> Result<Self, Error> {
+        // SAFETY: a fresh allocation of len floats.
+        let ptr = unsafe { cudarc::driver::result::malloc_host(len * 4, 0) }.map_err(gerr)? as *mut f32;
+        Ok(Self { ptr, len })
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [f32] {
+        // SAFETY: ptr holds len floats for the life of self.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+impl Drop for PinnedF32 {
+    fn drop(&mut self) {
+        // SAFETY: allocated by malloc_host and freed once.
+        let _ = unsafe { cudarc::driver::result::free_host(self.ptr as *mut std::ffi::c_void) };
     }
 }

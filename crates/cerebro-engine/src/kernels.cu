@@ -1741,6 +1741,30 @@ extern "C" __global__ void g4_rms_add(float* __restrict__ x, const float* __rest
     for (int i = threadIdx.x; i < n; i += blockDim.x) x[i] = (x[i] + t[i] * s * w[i]) * scale;
 }
 
+// g4_rms_add, then the next matrix's input from the new x in the same block: rms(x) * w2 quantised
+// (rmsnorm_quant), or x itself quantised when w2 is null (quantize_q8). Saves two launches of the
+// eighteen per Gemma 4 layer each time it replaces a pair. One block.
+extern "C" __global__ void g4_rms_add_quant(float* __restrict__ x, const float* __restrict__ t, const float* __restrict__ w,
+                                            float eps, int n, float scale, const float* __restrict__ w2,
+                                            signed char* __restrict__ xq, float* __restrict__ xd) {
+    __shared__ float red[32];
+    float ss = 0.f;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) ss += t[i] * t[i];
+    float s = rsqrtf(block_sum(ss, red) / n + eps);
+    float ss2 = 0.f;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {
+        float v = (x[i] + t[i] * s * w[i]) * scale;
+        x[i] = v;
+        ss2 += v * v;
+    }
+    float s2 = 1.f;
+    if (w2) s2 = rsqrtf(block_sum(ss2, red) / n + eps);
+    for (int base = 0; base < n; base += blockDim.x) {
+        int i = base + threadIdx.x;
+        if (i < n) quant32(w2 ? x[i] * s2 * w2[i] : x[i], xq, xd, i, threadIdx.x & 31);
+    }
+}
+
 // Per-layer inputs of one token: pl[l][j] = (rms(pp[l] * ps) * norm[j] + tok[l][j] * ts) / sqrt(2).
 // Grid n_layer; block ple.
 extern "C" __global__ void g4_ple_prep(const float* __restrict__ pp, const float* __restrict__ tok,
