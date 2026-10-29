@@ -176,8 +176,16 @@ pub fn drive_layers(layers: &[u64], head: u64, gpu_layers: usize, ram_budget: u6
 /// VRAM left free for the driver, CUDA graphs and fragmentation (the buffers a model needs are
 /// counted in its plan, including the prompt conversion scratch).
 pub const VRAM_MARGIN: u64 = 256 << 20;
-/// RAM left for the OS and the app.
-pub const RAM_MARGIN: u64 = 1536 << 20;
+/// RAM left for the OS and the app when planning (a thirty-second of 32 GB; `gguf::prefetch_room`
+/// keeps a thirty-second of whatever is installed).
+pub const RAM_MARGIN: u64 = 1 << 30;
+
+/// VRAM a load leaves free on a card of `total` bytes: a sixteenth (512 MB on 8 GB), never less
+/// than `VRAM_MARGIN`. Everything else holds weights, experts and the cache; what does not fit
+/// stays in RAM, and past RAM on the drive.
+pub fn vram_reserve(total: u64) -> u64 {
+    (total / 16).max(VRAM_MARGIN)
+}
 
 fn gib(b: u64) -> f64 {
     b as f64 / (1u64 << 30) as f64

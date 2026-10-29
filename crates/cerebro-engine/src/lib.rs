@@ -53,6 +53,23 @@ pub enum Error {
     Unsupported(String),
     #[error("request: {0}")]
     Request(String),
+    /// The host asked the work to stop (`STOP`); what finished before it is kept.
+    #[error("stopped")]
+    Stopped,
+}
+
+/// Set by the host to stop a model load or a prompt read at the next layer or chunk boundary
+/// (the stop button, Unload, Cancel load). The host clears it before it starts new work.
+pub static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the host asked the current work to stop.
+pub fn stop_requested() -> bool {
+    STOP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `Err(Error::Stopped)` once the host asked the current work to stop.
+pub fn check_stop() -> Result<(), Error> {
+    if stop_requested() { Err(Error::Stopped) } else { Ok(()) }
 }
 
 /// The chat format a model's own template uses, so prompts read the way the model was trained.

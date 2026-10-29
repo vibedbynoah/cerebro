@@ -1003,7 +1003,8 @@ impl GpuState {
         if std::env::var_os("CEREBRO_PLAN_DEBUG").is_some() {
             eprintln!("vram: free {:.2} of {:.2} GiB after the context and kernels", free as f64 / (1u64 << 30) as f64, total as f64 / (1u64 << 30) as f64);
         }
-        let free = free + extra;
+        // The plan keeps VRAM_MARGIN itself; together a sixteenth of the card stays free.
+        let free = (free + extra + crate::placement::VRAM_MARGIN as usize).saturating_sub(crate::placement::vram_reserve(total as u64) as usize);
         let plan = plan_for(model, max_ctx, free as u64, force_layers)?;
         if plan.layout == crate::placement::Layout::Cpu {
             return Err(Error::Unsupported(plan.notes.join(" ")));
@@ -1031,6 +1032,7 @@ impl GpuState {
         };
         let mut layers = Vec::with_capacity(n_gpu);
         for l in &model.layers()[..n_gpu] {
+            crate::check_stop()?;
             let (gu, down, router, shared) = match &l.ffn {
                 Ffn::Dense { gate, up: upm, down } => (Some(up(&[gate, upm])?), Some(up(&[down])?), None, None),
                 Ffn::Moe(m) => {
@@ -1843,8 +1845,8 @@ impl GpuState {
             .collect();
         let cacheable = kinds.iter().filter(|k| k.is_some()).count() * c.n_expert;
         let total = c.n_layer * c.n_expert;
-        let (free, _) = ctx.mem_get_info().map_err(gerr)?;
-        let mut budget = free.saturating_sub(600 << 20);
+        let (free, vram_total) = ctx.mem_get_info().map_err(gerr)?;
+        let mut budget = free.saturating_sub(crate::placement::vram_reserve(vram_total as u64) as usize);
         let mb = switches::get(switches::EXPERT_VRAM_MB) as usize;
         if mb > 0 {
             budget = budget.min(mb << 20);
@@ -1913,6 +1915,7 @@ impl GpuState {
         let mut order: Vec<usize> = (0..total).map(|i| (i % c.n_layer) * c.n_expert + i / c.n_layer).filter(|&k| mg.kinds[k / c.n_expert].is_some()).collect();
         order.sort_by(|&a, &b| mg.counts[b].total_cmp(&mg.counts[a]));
         for (slot, &key) in order.iter().take(n_slots).enumerate() {
+            crate::check_stop()?;
             mg.upload(stream, model, slot, key)?;
         }
         // Map the experts the CPU will compute into memory before the first token, most used first,
@@ -2426,7 +2429,7 @@ impl GpuState {
             self.stream.synchronize().map_err(gerr)?;
             p.set(pos);
         }
-        Ok(())
+        crate::check_stop()
     }
 
     /// Saved-cache access: an attention layer's K and V (f16 bits) for positions 0..n, or None for

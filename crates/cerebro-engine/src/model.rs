@@ -476,7 +476,7 @@ impl Model {
         let on_gpu: usize = self.offload_stats().map_or(0, |o| o.2);
         #[cfg(not(feature = "cuda"))]
         let on_gpu = 0usize;
-        let per_token: usize = g.tensors.values().filter(|t| !t.name.contains("_exps") && !t.name.contains("token_embd")).map(|t| t.size).sum::<usize>().saturating_sub(on_gpu);
+        let per_token: usize = g.tensors.values().filter(|t| !t.name.contains("_exps") && !t.name.contains("token_embd") && !t.name.contains("engram_embd")).map(|t| t.size).sum::<usize>().saturating_sub(on_gpu);
         let kv: usize = self.layers.iter().filter(|l| l.delta.is_none()).count() * 2 * max_ctx * c.n_kv * c.head_dim * 2;
         let budget = crate::gguf::prefetch_room().saturating_sub(per_token + kv);
         // CEREBRO_EXPERT_CACHE_MB pins the cache size (benchmarks: experts mostly from the drive).
@@ -1715,6 +1715,7 @@ impl Session {
                 let (dim, nlp) = (m.cfg.dim, m.cfg.n_layer * g4.ple);
                 let sc = (dim as f32).sqrt();
                 while rest.len() > 1 {
+                    crate::check_stop()?;
                     // The last token goes through `step`, which leaves its logits like any other.
                     let n = (rest.len() - 1).min(crate::gpu_g4::CH);
                     let mut xs = vec![0f32; n * dim];
@@ -1731,6 +1732,7 @@ impl Session {
                 }
             }
             for &tok in rest {
+                crate::check_stop()?;
                 self.step(m, tok);
             }
             self.stats = Stats { prompt_tokens: prompt.len(), reused_tokens: common, prefill_ms: t.elapsed().as_secs_f64() * 1000.0, ..Default::default() };
@@ -1777,6 +1779,7 @@ impl Session {
             let mut streamed = crate::switches::enabled(crate::switches::SPLIT_STREAM) && crate::gpu::GpuState::can_stream(m, from);
             let n_chunks = prompt[common..].len().div_ceil(crate::gpu::GpuState::SPLIT_CHUNK);
             for (ci, c) in prompt[common..].chunks(crate::gpu::GpuState::SPLIT_CHUNK).enumerate() {
+                crate::check_stop()?;
                 let pos = self.tokens.len();
                 if streamed {
                     match self.gpu.as_mut().expect("gpu").prefill_streamed(m, c, pos, from, &mut self.k, &mut self.v, &mut self.conv_hist, &mut self.ssm_state, &mut self.x) {
@@ -1804,6 +1807,7 @@ impl Session {
                     self.progress.set(self.tokens.len());
                 } else {
                     for (i, &tok) in c.iter().enumerate() {
+                        // Not between tokens here: the chunk's GPU layers already ran for all of them.
                         self.x.copy_from_slice(&xs[i * dim..(i + 1) * dim]);
                         self.layers_from(m, from, pos + i);
                         self.tokens.push(tok);
@@ -1838,7 +1842,14 @@ impl Session {
         #[cfg(feature = "cuda")]
         if let Some(g) = self.gpu.as_mut() {
             // Batched prefill on the GPU: every weight read once per chunk of tokens.
-            g.prefill(m, &prompt[common..], common, Some(&mut self.logits))?;
+            if let Err(e) = g.prefill(m, &prompt[common..], common, Some(&mut self.logits)) {
+                if matches!(e, Error::Stopped) {
+                    // The cache holds every chunk finished before the stop.
+                    let done = self.progress.pos.load(std::sync::atomic::Ordering::Relaxed).clamp(common, prompt.len());
+                    self.tokens.extend_from_slice(&prompt[common..done]);
+                }
+                return Err(e);
+            }
             self.tokens.extend_from_slice(&prompt[common..]);
             self.stats = Stats { prompt_tokens: prompt.len(), reused_tokens: common, prefill_ms: t0.elapsed().as_secs_f64() * 1000.0, ..Default::default() };
             return Ok(common);
@@ -1846,16 +1857,19 @@ impl Session {
         let dense = m.layers.iter().all(|l| matches!(l.ffn, Ffn::Dense { .. })) && m.cfg.ssm.is_none() && !m.cfg.attn_gate;
         if dense && self.remote.is_none() && crate::switches::enabled(crate::switches::CPU_BATCH_PREFILL) {
             for c in prompt[common..].chunks(CPU_CHUNK) {
+                crate::check_stop()?;
                 self.step_batch(m, c);
                 self.progress.set(self.tokens.len());
             }
         } else if self.processor_only() && crate::switches::enabled(crate::switches::CPU_BATCH_PREFILL) {
             for c in prompt[common..].chunks(LAYER_MAJOR_CHUNK) {
+                crate::check_stop()?;
                 self.step_layer_major(m, c);
                 self.progress.set(self.tokens.len());
             }
         } else {
             for &tok in &prompt[common..] {
+                crate::check_stop()?;
                 self.step(m, tok);
                 self.progress.set(self.tokens.len());
             }
@@ -2118,7 +2132,13 @@ impl Session {
             let r = g.prefill(m, &ids[common..], common, Some(&mut self.logits));
             g.image = None;
             g.rope_shift = shift;
-            r?;
+            if let Err(e) = r {
+                if matches!(e, Error::Stopped) {
+                    let done = self.progress.pos.load(std::sync::atomic::Ordering::Relaxed).clamp(common, ids.len());
+                    self.tokens.extend_from_slice(&ids[common..done]);
+                }
+                return Err(e);
+            }
             self.tokens.extend_from_slice(&ids[common..]);
             self.progress.set(self.tokens.len());
             self.stats = Stats { prompt_tokens: ids.len(), reused_tokens: common, prefill_ms: t0.elapsed().as_secs_f64() * 1000.0, ..Default::default() };
@@ -2126,6 +2146,7 @@ impl Session {
         }
         crate::pool::for_reading();
         for slot in common..ids.len() {
+            crate::check_stop()?;
             let id = ids[slot];
             match spans.iter().find(|(s0, nx, ny, _)| *s0 <= slot && slot < s0 + nx * ny) {
                 Some(&(s0, _, _, e)) => {

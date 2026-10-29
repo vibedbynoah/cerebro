@@ -501,12 +501,11 @@ pub fn total_ram() -> u64 {
 }
 
 /// How much of the model the engine may read into RAM ahead of time or keep in its expert cache:
-/// what is available now, less a reserve the rest of the computer keeps (the larger of 2.5 GiB and
-/// a twelfth of the installed memory). Reading ahead into the last free gigabytes made a 32 GB
-/// laptop run critically low while a 20 GB model loaded; a wider reserve (a sixth) starved
-/// Flash-Next's expert cache. Past this, layers stay on the drive and are read as they are used.
+/// what is available now, less a thirty-second of the installed memory for the rest of the
+/// computer (1 GB on 32 GB; the owner's rule: use everything, leave a thirty-second). Past this,
+/// layers and experts stay on the drive and are read as they are used.
 pub fn prefetch_room() -> usize {
-    let reserve = (5u64 << 29).max(total_ram() / 12);
+    let reserve = (total_ram() / 32).max(512 << 20);
     available_ram().saturating_sub(reserve) as usize
 }
 

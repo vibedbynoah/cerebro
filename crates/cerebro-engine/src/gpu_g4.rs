@@ -204,6 +204,7 @@ impl G4Gpu {
         let mut kv_bytes = 0usize;
         let mut layers = Vec::with_capacity(c.n_layer);
         for (li, (l, gl)) in model.layers().iter().zip(&g4.layers).enumerate() {
+            crate::check_stop()?;
             let Ffn::Dense { gate, up: upm, down } = &l.ffn else { return Err(Error::Unsupported("gemma4 expert layers".into())) };
             let own = li < g4.kv_layers;
             let kd = g4.n_kv * gl.hd;
