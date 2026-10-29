@@ -2808,6 +2808,41 @@ mod tool_loop_tests {
         assert!(matches!(events.last(), Some(ChatEvent::Done { .. })));
     }
 
+    /// A plain answer through the app's load and chat path on any model at $CEREBRO_TEST_MODEL (the
+    /// DeepSeek-V4.1 check: its own engine path, chat format and end of reply).
+    /// `CEREBRO_TEST_MODEL=... cargo test --release -p cerebro-desktop a_real_model_answers -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn a_real_model_answers() {
+        let path = std::env::var("CEREBRO_TEST_MODEL").unwrap_or_else(|_| r"C:\models\dev\Qwen3-0.6B-Q8_0.gguf".into());
+        let Some(model) = describe(Path::new(&path), "test") else { panic!("model not readable: {path}") };
+        assert!(model.supported, "{} runs", model.arch_name);
+        let engine = Engine::start();
+        engine.load(model.clone(), 4096, None).unwrap();
+        let events: Arc<Mutex<Vec<ChatEvent>>> = Arc::default();
+        let ev = events.clone();
+        let sink: ChatSink = Arc::new(move |e: ChatEvent| ev.lock().unwrap().push(e));
+        let req = ChatRequest {
+            model_id: model.id.clone(),
+            system_prompt: String::new(),
+            turns: vec![ChatTurn { role: "user".into(), text: "What is the capital of France? Answer in one short sentence.".into(), attachments: Vec::new() }],
+            sampler: ChatSampler { temperature: 0.0, top_p: 1.0, min_p: 0.0, top_k: 1, repeat_penalty: 1.0, max_tokens: 40 },
+            native: None,
+            tools: None,
+            orchestrate: None,
+            passes: 0,
+            keep_cache: false,
+            client_tools: None,
+        };
+        engine.chat(req, sink).unwrap();
+        let events = events.lock().unwrap();
+        let answer: String = events.iter().filter_map(|e| if let ChatEvent::Token { text } = e { Some(text.as_str()) } else { None }).collect();
+        eprintln!("answer: {answer}");
+        assert!(answer.contains("Paris"), "the answer names Paris");
+        assert!(!answer.contains("<｜"), "no special tokens reach the screen");
+        assert!(matches!(events.last(), Some(ChatEvent::Done { .. })));
+    }
+
     /// The Speed <-> Accuracy slider's five levels on a real model (ui/src/lib/chat/modes.ts and
     /// prompt.ts, built here the way the window builds them): time, tokens and whether each answer
     /// is right, per question. Measures; asserts only that every level answered.
