@@ -110,6 +110,7 @@ struct Funcs {
     delta_conv: CudaFunction,
     delta_l2: CudaFunction,
     delta_rule: CudaFunction,
+    delta_rule128: CudaFunction,
     delta_gnorm: CudaFunction,
     unpack_qgate: CudaFunction,
     gate_mul: CudaFunction,
@@ -935,6 +936,7 @@ impl GpuState {
             delta_conv: lf("delta_conv")?,
             delta_l2: lf("delta_l2")?,
             delta_rule: lf("delta_rule")?,
+            delta_rule128: lf("delta_rule128")?,
             delta_gnorm: lf("delta_gnorm")?,
             unpack_qgate: lf("unpack_qgate")?,
             gate_mul: lf("gate_mul")?,
@@ -1706,9 +1708,15 @@ impl GpuState {
         let l2_cfg = LaunchConfig { grid_dim: (2 * d.nk as u32, t as u32, 1), block_dim: (d.dk as u32, 1, 1), shared_mem_bytes: 0 };
         unsafe { s.launch_builder(&f.delta_l2).arg(&mut *row).arg(&ld).arg(&nk).arg(&dk).arg(&qscale).launch(l2_cfg) }.map_err(gerr)?;
         let ldo = (d.nv * d.dv) as i32;
-        let rule_cfg = LaunchConfig { grid_dim: (d.nv as u32, (d.dv / 32) as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: ((d.dk + 4) * 32 * 4) as u32 };
         let inter = d.inter as i32;
-        unsafe { s.launch_builder(&f.delta_rule).arg(&*row).arg(&ld).arg(&ch).arg(&nk).arg(&dk).arg(&nv).arg(&dv).arg(&dl.a).arg(&dl.dt_bias).arg(&mut dl.state).arg(&mut *out).arg(&ldo).arg(&ti).arg(&inter).launch(rule_cfg) }.map_err(gerr)?;
+        // dk = 128 (Qwen3.5/3.8, Qwen3-Next): two lanes per state column, the column in registers.
+        let reg = d.dk == 128 && d.dv <= 128 && std::env::var_os("CEREBRO_OLD_DELTA").is_none();
+        let rule_cfg = if reg {
+            LaunchConfig { grid_dim: (d.nv as u32, 1, 1), block_dim: (2 * d.dv as u32, 1, 1), shared_mem_bytes: 0 }
+        } else {
+            LaunchConfig { grid_dim: (d.nv as u32, (d.dv / 32) as u32, 1), block_dim: (128, 1, 1), shared_mem_bytes: ((d.dk + 4) * 32 * 4) as u32 }
+        };
+        unsafe { s.launch_builder(if reg { &f.delta_rule128 } else { &f.delta_rule }).arg(&*row).arg(&ld).arg(&ch).arg(&nk).arg(&dk).arg(&nv).arg(&dv).arg(&dl.a).arg(&dl.dt_bias).arg(&mut dl.state).arg(&mut *out).arg(&ldo).arg(&ti).arg(&inter).launch(rule_cfg) }.map_err(gerr)?;
         let zoff = ch;
         let gn_cfg = LaunchConfig { grid_dim: (d.nv as u32, t as u32, 1), block_dim: (d.dv as u32, 1, 1), shared_mem_bytes: 0 };
         unsafe { s.launch_builder(&f.delta_gnorm).arg(&mut *out).arg(&ldo).arg(&*row).arg(&ld).arg(&zoff).arg(&dl.norm).arg(&dv).arg(&sh.eps).arg(&sh.delta_sig).launch(gn_cfg) }.map_err(gerr)?;

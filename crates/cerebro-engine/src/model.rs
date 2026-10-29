@@ -175,6 +175,8 @@ pub struct Model {
     pub hc: Option<crate::hc::HcModel>,
     /// Gemma 4's per-layer kinds, per-layer inputs and extra norms (gemma4.rs).
     pub g4: Option<crate::gemma4::G4Model>,
+    /// DeepSeek-V4.1 (ds41.rs): its own layers; `layers` is empty.
+    pub ds41: Option<crate::ds41::Ds41Model>,
     /// GPU assist (gpu.rs Offload): matrices the GPU multiplies for a processor session.
     #[cfg(feature = "cuda")]
     offload: std::sync::OnceLock<std::sync::Mutex<crate::gpu::Offload>>,
@@ -191,7 +193,7 @@ pub(crate) fn vec_f32(g: &Gguf, name: &str) -> Result<Vec<f32>, Error> {
 }
 
 /// The architectures this engine runs (`general.architecture`): the app lists models by it.
-pub const ARCHITECTURES: &[&str] = &["qwen3", "qwen3moe", "qwen2", "llama", "qwen35", "qwen35moe", "qwen3next", "qwen3vl", "qwen3tts", "qwen4exp", "gemma4"];
+pub const ARCHITECTURES: &[&str] = &["qwen3", "qwen3moe", "qwen2", "llama", "qwen35", "qwen35moe", "qwen3next", "qwen3vl", "qwen3tts", "qwen4exp", "gemma4", "deepseek41"];
 
 impl Model {
     /// Whether any attention or output matrix is Q8_0 (four-row dots only apply to those).
@@ -207,6 +209,9 @@ impl Model {
         }
 
         let arch = g.str("general.architecture").unwrap_or("").to_owned();
+        if arch == "deepseek41" {
+            return Self::load_ds41(path, g);
+        }
         // qwen3vl: Qwen3 with multi-axis rotary positions (the language model of Qwen3-VL and
         // Qwen3-ASR); deepstack (image features added into early layers) is not run yet.
         // qwen3tts: the Qwen3-TTS talker, a qwen3vl model whose output head covers only the codec
@@ -359,7 +364,7 @@ impl Model {
             crate::activity::reset(cfg.n_layer, cfg.n_expert);
         }
         let g4 = if cfg.arch == "gemma4" { Some(crate::gemma4::G4Model::load(&g, cfg.n_layer, cfg.eps)?) } else { None };
-        let m = Self { path: path.to_path_buf(), embed: Mat::of(embed_t), out_norm, layers, output, inv_freq, cfg, gguf: g, packs: Default::default(), stream_map: Default::default(), hc, g4, rope_mscale: 1.0, ctx_extension: None, #[cfg(feature = "cuda")] offload: Default::default(), #[cfg(feature = "cuda")] batch_gpu: Default::default() };
+        let m = Self { path: path.to_path_buf(), embed: Mat::of(embed_t), out_norm, layers, output, inv_freq, cfg, gguf: g, packs: Default::default(), stream_map: Default::default(), hc, g4, ds41: None, rope_mscale: 1.0, ctx_extension: None, #[cfg(feature = "cuda")] offload: Default::default(), #[cfg(feature = "cuda")] batch_gpu: Default::default() };
         let n = crate::switches::get(crate::switches::STREAM_LAYERS).max(0) as usize;
         if n > 0 {
             m.stream_from_drive(n);
@@ -552,6 +557,39 @@ impl Model {
             let li = self.layers.iter().position(|l| [&l.q, &l.k, &l.v, &l.o].iter().any(|x| x.offset == m.offset) || matches!(&l.ffn, Ffn::Dense { gate, up, down } if [gate, up, down].iter().any(|x| x.offset == m.offset)));
             li.is_some_and(|li| of[li].is_some()) || (out.is_some() && m.offset == self.output.offset)
         })
+    }
+
+    /// DeepSeek-V4.1: the generic fields describe the embedding and head only (no generic layers);
+    /// ds41.rs runs the blocks.
+    fn load_ds41(path: &Path, g: Arc<Gguf>) -> Result<Self, Error> {
+        let d = crate::ds41::Ds41Model::load(&g)?;
+        let embed_t = g.tensor("token_embd.weight")?;
+        let output = g.tensors.get("output.weight").map(Mat::of).unwrap_or_else(|| Mat::of(embed_t));
+        let h = &d.hp;
+        let cfg = Config {
+            n_layer: 0,
+            dim: h.dim,
+            ffn: 0,
+            n_head: h.n_head,
+            n_kv: 1,
+            head_dim: h.hd,
+            rope_base: h.rope_base,
+            eps: h.eps,
+            ctx_train: g.u64("deepseek41.context_length").unwrap_or(65536) as usize,
+            vocab: output.rows,
+            qk_norm: false,
+            n_expert: 0,
+            n_used: 0,
+            expert_ffn: 0,
+            rope_dim: h.n_rot,
+            attn_gate: false,
+            rope_sections: None,
+            ssm: None,
+            delta_sigmoid: false,
+            arch: "deepseek41".into(),
+        };
+        let out_norm = vec_f32(&g, "output_norm.weight")?;
+        Ok(Self { path: path.to_path_buf(), embed: Mat::of(embed_t), out_norm, layers: Vec::new(), output, inv_freq: Vec::new(), cfg, gguf: g, packs: Default::default(), stream_map: Default::default(), hc: None, g4: None, ds41: Some(d), rope_mscale: 1.0, ctx_extension: None, #[cfg(feature = "cuda")] offload: Default::default(), #[cfg(feature = "cuda")] batch_gpu: Default::default() })
     }
 
     pub fn gguf(&self) -> &Gguf {
@@ -822,6 +860,10 @@ impl Model {
     /// `matvec` for the building blocks in other modules (hc.rs).
     pub(crate) fn matvec_pub(&self, m: &Mat, x: &[f32], qa: &QAct, out: &mut [f32]) {
         self.matvec(m, x, qa, out);
+    }
+
+    pub(crate) fn matvec_multi_pub(&self, jobs: &mut [(&Mat, &[f32], &QAct, &mut [f32])]) {
+        self.matvec_multi(jobs);
     }
 
     pub(crate) fn matvec_many_pub(&self, jobs: &mut [(&Mat, &mut [f32])], x: &[f32], qa: &QAct) {
@@ -1535,6 +1577,8 @@ pub struct Session {
     /// Gemma 4 on the graphics card (gpu_g4.rs).
     #[cfg(feature = "cuda")]
     pub g4gpu: Option<crate::gpu_g4::G4Gpu>,
+    /// DeepSeek-V4.1's windows and compressed rows (ds41.rs).
+    pub ds41: Option<crate::ds41::State>,
     /// Shared-expert scratch: gate, up, quantised activation, output.
     shg: Vec<f32>,
     shu: Vec<f32>,
@@ -1687,6 +1731,7 @@ impl Session {
             hcs: m.hc.as_ref().map(|h| crate::hc::HcState::new(h, c.dim)),
             #[cfg(feature = "cuda")]
             g4gpu: None,
+            ds41: m.ds41.as_ref().map(crate::ds41::State::new),
             shg: vec![0.0; shared_ffn(m)],
             shu: vec![0.0; shared_ffn(m)],
             qa_sh: QAct::new(shared_ffn(m).max(32)),
@@ -1705,6 +1750,23 @@ impl Session {
             return Err(Error::Request(format!("prompt of {} tokens exceeds the {}-token context", prompt.len(), self.max_ctx)));
         }
         let mut common = self.tokens.iter().zip(prompt).take_while(|(a, b)| a == b).count();
+        if m.ds41.is_some() {
+            // DeepSeek-V4.1's compressor state cannot rewind: an exact continuation, else from the start.
+            if common < self.tokens.len() || common == prompt.len() {
+                self.tokens.clear();
+                self.reset_recurrent();
+                common = 0;
+            }
+            let t0 = Instant::now();
+            self.progress.begin(common);
+            for &tok in &prompt[common..] {
+                crate::check_stop()?;
+                self.step(m, tok);
+                self.progress.set(self.tokens.len());
+            }
+            self.stats = Stats { prompt_tokens: prompt.len(), reused_tokens: common, prefill_ms: t0.elapsed().as_secs_f64() * 1000.0, ..Default::default() };
+            return Ok(common);
+        }
         // The last prompt token must be computed to produce fresh logits.
         if common == prompt.len() {
             common -= 1;
@@ -1980,6 +2042,10 @@ impl Session {
         }
         // Shared experts, DeltaNet and hyper-connection MoE layers run on the card with the routed
         // experts split between it and the processor.
+        if m.ds41.is_some() {
+            // DeepSeek-V4.1 runs on the processor (ds41.rs).
+            return Ok(Self::new(m, max_ctx));
+        }
         if m.g4.is_some() {
             // Gemma 4: the whole model on the card (gpu_g4.rs); the processor keeps no cache.
             let g = crate::gpu_g4::G4Gpu::load(m, max_ctx)?;
@@ -2421,6 +2487,13 @@ impl Session {
 
     pub fn step(&mut self, m: &Model, token: u32) {
         crate::pool::for_writing(self.tokens.len());
+        if let (Some(d), Some(st)) = (m.ds41.as_ref(), self.ds41.as_mut()) {
+            let pos = self.tokens.len();
+            let from = pos.saturating_sub(d.hp.ngram);
+            crate::ds41::step(m, d, st, &self.tokens[from..], token, pos, &mut self.logits);
+            self.tokens.push(token);
+            return;
+        }
         if let Some(g4) = m.g4.as_ref() {
             self.step_gemma4(m, g4, token);
             return;
@@ -3103,6 +3176,9 @@ impl Session {
     fn reset_recurrent(&mut self) {
         for v in self.conv_hist.iter_mut().chain(self.ssm_state.iter_mut()) {
             v.fill(0.0);
+        }
+        if let Some(s) = self.ds41.as_mut() {
+            s.reset();
         }
         if let Some(s) = self.hcs.as_mut() {
             s.reset();

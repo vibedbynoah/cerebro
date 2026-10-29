@@ -11,6 +11,14 @@ use fancy_regex::Regex;
 use crate::gguf::{Gguf, Value};
 use crate::Error;
 
+/// DeepSeek V3 / V4.1 ("deepseek-v3", "joyai-llm"): three patterns applied in turn (llama.cpp's
+/// unicode_regex_split): digits in groups of up to three, runs of CJK, then words and punctuation.
+const DEEPSEEK3_PATTERNS: [&str; 3] = [
+    r"\p{N}{1,3}",
+    r"[一-龥぀-ゟ゠-ヿ]+",
+    r##"[!"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~][A-Za-z]+|[^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+| ?[\p{P}\p{S}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"##,
+];
+
 const QWEN2_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
 pub struct Tokenizer {
@@ -20,7 +28,9 @@ pub struct Tokenizer {
     specials: Vec<(String, u32)>,
     byte_enc: [char; 256],
     byte_dec: HashMap<char, u8>,
-    pattern: Regex,
+    /// Pre-tokenizer patterns, applied in turn: each splits every piece so far into its matches
+    /// and the text between them (both kept).
+    patterns: Vec<Regex>,
     pub eos: u32,
     pub eot: Vec<u32>,
     /// SentencePiece-style BPE (gemma4); byte-level otherwise.
@@ -83,10 +93,18 @@ impl Tokenizer {
                 }
             }
         }
-        let pattern = Regex::new(if spm { r"[^\n]+|\n+" } else { QWEN2_PATTERN }).map_err(|e| Error::Format(e.to_string()))?;
+        let pre = g.str("tokenizer.ggml.pre").unwrap_or("");
+        let sources: Vec<&str> = if spm {
+            vec![r"[^\n]+|\n+"]
+        } else if matches!(pre, "deepseek-v3" | "joyai-llm") {
+            DEEPSEEK3_PATTERNS.to_vec()
+        } else {
+            vec![QWEN2_PATTERN]
+        };
+        let patterns = sources.iter().map(|p| Regex::new(p).map_err(|e| Error::Format(e.to_string()))).collect::<Result<Vec<_>, _>>()?;
         // llama.cpp always adds <bos> for Gemma 4, whatever the file says.
         let bos = spm.then(|| g.u64("tokenizer.ggml.bos_token_id").ok().map(|v| v as u32)).flatten();
-        Ok(Self { vocab, ids, ranks, specials, byte_enc, byte_dec, pattern, eos, eot, spm, bos })
+        Ok(Self { vocab, ids, ranks, specials, byte_enc, byte_dec, patterns, eos, eot, spm, bos })
     }
 
     pub fn vocab_size(&self) -> usize {
@@ -120,9 +138,34 @@ impl Tokenizer {
         out
     }
 
+    /// `text` split by every pattern in turn; matches and the text between them are both pieces.
+    fn pieces<'a>(&self, text: &'a str) -> Vec<&'a str> {
+        let mut pieces = vec![text];
+        for re in &self.patterns {
+            let mut next = Vec::with_capacity(pieces.len() * 2);
+            for p in pieces {
+                let mut at = 0;
+                for m in re.find_iter(p).flatten() {
+                    if m.start() > at {
+                        next.push(&p[at..m.start()]);
+                    }
+                    if m.end() > m.start() {
+                        next.push(m.as_str());
+                    }
+                    at = m.end();
+                }
+                if at < p.len() {
+                    next.push(&p[at..]);
+                }
+            }
+            pieces = next;
+        }
+        pieces
+    }
+
     fn encode_plain(&self, text: &str, out: &mut Vec<u32>) {
-        for m in self.pattern.find_iter(text).flatten() {
-            let piece: String = if self.spm { m.as_str().replace(' ', "\u{2581}") } else { m.as_str().bytes().map(|b| self.byte_enc[b as usize]).collect() };
+        for m in self.pieces(text) {
+            let piece: String = if self.spm { m.replace(' ', "\u{2581}") } else { m.bytes().map(|b| self.byte_enc[b as usize]).collect() };
             if let Some(&id) = self.ids.get(&piece) {
                 out.push(id);
                 continue;

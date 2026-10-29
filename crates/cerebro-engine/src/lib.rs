@@ -11,6 +11,7 @@ pub mod audio;
 pub mod chat;
 pub mod cluster;
 pub mod diffusion;
+pub mod ds41;
 pub mod experts;
 pub mod gemma4;
 pub mod gguf;
@@ -82,6 +83,9 @@ pub enum ChatFormat {
     /// Gemma 4: <|turn>role ... <turn|>, the model's turns called "model"; <|think|> in the system
     /// turn turns its thinking on.
     Gemma4,
+    /// DeepSeek V3 / V4.1: <｜begin▁of▁sentence｜><｜System｜>…<｜User｜>…<｜Assistant｜>, then <think> to
+    /// reason or </think> to answer directly; replies end with <｜end▁of▁sentence｜>.
+    DeepSeek,
 }
 
 impl ChatFormat {
@@ -90,6 +94,8 @@ impl ChatFormat {
         let t = g.str("tokenizer.chat_template").unwrap_or("");
         if t.contains("<|turn>") {
             Self::Gemma4
+        } else if t.contains("<｜User｜>") {
+            Self::DeepSeek
         } else if t.contains("<|start_header_id|>") {
             Self::Llama3
         } else {
@@ -100,7 +106,7 @@ impl ChatFormat {
     /// Whether replies carry Qwen-style <think> blocks (the other formats are rendered without
     /// thinking for now).
     pub fn think_tags(self) -> bool {
-        self == Self::ChatMl
+        matches!(self, Self::ChatMl | Self::DeepSeek)
     }
 
     /// The prompt for `turns` ("user" / "assistant"), ending where the model writes its reply.
@@ -117,6 +123,29 @@ impl ChatFormat {
                     push(role, text);
                 }
                 s.push_str("<|start_header_id|>assistant<|end_header_id|>\n\n");
+                s
+            }
+            Self::DeepSeek => {
+                // The model's template: a system block when thinking (with the reasoning budget,
+                // "high" = 75) or when there is a system prompt; earlier replies closed with </think>.
+                let mut s = String::from("<｜begin▁of▁sentence｜>");
+                if think || system.is_some() {
+                    s.push_str("<｜System｜>");
+                    if think {
+                        s.push_str("Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)
+
+");
+                    }
+                    s.push_str(system.unwrap_or(""));
+                }
+                for (role, text) in turns {
+                    if *role == "assistant" {
+                        s.push_str(&format!("<｜Assistant｜></think>{}<｜end▁of▁sentence｜>", text.trim()));
+                    } else {
+                        s.push_str(&format!("<｜User｜>{}", text.trim()));
+                    }
+                }
+                s.push_str(if think { "<｜Assistant｜><think>" } else { "<｜Assistant｜></think>" });
                 s
             }
             Self::Gemma4 => {

@@ -1482,6 +1482,70 @@ extern "C" __global__ void delta_rule(const float* __restrict__ row, int ld, int
     for (int i = ty; i < dk; i += 4) st[(size_t)i * dv + j] = S[i * 32 + tx];
 }
 
+// The same delta rule with each state column held in registers by a pair of adjacent lanes (64 of
+// the dk = 128 rows each; one shuffle joins their partial sums): the columns of S are independent,
+// so there are no reductions across the block. Each token's k and q (and the head's alpha and beta)
+// are staged in shared memory one token ahead, so a token costs one barrier instead of four.
+// Grid nv, block 2 * dv.
+extern "C" __global__ void __launch_bounds__(256) delta_rule128(const float* __restrict__ row, int ld, int ch, int nk, int dk, int nv, int dv,
+                                                              const float* __restrict__ a, const float* __restrict__ dtb,
+                                                              float* __restrict__ state, float* __restrict__ out, int ldo, int T, int inter) {
+    constexpr int DK = 128, HR = 64;
+    __shared__ float kq[2][2 * DK + 2];
+    const int h = blockIdx.x, j = threadIdx.x >> 1, i0 = (threadIdx.x & 1) * HR;
+    const int rf = nv / nk;
+    const int kh = inter ? h / rf : h % nk;
+    const int ia = inter ? (h / rf) * 2 * rf + rf + h % rf : h, ib = inter ? (h / rf) * 2 * rf + h % rf : nv + h;
+    float* st = state + (size_t)h * DK * dv;
+    float S[HR];
+    #pragma unroll
+    for (int i = 0; i < HR; ++i) S[i] = st[(size_t)(i0 + i) * dv + j];
+    const float ah = a[h], dth = dtb[h];
+    auto stage = [&](int t, int b) {
+        const float* r = row + (size_t)t * ld;
+        for (int i = threadIdx.x; i < DK; i += blockDim.x) {
+            kq[b][i] = r[(nk + kh) * DK + i];
+            kq[b][DK + i] = r[kh * DK + i];
+        }
+        if (threadIdx.x == 0) {
+            kq[b][2 * DK] = r[ch + nv * dv + ia];
+            kq[b][2 * DK + 1] = r[ch + nv * dv + ib];
+        }
+    };
+    if (T > 0) stage(0, 0);
+    __syncthreads();
+    for (int t = 0; t < T; ++t) {
+        const int b = t & 1;
+        const float vj = row[(size_t)t * ld + 2 * nk * DK + h * dv + j];
+        if (t + 1 < T) stage(t + 1, b ^ 1);
+        const float x = kq[b][2 * DK] + dth;
+        const float sp = x > 20.f ? x : log1pf(__expf(x));
+        const float decay = __expf(ah * sp);
+        const float beta = 1.f / (1.f + __expf(-kq[b][2 * DK + 1]));
+        const float* k = &kq[b][i0];
+        const float* q = &kq[b][DK + i0];
+        float kv = 0.f;
+        #pragma unroll
+        for (int i = 0; i < HR; ++i) {
+            S[i] *= decay;
+            kv = fmaf(S[i], k[i], kv);
+        }
+        kv += __shfl_xor_sync(0xffffffffu, kv, 1);
+        const float delta = (vj - kv) * beta;
+        float o = 0.f;
+        #pragma unroll
+        for (int i = 0; i < HR; ++i) {
+            S[i] = fmaf(k[i], delta, S[i]);
+            o = fmaf(S[i], q[i], o);
+        }
+        o += __shfl_xor_sync(0xffffffffu, o, 1);
+        if (i0 == 0) out[(size_t)t * ldo + h * dv + j] = o;
+        __syncthreads();
+    }
+    #pragma unroll
+    for (int i = 0; i < HR; ++i) st[(size_t)(i0 + i) * dv + j] = S[i];
+}
+
 // Gated RMSNorm of each value head's output: o = rmsnorm(o) * w * silu(z), or sigmoid(z) when `sig`
 // is set (qwen4exp). Grid (nv, T), block dv.
 extern "C" __global__ void delta_gnorm(float* __restrict__ out, int ldo, const float* __restrict__ row, int ld, int zoff,
