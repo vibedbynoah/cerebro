@@ -532,6 +532,9 @@ pub fn dot_row(t: DType, row: &[u8], x: &[f32]) -> f32 {
     let be = t.block_elems();
     let bb = t.block_bytes();
     match t {
+        // One value per "block": the generic path below would make a call per weight.
+        DType::BF16 => dot_bf16(row, x),
+        DType::F16 => dot_f16_row(row, x),
         DType::F32 => {
             let mut s = 0.0;
             for (i, xv) in x.iter().enumerate() {
@@ -727,6 +730,75 @@ pub fn dot_iq4xs_q8(row: &[u8], a: &QAct) -> f32 {
             }
             s += d * iq4xs_scale(blk, sh, ib) as f32 * a.d[k] * acc as f32;
         }
+    }
+    s
+}
+
+/// BF16 row times f32 activations (a BF16 value is the top half of an f32). Models such as
+/// DavidAU's Qwen3.8-27B keep their output head in BF16: 2.5 GB read every token, which the generic
+/// one-value-at-a-time path turned into 0.9 tok/s.
+pub fn dot_bf16(row: &[u8], x: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma") {
+            // SAFETY: AVX2 and FMA support were checked at run time just above.
+            return unsafe { dot_bf16_avx2(row, x) };
+        }
+    }
+    x.iter().enumerate().map(|(i, xv)| f32::from_bits((u16::from_le_bytes([row[2 * i], row[2 * i + 1]]) as u32) << 16) * xv).sum()
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_bf16_avx2(row: &[u8], x: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+    let n = x.len().min(row.len() / 2);
+    let (mut a0, mut a1) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+    let mut i = 0;
+    while i + 16 <= n {
+        let w = _mm256_loadu_si256(row.as_ptr().add(2 * i) as *const __m256i);
+        let lo = _mm256_slli_epi32::<16>(_mm256_cvtepu16_epi32(_mm256_castsi256_si128(w)));
+        let hi = _mm256_slli_epi32::<16>(_mm256_cvtepu16_epi32(_mm256_extracti128_si256::<1>(w)));
+        a0 = _mm256_fmadd_ps(_mm256_castsi256_ps(lo), _mm256_loadu_ps(x.as_ptr().add(i)), a0);
+        a1 = _mm256_fmadd_ps(_mm256_castsi256_ps(hi), _mm256_loadu_ps(x.as_ptr().add(i + 8)), a1);
+        i += 16;
+    }
+    let mut s = hsum_ps(_mm256_add_ps(a0, a1));
+    for j in i..n {
+        s += f32::from_bits((u16::from_le_bytes([row[2 * j], row[2 * j + 1]]) as u32) << 16) * x[j];
+    }
+    s
+}
+
+/// F16 row times f32 activations: the same reason as `dot_bf16`, converted with F16C.
+pub fn dot_f16_row(row: &[u8], x: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma") && std::arch::is_x86_feature_detected!("f16c") {
+            // SAFETY: AVX2, FMA and F16C support were checked at run time just above.
+            return unsafe { dot_f16_avx2(row, x) };
+        }
+    }
+    x.iter().enumerate().map(|(i, xv)| f16_to_f32(u16::from_le_bytes([row[2 * i], row[2 * i + 1]])) * xv).sum()
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn dot_f16_avx2(row: &[u8], x: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+    let n = x.len().min(row.len() / 2);
+    let (mut a0, mut a1) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+    let mut i = 0;
+    while i + 16 <= n {
+        let lo = _mm256_cvtph_ps(_mm_loadu_si128(row.as_ptr().add(2 * i) as *const __m128i));
+        let hi = _mm256_cvtph_ps(_mm_loadu_si128(row.as_ptr().add(2 * i + 16) as *const __m128i));
+        a0 = _mm256_fmadd_ps(lo, _mm256_loadu_ps(x.as_ptr().add(i)), a0);
+        a1 = _mm256_fmadd_ps(hi, _mm256_loadu_ps(x.as_ptr().add(i + 8)), a1);
+        i += 16;
+    }
+    let mut s = hsum_ps(_mm256_add_ps(a0, a1));
+    for j in i..n {
+        s += f16_to_f32(u16::from_le_bytes([row[2 * j], row[2 * j + 1]])) * x[j];
     }
     s
 }
@@ -2303,6 +2375,19 @@ mod iq_tests {
         }
         let (x, qa) = acts(512);
         close(dot_iq4nl_q8(&row, &qa), dot_row(DType::IQ4NL, &row, &x));
+    }
+
+    #[test]
+    fn half_precision_dots_match_the_plain_sum() {
+        let x: Vec<f32> = (0..100).map(|i| ((i * 37 % 23) as f32 - 11.0) * 0.125).collect();
+        let w: Vec<f32> = (0..100).map(|i| ((i * 53 % 29) as f32 - 14.0) * 0.0625).collect();
+        let want: f32 = w.iter().zip(&x).map(|(a, b)| a * b).sum();
+        // Values with few mantissa bits are exact in both formats.
+        let bf: Vec<u8> = w.iter().flat_map(|v| ((v.to_bits() >> 16) as u16).to_le_bytes()).collect();
+        let hf: Vec<u8> = w.iter().flat_map(|v| to_f16(*v).to_le_bytes()).collect();
+        assert!((dot_bf16(&bf, &x) - want).abs() < 1e-3, "bf16 {} vs {want}", dot_bf16(&bf, &x));
+        assert!((dot_f16_row(&hf, &x) - want).abs() < 1e-3, "f16 {} vs {want}", dot_f16_row(&hf, &x));
+        assert!((dot_row(DType::BF16, &bf, &x) - want).abs() < 1e-3);
     }
 
     #[test]
